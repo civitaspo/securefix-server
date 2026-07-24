@@ -36,7 +36,7 @@ The repository intentionally keeps only the features needed by Securefix:
 
 ## Pull request approval
 
-The `Approve Pull Request` workflow handles `approve-pr-*` label requests for pull requests whose committer is `civitaspo`, `renovate[bot]`, or `dependabot[bot]`.
+The `Approve Pull Request` workflow handles `approve-pr-*` label requests for pull requests whose committer or author is `civitaspo`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, or `dependabot[bot]`.
 
 Add the machine-user personal access token as the `PR_APPROVE_GITHUB_ACCESS_TOKEN` secret on the `main` environment. The workflow is expected to fail until that secret is configured; this repository does not create or store the token.
 
