@@ -1,0 +1,33 @@
+name: Approve Pull Request
+run-name: Approve Pull Request (${{ github.event.label.name }})
+
+on:
+  label:
+    types:
+      - created
+
+permissions: {}
+
+concurrency:
+  group: approve-${{ github.event.label.name }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    if: startsWith(github.event.label.name, 'approve-pr-')
+    name: Approve Pull Request (${{ github.event.label.description }})
+    runs-on: ubuntu-latest
+    environment: main
+    permissions: {}
+    timeout-minutes: 10
+    steps:
+      - name: Approve pull request
+        uses: csm-actions/approve-pr-action@452271472f121d6d2f8e7a0761488d2fcc29b715 # v0.2.0
+        with:
+          github_token: ${{ secrets.PR_APPROVE_GITHUB_ACCESS_TOKEN }}
+          app_id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
+          app_private_key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          allowed_committers: |
+            civitaspo
+            renovate[bot]
+            dependabot[bot]
