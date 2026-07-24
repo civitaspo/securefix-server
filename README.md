@@ -53,3 +53,5 @@ The `Release Terraform Provider` workflow handles `release-tf-provider-*` labels
 The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the run's commit and is contained in `main`, imports the provider signing key, and runs GoReleaser v2.17.0.
 
 The `release` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The Securefix server app variable and private-key secret must also be available to this workflow. The server GitHub App needs `actions: read` and `contents: write` access to `civitaspo/terraform-provider-sigma`.
+
+The release request label description must be `owner/repo/run_id/tag` (for example `civitaspo/terraform-provider-sigma/123/v0.1.0`). The server accepts in-progress `Release Tag` workflow runs so the client can request a release before its own job finishes.
