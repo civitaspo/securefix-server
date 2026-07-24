@@ -1,0 +1,12 @@
+entries:
+  - client:
+      repositories:
+        - /^civitaspo\/.+$/
+      branches:
+        - main
+        - /^.*$/
+    push:
+      repositories:
+        - /^civitaspo\/.+$/
+      branches:
+        - /^.*$/
