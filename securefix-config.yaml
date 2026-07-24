@@ -1,12 +1,15 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/csm-actions/securefix-action/v0.6.0/json-schema/config.json
 entries:
   - client:
       repositories:
-        - /^civitaspo\/.+$/
+        - "civitaspo/*"
       branches:
         - main
-        - /^.*$/
+        - "**"
     push:
       repositories:
-        - /^civitaspo\/.+$/
+        - "civitaspo/*"
       branches:
-        - /^.*$/
+        - "**"
+    # Required to open/update release PRs (and any other Securefix-created PRs).
+    pull_request: {}
