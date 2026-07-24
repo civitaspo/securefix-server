@@ -45,3 +45,11 @@ Add the machine-user personal access token as the `PR_APPROVE_GITHUB_ACCESS_TOKE
 The Securefix server accepts requests only from the `Lint` and `Release PR` client workflows. Requests from other workflow names are denied before a commit is created.
 
 Clients may request an allowed destination branch, including `release/next`, within `civitaspo/*` repositories. The server validates these requests with `securefix-config.yaml`. Commit messages supplied by clients are honored; the server does not override them.
+
+## Terraform provider releases
+
+The `Release Terraform Provider` workflow handles `release-tf-provider-*` labels whose description is `civitaspo/terraform-provider-sigma/<workflow-run-id>`. The referenced run must be a successful tag-push run of the `Release Tag` workflow, and its tag must be a semantic version such as `v1.2.3`.
+
+The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the run's commit and is contained in `main`, imports the provider signing key, and runs GoReleaser v2.17.0.
+
+The `release` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The Securefix server app variable and private-key secret must also be available to this workflow. The server GitHub App needs `actions: read` and `contents: write` access to `civitaspo/terraform-provider-sigma`.
