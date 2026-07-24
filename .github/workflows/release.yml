@@ -28,8 +28,12 @@ jobs:
           DESCRIPTION: ${{ github.event.label.description }}
         run: |
           set -euo pipefail
-          repository=${DESCRIPTION%/*}
-          run_id=${DESCRIPTION##*/}
+          # Description formats:
+          #   owner/repo/run_id
+          #   owner/repo/run_id/tag (preferred; tag like v0.1.0)
+          repository=$(printf '%s' "$DESCRIPTION" | cut -d/ -f1-2)
+          run_id=$(printf '%s' "$DESCRIPTION" | cut -d/ -f3)
+          tag=$(printf '%s' "$DESCRIPTION" | cut -d/ -f4-)
 
           if [ "$repository" != "civitaspo/terraform-provider-sigma" ]; then
             echo "Denied client repository: $repository" >&2
@@ -41,9 +45,14 @@ jobs:
               exit 1
               ;;
           esac
+          if [ -n "$tag" ] && ! printf '%s' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "Invalid tag in label description: $tag" >&2
+            exit 1
+          fi
 
           echo "repository=$repository" >> "$GITHUB_OUTPUT"
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Create provider installation token
         id: app-token
@@ -62,6 +71,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPOSITORY: ${{ steps.request.outputs.repository }}
           RUN_ID: ${{ steps.request.outputs.run_id }}
+          REQUESTED_TAG: ${{ steps.request.outputs.tag }}
         run: |
           set -euo pipefail
           workflow_run=$(curl --fail --silent --show-error \
@@ -74,17 +84,25 @@ jobs:
             .name == "Release Tag"
             and .repository.full_name == "civitaspo/terraform-provider-sigma"
             and .head_repository.full_name == "civitaspo/terraform-provider-sigma"
-            and .event == "push"
-            and .status == "completed"
-            and .conclusion == "success"
+            and (
+              .status == "in_progress"
+              or .status == "queued"
+              or (.status == "completed" and .conclusion == "success")
+            )
           ' >/dev/null
 
-          tag=$(printf '%s' "$workflow_run" | jq -er '
-            .head_branch
-            | select(type == "string")
-            | select(test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"))
-          ')
           head_sha=$(printf '%s' "$workflow_run" | jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))')
+          tag=$REQUESTED_TAG
+          if [ -z "$tag" ]; then
+            head_branch=$(printf '%s' "$workflow_run" | jq -r '.head_branch // empty')
+            if printf '%s' "$head_branch" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+              tag=$head_branch
+            fi
+          fi
+          if [ -z "$tag" ]; then
+            echo "Release tag missing from label description and workflow head_branch" >&2
+            exit 1
+          fi
 
           echo "Allowed Release Tag run $RUN_ID for $REPOSITORY at $tag"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
