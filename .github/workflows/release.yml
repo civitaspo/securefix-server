@@ -16,7 +16,7 @@ jobs:
   release:
     if: startsWith(github.event.label.name, 'release-tf-provider-')
     runs-on: ubuntu-latest
-    environment: release
+    environment: main
     permissions:
       issues: write
     timeout-minutes: 30
