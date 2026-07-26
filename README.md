@@ -48,10 +48,12 @@ Clients may request an allowed destination branch, including `release/next`, wit
 
 ## Terraform provider releases
 
-The `Release Terraform Provider` workflow handles `release-tf-provider-*` labels whose description is `civitaspo/terraform-provider-sigma/<workflow-run-id>`. The referenced run must be a successful tag-push run of the `Release Tag` workflow, and its tag must be a semantic version such as `v1.2.3`.
+The `Release Terraform Provider` workflow handles `release-tf-provider-*` labels whose description is `civitaspo/terraform-provider-sigma/<workflow-run-id>/<tag>/<merge-sha>`. The referenced run must be a successful (or still in-progress) `Release Tag` workflow run, and its tag must be a semantic version such as `v1.2.3`.
 
-The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the run's commit and is contained in `main`, imports the provider signing key, and runs GoReleaser v2.17.0.
+The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the expected merge commit and is contained in `main`, imports the provider signing key, and runs GoReleaser v2.17.0.
 
-The `main` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The Securefix server app variable and private-key secret must also be available to this workflow. The server GitHub App needs `actions: read` and `contents: write` access to `civitaspo/terraform-provider-sigma`.
+`Release Tag` runs on `pull_request` closed events tag the squash-merge commit on `main`, while `workflow_run.head_sha` is the PR head (`release/next`). The preferred label description therefore includes the tagged merge commit SHA. When the SHA is omitted, the server resolves it from the merged `release/next` → `main` pull request associated with the run's head commit (for `pull_request` events) or uses `head_sha` (for `workflow_dispatch`).
 
-The release request label description must be `owner/repo/run_id/tag` (for example `civitaspo/terraform-provider-sigma/123/v0.1.0`). The server accepts in-progress `Release Tag` workflow runs so the client can request a release before its own job finishes.
+The `main` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The Securefix server app variable and private-key secret must also be available to this workflow. The server GitHub App needs `actions: read`, `contents: write`, and `pull_requests: read` access to `civitaspo/terraform-provider-sigma`.
+
+The release request label description must be `owner/repo/run_id/tag/sha` (for example `civitaspo/terraform-provider-sigma/123/v0.1.0/<40-char-sha>`). The server accepts in-progress `Release Tag` workflow runs so the client can request a release before its own job finishes.
