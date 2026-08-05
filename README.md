@@ -36,9 +36,16 @@ The repository intentionally keeps only the features needed by Securefix:
 
 ## Pull request approval
 
-The `Approve Pull Request` workflow handles `approve-pr-*` label requests for pull requests whose committer or author is `civitaspo`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, or `dependabot[bot]`.
+Pull requests **to this repository** are auto-requested for approval by the `Approve Request` workflow (same CSM client pattern as other civitaspo repos). It creates an `approve-pr-*` label; the `Approve Pull Request` workflow then approves with the machine-user PAT.
 
-Add the machine-user personal access token as the `PR_APPROVE_GITHUB_ACCESS_TOKEN` secret on the `main` environment. The workflow is expected to fail until that secret is configured; this repository does not create or store the token.
+Trusted authors: `civitaspo`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`. You can also comment `/approve` as `civitaspo`.
+
+Client configuration on this repository:
+
+- Variable `SECUREFIX_CLIENT_APP_ID` (shared Securefix client app)
+- Secret `SECUREFIX_CLIENT_PRIVATE_KEY`
+
+Server-side approval still needs `PR_APPROVE_GITHUB_ACCESS_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
 
 ## Securefix client workflows
 
