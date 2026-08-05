@@ -42,8 +42,8 @@ Trusted authors: `civitaspo`, `civitaspo-securefix-server[bot]`, `renovate[bot]`
 
 Client configuration on this repository:
 
-- Variable `SECUREFIX_CLIENT_APP_ID` (shared Securefix client app)
-- Secret `SECUREFIX_CLIENT_PRIVATE_KEY`
+- Repository variable `SECUREFIX_CLIENT_APP_ID` (shared Securefix client app)
+- `main` environment secret `SECUREFIX_CLIENT_PRIVATE_KEY` (Approve Request selects `environment: main`)
 
 Server-side approval still needs `PR_APPROVE_GITHUB_ACCESS_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
 
