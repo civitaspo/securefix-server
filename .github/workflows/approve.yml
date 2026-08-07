@@ -29,6 +29,7 @@ jobs:
           app_private_key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           allowed_committers: |
             civitaspo
+            cursoragent
             civitaspo-securefix-server[bot]
             renovate[bot]
             dependabot[bot]

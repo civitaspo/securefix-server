@@ -38,7 +38,7 @@ The repository intentionally keeps only the features needed by Securefix:
 
 Pull requests **to this repository** are auto-requested for approval by the `Approve Request` workflow (same CSM client pattern as other civitaspo repos). It creates an `approve-pr-*` label; the `Approve Pull Request` workflow then approves with the machine-user PAT.
 
-Trusted authors: `civitaspo`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`. You can also comment `/approve` as `civitaspo`.
+Trusted authors / committers: `civitaspo`, `cursoragent`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`. You can also comment `/approve` as `civitaspo`.
 
 Client configuration on this repository:
 
