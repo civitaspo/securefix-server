@@ -127,7 +127,16 @@ If `dbt_project.yml` and/or `pyproject.toml` exist at the repository root, Relea
 
 ### Thin wrapper (client)
 
-GitHub requires each caller to declare `on:` triggers. Example for Release Tag:
+GitHub requires each caller to declare `on:` triggers. The caller job must also declare **`permissions` at least as wide as the reusable job** (otherwise Actions fails at startup with “nested job is requesting … but is only allowed … none”).
+
+| Reusable | Caller job `permissions` |
+| --- | --- |
+| `reusable-release-pr.yml` | `contents: read` |
+| `reusable-release-tag.yml` | `contents: write` |
+| `reusable-release-pr-sync.yml` | `contents: read`, `pull-requests: write` |
+| `reusable-approve-request.yml` | `contents: read`, `pull-requests: read` |
+
+Example for Release Tag:
 
 ```yaml
 name: Release Tag
@@ -151,6 +160,8 @@ concurrency:
 
 jobs:
   tag:
+    permissions:
+      contents: write
     uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@<sha>
     with:
       merge_sha: ${{ inputs.merge_sha }}
@@ -185,7 +196,7 @@ Keep the reusable and [`approve.yml`](../.github/workflows/approve.yml) lists in
 
 1. Open a PR here adding an explicit [`release-clients.yaml`](../release-clients.yaml) entry (`repository` + `publish`). Merge it.
 2. Install the Securefix **server** and **client** GitHub Apps on the new repository (server app needs the permissions in the allowlist section above).
-3. Add thin wrappers for the four reusables, pinned to a commit SHA of this repository that contains those workflow files.
+3. Add thin wrappers for the four reusables, pinned to a commit SHA of this repository that contains those workflow files, with caller job `permissions` from the table above.
 4. Set repository secret `SECUREFIX_CLIENT_PRIVATE_KEY` only.
 5. Enable Renovate (or equivalent) to bump `civitaspo/securefix-server` workflow pins.
 6. Ensure `.release-version`, changelog tooling (`cliff.toml` / equivalent), and tag protection rules match other clients.

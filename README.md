@@ -64,3 +64,4 @@ Quick facts:
 - Label: `release-request-<run_id>-<tag>` with description `owner/repo/run_id/tag/sha`
 - Clients pin `reusable-release-*.yml` / `reusable-approve-request.yml` by commit SHA (Renovate bumps)
 - Client secret required: `SECUREFIX_CLIENT_PRIVATE_KEY` only (App ID and server name are hardcoded in the reusables)
+- Caller jobs must grant the `permissions` scopes the reusable jobs request (see the doc)
