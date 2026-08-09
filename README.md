@@ -55,6 +55,12 @@ Clients may request an allowed destination branch, including `release/next`, wit
 
 ## Terraform provider releases
 
+The `Release dbt Authorized Models` workflow handles `release-dbt-auth-*` labels whose description is `civitaspo/dbt-authorized-models/<workflow-run-id>/<tag>/<merge-sha>`. The referenced run must be a successful (or still in-progress) `Release Tag` workflow run, and its tag must be a semantic version such as `v1.2.3`.
+
+The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the expected merge commit and is contained in `main`, and publishes a draft GitHub Release before finalizing it.
+
+The server GitHub App needs `actions: read`, `contents: write`, and `pull_requests: read` access to `civitaspo/dbt-authorized-models`.
+
 The `Release Terraform Provider` workflow handles `release-tf-provider-*` labels whose description is `civitaspo/terraform-provider-sigma/<workflow-run-id>/<tag>/<merge-sha>`. The referenced run must be a successful (or still in-progress) `Release Tag` workflow run, and its tag must be a semantic version such as `v1.2.3`.
 
 The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the expected merge commit and is contained in `main`, imports the provider signing key, and runs GoReleaser v2.17.0.
