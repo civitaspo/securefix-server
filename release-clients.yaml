@@ -1,0 +1,11 @@
+# Explicit allowlist of client repositories that may request releases.
+# Repositories not listed here are denied (no wildcards).
+clients:
+  - repository: civitaspo/dbt-authorized-models
+    publish: github-release
+  - repository: civitaspo/dbt-snowflake-iceberg-sync
+    publish: github-release
+  - repository: civitaspo/dbt-snowflake-rap-enforcement
+    publish: github-release
+  - repository: civitaspo/terraform-provider-sigma
+    publish: goreleaser
