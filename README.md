@@ -38,12 +38,11 @@ The repository intentionally keeps only the features needed by Securefix:
 
 Pull requests **to this repository** are auto-requested for approval by the `Approve Request` workflow (same CSM client pattern as other civitaspo repos). It creates an `approve-pr-*` label; the `Approve Pull Request` workflow then approves with the machine-user PAT.
 
-Trusted authors / committers: `civitaspo`, `cursoragent`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`. You can also comment `/approve` as `civitaspo`.
+Trusted authors / committers (single policy, shared with client reusables): `civitaspo`, `cursoragent`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`. You can also comment `/approve` as `civitaspo`.
 
 Client configuration on this repository:
 
-- Repository variable `SECUREFIX_CLIENT_APP_ID` (shared Securefix client app)
-- `main` environment secret `SECUREFIX_CLIENT_PRIVATE_KEY` (Approve Request selects `environment: main`)
+- `main` environment secret `SECUREFIX_CLIENT_PRIVATE_KEY` (this repository's Approve Request stays inline with `environment: main`; client repos call `reusable-approve-request.yml` with a repository secret instead)
 
 Server-side approval still needs `PR_APPROVE_GITHUB_ACCESS_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
 
@@ -53,20 +52,78 @@ The Securefix server accepts requests only from the `Lint` and `Release PR` clie
 
 Clients may request an allowed destination branch, including `release/next`, within `civitaspo/*` repositories. The server validates these requests with `securefix-config.yaml`. Commit messages supplied by clients are honored; the server does not override them.
 
-## Terraform provider releases
+## Client releases
 
-The `Release dbt Authorized Models` workflow handles `release-dbt-auth-*` labels whose description is `civitaspo/dbt-authorized-models/<workflow-run-id>/<tag>/<merge-sha>`. The referenced run must be a successful (or still in-progress) `Release Tag` workflow run, and its tag must be a semantic version such as `v1.2.3`.
+Privileged publish runs only in this repository (`environment: main`). Clients create an annotated tag and open a `release-request-*` label; the server validates and publishes.
 
-The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the expected merge commit and is contained in `main`, and publishes a draft GitHub Release before finalizing it.
+### Label contract
 
-The server GitHub App needs `actions: read`, `contents: write`, and `pull_requests: read` access to `civitaspo/dbt-authorized-models`.
+- Label name: `release-request-<run-id>-<tag>` (for example `release-request-123-v1.2.3`)
+- Description: `owner/repo/run_id/tag/sha` (preferred), or without the trailing merge SHA when the description would exceed GitHub's 100-character limit
+- Referenced run must be a `Release Tag` workflow that is queued, in progress, or completed successfully
+- Tag must be a semantic version such as `v1.2.3`, point at the expected merge commit, and be an ancestor of `main`
 
-The `Release Terraform Provider` workflow handles `release-tf-provider-*` labels whose description is `civitaspo/terraform-provider-sigma/<workflow-run-id>/<tag>/<merge-sha>`. The referenced run must be a successful (or still in-progress) `Release Tag` workflow run, and its tag must be a semantic version such as `v1.2.3`.
+### Publish allowlist
 
-The server validates the workflow run through the GitHub API, checks out the requested tag with a short-lived server GitHub App installation token, verifies that the tag matches the expected merge commit and is contained in `main`, imports the provider signing key, and runs GoReleaser v2.17.0.
+[`release-clients.yaml`](release-clients.yaml) is the only gate for which repositories may publish. Each entry has:
 
-`Release Tag` runs on `pull_request` closed events tag the squash-merge commit on `main`, while `workflow_run.head_sha` is the PR head (`release/next`). The preferred label description therefore includes the tagged merge commit SHA. When the SHA is omitted, the server resolves it from the merged `release/next` → `main` pull request associated with the run's head commit (for `pull_request` events) or uses `head_sha` (for `workflow_dispatch`).
+- `repository`: exact `owner/repo` (no wildcards)
+- `publish`: `github-release` or `goreleaser`
 
-The `main` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The Securefix server app variable and private-key secret must also be available to this workflow. The server GitHub App needs `actions: read`, `contents: write`, and `pull_requests: read` access to `civitaspo/terraform-provider-sigma`.
+Repositories not listed are denied and the request label is deleted. Go / GoReleaser versions are workflow constants (pinned; not floating `latest`).
 
-The release request label description must be `owner/repo/run_id/tag/sha` (for example `civitaspo/terraform-provider-sigma/123/v0.1.0/<40-char-sha>`). The server accepts in-progress `Release Tag` workflow runs so the client can request a release before its own job finishes.
+For `goreleaser`, the `main` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The server GitHub App needs `actions: read`, `contents: write`, and `pull_requests: read` on each allowlisted client.
+
+### Reusable client workflows
+
+Client repositories should call these reusables with a **commit SHA pin** (bump via Renovate):
+
+| Workflow | Purpose |
+| --- | --- |
+| `reusable-release-pr.yml` | git-cliff bump; sync `dbt_project.yml` / `pyproject.toml` when present; open `release/next` via Securefix |
+| `reusable-release-tag.yml` | annotated tag + `release-request-*` label (fork PRs rejected) |
+| `reusable-release-pr-sync.yml` | keep open `release/next` PR title/body in sync |
+| `reusable-approve-request.yml` | request server-side PR approval |
+
+App ID and server repository name are hardcoded in the reusables (`3872492`, `securefix-server`). Clients only need the repository secret `SECUREFIX_CLIENT_PRIVATE_KEY`.
+
+Thin wrapper example:
+
+```yaml
+name: Release Tag
+
+on:
+  pull_request:
+    types:
+      - closed
+  workflow_dispatch:
+    inputs:
+      merge_sha:
+        description: Commit SHA to tag (defaults to main HEAD when empty)
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-tag-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@<sha>
+    with:
+      merge_sha: ${{ inputs.merge_sha }}
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+```
+
+mise **CLI** is pinned inside the reusable; tool versions come from each client's `mise.lock`.
+
+### Onboarding a new client
+
+1. Add an explicit entry to [`release-clients.yaml`](release-clients.yaml) (`repository` + `publish`) and merge that PR.
+2. Install the Securefix **server** and **client** GitHub Apps on the client repository.
+3. Add thin wrappers that call the four reusables above, pinned to a securefix-server commit SHA.
+4. Configure repository secret `SECUREFIX_CLIENT_PRIVATE_KEY` only (no `SECUREFIX_CLIENT_APP_ID` / `SECUREFIX_SERVER_REPOSITORY` / approve policy vars).
+5. Enable Renovate (or equivalent) so the reusable SHA pins stay current.
