@@ -131,10 +131,12 @@ GitHub requires each caller to declare `on:` triggers. The caller job must also 
 
 | Reusable | Caller job `permissions` |
 | --- | --- |
-| `reusable-release-pr.yml` | `contents: read` |
+| `reusable-release-pr.yml` | `contents: read`, `pull-requests: read` |
 | `reusable-release-tag.yml` | `contents: write` |
 | `reusable-release-pr-sync.yml` | `contents: read`, `pull-requests: write` |
 | `reusable-approve-request.yml` | `contents: read`, `pull-requests: read` |
+
+After a client request step finishes, the job **Summary** lists links to the follow-up workflow on `civitaspo/securefix-server` (exact run when resolvable, otherwise a filtered Actions view plus the workflow file).
 
 Example for Release Tag:
 

@@ -142,3 +142,22 @@ jobs:
             -f name="$label_name" \
             -f color="1f6feb" \
             -f description="$description"
+
+          workflow_url="https://github.com/${server_full_name}/actions/workflows/release.yml"
+          query=$(jq -nr --arg q "workflow:Release ${label_name}" '$q|@uri')
+          filter_url="https://github.com/${server_full_name}/actions?query=${query}"
+
+          {
+            echo "## Follow on securefix-server"
+            echo ""
+            echo "Created label \`$label_name\` on \`${server_full_name}\`."
+            echo ""
+            echo "Privileged publish continues there (not in this repository):"
+            echo ""
+            echo "- **This Release run (filter by label):** ${filter_url}"
+            echo "- **Release workflow:** ${workflow_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Server follow-up:"
+          echo "  $filter_url"
+          echo "  $workflow_url"
