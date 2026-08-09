@@ -54,76 +54,13 @@ Clients may request an allowed destination branch, including `release/next`, wit
 
 ## Client releases
 
-Privileged publish runs only in this repository (`environment: main`). Clients create an annotated tag and open a `release-request-*` label; the server validates and publishes.
+Privileged publish runs only in this repository (`environment: main`). Clients call reusable workflows defined here, create an annotated tag, and open a `release-request-*` label; the server validates against [`release-clients.yaml`](release-clients.yaml) and publishes.
 
-### Label contract
+**Full specification:** [docs/client-releases.md](docs/client-releases.md) (architecture, label contract, allowlist, reusables, onboarding, approval policy).
 
-- Label name: `release-request-<run-id>-<tag>` (for example `release-request-123-v1.2.3`)
-- Description: `owner/repo/run_id/tag/sha` (preferred), or without the trailing merge SHA when the description would exceed GitHub's 100-character limit
-- Referenced run must be a `Release Tag` workflow that is queued, in progress, or completed successfully
-- Tag must be a semantic version such as `v1.2.3`, point at the expected merge commit, and be an ancestor of `main`
+Quick facts:
 
-### Publish allowlist
-
-[`release-clients.yaml`](release-clients.yaml) is the only gate for which repositories may publish. Each entry has:
-
-- `repository`: exact `owner/repo` (no wildcards)
-- `publish`: `github-release` or `goreleaser`
-
-Repositories not listed are denied and the request label is deleted. Go / GoReleaser versions are workflow constants (pinned; not floating `latest`).
-
-For `goreleaser`, the `main` environment must provide `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` and `TERRAFORM_PROVIDER_GPG_PASSPHRASE`. The server GitHub App needs `actions: read`, `contents: write`, and `pull_requests: read` on each allowlisted client.
-
-### Reusable client workflows
-
-Client repositories should call these reusables with a **commit SHA pin** (bump via Renovate):
-
-| Workflow | Purpose |
-| --- | --- |
-| `reusable-release-pr.yml` | git-cliff bump; sync `dbt_project.yml` / `pyproject.toml` when present; open `release/next` via Securefix |
-| `reusable-release-tag.yml` | annotated tag + `release-request-*` label (fork PRs rejected) |
-| `reusable-release-pr-sync.yml` | keep open `release/next` PR title/body in sync |
-| `reusable-approve-request.yml` | request server-side PR approval |
-
-App ID and server repository name are hardcoded in the reusables (`3872492`, `securefix-server`). Clients only need the repository secret `SECUREFIX_CLIENT_PRIVATE_KEY`.
-
-Thin wrapper example:
-
-```yaml
-name: Release Tag
-
-on:
-  pull_request:
-    types:
-      - closed
-  workflow_dispatch:
-    inputs:
-      merge_sha:
-        description: Commit SHA to tag (defaults to main HEAD when empty)
-        required: false
-        type: string
-
-permissions: {}
-
-concurrency:
-  group: release-tag-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: false
-
-jobs:
-  tag:
-    uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@<sha>
-    with:
-      merge_sha: ${{ inputs.merge_sha }}
-    secrets:
-      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-```
-
-mise **CLI** is pinned inside the reusable; tool versions come from each client's `mise.lock`.
-
-### Onboarding a new client
-
-1. Add an explicit entry to [`release-clients.yaml`](release-clients.yaml) (`repository` + `publish`) and merge that PR.
-2. Install the Securefix **server** and **client** GitHub Apps on the client repository.
-3. Add thin wrappers that call the four reusables above, pinned to a securefix-server commit SHA.
-4. Configure repository secret `SECUREFIX_CLIENT_PRIVATE_KEY` only (no `SECUREFIX_CLIENT_APP_ID` / `SECUREFIX_SERVER_REPOSITORY` / approve policy vars).
-5. Enable Renovate (or equivalent) so the reusable SHA pins stay current.
+- Allowlist gate: exact `owner/repo` entries in `release-clients.yaml` (no wildcards); add via PR to this repo
+- Label: `release-request-<run_id>-<tag>` with description `owner/repo/run_id/tag/sha`
+- Clients pin `reusable-release-*.yml` / `reusable-approve-request.yml` by commit SHA (Renovate bumps)
+- Client secret required: `SECUREFIX_CLIENT_PRIVATE_KEY` only (App ID and server name are hardcoded in the reusables)
