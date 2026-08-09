@@ -50,3 +50,31 @@ jobs:
             civitaspo-securefix-server[bot]
             renovate[bot]
             dependabot[bot]
+
+      - name: Write server follow-up links
+        env:
+          SERVER_REPOSITORY: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          server_full_name="${GITHUB_REPOSITORY_OWNER}/${SERVER_REPOSITORY}"
+          target="${GITHUB_REPOSITORY}/${PR_NUMBER}"
+          workflow_url="https://github.com/${server_full_name}/actions/workflows/approve.yml"
+          query=$(jq -nr --arg q "workflow:\"Approve Pull Request\"" '$q|@uri')
+          filter_url="https://github.com/${server_full_name}/actions?query=${query}"
+
+          {
+            echo "## Follow on securefix-server"
+            echo ""
+            echo "Approval was requested for \`${target}\`."
+            echo ""
+            echo "The machine-user approve continues there (not in this repository):"
+            echo ""
+            echo "- **Approve Pull Request runs:** ${filter_url}"
+            echo "- **Approve Pull Request workflow:** ${workflow_url}"
+            echo "- Look for a job named like \`Approve Pull Request (${target})\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Server follow-up:"
+          echo "  $filter_url"
+          echo "  $workflow_url"

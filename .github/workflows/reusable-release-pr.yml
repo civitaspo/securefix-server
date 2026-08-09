@@ -22,7 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10
+      pull-requests: read
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -151,3 +152,45 @@ jobs:
             - Update the changelog and ${{ steps.release.outputs.body_extra }}
 
             This pull request is managed by the Release PR workflow.
+
+      - name: Write server follow-up links
+        if: steps.release.outputs.releasable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVER_REPOSITORY: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          server_full_name="${GITHUB_REPOSITORY_OWNER}/${SERVER_REPOSITORY}"
+          workflow_url="https://github.com/${server_full_name}/actions/workflows/securefix.yml"
+          query=$(jq -nr --arg q 'workflow:Securefix' '$q|@uri')
+          filter_url="https://github.com/${server_full_name}/actions?query=${query}"
+
+          pr_url=$(
+            gh pr list --repo "$GITHUB_REPOSITORY" \
+              --head release/next --base main --state open \
+              --json url --jq '.[0].url // empty'
+          )
+
+          {
+            echo "## Follow on securefix-server"
+            echo ""
+            echo "Requested Securefix to prepare release \`v${VERSION}\` on \`release/next\`."
+            echo ""
+            echo "The signed commit / PR update continues there (not in this repository):"
+            echo ""
+            echo "- **Securefix runs:** ${filter_url}"
+            echo "- **Securefix workflow:** ${workflow_url}"
+            if [ -n "$pr_url" ]; then
+              echo "- **Client release PR:** ${pr_url}"
+            else
+              echo "- **Client release branch:** https://github.com/${GITHUB_REPOSITORY}/tree/release/next"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Server follow-up:"
+          echo "  $filter_url"
+          echo "  $workflow_url"
+          if [ -n "$pr_url" ]; then
+            echo "Client release PR: $pr_url"
+          fi
