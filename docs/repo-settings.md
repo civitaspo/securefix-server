@@ -37,8 +37,10 @@ Checked once in the `prepare` job before the matrix runs.
 
 | Secret | Required | Purpose |
 | --- | --- | --- |
-| `REPO_SETTINGS_TOKEN` | yes | PAT that can create repos and administer target repos |
-| `CIVITASPO_BOT_REPO_INVITE_TOKEN` | no | classic PAT with `repo:invite` only, to accept bot invitations |
+| `REPO_SETTINGS_TOKEN` | yes | PAT as **civitaspo** that can create repos and administer target repos |
+| `CIVITASPO_BOT_REPO_INVITE_TOKEN` | no | classic PAT as **civitaspo-bot** with `repo:invite` only, to accept invitations |
+
+Bot-owned PATs use the `CIVITASPO_BOT_*` prefix (the Securefix approver is `CIVITASPO_BOT_PR_APPROVE_TOKEN` on the same environment).
 
 Actions `GITHUB_TOKEN` cannot configure other repositories, so a PAT (or equivalent) is required.
 

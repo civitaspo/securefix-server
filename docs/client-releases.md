@@ -190,7 +190,7 @@ Single org-wide default (no per-repo approve config file yet):
 Trusted actors / committers: `civitaspo`, `cursoragent`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`.
 
 - Clients call `reusable-approve-request.yml` (auto on trusted PR authors, or `/approve` comment from `civitaspo`).
-- This server’s `Approve Pull Request` workflow consumes `approve-pr-*` labels and approves with `PR_APPROVE_GITHUB_ACCESS_TOKEN`.
+- This server’s `Approve Pull Request` workflow consumes `approve-pr-*` labels and approves with `CIVITASPO_BOT_PR_APPROVE_TOKEN`.
 
 Keep the reusable and [`approve.yml`](../.github/workflows/approve.yml) lists in sync when changing policy.
 

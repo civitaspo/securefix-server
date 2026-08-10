@@ -44,7 +44,7 @@ Client configuration on this repository:
 
 - `main` environment secret `SECUREFIX_CLIENT_PRIVATE_KEY` (this repository's Approve Request stays inline with `environment: main`; client repos call `reusable-approve-request.yml` with a repository secret instead)
 
-Server-side approval still needs `PR_APPROVE_GITHUB_ACCESS_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
+Server-side approval still needs `CIVITASPO_BOT_PR_APPROVE_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
 
 ## Securefix client workflows
 
