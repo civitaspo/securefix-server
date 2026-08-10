@@ -190,12 +190,13 @@ Single org-wide default (no per-repo approve config file yet):
 Trusted actors / committers: `civitaspo`, `cursoragent`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`.
 
 - Clients call `reusable-approve-request.yml` (auto on trusted PR authors, or `/approve` comment from `civitaspo`).
-- This server’s `Approve Pull Request` workflow consumes `approve-pr-*` labels and approves with `PR_APPROVE_GITHUB_ACCESS_TOKEN`.
+- This server’s `Approve Pull Request` workflow consumes `approve-pr-*` labels and approves with `CIVITASPO_BOT_PR_APPROVE_TOKEN`.
 
 Keep the reusable and [`approve.yml`](../.github/workflows/approve.yml) lists in sync when changing policy.
 
 ## Onboarding a new client
 
+0. Run **Repo settings** (`workflow_dispatch`) for the new repository name if the GitHub repo/settings are not ready yet; add the name to [`repo-settings/allowlist.json`](../repo-settings/allowlist.json) for schedule coverage. Details: [repo-settings.md](repo-settings.md).
 1. Open a PR here adding an explicit [`release-clients.yaml`](../release-clients.yaml) entry (`repository` + `publish`). Merge it.
 2. Install the Securefix **server** and **client** GitHub Apps on the new repository (server app needs the permissions in the allowlist section above).
 3. Add thin wrappers for the four reusables, pinned to a commit SHA of this repository that contains those workflow files, with caller job `permissions` from the table above.

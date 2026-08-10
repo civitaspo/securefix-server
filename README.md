@@ -44,7 +44,7 @@ Client configuration on this repository:
 
 - `main` environment secret `SECUREFIX_CLIENT_PRIVATE_KEY` (this repository's Approve Request stays inline with `environment: main`; client repos call `reusable-approve-request.yml` with a repository secret instead)
 
-Server-side approval still needs `PR_APPROVE_GITHUB_ACCESS_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
+Server-side approval still needs `CIVITASPO_BOT_PR_APPROVE_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
 
 ## Securefix client workflows
 
@@ -65,3 +65,7 @@ Quick facts:
 - Clients pin `reusable-release-*.yml` / `reusable-approve-request.yml` by commit SHA (Renovate bumps)
 - Client secret required: `SECUREFIX_CLIENT_PRIVATE_KEY` only (App ID and server name are hardcoded in the reusables)
 - Caller jobs must grant the `permissions` scopes the reusable jobs request (see the doc)
+
+## Repository settings reconcile
+
+OSS repositories under `civitaspo` get shared merge settings, a default-branch ruleset, and the `civitaspo-bot` collaborator from [`.github/workflows/repo-settings.yml`](.github/workflows/repo-settings.yml) applied from [`repo-settings/`](repo-settings/) (`gh` + schedule / `workflow_dispatch`). See [docs/repo-settings.md](docs/repo-settings.md).

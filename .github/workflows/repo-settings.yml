@@ -1,0 +1,253 @@
+# Reconcile GitHub repository settings for civitaspo OSS repos via gh.
+# Desired state: repo-settings/*. schedule / empty dispatch = matrix over allowlist.
+
+name: Repo settings
+
+on:
+  schedule:
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Repo name under civitaspo (empty = all allowlisted)"
+        required: false
+        default: ""
+      create_if_missing:
+        description: "Create the repo if missing (only when repository is set; default off)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: repo-settings
+  cancel-in-progress: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  OWNER: civitaspo
+  SETTINGS_DIR: repo-settings
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+    outputs:
+      repos: ${{ steps.resolve.outputs.repos }}
+      allowlist: ${{ steps.resolve.outputs.allowlist }}
+      bot_invite: ${{ steps.secrets.outputs.bot_invite }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check secrets
+        id: secrets
+        env:
+          GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
+          BOT_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
+        run: |
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN is required (main environment secret)."
+            exit 1
+          fi
+          gh api user --jq .login >/dev/null
+
+          if [[ -z "${BOT_TOKEN}" ]]; then
+            echo "bot_invite=false" >> "$GITHUB_OUTPUT"
+            echo "CIVITASPO_BOT_REPO_INVITE_TOKEN unset; invite accept steps will be skipped."
+            exit 0
+          fi
+          expected="$(jq -r .username "${SETTINGS_DIR}/collaborator.json")"
+          actual="$(GH_TOKEN="${BOT_TOKEN}" gh api user --jq .login)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "CIVITASPO_BOT_REPO_INVITE_TOKEN authenticates as ${actual}, expected ${expected}."
+            exit 1
+          fi
+          echo "bot_invite=true" >> "$GITHUB_OUTPUT"
+
+      - name: Validate settings files
+        run: |
+          jq -e '
+            type == "array"
+            and length > 0
+            and (length == (unique | length))
+            and all(.[]; type == "string" and test("^[a-zA-Z0-9._-]{1,100}$"))
+          ' "${SETTINGS_DIR}/allowlist.json" >/dev/null
+          jq -e 'has("allow_auto_merge") and has("allow_squash_merge")' \
+            "${SETTINGS_DIR}/repository.json" >/dev/null
+          jq -e '
+            (.username | type == "string" and length > 0)
+            and (.permission | IN("pull", "triage", "push", "maintain", "admin"))
+          ' "${SETTINGS_DIR}/collaborator.json" >/dev/null
+          jq -e '
+            (.name | type == "string" and length > 0)
+            and .target == "branch"
+            and (.rules | type == "array")
+            and (.bypass_actors | type == "array")
+          ' "${SETTINGS_DIR}/rulesets/default-branch.json" >/dev/null
+
+      - name: Resolve matrix
+        id: resolve
+        env:
+          INPUT_REPO: ${{ inputs.repository }}
+        run: |
+          allowlist="$(jq -c . "${SETTINGS_DIR}/allowlist.json")"
+          echo "allowlist=${allowlist}" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "${INPUT_REPO}" && "${INPUT_REPO}" =~ [^[:space:]] ]]; then
+            name="$(printf '%s' "$INPUT_REPO" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [[ "$name" =~ [[:space:]] ]]; then
+              echo "Repository name must not contain whitespace: got ${INPUT_REPO}"
+              exit 1
+            fi
+            if [[ ! "$name" =~ ^[a-zA-Z0-9._-]{1,100}$ ]]; then
+              echo "Repository must match ^[a-zA-Z0-9._-]{1,100}$ under ${OWNER}: got ${name}"
+              exit 1
+            fi
+            repos="$(jq -nc --arg n "$name" '[$n]')"
+          else
+            repos="$allowlist"
+          fi
+          echo "repos=${repos}" >> "$GITHUB_OUTPUT"
+          echo "Matrix: ${repos}"
+
+  reconcile:
+    name: ${{ matrix.repository }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        repository: ${{ fromJson(needs.prepare.outputs.repos) }}
+    env:
+      GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
+      REPO: ${{ matrix.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create repository if missing
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          inputs.repository != '' &&
+          inputs.create_if_missing
+        run: |
+          if gh api "repos/${OWNER}/${REPO}" >/dev/null 2>&1; then
+            echo "Exists: ${OWNER}/${REPO}"
+            exit 0
+          fi
+          echo "Creating ${OWNER}/${REPO}"
+          gh repo create "${OWNER}/${REPO}" --public --description ""
+
+      - name: Require repository exists
+        if: >
+          github.event_name != 'workflow_dispatch' ||
+          inputs.repository == '' ||
+          !inputs.create_if_missing
+        run: |
+          gh api "repos/${OWNER}/${REPO}" >/dev/null
+          echo "Exists: ${OWNER}/${REPO}"
+
+      - name: Patch repository merge settings
+        run: |
+          gh api -X PATCH "repos/${OWNER}/${REPO}" \
+            --input "${SETTINGS_DIR}/repository.json" \
+            >/dev/null
+          echo "Patched merge settings on ${OWNER}/${REPO}"
+
+      - name: Upsert default-branch ruleset
+        env:
+          RULESET_FILE: ${{ env.SETTINGS_DIR }}/rulesets/default-branch.json
+        run: |
+          name="$(jq -r .name "$RULESET_FILE")"
+          id="$(
+            gh api --paginate "repos/${OWNER}/${REPO}/rulesets?includes_parents=false" \
+              | jq -s -r --arg n "$name" '
+                  (add // [])
+                  | map(select(.name == $n and .source_type == "Repository"))
+                  | if length > 1 then
+                      error("multiple repository rulesets named \($n)")
+                    elif length == 1 then
+                      .[0].id
+                    else
+                      empty
+                    end
+                '
+          )"
+          if [[ -n "${id}" ]]; then
+            echo "Updating ruleset ${name} (id=${id})"
+            gh api -X PUT "repos/${OWNER}/${REPO}/rulesets/${id}" --input "$RULESET_FILE" >/dev/null
+          else
+            echo "Creating ruleset ${name}"
+            gh api -X POST "repos/${OWNER}/${REPO}/rulesets" --input "$RULESET_FILE" >/dev/null
+          fi
+
+      - name: Invite collaborator
+        run: |
+          user="$(jq -r .username "${SETTINGS_DIR}/collaborator.json")"
+          permission="$(jq -r .permission "${SETTINGS_DIR}/collaborator.json")"
+          gh api -X PUT "repos/${OWNER}/${REPO}/collaborators/${user}" \
+            -f permission="${permission}" \
+            >/dev/null
+          echo "Collaborator ensure requested for ${user} on ${OWNER}/${REPO}"
+
+      - name: Accept pending bot invitation
+        if: needs.prepare.outputs.bot_invite == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
+        run: |
+          user="$(jq -r .username "${SETTINGS_DIR}/collaborator.json")"
+          full="${OWNER}/${REPO}"
+          invitation_id=""
+          for _ in 1 2 3 4 5; do
+            if gh api "repos/${full}/collaborators/${user}" >/dev/null 2>&1; then
+              echo "Already collaborator: ${user} on ${full}"
+              exit 0
+            fi
+            invitation_id="$(
+              GH_TOKEN="${BOT_TOKEN}" gh api "user/repository_invitations" --paginate \
+                | jq -s -r --arg full "$full" '
+                    (add // [])
+                    | map(select(.repository.full_name == $full))
+                    | .[0].id // empty
+                  '
+            )"
+            if [[ -n "${invitation_id}" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ -z "${invitation_id}" ]]; then
+            echo "Not a collaborator and no pending invitation for ${full} visible to ${user}."
+            exit 1
+          fi
+          echo "Accepting invitation ${invitation_id} for ${user}"
+          GH_TOKEN="${BOT_TOKEN}" gh api -X PATCH "user/repository_invitations/${invitation_id}" >/dev/null
+          for _ in 1 2 3 4 5; do
+            if gh api "repos/${full}/collaborators/${user}" >/dev/null 2>&1; then
+              echo "Confirmed collaborator: ${user} on ${full}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Accepted invitation but collaborator ${user} is not yet visible on ${full}."
+          exit 1
+
+      - name: Remind if not on schedule allowlist
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          inputs.repository != ''
+        env:
+          ALLOWLIST: ${{ needs.prepare.outputs.allowlist }}
+        run: |
+          if jq -e --arg n "$REPO" 'index($n) != null' <<<"$ALLOWLIST" >/dev/null; then
+            exit 0
+          fi
+          echo "NOTE: ${REPO} is not in ${SETTINGS_DIR}/allowlist.json; add it there if schedule should keep reconciling it."
