@@ -2,6 +2,11 @@ name: CI
 
 on:
   pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
   push:
     branches:
       - main
@@ -29,3 +34,21 @@ jobs:
 
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
+
+  status-check:
+    name: status-check
+    if: always() && !cancelled() && github.event_name == 'pull_request'
+    needs:
+      - workflows
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Require checks success
+        run: |
+          set -euo pipefail
+          result="${{ needs.workflows.result }}"
+          echo "workflows result: ${result}"
+          if [[ "${result}" != "success" ]]; then
+            exit 1
+          fi
