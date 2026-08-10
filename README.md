@@ -65,3 +65,7 @@ Quick facts:
 - Clients pin `reusable-release-*.yml` / `reusable-approve-request.yml` by commit SHA (Renovate bumps)
 - Client secret required: `SECUREFIX_CLIENT_PRIVATE_KEY` only (App ID and server name are hardcoded in the reusables)
 - Caller jobs must grant the `permissions` scopes the reusable jobs request (see the doc)
+
+## Repository settings reconcile
+
+OSS repositories under `civitaspo` get shared merge settings, a default-branch ruleset, and the `civitaspo-bot` collaborator from [`.github/workflows/repo-settings.yml`](.github/workflows/repo-settings.yml) applied from [`repo-settings/`](repo-settings/) (`gh` + schedule / `workflow_dispatch`). See [docs/repo-settings.md](docs/repo-settings.md).
