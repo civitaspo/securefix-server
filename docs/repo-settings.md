@@ -37,7 +37,7 @@ Checked once in the `prepare` job before the matrix runs.
 
 | Secret | Required | Purpose |
 | --- | --- | --- |
-| `REPO_SETTINGS_TOKEN` | yes | PAT as **civitaspo** that can create repos and administer target repos |
+| `CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN` | yes | classic PAT as **civitaspo** with `public_repo` (create / administer public target repos) |
 | `CIVITASPO_BOT_REPO_INVITE_TOKEN` | no | classic PAT as **civitaspo-bot** with `repo:invite` only, to accept invitations |
 
 Bot-owned PATs use the `CIVITASPO_BOT_*` prefix (the Securefix approver is `CIVITASPO_BOT_PR_APPROVE_TOKEN` on the same environment).
@@ -57,7 +57,7 @@ Settings-only repos (for example `dotfiles`) need steps 1–2 (and App/bot as ne
 
 ## Manual checklist
 
-- [ ] `REPO_SETTINGS_TOKEN` on `main`
+- [ ] `CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN` on `main`
 - [ ] `main` environment: required reviewers + default-branch-only deployments
 - [ ] Optional bot invite Accept token
 - [ ] Securefix Apps + client secret + wrappers + Renovate

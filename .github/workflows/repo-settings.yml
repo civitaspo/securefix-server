@@ -48,11 +48,11 @@ jobs:
       - name: Check secrets
         id: secrets
         env:
-          GH_TOKEN: ${{ secrets.REPO_SETTINGS_TOKEN }}
+          GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
           BOT_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
         run: |
           if [[ -z "${GH_TOKEN}" ]]; then
-            echo "REPO_SETTINGS_TOKEN is required (main environment secret)."
+            echo "CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN is required (main environment secret)."
             exit 1
           fi
           gh api user --jq .login >/dev/null
@@ -128,7 +128,7 @@ jobs:
       matrix:
         repository: ${{ fromJson(needs.prepare.outputs.repos) }}
     env:
-      GH_TOKEN: ${{ secrets.REPO_SETTINGS_TOKEN }}
+      GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
       REPO: ${{ matrix.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
