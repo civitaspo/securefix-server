@@ -10,7 +10,7 @@ Thin GitHub Actions workflow that applies shared repository settings to `civitas
 | File | API |
 | --- | --- |
 | [`repository.json`](../repo-settings/repository.json) | `PATCH /repos/{owner}/{repo}` (merge options) |
-| [`rulesets/default-branch.json`](../repo-settings/rulesets/default-branch.json) | Upsert repository ruleset by fixed `.name` (`PUT` if present, else `POST`). Full body replace — include anything you want kept (for example `bypass_actors`) |
+| [`rulesets/default-branch.json`](../repo-settings/rulesets/default-branch.json) | Upsert repository ruleset by fixed `.name` (`PUT` if present, else `POST`). Full body replace — include anything you want kept (for example `bypass_actors`). Requires the single CI job context `status-check` (clients collapse PR workflows into that gate) |
 | [`collaborator.json`](../repo-settings/collaborator.json) | Invite collaborator (`push`); optional Accept via bot PAT (token must authenticate as that user) |
 
 Not managed here: Securefix Apps, secret values, Renovate, client workflow wrappers, `release-clients.yaml`. Other rulesets under different names (for example legacy `Protect main` or per-repo status checks) are left alone — delete or rename them manually if you want a single ruleset.
