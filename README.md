@@ -48,7 +48,7 @@ Server-side approval still needs `CIVITASPO_BOT_PR_APPROVE_TOKEN` on the `main` 
 
 ## Securefix client workflows
 
-The Securefix server accepts requests only from the `Lint` and `Release PR` client workflows. Requests from other workflow names are denied before a commit is created.
+The Securefix server accepts requests only from the `CI`, `Lint`, and `Release PR` client workflows. Requests from other workflow names are denied before a commit is created. `CI` is the top-level pull-request workflow after the single-PR CI migration; `Lint` remains allowed for older clients.
 
 Clients may request an allowed destination branch, including `release/next`, within `civitaspo/*` repositories. The server validates these requests with `securefix-config.yaml`. Commit messages supplied by clients are honored; the server does not override them.
 
