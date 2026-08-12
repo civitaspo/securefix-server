@@ -46,7 +46,7 @@ jobs:
           set -euo pipefail
           name=$(printf '%s' "$WORKFLOW_RUN" | jq -r '.name')
           case "$name" in
-            Lint|Release\ PR)
+            CI|Release\ PR)
               echo "Allowed client workflow: $name"
               ;;
             *)
