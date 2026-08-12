@@ -90,6 +90,22 @@ jobs:
             and (.rules | type == "array")
             and (.bypass_actors | type == "array")
           ' "${SETTINGS_DIR}/rulesets/default-branch.json" >/dev/null
+          jq -e '
+            (.name | type == "string" and length > 0)
+            and .target == "tag"
+            and (.rules | type == "array")
+            and (.bypass_actors | type == "array")
+          ' "${SETTINGS_DIR}/rulesets/all-tags.json" >/dev/null
+          jq -e '
+            type == "array"
+            and (length == (unique | length))
+            and all(.[]; type == "string" and test("^[a-zA-Z0-9._-]{1,100}$"))
+          ' "${SETTINGS_DIR}/tags-allowlist.json" >/dev/null
+          jq -e --slurpfile tags "${SETTINGS_DIR}/tags-allowlist.json" '
+            ($tags[0] | unique | length) as $n
+            | ($tags[0] - .) | length == 0
+            and ($tags[0] | length) == $n
+          ' "${SETTINGS_DIR}/allowlist.json" >/dev/null
 
       - name: Resolve matrix
         id: resolve
@@ -188,6 +204,52 @@ jobs:
             echo "Creating ruleset ${name}"
             gh api -X POST "repos/${OWNER}/${REPO}/rulesets" --input "$RULESET_FILE" >/dev/null
           fi
+
+      - name: Upsert all-tags ruleset
+        env:
+          RULESET_FILE: ${{ env.SETTINGS_DIR }}/rulesets/all-tags.json
+          TAGS_ALLOWLIST_FILE: ${{ env.SETTINGS_DIR }}/tags-allowlist.json
+        run: |
+          if ! jq -e --arg n "$REPO" 'index($n) != null' "$TAGS_ALLOWLIST_FILE" >/dev/null; then
+            echo "Skip all-tags for ${REPO} (not in tags-allowlist.json)"
+            exit 0
+          fi
+          name="$(jq -r .name "$RULESET_FILE")"
+          id="$(
+            gh api --paginate "repos/${OWNER}/${REPO}/rulesets?includes_parents=false" \
+              | jq -s -r --arg n "$name" '
+                  (add // [])
+                  | map(select(.name == $n and .source_type == "Repository"))
+                  | if length > 1 then
+                      error("multiple repository rulesets named \($n)")
+                    elif length == 1 then
+                      .[0].id
+                    else
+                      empty
+                    end
+                '
+          )"
+          if [[ -n "${id}" ]]; then
+            echo "Updating ruleset ${name} (id=${id})"
+            gh api -X PUT "repos/${OWNER}/${REPO}/rulesets/${id}" --input "$RULESET_FILE" >/dev/null
+          else
+            echo "Creating ruleset ${name}"
+            gh api -X POST "repos/${OWNER}/${REPO}/rulesets" --input "$RULESET_FILE" >/dev/null
+          fi
+
+          # Rename cutover: drop legacy hand-created "Protect tags" once all-tags exists.
+          legacy_ids="$(
+            gh api --paginate "repos/${OWNER}/${REPO}/rulesets?includes_parents=false" \
+              | jq -s -r '
+                  (add // [])
+                  | map(select(.name == "Protect tags" and .source_type == "Repository" and .target == "tag") | .id)
+                  | .[]
+                '
+          )"
+          for legacy_id in ${legacy_ids}; do
+            echo "Deleting legacy ruleset Protect tags (id=${legacy_id})"
+            gh api -X DELETE "repos/${OWNER}/${REPO}/rulesets/${legacy_id}" >/dev/null
+          done
 
       - name: Invite collaborator
         run: |
