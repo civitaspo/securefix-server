@@ -9,7 +9,7 @@ Thin GitHub Actions workflow that applies shared repository settings to `civitas
 
 | File | API |
 | --- | --- |
-| [`repository.json`](../repo-settings/repository.json) | `PATCH /repos/{owner}/{repo}` (merge options) |
+| [`repository.json`](../repo-settings/repository.json) | `PATCH /repos/{owner}/{repo}` (merge options, including Always suggest updating pull request branches via `allow_update_branch`) |
 | [`rulesets/default-branch.json`](../repo-settings/rulesets/default-branch.json) | Upsert branch ruleset by fixed `.name` (`PUT` if present, else `POST`). Full body replace — include anything you want kept (for example `bypass_actors`). Requires the single CI job context `status-check` (clients collapse PR workflows into that gate) |
 | [`rulesets/all-tags.json`](../repo-settings/rulesets/all-tags.json) | Upsert tag ruleset `all-tags` (`~ALL`, block deletion / force-push) for names in [`tags-allowlist.json`](../repo-settings/tags-allowlist.json). Also deletes legacy `Protect tags` if present |
 | [`collaborator.json`](../repo-settings/collaborator.json) | Invite collaborator (`push`); optional Accept via bot PAT (token must authenticate as that user) |
