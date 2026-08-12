@@ -1,0 +1,7 @@
+[
+  "securefix-server",
+  "dbt-authorized-models",
+  "dbt-snowflake-iceberg-sync",
+  "dbt-snowflake-rap-enforcement",
+  "terraform-provider-sigma"
+]

@@ -208,7 +208,7 @@ Until step 1 is merged, copied wrappers cannot publish even if they create label
 
 ## Securefix commit path (related)
 
-Separate from publish: Securefix **commit** requests are still limited to client workflows named `Lint` and `Release PR`, and validated by [`securefix-config.yaml`](../securefix-config.yaml). See the root [README](../README.md).
+Separate from publish: Securefix **commit** requests are still limited to client workflows named `CI` and `Release PR`, and validated by [`securefix-config.yaml`](../securefix-config.yaml). See the root [README](../README.md).
 
 ## Deferred
 
