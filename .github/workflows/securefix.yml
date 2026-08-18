@@ -30,7 +30,7 @@ jobs:
 
       - name: Prepare Securefix request
         id: prepare
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+        uses: csm-actions/securefix-action@11b2bfd2f4b7e1e02b63648fbe5d17e6273e515d # v0.6.1
         with:
           action: prepare
           allow_workflow_fix: true
@@ -56,14 +56,14 @@ jobs:
           esac
 
       - name: Create Securefix commit
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+        uses: csm-actions/securefix-action@11b2bfd2f4b7e1e02b63648fbe5d17e6273e515d # v0.6.1
         with:
           action: commit
           outputs: ${{ toJson(steps.prepare.outputs) }}
 
       - name: Notify Securefix failure
         if: failure()
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+        uses: csm-actions/securefix-action@11b2bfd2f4b7e1e02b63648fbe5d17e6273e515d # v0.6.1
         with:
           action: notify
           outputs: ${{ toJson(steps.prepare.outputs) }}
