@@ -2,6 +2,14 @@ name: Reusable Release PR
 
 on:
   workflow_call:
+    inputs:
+      version:
+        description: >-
+          Explicit release version without the leading v (for example 0.0.1-pre.1).
+          Empty computes the next version with git-cliff.
+        required: false
+        type: string
+        default: ""
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
@@ -42,6 +50,8 @@ jobs:
 
       - name: Compute release
         id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
@@ -50,7 +60,8 @@ jobs:
           # a later push already runs this workflow; without the shipped version
           # floor, git-cliff falls back to an older tag and re-proposes the same
           # release.
-          latest_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || printf '%s\n' v0.0.0)
+          # Pre-release tags (vX.Y.Z-*) never become the bump base.
+          latest_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' 2>/dev/null || printf '%s\n' v0.0.0)
           if [ -f .release-version ]; then
             shipped_tag="v$(tr -d '[:space:]' < .release-version)"
             if printf '%s\n' "$shipped_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
@@ -61,8 +72,8 @@ jobs:
 
           # When .release-version is ahead of the real git tag, point a local tag
           # at the release commit so git-cliff bumps from the shipped version.
-          # Never push this tag.
-          if ! git rev-parse --verify --quiet "${latest_tag}^{commit}" >/dev/null; then
+          # Never push this tag. The v0.0.0 fallback (no release yet) needs no tag.
+          if [ "${latest_tag}" != v0.0.0 ] && ! git rev-parse --verify --quiet "${latest_tag}^{commit}" >/dev/null; then
             version_no_v=${latest_tag#v}
             ship_commit=$(
               git log --grep="^chore(release): v${version_no_v}$" --format='%H' -1 2>/dev/null || true
@@ -80,13 +91,26 @@ jobs:
             echo "Created local tag ${latest_tag} at ${ship_commit}"
           fi
 
-          bumped=$(git cliff --bumped-version)
-          bumped=${bumped#v}
-          base=${latest_tag#v}
-          if [ -z "${bumped}" ] || [ "${bumped}" = "${base}" ]; then
-            echo "No releasable commits found."
-            echo "releasable=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ -n "${INPUT_VERSION}" ]; then
+            # Explicit versions (including pre-releases) skip git-cliff bumping.
+            bumped=${INPUT_VERSION#v}
+            if ! printf '%s\n' "$bumped" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+              echo "Invalid explicit version: ${INPUT_VERSION}" >&2
+              exit 1
+            fi
+            if git rev-parse --verify --quiet "refs/tags/v${bumped}" >/dev/null; then
+              echo "Tag v${bumped} already exists." >&2
+              exit 1
+            fi
+          else
+            bumped=$(git cliff --bumped-version)
+            bumped=${bumped#v}
+            base=${latest_tag#v}
+            if [ -z "${bumped}" ] || [ "${bumped}" = "${base}" ]; then
+              echo "No releasable commits found."
+              echo "releasable=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
           git cliff --tag "v${bumped}" --output CHANGELOG.md
