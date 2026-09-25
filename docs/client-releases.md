@@ -98,7 +98,7 @@ Also accepted (legacy fallbacks inside the same unified workflow):
 Constraints:
 
 - Referenced Actions run must be named **Release Tag**, same repository (no fork), and `queued` / `in_progress` / `completed+success`.
-- Tag must be semver with a leading `v` (example: `v1.2.3`).
+- Tag must be semver with a leading `v` (example: `v1.2.3`). A pre-release part is allowed (example: `v0.0.1-pre.1`); such tags are published as GitHub pre-releases.
 - Tag commit must equal the expected merge SHA and be an ancestor of `main`.
 - Prefer including the squash-merge commit SHA: on `pull_request` closed, `workflow_run.head_sha` is the PR head (`release/next`), not the merge commit on `main`.
 - If the description with SHA would exceed GitHub’s **100-character** label description limit, omit the SHA; the server resolves it from the merged `release/next` → `main` PR (or uses `head_sha` for `workflow_dispatch`).
@@ -122,6 +122,36 @@ Hardcoded in reusables (not client repository variables):
 - Server repository name: `securefix-server`
 
 mise **CLI** version is pinned inside the reusable; **tool** versions come from each client’s `mise.lock` after checkout.
+
+### Explicit and pre-release versions
+
+`reusable-release-pr.yml` accepts an optional `version` input (without the leading `v`). When it is set, Release PR skips git-cliff bumping and prepares exactly that version, which may carry a semver pre-release part such as `0.0.1-pre.1`. The run fails if the tag already exists. Clients expose it through a `workflow_dispatch` input:
+
+```yaml
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Explicit release version without the leading v (empty = compute with git-cliff)
+        required: false
+        type: string
+
+jobs:
+  prepare:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@<sha>
+    with:
+      version: ${{ inputs.version }}
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+```
+
+Pre-release tags (`vX.Y.Z-*`) are never used as the base for automatic bumps, and the `.release-version` floor ignores pre-release values. The next push to `main` may therefore rewrite an open pre-release `release/next` to the computed stable version; dispatch again with `version` to restore it. The tag ruleset makes every published tag permanent, including pre-releases.
 
 If `dbt_project.yml` and/or `pyproject.toml` exist at the repository root, Release PR updates their `version` fields and includes them in the Securefix file list.
 

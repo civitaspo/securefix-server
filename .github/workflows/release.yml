@@ -228,11 +228,17 @@ jobs:
             echo "Release $TAG already exists."
             exit 0
           fi
+          # Tags with a semver pre-release part (vX.Y.Z-*) become pre-releases.
+          prerelease=false
+          case "$TAG" in
+            *-*) prerelease=true ;;
+          esac
           # Draft → publish once so immutable releases remain compatible.
           gh release create "$TAG" \
             --repo "$REPOSITORY" \
             --title "$TAG" \
             --generate-notes \
+            --prerelease="$prerelease" \
             --draft
           gh release edit "$TAG" --repo "$REPOSITORY" --draft=false
 
