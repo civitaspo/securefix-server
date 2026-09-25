@@ -158,7 +158,7 @@ jobs:
 
       - name: Request release pull request
         if: steps.release.outputs.releasable == 'true'
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
           action: client
           app_id: ${{ env.SECUREFIX_CLIENT_APP_ID }}
