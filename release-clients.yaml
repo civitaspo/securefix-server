@@ -9,3 +9,5 @@ clients:
     publish: github-release
   - repository: civitaspo/terraform-provider-sigma
     publish: goreleaser
+  - repository: civitaspo/herdr-linear-agent
+    publish: github-release
