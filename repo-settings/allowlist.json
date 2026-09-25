@@ -5,5 +5,6 @@
   "dbt-snowflake-iceberg-sync",
   "dbt-snowflake-rap-enforcement",
   "terraform-provider-sigma",
-  "nagi"
+  "nagi",
+  "herdr-linear-agent"
 ]
