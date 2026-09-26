@@ -11,3 +11,5 @@ clients:
     publish: goreleaser
   - repository: civitaspo/herdr-linear-agent
     publish: github-release
+  - repository: civitaspo/hook-relay-client-rs
+    publish: github-release
