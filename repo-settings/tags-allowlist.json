@@ -4,5 +4,6 @@
   "dbt-snowflake-iceberg-sync",
   "dbt-snowflake-rap-enforcement",
   "terraform-provider-sigma",
-  "herdr-linear-agent"
+  "herdr-linear-agent",
+  "hook-relay-client-rs"
 ]
