@@ -7,5 +7,6 @@
   "terraform-provider-sigma",
   "nagi",
   "herdr-linear-agent",
-  "hook-relay-client-rs"
+  "hook-relay-client-rs",
+  "herdr-infobox"
 ]

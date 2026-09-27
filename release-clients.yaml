@@ -13,3 +13,5 @@ clients:
     publish: github-release
   - repository: civitaspo/hook-relay-client-rs
     publish: github-release
+  - repository: civitaspo/herdr-infobox
+    publish: github-release
