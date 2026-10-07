@@ -41,6 +41,10 @@ The Securefix Server App needs `actions: read`, `checks: read`, `commit statuses
 
 ## Verify before rollout
 
+The workflows use Bash, `gh api`, and `jq`. Each step takes its inputs through environment variables, so the same commands can run locally. GitHub API responses remain JSON through validation and merge payload construction.
+
+Run `python3 tests/merge-workflows_test.py` to execute the workflow commands with fixture API responses and real `jq`. The tests check request records, rejected authorization, replay history, timeline changes, readiness, and merge payloads. They do not exercise real App permissions or repository rulesets.
+
 Use a public scratch repository that is not in the production allowlist. Install both Apps and set `MERGE_VERIFICATION_REPOSITORY` in the server's `main` environment to that exact repository name. Pin the scratch workflow to a reviewed Securefix Server commit that is on its default branch. Exercise unauthorized comments, edited and deleted comments, reruns, replayed labels, changed heads, force-push-and-return, pending checks, pending review, timeout, and a successful squash merge. Confirm that direct pushes and merges without the required checks or review still fail under the repository rulesets.
 
 Remove `MERGE_VERIFICATION_REPOSITORY` after testing. Keep production merge controls disabled until the real App permissions and scratch-repository merge path pass.

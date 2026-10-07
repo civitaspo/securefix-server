@@ -12,6 +12,10 @@ env:
 
 permissions: {}
 
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
 jobs:
   request:
     if: >-
@@ -40,64 +44,39 @@ jobs:
           test -n "${APP_PRIVATE_KEY}"
       - name: Capture the merge request
         id: manifest
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        with:
-          script: |
-            const { writeFileSync, mkdirSync } = require('node:fs')
-            const { join } = require('node:path')
-
-            const comment = context.payload.comment
-            const repository = context.payload.repository
-            const number = context.payload.issue.number
-            if (repository.owner.login !== 'civitaspo' || comment.user.id !== 4525500 || comment.body !== '/merge') {
-              core.setFailed('Only civitaspo can request a merge with an exact /merge comment.')
-              return
-            }
-            const acceptedAt = new Date().toISOString()
-
-            const { data: pr } = await github.rest.pulls.get({
-              owner: repository.owner.login,
-              repo: repository.name,
-              pull_number: number,
-            })
-            const { data: defaultRepo } = await github.rest.repos.get({
-              owner: repository.owner.login,
-              repo: repository.name,
-            })
-            const { data: currentComment } = await github.rest.issues.getComment({
-              owner: repository.owner.login,
-              repo: repository.name,
-              comment_id: comment.id,
-            })
-
-            if (pr.state !== 'open' || pr.draft || pr.base.ref !== defaultRepo.default_branch) {
-              core.setFailed('The pull request must be open, ready for review, and target the default branch.')
-              return
-            }
-            if (currentComment.body !== '/merge' || currentComment.user.id !== 4525500) {
-              core.setFailed('The request comment changed before it could be recorded.')
-              return
-            }
-
-            const manifest = {
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -e '.repository.owner.login == "civitaspo" and .comment.user.id == 4525500 and .comment.body == "/merge"' "$GITHUB_EVENT_PATH" >/dev/null
+          number=$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")
+          comment_id=$(jq -r '.comment.id' "$GITHUB_EVENT_PATH")
+          accepted_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}")
+          repository=$(gh api "repos/${GITHUB_REPOSITORY}")
+          comment=$(gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}")
+          jq -en --argjson pr "$pr" --argjson repository "$repository" --argjson comment "$comment" '
+            $pr.state == "open" and $pr.draft == false and
+            $pr.base.ref == $repository.default_branch and
+            $comment.body == "/merge" and $comment.user.id == 4525500
+          ' >/dev/null
+          mkdir -p merge-request
+          umask 077
+          jq -n --argjson pr "$pr" --argjson repository "$repository" --argjson comment "$comment" \
+            --arg accepted_at "$accepted_at" --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" --arg workflow_sha "$GITHUB_SHA" '
+            {
               version: 1,
-              repository: { id: repository.id, fullName: repository.full_name },
-              pullRequest: { number, headSha: pr.head.sha, baseRef: pr.base.ref },
-              comment: {
-                id: currentComment.id,
-                authorId: currentComment.user.id,
-                updatedAt: currentComment.updated_at,
-              },
-              acceptedAt,
-              runId: context.runId,
-              runAttempt: context.runAttempt,
-              workflowSha: context.sha,
+              repository: {id: $repository.id, fullName: $repository.full_name},
+              pullRequest: {number: $pr.number, headSha: $pr.head.sha, baseRef: $pr.base.ref},
+              comment: {id: $comment.id, authorId: $comment.user.id, updatedAt: $comment.updated_at},
+              acceptedAt: $accepted_at,
+              runId: $run_id,
+              runAttempt: $run_attempt,
+              workflowSha: $workflow_sha
             }
-            const directory = join(process.env.GITHUB_WORKSPACE, 'merge-request')
-            mkdirSync(directory, { recursive: true })
-            writeFileSync(join(directory, 'manifest.json'), `${JSON.stringify(manifest)}\n`, { mode: 0o600 })
-            core.setOutput('repository', repository.name)
-            core.setOutput('run_id', String(context.runId))
+          ' > merge-request/manifest.json
+          echo "repository=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+          echo "run_id=${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
       - name: Upload the immutable request record
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -116,29 +95,18 @@ jobs:
           repositories: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}
           permission-issues: write
       - name: Notify Securefix Server
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           SOURCE_RUN_ID: ${{ steps.manifest.outputs.run_id }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const name = `merge-request-${process.env.SOURCE_RUN_ID}`
-            const description = `${process.env.SOURCE_REPOSITORY}/${process.env.SOURCE_RUN_ID}`
-            if (owner !== 'civitaspo' || name.length > 50 || description.length > 100) {
-              core.setFailed('The merge request label fields are invalid.')
-              return
-            }
-
-            await github.rest.issues.createLabel({
-              owner,
-              repo: process.env.SERVER_REPOSITORY,
-              name,
-              color: '1f6feb',
-              description,
-            })
-            core.summary.addHeading('Merge request sent to Securefix Server')
-              .addText(`Request ${process.env.SOURCE_RUN_ID} for ${process.env.SOURCE_REPOSITORY} is queued for validation.`)
-            await core.summary.write()
+        run: |
+          name="merge-request-${SOURCE_RUN_ID}"
+          description="${SOURCE_REPOSITORY}/${SOURCE_RUN_ID}"
+          test "${SOURCE_REPOSITORY%%/*}" = civitaspo
+          test "${#name}" -le 50
+          test "${#description}" -le 100
+          gh api --method POST "repos/civitaspo/${SERVER_REPOSITORY}/labels" \
+            -f name="$name" -f color=1f6feb -f description="$description"
+          printf '## Merge request sent to Securefix Server\n\nRequest %s for %s is queued for validation.\n' \
+            "$SOURCE_RUN_ID" "$SOURCE_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
