@@ -69,3 +69,5 @@ Quick facts:
 ## Repository settings reconcile
 
 OSS repositories under `civitaspo` get shared merge settings, a default-branch ruleset, and the `civitaspo-bot` collaborator from [`.github/workflows/repo-settings.yml`](.github/workflows/repo-settings.yml) applied from [`repo-settings/`](repo-settings/) (`gh` + schedule / `workflow_dispatch`). See [docs/repo-settings.md](docs/repo-settings.md).
+
+Human pull request merges use a `/merge` comment from `civitaspo` and run through Securefix Server. Renovate keeps its existing automerge scopes through its GitHub App. Merge controls remain disabled until the real App permissions and merge behavior pass rollout checks. See [docs/client-releases.md](docs/client-releases.md) and [docs/repo-settings.md](docs/repo-settings.md).

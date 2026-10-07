@@ -46,7 +46,7 @@ Clients cannot publish by calling a reusable “publish” job. They can only cr
 1. Commits land on client `main` (squash-merge).
 2. **Release PR** (`reusable-release-pr.yml`) runs git-cliff, writes `.release-version` / `CHANGELOG.md`, and if present updates `dbt_project.yml` / `pyproject.toml`, then opens or updates `release/next` via Securefix.
 3. **Release PR Sync** keeps the open `release/next` PR title/body aligned with `.release-version`.
-4. A human squash-merges `chore(release): vX.Y.Z`.
+4. `civitaspo` comments `/merge` on `chore(release): vX.Y.Z`; Securefix Server squash-merges it after required checks and review pass.
 5. **Release Tag** creates annotated tag `vX.Y.Z` on the merge commit and creates a `release-request-*` label on this server.
 6. **Release** on this server validates the request and publishes according to the allowlist `publish` strategy.
 
@@ -223,6 +223,14 @@ Trusted actors / committers: `civitaspo`, `cursoragent`, `civitaspo-securefix-se
 - This server’s `Approve Pull Request` workflow consumes `approve-pr-*` labels and approves with `CIVITASPO_BOT_PR_APPROVE_TOKEN`.
 
 Keep the reusable and [`approve.yml`](../.github/workflows/approve.yml) lists in sync when changing policy.
+
+## Pull request merges
+
+Human merge requests use the exact `/merge` comment on the pull request. Only the GitHub account with user ID `4525500` (`civitaspo`) can request a human merge. Securefix Server checks the original comment and the pull request state, waits for required checks and review, then merges the recorded head SHA.
+
+The client wrapper calls `reusable-merge-request.yml` at a commit SHA and uses the Client App only to submit the request. It does not receive merge credentials. Install the wrapper and configure its Client App variables and private key before enabling merge controls in [`repo-settings.md`](repo-settings.md).
+
+Renovate is the only direct App exception. Its existing automerge rules stay in place, with GitHub native auto-merge disabled. See [the merge control specification](merging.md) for request validation, App permissions, failure handling, and rollout requirements.
 
 ## Onboarding a new client
 

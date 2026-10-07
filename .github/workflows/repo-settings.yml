@@ -16,6 +16,10 @@ on:
         description: "Create the repo if missing (only when repository is set; default off)"
         type: boolean
         default: false
+      merge_controls_ready:
+        description: "Confirm both Apps, required permissions, and live merge tests are verified in every repo"
+        type: boolean
+        default: false
 
 concurrency:
   group: repo-settings
@@ -42,8 +46,14 @@ jobs:
       repos: ${{ steps.resolve.outputs.repos }}
       allowlist: ${{ steps.resolve.outputs.allowlist }}
       bot_invite: ${{ steps.secrets.outputs.bot_invite }}
+      merge_controls_enabled: ${{ steps.resolve.outputs.merge_controls_enabled }}
+      merge_controls_apply: ${{ steps.resolve.outputs.merge_controls_apply }}
+      merge_controls_reconcile: ${{ steps.resolve.outputs.merge_controls_reconcile }}
+      client_repos: ${{ steps.resolve.outputs.client_repos }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Check secrets
         id: secrets
@@ -80,6 +90,8 @@ jobs:
           ' "${SETTINGS_DIR}/allowlist.json" >/dev/null
           jq -e 'has("allow_auto_merge") and has("allow_squash_merge")' \
             "${SETTINGS_DIR}/repository.json" >/dev/null
+          jq -e 'type == "object" and (.enabled | type == "boolean")' \
+            "${SETTINGS_DIR}/merge-controls.json" >/dev/null
           jq -e '
             (.username | type == "string" and length > 0)
             and (.permission | IN("pull", "triage", "push", "maintain", "admin"))
@@ -97,6 +109,14 @@ jobs:
             and (.bypass_actors | type == "array")
           ' "${SETTINGS_DIR}/rulesets/all-tags.json" >/dev/null
           jq -e '
+            (.name | type == "string" and length > 0)
+            and .target == "branch"
+            and .conditions.ref_name.include == ["~DEFAULT_BRANCH"]
+            and .rules == [{"type":"update","parameters":{"update_allows_fetch_and_merge":false}}]
+            and ([.bypass_actors[].actor_id] | sort) == [2740,3872533]
+            and all(.bypass_actors[]; .actor_type == "Integration" and .bypass_mode == "pull_request")
+          ' "${SETTINGS_DIR}/rulesets/controlled-merges.json" >/dev/null
+          jq -e '
             type == "array"
             and (length == (unique | length))
             and all(.[]; type == "string" and test("^[a-zA-Z0-9._-]{1,100}$"))
@@ -111,11 +131,31 @@ jobs:
         id: resolve
         env:
           INPUT_REPO: ${{ inputs.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MERGE_CONTROLS_READY: ${{ inputs.merge_controls_ready }}
         run: |
           allowlist="$(jq -c . "${SETTINGS_DIR}/allowlist.json")"
-          echo "allowlist=${allowlist}" >> "$GITHUB_OUTPUT"
 
+          merge_controls_enabled="$(jq -r .enabled "${SETTINGS_DIR}/merge-controls.json")"
+          merge_controls_ready="${INPUT_MERGE_CONTROLS_READY}"
+          merge_controls_apply=false
+          merge_controls_reconcile=false
+          if [[ "${merge_controls_enabled}" == true ]]; then
+            if [[ "${EVENT_NAME}" == schedule || "${merge_controls_ready}" == true ]]; then
+              merge_controls_apply=true
+              merge_controls_reconcile=true
+            fi
+          elif [[ "${merge_controls_ready}" == true ]]; then
+            echo "merge_controls_ready cannot activate merge controls while merge-controls.json is disabled."
+            exit 1
+          elif [[ -z "${INPUT_REPO}" ]]; then
+            merge_controls_reconcile=true
+          fi
           if [[ -n "${INPUT_REPO}" && "${INPUT_REPO}" =~ [^[:space:]] ]]; then
+            if [[ "${merge_controls_apply}" == true && "${EVENT_NAME}" == workflow_dispatch && "${merge_controls_ready}" == true ]]; then
+              echo "Merge-control activation requires the full allowlist. Leave repository empty."
+              exit 1
+            fi
             name="$(printf '%s' "$INPUT_REPO" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             if [[ "$name" =~ [[:space:]] ]]; then
               echo "Repository name must not contain whitespace: got ${INPUT_REPO}"
@@ -129,8 +169,91 @@ jobs:
           else
             repos="$allowlist"
           fi
-          echo "repos=${repos}" >> "$GITHUB_OUTPUT"
+          client_repos="$(jq -c '[.[] | select(. != "securefix-server")]' <<<"${allowlist}")"
+          {
+            echo "allowlist=${allowlist}"
+            echo "merge_controls_enabled=${merge_controls_enabled}"
+            echo "merge_controls_apply=${merge_controls_apply}"
+            echo "merge_controls_reconcile=${merge_controls_reconcile}"
+            echo "repos=${repos}"
+            echo "client_repos=${client_repos}"
+          } >> "$GITHUB_OUTPUT"
           echo "Matrix: ${repos}"
+
+      - name: Preflight merge-control rollout
+        if: steps.resolve.outputs.merge_controls_apply == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
+          REPOS: ${{ steps.resolve.outputs.allowlist }}
+        run: |
+          failures=0
+          if ! server_app_id="$(gh api "repos/${OWNER}/securefix-server/environments/main/variables/SECUREFIX_SERVER_APP_ID" --jq .value 2>/dev/null)" || [[ "${server_app_id}" != 3872533 ]]; then
+            echo "securefix-server main environment must set SECUREFIX_SERVER_APP_ID to 3872533."
+            failures=1
+          fi
+          if gh api "repos/${OWNER}/securefix-server/environments/main/variables/MERGE_VERIFICATION_REPOSITORY" >/dev/null 2>&1; then
+            echo "Remove MERGE_VERIFICATION_REPOSITORY from securefix-server before production activation."
+            failures=1
+          fi
+          for secret in SECUREFIX_CLIENT_PRIVATE_KEY SECUREFIX_SERVER_PRIVATE_KEY; do
+            if ! gh api "repos/${OWNER}/securefix-server/environments/main/secrets/${secret}" >/dev/null 2>&1; then
+              echo "securefix-server main environment is missing ${secret} metadata."
+              failures=1
+            fi
+          done
+
+          while IFS= read -r repo; do
+            echo "Checking ${OWNER}/${repo}"
+            if ! wrapper_base64="$(gh api "repos/${OWNER}/${repo}/contents/.github/workflows/merge-request.yml" --jq .content 2>/dev/null)"; then
+              echo "Missing .github/workflows/merge-request.yml in ${OWNER}/${repo}."
+              failures=1
+              continue
+            fi
+            wrapper_path="${RUNNER_TEMP}/merge-request-${repo}.yml"
+            printf '%s' "${wrapper_base64}" | tr -d '\n' | base64 --decode > "${wrapper_path}"
+            uses_count="$(grep -Ec '^[[:space:]]+uses:' "${wrapper_path}" || true)"
+            if [[ "${uses_count}" != 1 ]] || ! grep -Eq '^[[:space:]]+uses:[[:space:]]*civitaspo/securefix-server/\.github/workflows/reusable-merge-request\.yml@[0-9a-f]{40}[[:space:]]*$' "${wrapper_path}"; then
+              echo "${OWNER}/${repo} must call reusable-merge-request.yml at a 40-character commit SHA."
+              failures=1
+            fi
+
+            for variable in SECUREFIX_CLIENT_APP_ID SECUREFIX_SERVER_REPOSITORY; do
+              if ! value="$(gh api "repos/${OWNER}/${repo}/actions/variables/${variable}" --jq .value 2>/dev/null)"; then
+                echo "${OWNER}/${repo} is missing Actions variable ${variable}."
+                failures=1
+                continue
+              fi
+              case "${variable}:${value}" in
+                SECUREFIX_CLIENT_APP_ID:3872492|SECUREFIX_SERVER_REPOSITORY:securefix-server) ;;
+                *)
+                  echo "${OWNER}/${repo} has an unexpected ${variable} value."
+                  failures=1
+                  ;;
+              esac
+            done
+
+            if [[ "${repo}" == securefix-server ]]; then
+              secret_path="repos/${OWNER}/${repo}/environments/main/secrets/SECUREFIX_CLIENT_PRIVATE_KEY"
+            else
+              secret_path="repos/${OWNER}/${repo}/actions/secrets/SECUREFIX_CLIENT_PRIVATE_KEY"
+            fi
+            if ! gh api "${secret_path}" >/dev/null 2>&1; then
+              echo "${OWNER}/${repo} is missing SECUREFIX_CLIENT_PRIVATE_KEY metadata."
+              failures=1
+            fi
+
+            queued="$(gh api --paginate --slurp "repos/${OWNER}/${repo}/pulls?state=open&per_page=100" \
+              --jq '[.[][] | select(.auto_merge != null) | .number] | .[]')"
+            if [[ -n "${queued}" ]]; then
+              echo "${OWNER}/${repo} has native auto-merge requests on PRs: ${queued//$'\n'/, }. Clear them before rollout."
+              failures=1
+            fi
+          done < <(jq -r '.[]' <<<"${REPOS}")
+          if [[ "${failures}" == 1 ]]; then
+            echo "Merge-control rollout preflight failed. No repository settings have been changed."
+            exit 1
+          fi
+          echo "Merge-control rollout preflight passed for every allowlisted repository."
 
   reconcile:
     name: ${{ matrix.repository }}
@@ -148,6 +271,8 @@ jobs:
       REPO: ${{ matrix.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Create repository if missing
         if: >
@@ -172,9 +297,17 @@ jobs:
           echo "Exists: ${OWNER}/${REPO}"
 
       - name: Patch repository merge settings
+        env:
+          MERGE_CONTROLS_ACTIVE: ${{ needs.prepare.outputs.merge_controls_apply }}
         run: |
+          settings_file="${RUNNER_TEMP}/repository.json"
+          if [[ "${MERGE_CONTROLS_ACTIVE}" == true ]]; then
+            cp "${SETTINGS_DIR}/repository.json" "${settings_file}"
+          else
+            jq 'del(.allow_auto_merge)' "${SETTINGS_DIR}/repository.json" > "${settings_file}"
+          fi
           gh api -X PATCH "repos/${OWNER}/${REPO}" \
-            --input "${SETTINGS_DIR}/repository.json" \
+            --input "${settings_file}" \
             >/dev/null
           echo "Patched merge settings on ${OWNER}/${REPO}"
 
@@ -313,3 +446,87 @@ jobs:
             exit 0
           fi
           echo "NOTE: ${REPO} is not in ${SETTINGS_DIR}/allowlist.json; add it there if schedule should keep reconciling it."
+
+  controlled-merges:
+    name: Controlled merges
+    timeout-minutes: 20
+    needs: [prepare, reconcile]
+    if: needs.prepare.outputs.merge_controls_reconcile == 'true'
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+    env:
+      RULESET_FILE: repo-settings/rulesets/controlled-merges.json
+      MERGE_CONTROLS_ENABLED: ${{ needs.prepare.outputs.merge_controls_enabled }}
+      CLIENT_REPOS: ${{ needs.prepare.outputs.client_repos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reconcile client rulesets, then securefix-server
+        env:
+          GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
+        run: |
+          name="$(jq -r .name "$RULESET_FILE")"
+
+          reconcile_ruleset() {
+            local repo="$1"
+            local id
+            id="$(gh api --paginate "repos/${OWNER}/${repo}/rulesets?includes_parents=false" \
+              | jq -s -r --arg n "$name" '
+                  (add // [])
+                  | map(select(.name == $n and .source_type == "Repository"))
+                  | if length > 1 then
+                      error("multiple repository rulesets named \($n)")
+                    elif length == 1 then
+                      .[0].id
+                    else
+                      empty
+                    end
+                ')" || return 1
+
+            if [[ "${MERGE_CONTROLS_ENABLED}" != true ]]; then
+              if [[ -z "${id}" ]]; then
+                echo "No ${name} ruleset exists on ${OWNER}/${repo}."
+                return 0
+              fi
+              local enforcement
+              enforcement="$(gh api "repos/${OWNER}/${repo}/rulesets/${id}" --jq .enforcement)" || return 1
+              if [[ "${enforcement}" == disabled ]]; then
+                echo "${name} is already disabled on ${OWNER}/${repo}."
+                return 0
+              fi
+              local disabled_file="${RUNNER_TEMP}/${repo}-controlled-merges-disabled.json"
+              jq '.enforcement = "disabled"' "$RULESET_FILE" > "$disabled_file" || return 1
+              echo "Disabling ${name} on ${OWNER}/${repo}."
+              gh api -X PUT "repos/${OWNER}/${repo}/rulesets/${id}" --input "$disabled_file" >/dev/null || return 1
+              return 0
+            fi
+
+            if [[ -n "${id}" ]]; then
+              echo "Updating ${name} on ${OWNER}/${repo}."
+              gh api -X PUT "repos/${OWNER}/${repo}/rulesets/${id}" --input "$RULESET_FILE" >/dev/null
+            else
+              echo "Creating ${name} on ${OWNER}/${repo}."
+              gh api -X POST "repos/${OWNER}/${repo}/rulesets" --input "$RULESET_FILE" >/dev/null
+            fi
+          }
+
+          failures=0
+          while IFS= read -r repo; do
+            if ! reconcile_ruleset "$repo"; then
+              echo "Failed to reconcile ${name} on ${OWNER}/${repo}."
+              failures=1
+            fi
+          done < <(jq -r '.[]' <<<"${CLIENT_REPOS}")
+          if [[ "${failures}" == 1 ]]; then
+            echo "securefix-server remains untouched because a client ruleset failed."
+            exit 1
+          fi
+
+          if ! reconcile_ruleset securefix-server; then
+            echo "Failed to reconcile ${name} on ${OWNER}/securefix-server."
+            exit 1
+          fi
