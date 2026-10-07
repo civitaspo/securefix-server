@@ -1,0 +1,21 @@
+{
+  "name": "controlled-merges",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [
+    { "actor_id": 3872533, "actor_type": "Integration", "bypass_mode": "pull_request" },
+    { "actor_id": 2740, "actor_type": "Integration", "bypass_mode": "pull_request" }
+  ],
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "update",
+      "parameters": { "update_allows_fetch_and_merge": false }
+    }
+  ]
+}

@@ -10,13 +10,19 @@ Thin GitHub Actions workflow that applies shared repository settings to `civitas
 | File | API |
 | --- | --- |
 | [`repository.json`](../repo-settings/repository.json) | `PATCH /repos/{owner}/{repo}` (merge options, including Always suggest updating pull request branches via `allow_update_branch`) |
+| [`merge-controls.json`](../repo-settings/merge-controls.json) | Opt-in switch for disabling GitHub native auto-merge and enabling the controlled merge ruleset. It starts disabled. |
 | [`rulesets/default-branch.json`](../repo-settings/rulesets/default-branch.json) | Upsert branch ruleset by fixed `.name` (`PUT` if present, else `POST`). Full body replace — include anything you want kept (for example `bypass_actors`). Requires the single CI job context `status-check` (clients collapse PR workflows into that gate) |
+| [`rulesets/controlled-merges.json`](../repo-settings/rulesets/controlled-merges.json) | Upsert `controlled-merges` by fixed name when merge controls are enabled. It restricts updates to the default branch, with PR-only bypass for the Securefix Server and Renovate Apps. |
 | [`rulesets/all-tags.json`](../repo-settings/rulesets/all-tags.json) | Upsert tag ruleset `all-tags` (`~ALL`, block deletion / force-push) for names in [`tags-allowlist.json`](../repo-settings/tags-allowlist.json). Also deletes legacy `Protect tags` if present |
 | [`collaborator.json`](../repo-settings/collaborator.json) | Invite collaborator (`push`); optional Accept via bot PAT (token must authenticate as that user) |
 
-Not managed here: SecureFix Apps, secret values, Renovate, client workflow wrappers, `release-clients.yaml`. Other branch rulesets under different names (for example legacy `Protect main` or per-repo status checks) are left alone — delete or rename them manually if you want a single branch ruleset.
+Not managed here: Securefix App installation or permissions, secret values, Renovate update rules, client workflow contents, and `release-clients.yaml`. Other branch rulesets under different names (for example legacy `Protect main` or per-repo status checks) are left alone.
 
-The shared branch ruleset requires 1 approving review. Solo merges rely on a second actor (typically `civitaspo-bot` via SecureFix). Add `bypass_actors` in the JSON if you need an explicit human/admin bypass.
+The shared `default-branch` ruleset requires one approving review and does not grant bypass. `controlled-merges` is separate because a bypass applies to every rule in a ruleset. Its only rule restricts updates, so Securefix and Renovate can merge pull requests without bypassing the existing CI, review, signature, or squash requirements.
+
+Merge controls remain off while [`merge-controls.json`](../repo-settings/merge-controls.json) has `"enabled": false`. In that state, the workflow omits `allow_auto_merge` and creates no `controlled-merges` ruleset. If a prior rollout left that ruleset active, the workflow disables it. Before enabling the switch, validate both App installations and their permissions, including `actions: read` for the Securefix Server App. Also validate the real merge behavior, install the pinned merge-request workflow in every allowlisted repository, and clear all queued native auto-merge requests. The activation preflight checks every wrapper pin, required Actions variables, and client-key secret metadata. It rejects any missing value or queued request before the matrix changes settings. It never reads a secret value. GitHub's user-authenticated API cannot confirm the App installations or permissions, and the workflow cannot prove the result of a live merge test. The readiness input is an explicit human attestation of those checks.
+
+To enable the controls, change `enabled` to `true` in a reviewed PR after completing the checks above. Then run **Repo settings** with an empty `repository` and `merge_controls_ready: true`. The workflow requires the full allowlist for this dispatch. It applies the restriction to each client repository in sequence and applies it to securefix-server last. Later scheduled runs keep reconciling the enabled state. To roll back, set `enabled` to `false` and run the workflow for all repositories. This disables the new ruleset. Restore `allow_auto_merge` separately only if the previous policy is needed.
 
 ## Allowlist
 
@@ -29,7 +35,7 @@ Tag immutability (`all-tags`) is limited to [`tags-allowlist.json`](../repo-sett
 | Trigger | Behavior |
 | --- | --- |
 | `schedule` (daily) | Reconcile every allowlisted name (matrix) |
-| `workflow_dispatch` with empty `repository` | Same as schedule |
+| `workflow_dispatch` with empty `repository` | Same as schedule. When merge controls are enabled, set `merge_controls_ready: true` to run the activation preflight and apply the full rollout. |
 | `workflow_dispatch` with `repository` | Configure that one repo; only if `create_if_missing` is explicitly true and the repo is absent, `gh repo create civitaspo/<name> --public` first |
 
 `create_if_missing` defaults to **false** so a typo does not create a public repo. Dispatch does **not** edit the allowlist for you. After creating a new OSS, add the name to `allowlist.json` in a PR if schedule should cover it.
@@ -63,5 +69,7 @@ Settings-only repos (for example `dotfiles`) need steps 1–2 (and App/bot as ne
 - [ ] `CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN` on `main`
 - [ ] `main` environment: required reviewers + default-branch-only deployments
 - [ ] Optional bot invite Accept token
-- [ ] SecureFix Apps + client secret + wrappers + Renovate
+- [ ] Securefix and Renovate Apps installed with the permissions required for controlled PR merges
+- [ ] Pinned merge-request wrapper installed on every allowlisted repository
+- [ ] No queued GitHub native auto-merge requests remain before rollout
 - [ ] If invite stays pending, accept as the collaborator user once
