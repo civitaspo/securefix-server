@@ -19,6 +19,8 @@ The server app needs these permissions:
 
 - `contents: write`
 - `actions: read`
+- `checks: read`
+- `commit statuses: read`
 - `pull_requests: write`
 - `workflows: write`
 

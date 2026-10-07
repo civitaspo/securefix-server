@@ -212,7 +212,7 @@ jobs:
             wrapper_path="${RUNNER_TEMP}/merge-request-${repo}.yml"
             printf '%s' "${wrapper_base64}" | tr -d '\n' | base64 --decode > "${wrapper_path}"
             uses_count="$(grep -Ec '^[[:space:]]+uses:' "${wrapper_path}" || true)"
-            if [[ "${uses_count}" != 1 ]] || ! grep -Eq '^[[:space:]]+uses:[[:space:]]*civitaspo/securefix-server/\.github/workflows/reusable-merge-request\.yml@[0-9a-f]{40}[[:space:]]*$' "${wrapper_path}"; then
+            if [[ "${uses_count}" != 1 ]] || ! grep -Eq '^[[:space:]]+uses:[[:space:]]*civitaspo/securefix-server/\.github/workflows/reusable-merge-request\.yml@[0-9a-f]{40}([[:space:]]+#.*)?[[:space:]]*$' "${wrapper_path}"; then
               echo "${OWNER}/${repo} must call reusable-merge-request.yml at a 40-character commit SHA."
               failures=1
             fi
