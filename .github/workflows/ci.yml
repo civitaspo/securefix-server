@@ -35,6 +35,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test merge request validation
+        run: node --test tests/merge-workflows.test.mjs
+
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
 
