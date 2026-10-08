@@ -1,0 +1,14 @@
+entries:
+  - client:
+      repositories:
+        - civitaspo/dbt-authorized-models
+        - civitaspo/dbt-snowflake-iceberg-sync
+        - civitaspo/dbt-snowflake-rap-enforcement
+        - civitaspo/terraform-provider-sigma
+        - civitaspo/herdr-linear-agent
+        - civitaspo/hook-relay-client-rs
+        - civitaspo/herdr-infobox
+    push:
+      branches:
+        - release/next
+    pull_request: {}

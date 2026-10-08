@@ -402,15 +402,12 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
 }
 
 #[test]
-fn securefix_server_uses_native_writes_and_a_separate_trusted_runtime() {
+fn securefix_uses_the_pinned_upstream_action_behind_the_rust_policy_gate() {
     let workflow: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/securefix.yml").unwrap()).unwrap();
-    let steps = workflow["jobs"]["gate"]["steps"].as_array().unwrap();
-    assert!(steps.iter().all(|step| {
-        !step["uses"].as_str().is_some_and(|uses| {
-            uses.starts_with("actions/checkout@") || uses.starts_with("csm-actions/")
-        })
-    }));
+    let job = &workflow["jobs"]["fix"];
+    assert_eq!(job["permissions"]["issues"], "write");
+    let steps = job["steps"].as_array().unwrap();
     let download = steps
         .iter()
         .find(|step| {
@@ -420,14 +417,106 @@ fn securefix_server_uses_native_writes_and_a_separate_trusted_runtime() {
         })
         .unwrap();
     assert_eq!(download["with"]["path"], "${{ runner.temp }}/securefix");
-    for step in steps {
-        if step["run"]
-            .as_str()
-            .is_some_and(|run| run.starts_with("./securefix "))
-        {
-            assert_eq!(step["working-directory"], "${{ runner.temp }}/securefix");
-        }
+    let position = |name: &str| {
+        steps
+            .iter()
+            .position(|step| step["name"] == name)
+            .unwrap_or_else(|| panic!("missing workflow step {name}"))
+    };
+    let event = position("Validate label event and source capability");
+    let prepare = position("Prepare fix with Securefix Action");
+    let gate = position("Validate Securefix prepare outputs");
+    let commit = position("Apply fix with Securefix Action");
+    assert!(event < prepare && prepare < gate && gate < commit);
+    for name in [
+        "Prepare fix with Securefix Action",
+        "Apply fix with Securefix Action",
+        "Notify validated fix failure",
+    ] {
+        let step = &steps[position(name)];
+        assert_eq!(
+            step["uses"],
+            "csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550"
+        );
     }
+    let prepare = &steps[prepare];
+    assert_eq!(prepare["with"]["action"], "prepare");
+    assert_eq!(prepare["with"]["allow_workflow_fix"], "true");
+    assert_eq!(
+        prepare["with"]["config_file"],
+        "${{ runner.temp }}/securefix/securefix-config.yaml"
+    );
+    let gate = &steps[gate];
+    for output in [
+        "SECUREFIX_CLIENT_REPOSITORY",
+        "SECUREFIX_PUSH_REPOSITORY",
+        "SECUREFIX_BRANCH",
+        "SECUREFIX_WORKFLOW_RUN",
+        "SECUREFIX_PULL_REQUEST",
+        "SECUREFIX_CREATE_PULL_REQUEST",
+    ] {
+        assert!(gate["env"][output].is_string(), "missing {output}");
+    }
+    assert!(gate["env"].get("SECUREFIX_PREPARED_OUTPUTS").is_none());
+    assert_eq!(
+        steps[commit]["with"]["outputs"],
+        "${{ toJSON(steps.prepare.outputs) }}"
+    );
+    let notify = &steps[position("Notify validated fix failure")];
+    assert_eq!(notify["with"]["action"], "notify");
+    assert_eq!(
+        notify["if"],
+        "failure() && steps.gate.outcome == 'success' && steps.commit.outcome == 'failure'"
+    );
+}
+
+#[test]
+fn securefix_config_only_allows_release_clients_to_create_release_next_prs() {
+    let config: Value =
+        serde_yaml::from_slice(&fs::read("securefix-config.yaml").unwrap()).unwrap();
+    let entries = config["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let allowed = entries[0]["client"]["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| repository.as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let policy = securefix::policy::Policy::load("policy.json").unwrap();
+    let expected = policy
+        .repositories
+        .iter()
+        .filter(|repository| {
+            repository
+                .capabilities
+                .contains(&securefix::policy::Capability::Securefix)
+                && repository
+                    .capabilities
+                    .contains(&securefix::policy::Capability::Release)
+        })
+        .map(|repository| repository.repository.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(allowed, expected);
+    assert!(entries[0]["client"].get("branches").is_none());
+    assert!(entries[0]["push"].get("repositories").is_none());
+    assert_eq!(
+        entries[0]["push"]["branches"],
+        serde_json::json!(["release/next"])
+    );
+    assert_eq!(entries[0]["pull_request"], serde_json::json!({}));
+    let publisher: Value =
+        serde_yaml::from_slice(&fs::read(".github/workflows/publish-runtime.yml").unwrap())
+            .unwrap();
+    let assemble = publisher["jobs"]["build"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Assemble runtime archive")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(assemble.contains("cp securefix-config.yaml runtime/securefix-config.yaml"));
 }
 
 #[test]

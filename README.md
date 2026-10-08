@@ -13,7 +13,7 @@ See the [runtime distribution decision](docs/adr/0006-prebuilt-runtime.md) for p
 ## Policy and trust
 
 [`policy.json`](policy.json) grants named operations to exact repositories and defines sensitive paths.
-Requests must originate from the configured Client App, a successful first-attempt workflow run, and the current server revision.
+Approval, merge, and release requests must originate from the configured Client App, a successful first-attempt workflow run, and the current server revision.
 Client wrappers pin a full server commit SHA; older ancestors are rejected.
 Every server commit therefore requires client pin updates.
 
@@ -23,9 +23,12 @@ Sensitive changes need owner authorization for that exact head.
 The server publishes `securefix-policy-check` from the Server App; an approval for an earlier head cannot satisfy it for an updated head.
 Ordinary Renovate automerge remains possible under the same required checks and stale-review dismissal.
 
-The Securefix client keeps its pinned upstream artifact protocol.
-Rust reads that exact artifact ID, validates metadata and file paths, and creates signed commits with the captured head as an API precondition.
+Securefix uses pinned upstream `prepare`, `commit`, and `notify` actions for its artifact protocol and repair commits.
+Rust validates the Client App event, exact repository capabilities, source workflow provenance, and destination scope between preparation and commit.
 It accepts `CI` and `Release PR` workflows and denies direct default-branch pushes.
+The trusted [`securefix-config.yaml`](securefix-config.yaml) permits release-capable clients to prepare `release/next`; it travels with the attested runtime outside the client artifact workspace.
+Securefix requests may come from a running or failed CI run because the client deliberately fails after dispatching a same-branch fix.
+The [upstream integration decision](docs/adr/0005-upstream-securefix-protocol.md) records the accepted stale-artifact limitation and why approval remains in Rust.
 
 ## Operations
 

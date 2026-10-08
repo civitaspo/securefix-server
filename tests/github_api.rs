@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use base64::Engine;
-use securefix::api::{ApiError, CommitAddition, CommitOnBranch, GitHub};
+use securefix::api::{ApiError, GitHub};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +7,7 @@ const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
 
 #[test]
 #[ignore = "requires SECUREFIX_LIVE_TEST_TOKEN and the dedicated scratch repository"]
-fn live_commit_api_guard_cas_signature_and_stale_merge() -> Result<()> {
+fn stale_pull_request_merge_is_rejected_without_changing_the_pr() -> Result<()> {
     let repository = std::env::var("SECUREFIX_LIVE_TEST_REPOSITORY")
         .context("SECUREFIX_LIVE_TEST_REPOSITORY must name the dedicated scratch repository")?;
     ensure!(
@@ -25,128 +24,56 @@ fn live_commit_api_guard_cas_signature_and_stale_merge() -> Result<()> {
         .as_str()
         .context("securefix-server main response has no SHA")?;
     let api = read_api.with_runtime_revision(runtime_sha)?;
-
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     ensure!(
         repo["full_name"] == SCRATCH_REPOSITORY,
         "scratch repository identity changed"
     );
-    let default_branch = repo["default_branch"]
+    let base = repo["default_branch"]
         .as_str()
         .context("scratch repository has no default branch")?;
-    let default_head = branch_head(&api, &repository, default_branch)?;
-
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let branch = format!("securefix-live-{}-{nonce}", std::process::id());
-    let first_path = format!("securefix-live/{nonce}-initial.txt");
-    let deleted_path = format!("securefix-live/{nonce}-deleted.txt");
-    let final_path = format!("securefix-live/{nonce}-final.txt");
-
-    let created_ref: Value = api.post(
-        &format!("/repos/{repository}/git/refs"),
-        &json!({"ref":format!("refs/heads/{branch}"),"sha":default_head}),
-    )?;
-    ensure!(
-        created_ref["object"]["sha"] == default_head,
-        "scratch branch did not start at the captured default head"
-    );
-
-    let first_commit = api.create_commit_on_branch(&CommitOnBranch {
-        repository: repository.clone(),
-        branch: branch.clone(),
-        expected_head: default_head.clone(),
-        headline: "test: create Securefix live API fixture".into(),
-        body: "Ignored live API boundary test fixture.".into(),
-        additions: vec![
-            addition(&first_path, b"initial fixture content\n"),
-            addition(&deleted_path, b"delete this fixture file\n"),
-        ],
-        deletions: vec![],
-    })?;
-    ensure!(
-        branch_head(&api, &repository, &branch)? == first_commit,
-        "first commit is not at branch head"
-    );
-
-    let stale_result = api.create_commit_on_branch(&CommitOnBranch {
-        repository: repository.clone(),
-        branch: branch.clone(),
-        expected_head: default_head,
-        headline: "test: reject stale Securefix head".into(),
-        body: "This commit must not be created.".into(),
-        additions: vec![addition(
-            &format!("securefix-live/{nonce}-stale.txt"),
-            b"must not appear\n",
-        )],
-        deletions: vec![],
-    });
-    ensure!(
-        stale_result.as_ref().err().is_some_and(|error| {
-            error.to_string() == "GitHub rejected the commit; the branch may have changed"
-        }),
-        "stale expectedHeadOid did not receive a semantic GitHub rejection"
-    );
-    ensure!(
-        branch_head(&api, &repository, &branch)? == first_commit,
-        "stale attempt changed the branch ref"
-    );
-
-    let final_commit = api.create_commit_on_branch(&CommitOnBranch {
-        repository: repository.clone(),
-        branch: branch.clone(),
-        expected_head: first_commit.clone(),
-        headline: "test: verify Securefix additions and deletions".into(),
-        body: "Apply one exact addition and one exact deletion.".into(),
-        additions: vec![addition(&final_path, b"final fixture content\n")],
-        deletions: vec![deleted_path.clone()],
-    })?;
-    ensure!(
-        branch_head(&api, &repository, &branch)? == final_commit,
-        "final commit is not at branch head"
-    );
-
-    let final_file: Value = api.get(&format!(
-        "/repos/{repository}/contents/{}?ref={branch}",
-        encode_path(&final_path)
-    ))?;
-    let encoded = final_file["content"]
+    let base_commit: Value = api.get(&format!("/repos/{repository}/commits/{base}"))?;
+    let base_sha = base_commit["sha"]
         .as_str()
-        .context("added fixture file has no contents")?
-        .replace('\n', "");
-    let contents = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-    ensure!(
-        contents == b"final fixture content\n",
-        "added fixture bytes differ"
-    );
-    let deleted = api.get::<Value>(&format!(
-        "/repos/{repository}/contents/{}?ref={branch}",
-        encode_path(&deleted_path)
-    ));
-    ensure!(
-        deleted
-            .as_ref()
-            .err()
-            .and_then(|error| error.downcast_ref::<ApiError>())
-            .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND),
-        "deleted fixture file still exists or lookup failed unexpectedly"
-    );
+        .context("default branch has no SHA")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let branch = format!("securefix-stale-merge-{nonce}");
+    let path = format!("securefix-stale-merge/{nonce}.txt");
 
+    let first = create_commit(&api, &repository, base_sha, &path, "head A\n")?;
+    let _: Value = api.post(
+        &format!("/repos/{repository}/git/refs"),
+        &json!({"ref":format!("refs/heads/{branch}"),"sha":first}),
+    )?;
     let pull_request: Value = api.post(
         &format!("/repos/{repository}/pulls"),
-        &json!({
-            "title": format!("test: Securefix live API fixture {nonce}"),
-            "body": format!("Preserved API boundary fixture branch `{branch}` at `{final_commit}`."),
-            "head": branch,
-            "base": default_branch,
-            "draft": false
-        }),
+        &json!({"title":format!("test: reject stale merge {nonce}"),"head":branch,"base":base}),
     )?;
     let number = pull_request["number"]
         .as_u64()
-        .context("created fixture PR has no number")?;
+        .context("created PR has no number")?;
+
+    let second = create_commit(&api, &repository, &first, &path, "head B\n")?;
+    let _: Value = api.patch(
+        &format!("/repos/{repository}/git/refs/heads/{branch}"),
+        &json!({"sha":second,"force":false}),
+    )?;
+    let mut current: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    for _ in 0..30 {
+        ensure!(current["state"] == "open", "scratch PR is no longer open");
+        if current["head"]["sha"] == second {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        current = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    }
+    ensure!(
+        current["head"]["sha"] == second,
+        "scratch PR did not reflect its advanced head within 30 attempts"
+    );
     let stale_merge = api.put::<Value>(
         &format!("/repos/{repository}/pulls/{number}/merge"),
-        &json!({"sha":first_commit,"merge_method":"squash"}),
+        &json!({"sha":first,"merge_method":"squash"}),
     );
     ensure!(
         stale_merge
@@ -156,48 +83,42 @@ fn live_commit_api_guard_cas_signature_and_stale_merge() -> Result<()> {
             .is_some_and(|error| error.status == reqwest::StatusCode::CONFLICT),
         "merge API did not reject the stale head SHA with HTTP 409"
     );
-    let current_pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    let current: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
     ensure!(
-        current_pr["state"] == "open",
-        "stale merge attempt changed PR state"
+        current["state"] == "open" && current["head"]["sha"] == second,
+        "stale merge changed the PR"
     );
-
     eprintln!(
-        "Scratch evidence: {} branch={} first_commit={} final_commit={} signature=VALID (verified by createCommitOnBranch) PR={}",
-        SCRATCH_REPOSITORY,
-        branch,
-        first_commit,
-        final_commit,
-        current_pr["html_url"].as_str().unwrap_or_default()
+        "Scratch stale-merge evidence: {repository} PR={} headB={}",
+        current["html_url"].as_str().unwrap_or_default(),
+        second
     );
     Ok(())
 }
 
-fn addition(path: &str, bytes: &[u8]) -> CommitAddition {
-    CommitAddition {
-        path: path.to_owned(),
-        contents: base64::engine::general_purpose::STANDARD.encode(bytes),
-    }
-}
-
-fn branch_head(api: &GitHub, repository: &str, branch: &str) -> Result<String> {
-    let value: Value = api.get(&format!("/repos/{repository}/git/ref/heads/{branch}"))?;
-    value["object"]["sha"]
+fn create_commit(
+    api: &GitHub,
+    repository: &str,
+    parent: &str,
+    path: &str,
+    contents: &str,
+) -> Result<String> {
+    let blob: Value = api.post(
+        &format!("/repos/{repository}/git/blobs"),
+        &json!({"content":contents,"encoding":"utf-8"}),
+    )?;
+    let tree: Value = api.post(
+        &format!("/repos/{repository}/git/trees"),
+        &json!({"base_tree":parent,"tree":[{"path":path,"mode":"100644","type":"blob","sha":blob["sha"]}]}),
+    )?;
+    let commit: Value = api.post(
+        &format!("/repos/{repository}/git/commits"),
+        &json!({"message":"test: advance scratch fixture head","tree":tree["sha"],"parents":[parent]}),
+    )?;
+    commit["sha"]
         .as_str()
         .map(str::to_owned)
-        .context("branch ref has no SHA")
-}
-
-fn encode_path(path: &str) -> String {
-    path.bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
-                (byte as char).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect()
+        .context("created commit has no SHA")
 }
 
 #[test]
@@ -227,7 +148,6 @@ fn client_app_token_is_scoped_to_scratch_repository() -> Result<()> {
             && repositories[0]["full_name"] == SCRATCH_REPOSITORY,
         "Client App token must be scoped to exactly the scratch repository"
     );
-
     let repo: Value = api.get(&format!("/repos/{SCRATCH_REPOSITORY}"))?;
     ensure!(
         repo["full_name"] == SCRATCH_REPOSITORY && repo["id"].as_u64().is_some_and(|id| id > 0),

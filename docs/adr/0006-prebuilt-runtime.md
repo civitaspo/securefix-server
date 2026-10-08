@@ -4,7 +4,7 @@ The previous reusable builder compiled Rust for every operation, then passed a s
 We retain that artifact boundary while moving compilation into a dedicated producer.
 
 `publish-runtime.yml` runs only on pushes to protected server `main`.
-It checks out `job.workflow_sha`, builds with the locked toolchain and dependencies, and archives the executable, `policy.json`, and `repo-settings` together.
+It checks out `job.workflow_sha`, builds with the locked toolchain and dependencies, and archives the executable, `policy.json`, `securefix-config.yaml`, and `repo-settings` together.
 The build job has contents-read, OIDC, and attestation permissions, but no release-write token or custom secrets.
 The pinned official attestation action signs that exact archive.
 A separate contents-write job downloads the producer's immutable artifact ID, verifies the same archive before extracting its executable, and calls Rust to publish a draft-first Release.

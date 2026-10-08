@@ -7,13 +7,13 @@ concurrency:
   group: securefix-${{ github.event.label.name }}
   cancel-in-progress: false
 jobs:
-  build:
+  runtime:
     uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
       attestations: read
-  gate:
-    needs: build
+  fix:
+    needs: runtime
     if: startsWith(github.event.label.name, 'securefix-')
     runs-on: ubuntu-latest
     environment: main
@@ -22,72 +22,65 @@ jobs:
       contents: read
       actions: read
       issues: write
+      pull-requests: read
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
           path: ${{ runner.temp }}/securefix
           merge-multiple: true
-      - name: Restore trusted CLI permissions
+      - name: Restore trusted runtime permissions
         run: chmod 700 "$RUNNER_TEMP/securefix/securefix"
-      - name: Validate label event and source scope
+      - name: Validate label event and source capability
         id: event
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
         working-directory: ${{ runner.temp }}/securefix
         run: ./securefix securefix validate-event
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: read-token
+      - name: Prepare fix with Securefix Action
+        id: prepare
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
-          app-id: 3872533
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: ${{ steps.event.outputs.source_repository }}
-          permission-actions: read
-          permission-pull-requests: read
-          permission-contents: read
-      - name: Validate source workflow run and artifact
-        id: source
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_READ_TOKEN: ${{ steps.read-token.outputs.token }}
-          SOURCE_REPOSITORY: ${{ steps.event.outputs.source_repository }}
-          SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}
-          SOURCE_LABEL: ${{ steps.event.outputs.source_label }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-        working-directory: ${{ runner.temp }}/securefix
-        run: ./securefix securefix validate-source
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: write-token
-        with:
-          app-id: 3872533
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: ${{ steps.event.outputs.source_repository }}
-          permission-actions: read
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-      - name: Revalidate source and apply the exact inspected artifact
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_READ_TOKEN: ${{ steps.read-token.outputs.token }}
-          SECUREFIX_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
-          SOURCE_REPOSITORY: ${{ steps.event.outputs.source_repository }}
-          SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}
-          SOURCE_LABEL: ${{ steps.event.outputs.source_label }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-        working-directory: ${{ runner.temp }}/securefix
-        run: ./securefix securefix apply
-      - name: Consume validated request label
-        if: always() && steps.event.outcome == 'success'
+          action: prepare
+          app_id: "3872533"
+          app_private_key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          label_name: ${{ steps.event.outputs.source_label }}
+          label_description: ${{ github.event.label.description }}
+          workflow_name: ""
+          allow_workflow_fix: "true"
+          allow_members_read: "false"
+          allow_organization_projects_write: "false"
+          config_file: ${{ runner.temp }}/securefix/securefix-config.yaml
+          delete_label: "true"
+          github_token_to_delete_label: ${{ github.token }}
+      - name: Validate Securefix prepare outputs
+        id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          SECUREFIX_CLIENT_REPOSITORY: ${{ steps.prepare.outputs.client_repository }}
+          SECUREFIX_PUSH_REPOSITORY: ${{ steps.prepare.outputs.push_repository }}
+          SECUREFIX_BRANCH: ${{ steps.prepare.outputs.branch }}
+          SECUREFIX_WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
+          SECUREFIX_PULL_REQUEST: ${{ steps.prepare.outputs.pull_request }}
+          SECUREFIX_CREATE_PULL_REQUEST: ${{ steps.prepare.outputs.create_pull_request }}
         working-directory: ${{ runner.temp }}/securefix
-        run: ./securefix securefix cleanup
+        run: ./securefix securefix validate-prepared
+      - name: Apply fix with Securefix Action
+        id: commit
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
+        with:
+          action: commit
+          outputs: ${{ toJSON(steps.prepare.outputs) }}
+      - name: Notify validated fix failure
+        if: failure() && steps.gate.outcome == 'success' && steps.commit.outcome == 'failure'
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
+        with:
+          action: notify
+          outputs: ${{ toJSON(steps.prepare.outputs) }}
+          commit_error: ${{ steps.commit.outputs.error }}

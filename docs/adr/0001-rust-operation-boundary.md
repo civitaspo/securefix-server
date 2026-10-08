@@ -5,5 +5,5 @@ We use one Rust package with modules for each operation, a shared GitHub API bou
 Rust matches the maintainer's preference and makes request and operation states reviewable through typed data.
 
 Workflows retain job isolation, environments, native token creation, pinned actions, and executable invocations.
-The upstream Securefix client artifact protocol remains supported; the privileged server implementation is native Rust.
+Rust owns repository-specific authorization; the pinned upstream Securefix actions own repair artifact preparation, commits, and notifications.
 Keeping the executable as a single package avoids another service or distribution system.

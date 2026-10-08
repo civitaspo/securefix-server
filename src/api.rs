@@ -1,27 +1,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Method, StatusCode, blocking::Client, redirect::Policy};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{fmt, io::Read, time::Duration};
-
-const CREATE_COMMIT: &str = "mutation SecurefixCommit($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid signature{isValid state} parents(first:2){nodes{oid}}} ref{target{oid}}}}";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitAddition {
-    pub path: String,
-    pub contents: String,
-}
-
-pub struct CommitOnBranch {
-    pub repository: String,
-    pub branch: String,
-    pub expected_head: String,
-    pub headline: String,
-    pub body: String,
-    pub additions: Vec<CommitAddition>,
-    pub deletions: Vec<String>,
-}
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -113,12 +94,7 @@ impl GitHub {
                 .and_then(|body| body["query"].as_str())
                 .is_some_and(read_only_query);
         if path == "/graphql" {
-            ensure!(
-                read_only_graphql
-                    || (method == Method::POST
-                        && body.and_then(|body| body["query"].as_str()) == Some(CREATE_COMMIT)),
-                "unsupported GraphQL operation"
-            );
+            ensure!(read_only_graphql, "unsupported GraphQL operation");
         }
         if method != Method::GET && method != Method::HEAD && !read_only_graphql {
             self.require_current_revision()?;
@@ -208,56 +184,6 @@ impl GitHub {
             .context("missing GraphQL data")
     }
 
-    pub fn create_commit_on_branch(&self, input: &CommitOnBranch) -> Result<String> {
-        crate::policy::validate_repository(&input.repository)?;
-        crate::policy::validate_sha(&input.expected_head)?;
-        ensure!(
-            !input.branch.is_empty() && input.branch.len() <= 255,
-            "invalid commit branch"
-        );
-        ensure!(
-            !input.headline.is_empty() && !input.headline.contains(['\r', '\n']),
-            "invalid commit headline"
-        );
-        let response = self.request(Method::POST, "/graphql", Some(&serde_json::json!({
-            "query": CREATE_COMMIT,
-            "variables": {"input": {
-                "branch": {"repositoryNameWithOwner": input.repository, "branchName": input.branch},
-                "expectedHeadOid": input.expected_head,
-                "message": {"headline": input.headline, "body": input.body},
-                "fileChanges": {
-                    "additions": input.additions,
-                    "deletions": input.deletions.iter().map(|path|serde_json::json!({"path":path})).collect::<Vec<_>>()
-                }
-            }}
-        })))?;
-        ensure!(
-            response.get("errors").is_none(),
-            "GitHub rejected the commit; the branch may have changed"
-        );
-        let result = &response["data"]["createCommitOnBranch"];
-        let commit = &result["commit"];
-        let sha = commit["oid"]
-            .as_str()
-            .context("commit response has no SHA")?;
-        crate::policy::validate_sha(sha)?;
-        ensure!(
-            result["ref"]["target"]["oid"] == sha,
-            "commit response did not update the expected ref"
-        );
-        ensure!(
-            commit["signature"]["isValid"] == true && commit["signature"]["state"] == "VALID",
-            "GitHub did not verify the generated commit signature"
-        );
-        let parents = commit["parents"]["nodes"]
-            .as_array()
-            .context("commit parents missing")?;
-        ensure!(
-            parents.len() == 1 && parents[0]["oid"] == input.expected_head,
-            "generated commit has an unexpected parent"
-        );
-        Ok(sha.to_owned())
-    }
     pub fn paginate(&self, path: &str) -> Result<Vec<Value>> {
         let delimiter = if path.contains('?') { '&' } else { '?' };
         let mut result = Vec::new();
@@ -371,113 +297,6 @@ fn bounded_read(reader: impl Read, max: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn commit_input() -> CommitOnBranch {
-        CommitOnBranch {
-            repository: "civitaspo/example".into(),
-            branch: "feature".into(),
-            expected_head: "a".repeat(40),
-            headline: "chore: apply verified fixes".into(),
-            body: "Source run 123".into(),
-            additions: vec![CommitAddition {
-                path: "README.md".into(),
-                contents: "dGVzdAo=".into(),
-            }],
-            deletions: vec!["obsolete.txt".into()],
-        }
-    }
-
-    fn expected_commit_request() -> Value {
-        serde_json::json!({
-            "query": CREATE_COMMIT,
-            "variables": {"input": {
-                "branch": {"repositoryNameWithOwner":"civitaspo/example","branchName":"feature"},
-                "expectedHeadOid":"a".repeat(40),
-                "message":{"headline":"chore: apply verified fixes","body":"Source run 123"},
-                "fileChanges":{"additions":[{"path":"README.md","contents":"dGVzdAo="}],"deletions":[{"path":"obsolete.txt"}]}
-            }}
-        })
-    }
-
-    fn generated_commit() -> Value {
-        serde_json::json!({"data":{"createCommitOnBranch":{
-            "commit":{"oid":"b".repeat(40),"signature":{"isValid":true,"state":"VALID"},"parents":{"nodes":[{"oid":"a".repeat(40)}]}},
-            "ref":{"target":{"oid":"b".repeat(40)}}
-        }}})
-    }
-
-    #[test]
-    fn native_commits_send_the_expected_head_precondition_and_validate_signature() {
-        use crate::fixtures::{Fixture, Route};
-        let fixture = Fixture::new(vec![
-            Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                serde_json::json!({"sha":"a".repeat(40)}),
-            ),
-            Route::request("POST", "/graphql", 200, generated_commit())
-                .with_request_body(expected_commit_request()),
-        ]);
-        assert_eq!(
-            fixture
-                .api
-                .create_commit_on_branch(&commit_input())
-                .unwrap(),
-            "b".repeat(40)
-        );
-        fixture.finish();
-    }
-
-    #[test]
-    fn native_commits_fail_closed_on_head_conflict_and_unverified_result() {
-        use crate::fixtures::{Fixture, Route};
-        let mut unsigned = generated_commit();
-        unsigned["data"]["createCommitOnBranch"]["commit"]["signature"] = Value::Null;
-        for response in [
-            serde_json::json!({"errors":[{"type":"STALE_DATA","message":"Head changed"}]}),
-            unsigned,
-        ] {
-            let fixture = Fixture::new(vec![
-                Route::get(
-                    "/repos/civitaspo/securefix-server/commits/main",
-                    serde_json::json!({"sha":"a".repeat(40)}),
-                ),
-                Route::request("POST", "/graphql", 200, response)
-                    .with_request_body(expected_commit_request()),
-            ]);
-            assert!(
-                fixture
-                    .api
-                    .create_commit_on_branch(&commit_input())
-                    .is_err()
-            );
-            fixture.finish();
-        }
-    }
-
-    #[test]
-    fn native_commit_mutations_cannot_bypass_the_current_runtime_guard() {
-        use crate::fixtures::{Fixture, Route};
-        let fixture = Fixture::new(vec![Route::get(
-            "/repos/civitaspo/securefix-server/commits/main",
-            serde_json::json!({"sha":"c".repeat(40)}),
-        )]);
-        assert!(
-            fixture
-                .api
-                .create_commit_on_branch(&commit_input())
-                .is_err()
-        );
-        fixture.finish();
-        let read = GitHub::new("https://api.github.com", String::new()).unwrap();
-        assert!(read.create_commit_on_branch(&commit_input()).is_err());
-        assert!(
-            read.request(
-                Method::POST,
-                "/graphql",
-                Some(&serde_json::json!({"query":"mutation { deleteRef }"}))
-            )
-            .is_err()
-        );
-    }
     #[test]
     fn bounds_downloads_and_rejects_external_paths() {
         assert!(bounded_read(&b"12345"[..], 4).is_err());

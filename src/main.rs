@@ -63,7 +63,7 @@ enum Command {
         #[command(subcommand)]
         command: settings::Command,
     },
-    #[command(about = "Apply signed CI fixes from a verified source run")]
+    #[command(about = "Authorize Securefix requests from policy-approved workflows")]
     Securefix {
         #[command(subcommand)]
         command: securefix_gate::Command,

@@ -21,8 +21,10 @@ The API test added no custom secrets, App keys, production policy capability, or
 The test uses an ephemeral authenticated-user token in the local process and writes only to this exact repository.
 Its branches and open PRs remain available for inspection; no fixture PR was merged.
 
-The ignored test in [`tests/github_api.rs`](../tests/github_api.rs) passed twice.
+The former native commit API probe passed twice.
 The second run strengthened stale-head rejection to require a semantic GraphQL rejection, rather than accepting any request error.
+That probe and the private commit helper were subsequently removed when Securefix commits returned to the upstream action.
+The results below remain historical GitHub API evidence and do not verify the replacement Securefix workflow.
 
 | Check | Observed result | Evidence |
 | --- | --- | --- |
@@ -32,15 +34,8 @@ The second run strengthened stale-head rejection to require a semantic GraphQL r
 | Stale merge head | REST merge with the earlier SHA returned HTTP 409; PR2 remained open. | [Fixture PR2](https://github.com/civitaspo/testing-securefix-server/pull/2), live test assertions |
 | Encoded branch-ref path | The exact `heads%2F...` path used by native Securefix resolved to the expected current head. | [Initial fixture PR1](https://github.com/civitaspo/testing-securefix-server/pull/1), REST ref read-back |
 
-To repeat, set `SECUREFIX_LIVE_TEST_REPOSITORY=civitaspo/testing-securefix-server` and provide `SECUREFIX_LIVE_TEST_TOKEN` through the process environment, then run:
-
-```sh
-cargo test --locked --test github_api live_commit_api_guard_cas_signature_and_stale_merge -- --exact --ignored --nocapture
-```
-
-The test refuses any other repository.
-It reads the current production main SHA only to exercise the shared API write guard.
-It calls the API helper directly; it does not claim that the PR's runtime is the active production revision.
+The probe was restricted to this scratch repository and read production main only to exercise the API write guard.
+It did not claim that the PR runtime was the active production revision.
 
 ## GitHub-signed committer regression
 
@@ -118,3 +113,40 @@ No extra App permissions, secrets, or production settings were used.
 The scratch archive contains no executable and exercises GitHub distribution/provenance, not the full privileged runtime.
 The production Rust publisher's real asset upload and main-push producer still require deployment validation; these tests do not establish full approve/merge/release/settings E2E.
 Follow the [migration sequence](migration.md) after review and deployment; the API probe does not replace those lifecycle tests or activation attestation.
+
+## Upstream Securefix reuse follow-up (2026-10-09)
+
+Securefix intake now uses the pinned upstream v0.6.3 `prepare`, `commit`, and `notify` actions at `1b770a7af0ec5e04517295b4e14c4b451359d550`.
+Rust checks the label and active repository capability before preparation, then validates source-run provenance and the prepared destination before committing.
+Only six non-secret prepared fields enter the Rust process.
+The runtime archive includes `securefix-config.yaml`, which restricts default-branch release requests to the seven release-capable clients and their same-repository `release/next` destination.
+The attested executable and configuration remain outside the artifact extraction workspace.
+The private ZIP parser and native Securefix commit helper are removed.
+
+The final local suite passes 81 Rust tests, with three credential-dependent tests ignored by ordinary CI.
+Formatting, warnings-denied Clippy, pinned actionlint, a locked release build, and CLI command inspection pass.
+The local macOS build emitted a host-toolchain warning about an unavailable LLVM library during optional stripping; it exited successfully and both CLI help surfaces executed successfully.
+The new HTTP-fixture tests exercise the complete Rust post-prepare gate for both in-progress and completed-failed client runs, an advanced same-repository PR head, and release source provenance.
+Workflow paths may be bare or use one nonempty reference suffix; unknown filenames, empty suffixes, and multiple suffix delimiters are rejected.
+The release fixtures check the caller revision, referenced workflow revision, default-branch ancestry, and restricted PR creation options.
+Structural tests cover upstream action ordering and pins, credential separation, notification conditions, and configuration packaging and agreement with policy capabilities.
+An independent same-model security review found no remaining proven security or correctness issue; the separate comment review found no required comment removal.
+
+The actual pinned distributed action ran locally with `action: validate-config`.
+It accepted the restored configuration and rejected an `entries: not-an-array` fixture with a schema error.
+These validation runs used no GitHub credential and performed no GitHub write.
+The pinned distributed commit helper was separately executed with local API doubles: applying A's file content after observing head B succeeded, advancing B after observing A was rejected by the simulated non-force ref update, and setting `baseSHA: A` rejected an already advanced B.
+This executes the distributed helper, not the whole action on GitHub; it does not establish latest-action E2E or a security exploit.
+The reproduction, observed results, and upstream repair instructions were delivered separately under `/private/tmp/securefix-action-stale-head-fix-20261008/`.
+No upstream Issue or PR was posted.
+
+The replacement ignored live test passed against [scratch PR4](https://github.com/civitaspo/testing-securefix-server/pull/4).
+It created head A, advanced the branch to B, waited for the PR API to reflect B, and required an HTTP 409 response when merging with A's SHA.
+The PR remained open at B (`fbf5631f1a3fb04fcaec24bc929a02e96ff9d609`); no fixture was merged and scratch main was unchanged.
+An initial attempt already received 409 but failed its immediate PR read-back assertion; subsequent inspection of [scratch PR3](https://github.com/civitaspo/testing-securefix-server/pull/3) confirmed it remained open at the advanced head.
+The test now waits with a bounded retry for GitHub's PR head representation before exercising stale-head rejection.
+
+`approve-pr-action` v1.0.0 at `a8fdc60ab4d9b446694140534bbcc71c29fb499c` has no expected-head input.
+The Rust approval implementation remains because this upstream version cannot preserve owner authorization of a captured head when a later head arrives before its lookup.
+See the [integration decision](adr/0005-upstream-securefix-protocol.md).
+Full privileged workflow E2E, including replacement Securefix intake and cleanup, still requires deployment under the accepted production revision and environment restrictions.

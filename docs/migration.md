@@ -2,8 +2,8 @@
 
 This migration changes the request contract and accepted runtime revision.
 There is one execution path for each operation; old inline scripts and legacy allowlists are removed.
-[`policy.json`](../policy.json) replaces release, settings, tag, and wildcard Securefix allowlists.
-The former `securefix-config.yaml` is removed because the native Rust server uses this policy directly.
+[`policy.json`](../policy.json) grants exact repository capabilities for release, settings, approval, merge, and Securefix.
+[`securefix-config.yaml`](../securefix-config.yaml) configures upstream Securefix release-branch pushes for the release-capable clients.
 
 ## Contract changes
 
@@ -18,17 +18,19 @@ The former `securefix-config.yaml` is removed because the native Rust server use
 | Scheduled reconcile can distribute merge restrictions | Scheduled runs update only existing active restrictions; activation is manual and full-set |
 | Verification repo environment variable bypasses policy | A scratch repo needs an explicit reviewed capability entry |
 
-Securefix's upstream v0.6.0 client artifact contract remains in use; the server-side upstream `prepare`, `commit`, and `notify` actions are removed.
+Securefix's client and server use upstream v0.6.3, pinned to its full commit SHA.
+The server delegates artifact preparation, commits, notifications, and post-action cleanup to upstream actions.
 `CI` uses `.github/workflows/pull_request.yml`; `Release PR` uses `.github/workflows/release-pr.yml`.
 Fixes stay on the source branch or `release/next`, and cannot push directly to a default branch.
-The native server permits the existing release-PR metadata without running client-provided scripts.
-It reads the selected immutable artifact ID once, validates the manifest and metadata, and stages those exact ZIP bytes outside the runner workspace; no artifact is resolved again by name or extracted.
-Every payload must belong to the manifest, which may list absent paths only to represent deletions. Unsafe paths, including `.git`, are rejected whether or not a payload is present.
-Immediately before applying, the server rechecks the successful source run, live PR head, current policy/runtime, artifact ID, and captured destination branch head.
-Signed writes use GitHub's `createCommitOnBranch` with the captured head as `expectedHeadOid`; concurrent branch movement fails instead of applying stale CI fixes to newer content.
-For a new `release/next`, Rust creates the ref at the validated default-branch run SHA and then performs the same expected-head check.
-PR creation is limited to the validated title/body/base/draft options; client-provided labels, reviewers, comments, automerge, projects, and scripts are not executed.
-After Rust validates the bot-created locator, an `always()` workflow step consumes that request label through the current-runtime guard, including when source validation or application fails. Per-PR failure comments from the former server notifier are not retained; operators track failures from the Securefix Actions run and its logs.
+Rust validates the Client App locator before preparation and checks repository capabilities, source workflow provenance, and destination scope before commit.
+The executable and config come from the attested runtime and remain outside the workspace where upstream extracts client files.
+The Securefix client may dispatch a request from a running CI run that will deliberately conclude failure, so this path does not require a successful run.
+It does not weaken the separate successful-run and exact-head authorization checks for approval, merge, or release publication.
+
+Upstream resolves the artifact name to an immutable ID but creates its commit on the destination head observed at write time.
+An artifact made at A can therefore replace newer file content on B if B was present before that lookup.
+We accept that limitation pending an upstream fix and remove the private artifact parser and expected-head commit engine.
+The [integration decision](adr/0005-upstream-securefix-protocol.md) records the verified behavior and the reason `approve-pr-action` cannot safely replace head-bound owner approval.
 
 ## Deployment sequence
 
