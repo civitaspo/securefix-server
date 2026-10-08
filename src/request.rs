@@ -707,10 +707,7 @@ fn repo_trusted_committer(commit: &Value, trusted: &[String], github_signed: boo
             && github_signed
             && is_trusted_login(commit["author"]["login"].as_str(), trusted);
     }
-    is_trusted_login(
-        committer.or_else(|| commit["author"]["login"].as_str()),
-        trusted,
-    )
+    is_trusted_login(committer, trusted)
 }
 
 fn is_trusted_login(login: Option<&str>, trusted: &[String]) -> bool {
@@ -956,33 +953,31 @@ mod tests {
     fn authorization_rejects_untrusted_committer_even_when_author_is_trusted() {
         let policy = Policy::load("policy.json").unwrap();
         let sha = "a".repeat(40);
-        let commit = json!({"sha":sha,"commit":{"verification":{"verified":true}},
-            "author":{"login":"civitaspo"},"committer":{"login":"attacker"}});
-        let routes = vec![
-            Route::get(
-                "/repos/civitaspo/dbt-authorized-models/pulls/7",
-                json!({
-                    "state":"open","head":{"repo":{"full_name":"civitaspo/dbt-authorized-models"},"sha":sha}
-                }),
-            ),
-            Route::get(
-                "/repos/civitaspo/dbt-authorized-models/pulls/7/commits?per_page=100&page=1",
-                json!([commit]),
-            ),
-        ];
-        let fixture = Fixture::new(routes);
-        assert!(
-            validate_pr_authorization(
+        for committer in [json!({"login":"attacker"}), Value::Null, json!({})] {
+            let commit = json!({"sha":sha,"commit":{"verification":{"verified":true}},
+                "author":{"login":"civitaspo"},"committer":committer});
+            let fixture = Fixture::new(vec![
+                authorization_route(&sha),
+                Route::get(
+                    "/repos/civitaspo/dbt-authorized-models/pulls/7/commits?per_page=100&page=1",
+                    json!([commit]),
+                ),
+            ]);
+            let error = validate_pr_authorization(
                 &fixture.api,
                 &policy,
                 "civitaspo/dbt-authorized-models",
                 7,
                 &sha,
-                false
+                false,
             )
-            .is_err()
-        );
-        fixture.finish();
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "commit committer is not an allowed committer"
+            );
+            fixture.finish();
+        }
     }
 
     fn authorization_route(sha: &str) -> Route {
@@ -1128,12 +1123,19 @@ mod tests {
     }
 
     #[test]
-    fn trusted_committer_is_used_in_preference_to_trusted_author() {
+    fn trusted_committer_is_required_instead_of_trusted_author() {
         let commit = json!({"author":{"login":"trusted"},"committer":{"login":"untrusted"}});
         assert!(!repo_trusted_committer(&commit, &["trusted".into()], false));
         let missing_committer = json!({"author":{"login":"trusted"},"committer":{}});
-        assert!(repo_trusted_committer(
+        assert!(!repo_trusted_committer(
             &missing_committer,
+            &["TRUSTED".into()],
+            false
+        ));
+        let trusted_committer =
+            json!({"author":{"login":"attacker"},"committer":{"login":"trusted"}});
+        assert!(repo_trusted_committer(
+            &trusted_committer,
             &["TRUSTED".into()],
             false
         ));

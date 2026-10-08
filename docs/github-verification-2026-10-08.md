@@ -10,6 +10,9 @@ The checks below distinguish live API behavior from the full privileged workflow
 Formatting, 76 Rust tests, Clippy with warnings denied, actionlint, and the aggregate `status-check` succeeded.
 The live integration test is ignored by ordinary CI and must be run explicitly with credentials.
 The existing Approve Request workflow also succeeded, but it ran the legacy default-branch implementation and is not evidence for the new Rust approval flow.
+After the GitHub-signed-commit change, [CI run 37780866451](https://github.com/civitaspo/securefix-server/actions/runs/37780866451) passed on `678e10c6d968b17cb967b5a3589f40f7aae6cf65`, including 79 Rust tests.
+The subsequent absent-committer rejection also passed 79 local Rust tests, formatting, Clippy, actionlint, and a locked release build.
+All three credential-dependent live tests are ignored by regular CI.
 
 ## Live API checks
 
@@ -47,7 +50,10 @@ The same representation appears on an existing [Server App commit](https://githu
 
 The fix keeps `web-flow` out of that list.
 For this committer only, authorization looks up the exact commit OID and requires `committedViaWeb`, a valid GitHub signature with state `VALID`, and a GraphQL author account matching the REST author and the existing trusted-author policy.
-Other committers retain the existing committer-first check, and every commit must still have a verified signature.
+Other committers require a present, trusted committer account, and every commit must still have a verified signature.
+The previous fallback to a trusted author when the committer account is absent was removed.
+GitHub's [signature verification contract](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification) does not guarantee author consent, and verified records persist after signing-key changes.
+This conservative rejection does not depend on reproducing account-removal behavior against a live account.
 Missing, mismatched, or invalid identity and signature fields fail closed.
 GitHub documents [credential-bound native authorship](https://docs.github.com/en/graphql/reference/commits) and the [GitHub signing-key signal](https://docs.github.com/en/graphql/reference/git).
 
@@ -77,6 +83,10 @@ No production ruleset, environment restriction, runtime check, or client pin was
 The operator reports installing the Client App, Server App, and Renovate for the scratch repository.
 The repository secret metadata confirms `SECUREFIX_CLIENT_PRIVATE_KEY` was registered on 2026-10-08.
 These provisioning steps do not activate the Rust runtime or add the scratch repository to production policy.
-The Client installation is probed separately with a repository-scoped, read-only App token.
+The [Client App credential probe](https://github.com/civitaspo/testing-securefix-server/actions/runs/37781078478) builds the reviewed Rust test without credentials and requests a repository-scoped, read-only token in a separate job.
+The build succeeded, but the token action failed while parsing the registered private key with `DECODER routines::unsupported`, before GitHub authentication.
+No installation token was issued, so Client installation scope remains unverified.
+The secret needs a valid PEM private key, preserving its real newlines; its value must not be shared in logs or review comments.
+The same manual workflow can be rerun after correcting the secret.
 The Server installation and its full requested permissions still require App-authenticated lifecycle verification during staging.
 Follow the [migration sequence](migration.md) after review and deployment; the API probe does not replace those lifecycle tests or activation attestation.
