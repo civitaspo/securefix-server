@@ -58,6 +58,8 @@ jobs:
         run: securefix runtime publish --help
 
       - name: Run actionlint
+        env:
+          GOTOOLCHAIN: go1.26.5
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           -shellcheck=
