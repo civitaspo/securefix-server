@@ -13,9 +13,10 @@ concurrency:
 jobs:
   cli:
     if: startsWith(github.event.label.name, 'release-request-')
-    uses: ./.github/workflows/build-cli.yml
+    uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
+      attestations: read
 
   resolve-request:
     needs: cli
@@ -29,7 +30,7 @@ jobs:
       repo_name: ${{ steps.parse.outputs.repo_name }}
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
           path: runtime
@@ -56,7 +57,7 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
           path: runtime
@@ -98,12 +99,12 @@ jobs:
       actions: read
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
           path: runtime
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.preflight.outputs.artifact_id }}
           path: release-input
@@ -142,12 +143,12 @@ jobs:
       actions: read
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
           path: runtime
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.preflight.outputs.strategy == 'terraform-provider' && needs.sign.outputs.artifact_id || needs.preflight.outputs.artifact_id }}
           path: release-package
@@ -181,7 +182,7 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         if: needs.cli.result == 'success'
         continue-on-error: true
         with:

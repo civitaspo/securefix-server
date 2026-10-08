@@ -47,6 +47,11 @@ jobs:
       - name: Run Clippy
         run: cargo +1.99.0 clippy --locked --all-targets -- -D warnings
 
+      - uses: ./.github/actions/setup-cli
+
+      - name: Verify release executable
+        run: target/release/securefix runtime publish --help
+
       - name: Run actionlint
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

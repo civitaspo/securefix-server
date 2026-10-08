@@ -8,9 +8,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    uses: ./.github/workflows/build-cli.yml
+    uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
+      attestations: read
   gate:
     needs: build
     if: startsWith(github.event.label.name, 'securefix-')
@@ -22,7 +23,7 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: ${{ runner.temp }}/securefix

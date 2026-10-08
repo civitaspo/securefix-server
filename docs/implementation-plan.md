@@ -8,6 +8,7 @@ Workflows retain event routing, permissions, environments, isolated jobs, pinned
 - [x] Build the common API boundary, policy model, and immutable CLI artifact transport.
 - [x] Replace each operation and verify its rejection cases.
 - [x] Review the integrated workflows independently and run the full local checks.
+- [x] Replace per-operation Rust builds with attested SHA-keyed Releases and verify the hosted loader boundary.
 - [ ] Deploy to GitHub and verify real App permissions and lifecycle behavior before activation.
 
 Local completion means the CLI builds with locked dependencies, formatting and Clippy pass, workflow validation passes, and regression tests exercise authorization decisions through typed input or HTTP fixtures.

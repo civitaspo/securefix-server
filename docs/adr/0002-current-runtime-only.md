@@ -6,8 +6,9 @@ An older revision being an ancestor of `main` does not make it acceptable.
 This avoids a compatibility window in which old authorization code remains usable.
 
 The [GitHub job context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts) exposes `job.workflow_sha` for the workflow that defines a reusable job.
-We use it to check out the server source and compile without custom secrets.
-Privileged jobs download the resulting immutable artifact ID.
+The main-only producer uses it to check out the exact server source.
+Consumers use it to select a prebuilt GitHub Release and verify the archive's source and signer digests before extraction.
+Privileged jobs download the verified runtime's immutable same-run artifact ID.
 The source SHA travels with the runtime and is checked against current policy before privileged effects.
 
 Every server commit requires clients to update their pins before making another request.

@@ -22,6 +22,7 @@ jobs:
     uses: ./.github/workflows/reusable-approve-request.yml
     permissions:
       contents: read
+      attestations: read
       issues: read
       pull-requests: read
     secrets: inherit

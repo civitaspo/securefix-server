@@ -1,0 +1,59 @@
+name: Load CLI
+on:
+  workflow_call:
+    outputs:
+      artifact-id:
+        description: Immutable artifact ID of the verified runtime
+        value: ${{ jobs.load.outputs.artifact-id }}
+      source-sha:
+        description: Immutable commit of the trusted runtime
+        value: ${{ jobs.load.outputs.source-sha }}
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  load:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ job.workflow_sha }}
+    steps:
+      - name: Download exact runtime release
+        env:
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: >-
+          gh release download "securefix-runtime-$SECUREFIX_SOURCE_SHA"
+          --repo civitaspo/securefix-server
+          --pattern securefix-runtime-linux-x86_64.tar.gz
+          --dir download
+      - name: Verify archive provenance before extraction
+        env:
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: >-
+          gh attestation verify download/securefix-runtime-linux-x86_64.tar.gz
+          --repo civitaspo/securefix-server
+          --source-digest "$SECUREFIX_SOURCE_SHA"
+          --source-ref refs/heads/main
+          --signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml
+          --signer-digest "$SECUREFIX_SOURCE_SHA"
+          --cert-oidc-issuer https://token.actions.githubusercontent.com
+          --predicate-type https://slsa.dev/provenance/v1
+          --deny-self-hosted-runners
+      - name: Stage verified runtime
+        run: |
+          mkdir runtime
+          tar -xzf download/securefix-runtime-linux-x86_64.tar.gz -C runtime --no-same-owner
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: securefix-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runtime/
+          if-no-files-found: error
+          retention-days: 1

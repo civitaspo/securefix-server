@@ -2,7 +2,13 @@
 
 Privileged OSS automation for civitaspo repositories, based on the client/server trust model of [csm-actions/securefix-action](https://github.com/csm-actions/securefix-action).
 The Rust `securefix` executable owns approval, merge, release, settings, and request validation.
-GitHub Actions workflows route events, build the trusted executable, isolate credentials, and call its commands.
+GitHub Actions workflows route events, load the verified prebuilt executable, isolate credentials, and call its commands.
+
+`Publish Runtime` builds once for each protected `main` commit and publishes `securefix-runtime-<full-SHA>` to GitHub Releases.
+`Load CLI` downloads that exact release and verifies its archive against the server SHA and publishing workflow's GitHub attestation before extraction.
+It transfers the verified runtime to execution jobs using an immutable same-run artifact ID.
+Normal operations never compile Rust; a missing release or failed verification stops the operation.
+See the [runtime distribution decision](docs/adr/0006-prebuilt-runtime.md) for provenance and retry behavior.
 
 ## Policy and trust
 

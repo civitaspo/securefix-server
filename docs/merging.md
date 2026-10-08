@@ -7,7 +7,8 @@ If that head changes, resolve the failure and post a new command.
 When automatic approval rejects a sensitive change, post `/approve` before `/merge` to obtain the bot review for that head; `/merge` still waits for a counted approval.
 
 Automatic approval remains available to configured trusted actors for ordinary changes.
-The server checks every source commit's verified signature and committer identity, with the author used only when no GitHub committer identity exists.
+The server checks every source commit's verified signature and committer identity.
+GitHub web commits additionally require the exact commit's GraphQL proof of a valid GitHub signature and a trusted author; a missing committer identity is rejected.
 Fork PRs are rejected.
 Missing, truncated, unsigned, or mismatched commit lists fail closed.
 Sensitive paths in [`policy.json`](../policy.json), including dependency manifests and workflow/build configuration, require an owner command for the same head.
@@ -18,7 +19,7 @@ Every change in the server repository is sensitive.
 
 Client wrappers are `.github/workflows/approve-request.yml` and `.github/workflows/merge-request.yml`.
 They call the corresponding reusable at a full current server SHA.
-The caller grants `contents: read`, `issues: read`, and `pull-requests: read`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
+The caller grants `contents: read`, `attestations: read`, `issues: read`, and `pull-requests: read`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
 The Client App creates a server label whose description is only `civitaspo/<repository>/<run ID>`.
 The versioned manifest travels as an immutable source-run artifact.
 
@@ -34,7 +35,7 @@ Approval uses the machine-user PAT only after validation and explicitly sends th
 The machine user's identity must be `civitaspo-bot`, and it cannot approve its own PR.
 Only a non-author approval for the current head counts; a reviewer's later dismissal or change request supersedes an earlier approval.
 
-The separate `policy-check.yml` client wrapper calls `reusable-policy-check.yml` on PR-target events and default-branch pushes.
+The separate `policy-check.yml` client wrapper calls `reusable-policy-check.yml` on PR-target events and default-branch pushes, granting `contents: read`, `attestations: read`, `actions: read`, and `pull-requests: read`.
 The Server App alone publishes the stable required `securefix-policy-check` result for that SHA.
 It verifies source signatures, sensitive-path owner authorization, and current-head approval.
 Approval and merge authorization can refresh that check after an owner command.

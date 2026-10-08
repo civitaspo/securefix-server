@@ -94,4 +94,27 @@ The operator restored the raw PEM, and the probe was reduced to its required met
 No App permissions were expanded.
 The [manual probe workflow](https://github.com/civitaspo/testing-securefix-server/blob/b0db14244026157c52d9c6eee18c42b28e78feb7/.github/workflows/client-app-smoke.yml) and ignored Rust test remain available to rerun.
 The Server installation and its full requested permissions still require App-authenticated lifecycle verification during staging.
+
+## Prebuilt runtime distribution follow-up
+
+The runtime now has a dedicated main-push producer and a SHA-keyed GitHub Release loader.
+Normal operations reuse the verified archive; they do not compile Rust.
+The producer's publication job verifies the same archive before extracting its executable.
+Seven new Rust tests cover exact asset identity/digest, matching draft recovery, published idempotent retry, stale runtime rejection, and non-404 failures.
+The complete local suite passes 86 tests with three credential-dependent tests ignored; formatting, warnings-denied Clippy, and pinned actionlint pass.
+Structural tests check immutable IDs, caller permission grants, source identity, credential separation, and fail-fast verification before extraction/execution.
+
+The [runtime distribution smoke run](https://github.com/civitaspo/testing-securefix-server/actions/runs/37785745337) succeeded on scratch main `742c9eb4764310ada2ed2b36ba97411cc59ec365`.
+It attested a harmless source-SHA text archive using the same pinned official action, transferred that archive by immutable artifact ID, verified it in the separate publisher job, published it only to scratch, and downloaded/verified it in a read-only job.
+The runner's `gh` was version 2.102.0; the initial run also confirmed the certificate constraints with 2.101.0.
+Both certificate source and signer digests matched the actual `job.workflow_sha`.
+Verification rejected different source and signer SHA values, a different signer workflow, repository and source ref, and modified archive bytes.
+The expected source/ref failures explicitly reported the actual certificate values in the Actions log.
+Using only the scratch repository's contents-read/attestations-read `GITHUB_TOKEN`, the run also downloaded `cli/cli`'s public Linux release archive and verified its build attestation, proving public cross-repository reads without an App or PAT.
+
+The [initial smoke run](https://github.com/civitaspo/testing-securefix-server/actions/runs/37785390380) passed the exact-source and rejection checks but failed the cross-repository attestation step because the chosen checksum file had no SLSA build attestation.
+The successful run used the attested binary archive instead.
+No extra App permissions, secrets, or production settings were used.
+The scratch archive contains no executable and exercises GitHub distribution/provenance, not the full privileged runtime.
+The production Rust publisher's real asset upload and main-push producer still require deployment validation; these tests do not establish full approve/merge/release/settings E2E.
 Follow the [migration sequence](migration.md) after review and deployment; the API probe does not replace those lifecycle tests or activation attestation.

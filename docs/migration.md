@@ -32,9 +32,9 @@ After Rust validates the bot-created locator, an `always()` workflow step consum
 
 ## Deployment sequence
 
-1. Review and land this runtime while privileged processing is stopped. Disable the schedule and controlled-merges activation during staging; the automatic schedule cannot reactivate a disabled restriction.
+1. Review and land this runtime while privileged processing is stopped. Disable the schedule and controlled-merges activation during staging; the automatic schedule cannot reactivate a disabled restriction. Wait for `Publish Runtime` to build, attest, and publish the new main SHA before testing or updating client pins. Confirm `Load CLI` verifies the resulting Release without compilation. No operational fallback build is available.
 2. Configure the existing secrets and confirm both Apps' repository installations and requested permissions. The Server App needs Administration read for immutable-release preflight. Enable immutable releases for every release-capable repository through settings reconciliation before staging publication. Provider signing uses the existing GPG secrets in `main`; the signing job references no Server App key and receives no client write token.
-3. Add a public scratch repository to a reviewed temporary policy, then update every client wrapper to the resulting full server SHA. Add `policy-check.yml` with PR-target and default-branch push triggers, read-only caller permissions, and `SECUREFIX_CLIENT_PRIVATE_KEY`. Update release wrappers to the documented PR-number retry contract.
+3. Add a public scratch repository to a reviewed temporary policy, wait for that SHA's runtime publication, then update every client wrapper to the resulting full server SHA. Add `policy-check.yml` with PR-target and default-branch push triggers, read-only caller permissions, and `SECUREFIX_CLIENT_PRIVATE_KEY`. All reusable callers need `attestations: read` as well as their documented contents permission. Update release wrappers to the documented PR-number retry contract.
 4. Exercise the runtime on scratch before making checks mandatory. Verify valid signed approval/merge, unauthorized and edited commands, reruns/replays, changed heads, force-push-and-return, wrong source workflow/pin, malformed artifacts, unsigned parents, failed/pending CI, and natural fixed-deadline timeout. For the requested scenario, authorize head A, update to sensitive B, and verify that a Renovate direct merge is rejected until B gets new owner authorization.
 5. Stage both release strategies. Confirm a merged release PR produces the expected annotated tag and release. For Sigma, compare all 13 ZIP names and four archive entries, Terraform manifest, checksum names, GPG signature and Registry import. Test a matching partial draft retry and rejection of different bytes or extra assets. Confirm client hooks never run in sign/publish.
 6. Reconcile default protections and read back the App-bound check sources, stale-review dismissal, signed commits, linear history, squash settings, bot collaborator access, and tag protection. Obtain successful default-head checks for every configured repository at the current wrapper pins.
@@ -49,6 +49,7 @@ The readiness input records operator attestation; API preflight does not prove t
 Prepare and review all client pin updates before merging a new server revision.
 Merge the server change while the old current runtime can still authorize its PR.
 After that merge, old client wrappers deliberately fail closed.
+Wait for the new SHA's `Publish Runtime` run to succeed; rerun a failed main-push producer before resuming operations.
 PR-target workflows use the wrapper on the default branch, so a client pin-update PR cannot produce the new policy check by changing its own workflow file.
 
 Use a coordinated maintenance window for that transition.
@@ -71,7 +72,7 @@ Existing published releases and assets are never overwritten.
 Run locked Rust tests, formatting, Clippy, and pinned actionlint as in CI.
 `job.workflow_sha` identifies the actual workflow defining a reusable job, introduced in the [September 2026 GitHub Actions update](https://github.blog/changelog/2026-09-03-github-actions-early-september-2026-updates/).
 Actionlint v1.7.12 does not yet recognize this field; CI ignores only its specific unknown-property diagnostic.
-Rust workflow tests independently require that exact checkout expression, empty top-level permissions, immutable artifact IDs, and release credential separation.
+Rust workflow tests independently require that exact producer checkout expression and consumer verification SHA, empty top-level permissions, immutable artifact IDs, verification before extraction, and release credential separation.
 Remove that narrow exception when actionlint supports the field.
 Version comments on SHA-pinned actions remain because [Renovate uses them to follow action tags](https://docs.renovatebot.com/modules/manager/github-actions/); bare SHA references are disabled by its default update policy.
 The [previous live verification](archive/merge-verification-2026-10-08.md) is historical and does not certify this implementation.

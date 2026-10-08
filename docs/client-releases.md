@@ -36,9 +36,9 @@ Pin each reusable to a full commit SHA and give its caller the minimum `permissi
 
 | Reusable | Caller permissions |
 | --- | --- |
-| `reusable-release-pr.yml` | `contents: read`, `pull-requests: read` |
-| `reusable-release-pr-sync.yml` | `contents: read`, `pull-requests: write` |
-| `reusable-release-tag.yml` | `contents: write`, `pull-requests: read`, `issues: write` |
+| `reusable-release-pr.yml` | `contents: read`, `attestations: read`, `pull-requests: read` |
+| `reusable-release-pr-sync.yml` | `contents: read`, `attestations: read`, `pull-requests: write` |
+| `reusable-release-tag.yml` | `contents: write`, `attestations: read`, `pull-requests: read`, `issues: write` |
 
 A release PR wrapper passes `SECUREFIX_CLIENT_PRIVATE_KEY` and may provide an explicit version. The Rust CLI updates `.release-version`, `CHANGELOG.md`, and supported root package version metadata before Securefix opens or updates `release/next`.
 
@@ -58,6 +58,7 @@ jobs:
   prepare:
     permissions:
       contents: read
+      attestations: read
       pull-requests: read
     uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@<full-commit-sha>
     with:
@@ -88,6 +89,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.event.pull_request.head.ref == 'release/next' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: write
+      attestations: read
       pull-requests: read
       issues: write
     uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@<full-commit-sha>

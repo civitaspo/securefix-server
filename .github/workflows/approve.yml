@@ -15,9 +15,10 @@ concurrency:
 jobs:
   build:
     if: startsWith(github.event.label.name, 'approve-request-')
-    uses: ./.github/workflows/build-cli.yml
+    uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
+      attestations: read
 
   approve:
     needs: build

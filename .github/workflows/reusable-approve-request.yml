@@ -10,9 +10,10 @@ permissions: {}
 
 jobs:
   build:
-    uses: ./.github/workflows/build-cli.yml
+    uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
+      attestations: read
 
   capture:
     needs: build

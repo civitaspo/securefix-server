@@ -12,6 +12,14 @@ fn workflows() -> Vec<(String, Value)> {
         .collect()
 }
 
+fn workflow(name: &str) -> Value {
+    serde_yaml::from_slice(
+        &fs::read(format!(".github/workflows/{name}"))
+            .unwrap_or_else(|error| panic!("cannot read {name}: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("cannot parse {name}: {error}"))
+}
+
 #[test]
 fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
     for (path, workflow) in workflows() {
@@ -28,9 +36,19 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     "{path}/{job_id}: local reusable must use the running revision"
                 );
                 assert!(
-                    job.get("secrets").is_none() || uses != "./.github/workflows/build-cli.yml",
-                    "builder cannot inherit secrets"
+                    job.get("secrets").is_none() || uses != "./.github/workflows/load-cli.yml",
+                    "runtime loader cannot inherit secrets"
                 );
+                if uses == "./.github/workflows/load-cli.yml" {
+                    assert_eq!(
+                        job["permissions"]["contents"], "read",
+                        "{path}/{job_id}: loader caller needs content read"
+                    );
+                    assert_eq!(
+                        job["permissions"]["attestations"], "read",
+                        "{path}/{job_id}: loader caller needs attestation read"
+                    );
+                }
             }
             let Some(steps) = job["steps"].as_array() else {
                 continue;
@@ -82,17 +100,302 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
 }
 
 #[test]
-fn runtime_builder_has_no_custom_secrets_and_only_read_permissions() {
-    let builder: Value =
-        serde_yaml::from_slice(&fs::read(".github/workflows/build-cli.yml").unwrap()).unwrap();
-    let job = &builder["jobs"]["build"];
-    assert!(job.get("environment").is_none());
-    assert_eq!(job["permissions"], serde_json::json!({"contents":"read"}));
-    assert!(!serde_json::to_string(job).unwrap().contains("secrets."));
+fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
+    let loader = workflow("load-cli.yml");
+    let load = &loader["jobs"]["load"];
+    assert!(loader["on"].get("workflow_dispatch").is_none());
     assert_eq!(
-        builder["on"]["workflow_call"]["outputs"]["source-sha"]["value"],
-        "${{ jobs.build.outputs.source-sha }}"
+        loader["defaults"]["run"]["shell"], "bash -euo pipefail {0}",
+        "failed release fetch or attestation verification must stop the loader"
     );
+    assert_eq!(
+        load["permissions"],
+        serde_json::json!({
+            "contents":"read", "attestations":"read"
+        })
+    );
+    let steps = load["steps"].as_array().unwrap();
+    assert!(
+        steps
+            .iter()
+            .filter(|step| {
+                step["run"].as_str().is_some_and(|run| {
+                    run.contains("gh release download") || run.contains("gh attestation verify")
+                })
+            })
+            .all(|step| step["env"]["SECUREFIX_SOURCE_SHA"] == "${{ job.workflow_sha }}")
+    );
+    assert_eq!(
+        loader["on"]["workflow_call"]["outputs"]["source-sha"]["value"],
+        "${{ jobs.load.outputs.source-sha }}"
+    );
+    assert_eq!(load["outputs"]["source-sha"], "${{ job.workflow_sha }}");
+    assert_eq!(
+        load["outputs"]["artifact-id"],
+        "${{ steps.upload.outputs.artifact-id }}"
+    );
+    let load_text = serde_json::to_string(load).unwrap();
+    for forbidden in [
+        "secrets.",
+        "actions/checkout",
+        "setup-cli",
+        "cargo",
+        "rustup",
+    ] {
+        assert!(
+            !load_text.contains(forbidden),
+            "loader contains {forbidden}"
+        );
+    }
+    let index_of = |predicate: &dyn Fn(&Value) -> bool| {
+        steps
+            .iter()
+            .position(predicate)
+            .unwrap_or_else(|| panic!("required loader step is missing"))
+    };
+    let download = index_of(&|step| {
+        step["run"].as_str().is_some_and(|run| {
+            run.contains("gh release download")
+                && run.contains("securefix-runtime-$SECUREFIX_SOURCE_SHA")
+                && run.contains("--repo civitaspo/securefix-server")
+                && run.contains("--pattern securefix-runtime-linux-x86_64.tar.gz")
+        })
+    });
+    let verify = index_of(&|step| {
+        step["run"].as_str().is_some_and(|run| {
+            run.contains("gh attestation verify download/securefix-runtime-linux-x86_64.tar.gz")
+        })
+    });
+    let extract = index_of(&|step| {
+        step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("tar -xzf"))
+    });
+    let upload = index_of(&|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+    });
+    assert!(download < verify && verify < extract && extract < upload);
+    let verification = steps[verify]["run"].as_str().unwrap();
+    for required in [
+        "--source-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "--repo civitaspo/securefix-server",
+        "--source-ref refs/heads/main",
+        "--signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml",
+        "--signer-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "--cert-oidc-issuer https://token.actions.githubusercontent.com",
+        "--predicate-type https://slsa.dev/provenance/v1",
+        "--deny-self-hosted-runners",
+    ] {
+        assert!(
+            verification.contains(required),
+            "missing attestation constraint: {required}"
+        );
+    }
+    for index in [verify, extract, upload] {
+        assert_ne!(steps[index]["continue-on-error"], true);
+        assert!(
+            steps[index].get("if").is_none(),
+            "attestation, extraction, and upload use fail-fast defaults"
+        );
+    }
+    assert_eq!(
+        steps[upload]["with"]["path"], "runtime/",
+        "only the verified runtime is re-uploaded"
+    );
+    assert_eq!(
+        steps[upload]["with"]["retention-days"], 1,
+        "verified workflow artifact has short retention"
+    );
+
+    let publisher = workflow("publish-runtime.yml");
+    assert_eq!(
+        publisher["on"]["push"]["branches"],
+        serde_json::json!(["main"])
+    );
+    assert!(publisher["on"].get("workflow_dispatch").is_none());
+    let build = &publisher["jobs"]["build"];
+    assert_eq!(
+        build["if"],
+        "github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main'"
+    );
+    assert_eq!(
+        build["permissions"],
+        serde_json::json!({
+            "contents":"read", "id-token":"write", "attestations":"write"
+        })
+    );
+    assert_eq!(
+        build["outputs"]["source-sha"],
+        "${{ steps.checkout.outputs.commit }}"
+    );
+    let build_text = serde_json::to_string(build).unwrap();
+    assert!(!build_text.contains("secrets."));
+    assert!(build_text.contains("./.github/actions/setup-cli"));
+    assert_eq!(
+        build["outputs"]["artifact-id"],
+        "${{ steps.upload.outputs.artifact-id }}"
+    );
+    let build_steps = build["steps"].as_array().unwrap();
+    assert!(build_steps.iter().any(|step| {
+        step["with"]["repository"] == "civitaspo/securefix-server"
+            && step["with"]["ref"] == "${{ job.workflow_sha }}"
+            && step["with"]["persist-credentials"] == false
+    }));
+    let attest_steps = build_steps
+        .iter()
+        .filter(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/attest@"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attest_steps.len(),
+        1,
+        "exactly one archive subject is attested"
+    );
+    assert_eq!(
+        attest_steps[0]["with"]["subject-path"],
+        "distribution/securefix-runtime-linux-x86_64.tar.gz"
+    );
+    assert_eq!(attest_steps[0]["with"]["create-storage-record"], false);
+    assert!(
+        attest_steps[0]["with"]["subject-path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".tar.gz")
+    );
+
+    let publish = &publisher["jobs"]["publish"];
+    assert_eq!(publish["needs"], "build");
+    assert_eq!(
+        publish["permissions"],
+        serde_json::json!({"contents":"write", "attestations":"read"})
+    );
+    let publish_text = serde_json::to_string(publish).unwrap();
+    for forbidden in ["id-token", "secrets.", "setup-cli", "actions/checkout"] {
+        assert!(
+            !publish_text.contains(forbidden),
+            "publisher contains {forbidden}"
+        );
+    }
+    assert_eq!(
+        publish["env"]["SECUREFIX_SOURCE_SHA"],
+        "${{ needs.build.outputs.source-sha }}"
+    );
+    assert!(publish["steps"].as_array().unwrap().iter().any(|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            && step["with"]["artifact-ids"] == "${{ needs.build.outputs.artifact-id }}"
+    }));
+    let publish_steps = publish["steps"].as_array().unwrap();
+    let publish_index = |predicate: &dyn Fn(&Value) -> bool| {
+        publish_steps
+            .iter()
+            .position(predicate)
+            .unwrap_or_else(|| panic!("required publisher step is missing"))
+    };
+    let downloaded = publish_index(&|step| {
+        step["uses"].as_str().is_some_and(|uses| {
+            uses.starts_with("actions/download-artifact@")
+                && step["with"]["artifact-ids"] == "${{ needs.build.outputs.artifact-id }}"
+        })
+    });
+    let verified = publish_index(&|step| {
+        step["run"].as_str().is_some_and(|run| {
+            run.contains("gh attestation verify distribution/securefix-runtime-linux-x86_64.tar.gz")
+        })
+    });
+    let staged = publish_index(&|step| {
+        step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("tar -xzf"))
+    });
+    let invoked = publish_index(&|step| {
+        step["run"].as_str().is_some_and(|run| {
+            run.contains("runtime/securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz")
+        })
+    });
+    assert!(downloaded < verified && verified < staged && staged < invoked);
+    let verification = publish_steps[verified]["run"].as_str().unwrap();
+    for required in [
+        "--repo civitaspo/securefix-server",
+        "--source-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "--source-ref refs/heads/main",
+        "--signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml",
+        "--signer-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "--cert-oidc-issuer https://token.actions.githubusercontent.com",
+        "--predicate-type https://slsa.dev/provenance/v1",
+        "--deny-self-hosted-runners",
+    ] {
+        assert!(
+            verification.contains(required),
+            "publisher missing attestation constraint: {required}"
+        );
+    }
+    for index in [verified, staged, invoked] {
+        assert_ne!(publish_steps[index]["continue-on-error"], true);
+        assert!(publish_steps[index].get("if").is_none());
+    }
+    let ci = workflow("ci.yml");
+    let ci_build = &ci["jobs"]["workflows"];
+    assert_eq!(
+        ci_build["permissions"],
+        serde_json::json!({"contents":"read"})
+    );
+    assert!(
+        !serde_json::to_string(ci_build)
+            .unwrap()
+            .contains("secrets.")
+    );
+    let mut setup_users = workflows()
+        .into_iter()
+        .flat_map(|(path, workflow)| {
+            workflow["jobs"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_values()
+                .filter_map(move |job| {
+                    job["steps"].as_array().and_then(|steps| {
+                        steps
+                            .iter()
+                            .any(|step| step["uses"] == "./.github/actions/setup-cli")
+                            .then(|| path.clone())
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    setup_users.sort();
+    assert_eq!(
+        setup_users,
+        [
+            ".github/workflows/ci.yml",
+            ".github/workflows/publish-runtime.yml"
+        ],
+        "only secret-free CI and runtime producer compile CLI"
+    );
+    for (path, workflow) in workflows() {
+        if matches!(
+            path.as_str(),
+            ".github/workflows/ci.yml" | ".github/workflows/publish-runtime.yml"
+        ) {
+            continue;
+        }
+        for (job_id, job) in workflow["jobs"].as_object().unwrap() {
+            for step in job["steps"].as_array().into_iter().flatten() {
+                if let Some(run) = step["run"].as_str() {
+                    assert!(
+                        !run.contains("cargo ") && !run.contains("rustup "),
+                        "{path}/{job_id}: operational jobs must load the published runtime"
+                    );
+                }
+            }
+        }
+    }
     let composite = fs::read_to_string(".github/actions/setup-cli/action.yml").unwrap();
     assert!(composite.contains("build --locked --release"));
     assert!(!composite.contains("secrets."));
@@ -140,7 +443,7 @@ fn cli_jobs_restore_executable_mode_and_supply_runtime_identity() {
                     .is_some_and(|u| u.starts_with("actions/download-artifact@"))
                     && step["with"]["path"]
                         .as_str()
-                        .is_some_and(|p| p == "runtime")
+                        .is_some_and(|p| p == "runtime" || p == "distribution")
             });
             let mut executable = !downloads_cli;
             for step in steps {
@@ -166,8 +469,10 @@ fn cli_jobs_restore_executable_mode_and_supply_runtime_identity() {
                     let line = line.trim();
                     line.starts_with("runtime/securefix ")
                         || line.starts_with("./securefix ")
+                        || line.starts_with("distribution/securefix ")
                         || line.contains("&& runtime/securefix ")
                         || line.contains("&& ./securefix ")
+                        || line.contains("&& distribution/securefix ")
                 });
                 if invokes_cli {
                     assert!(

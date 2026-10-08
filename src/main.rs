@@ -9,6 +9,7 @@ mod merge;
 mod policy_check;
 mod release;
 mod request;
+mod runtime;
 mod securefix_gate;
 mod settings;
 #[cfg(test)]
@@ -52,6 +53,11 @@ enum Command {
         #[command(subcommand)]
         command: release::Command,
     },
+    #[command(about = "Publish the SHA-keyed trusted runtime archive")]
+    Runtime {
+        #[command(subcommand)]
+        command: runtime::Command,
+    },
     #[command(about = "Reconcile repository settings and activate merge controls")]
     Settings {
         #[command(subcommand)]
@@ -76,6 +82,7 @@ fn main() -> Result<()> {
         Command::Approve { command } => approval::run(command),
         Command::Merge { command } => merge::run(command),
         Command::Release { command } => release::run(command),
+        Command::Runtime { command } => runtime::run(command),
         Command::Settings { command } => settings::run(command),
         Command::Securefix { command } => securefix_gate::run(command),
         Command::Check { command } => policy_check::run(command),
