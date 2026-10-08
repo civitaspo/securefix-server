@@ -37,10 +37,33 @@ GitHub remains the final authority for branch rules. The Merge API's SHA conditi
 
 The server posts a terminal result comment with the merge SHA or a request to post a fresh comment. It deletes the one-time request label. Server run failures before the request artifact has been validated are available in the server Actions run and do not produce a comment on the source pull request.
 
-The Securefix Server App needs `actions: read`, `checks: read`, `commit statuses: read`, `contents: read`, and `pull requests: read/write` on client repositories. The workflow narrows source-read and merge tokens to one target repository. Only the post-readiness token receives `contents: write`.
+The Securefix Server App installation needs `actions: read`, `checks: read`, `commit statuses: read`, `contents: write`, and `pull requests: read/write` on client repositories. The workflow narrows source-read and merge tokens to one target repository. Source-read tokens receive only `contents: read`. Only the post-readiness token receives `contents: write`.
 
 ## Verify before rollout
 
 Use a public scratch repository that is not in the production allowlist. Install both Apps and set `MERGE_VERIFICATION_REPOSITORY` in the server's `main` environment to that exact repository name. Pin the scratch workflow to a reviewed Securefix Server commit that is on its default branch. Exercise unauthorized comments, edited and deleted comments, reruns, replayed labels, changed heads, force-push-and-return, pending checks, pending review, timeout, and a successful squash merge. Confirm that direct pushes and merges without the required checks or review still fail under the repository rulesets.
 
 Remove `MERGE_VERIFICATION_REPOSITORY` after testing. Keep production merge controls disabled until the real App permissions and scratch-repository merge path pass.
+
+## Verification evidence
+
+The following checks ran against the public `civitaspo/securefix-merge-verification` repository on October 8, 2026. Normal merges and App protection probes used separate, active `default-branch` and `controlled-merges` rulesets with native auto-merge disabled. The production distribution gate remained disabled.
+
+| Check | Observed result | Evidence |
+| --- | --- | --- |
+| Authorized `/merge` | Server App merged the recorded head, retained the description and unique Codex trailer, and deleted the request label. The squash commit was verified and its subject included `(#2)`. | [Server attempt 1](https://github.com/civitaspo/securefix-server/actions/runs/37715004379/attempts/1), commit `ac38b2c1c1b74e4d6c072ea471c5708237864ed6` |
+| Human merge after successful CI and approval | Merge API rejected the protected-ref update. | [Scratch PR3](https://github.com/civitaspo/securefix-merge-verification/pull/3) |
+| Forged request label | Rejected before any App token was issued; cleanup removed the label. | [Server run](https://github.com/civitaspo/securefix-server/actions/runs/37623214655) |
+| Force-push followed by return to accepted SHA | Timeline validation rejected the request before creating a merge token. | [Server run](https://github.com/civitaspo/securefix-server/actions/runs/37715212665) |
+| Comment edited and restored to `/merge` | Changed update time invalidated the request before creating a merge token. | [Server run](https://github.com/civitaspo/securefix-server/actions/runs/37715300466) |
+| Workflow reruns | Intake attempt 2 was skipped; server attempt 2 was rejected before merge. | Source run `37713677192`, [Server attempt 2](https://github.com/civitaspo/securefix-server/actions/runs/37715004379/attempts/2) |
+| Ordinary Actions direct push and merge | A `GITHUB_TOKEN` with write permissions received protected-ref rejection for both operations. The push candidate was ahead of main and `force` was false. | [Scratch CI](https://github.com/civitaspo/securefix-merge-verification/actions/runs/37716442878) |
+| Server App direct push and missing-review merge | Its repository-scoped write token received protected-ref rejection for direct push and required-review rejection for PR4. It then merged the ready PR7 normally. | [Server run](https://github.com/civitaspo/securefix-server/actions/runs/37716555848), commit `5b72f5de4fbad9d148b5045794c9d6c6d0036d13` |
+| Renovate automerge | Renovate created the `minimist` patch update from `1.2.7` to `1.2.8`, waited for CI and approval, and squash-merged it as `renovate[bot]`. The verified commit subject included `(#6)` and retained the Renovate trailer. | [Scratch PR6](https://github.com/civitaspo/securefix-merge-verification/pull/6), commit `5a07ead77537a92506ae2d17ef1b12fd7ded09d5` |
+| Scratch repo-settings dispatch | Existing distribution accepted the bot invitation; bot access read back as `write`. | [Settings run](https://github.com/civitaspo/securefix-server/actions/runs/37714481583) |
+
+The scratch checks exposed three runtime adapter defects, fixed in [PR46](https://github.com/civitaspo/securefix-server/pull/46), [PR47](https://github.com/civitaspo/securefix-server/pull/47), and [PR48](https://github.com/civitaspo/securefix-server/pull/48). The pinned github-script action requires `core.summary.addRaw` and the runner's `GITHUB_RUN_ATTEMPT`; the App-token action requires the input `permission-statuses`. The workflow fixture suite has 38 passing tests. Those tests are separate from the live evidence above.
+
+The temporary Server App probe was restricted to scratch PR7 and removed after its successful run. It reused the existing post-readiness token without exporting credentials or adding a service.
+
+The full rollout is not yet verified. Remaining live checks include isolated failed-CI and unsigned-commit rejection, Renovate direct-push rejection and preservation of production exclusions, the fixed 60-minute deadline, release PR merging, and repeated controlled-merges distribution without drift. Artifact forgery and final-head races have fixture coverage, but the entire negative matrix has not run against GitHub. Keep the production gate disabled until the remaining checks and client-pin updates are complete.

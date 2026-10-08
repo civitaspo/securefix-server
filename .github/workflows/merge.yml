@@ -387,42 +387,6 @@ jobs:
           permission-statuses: read
           permission-contents: write
           permission-pull-requests: write
-      - name: Verify scratch App protection enforcement
-        if: >-
-          steps.ready.outcome == 'success' &&
-          needs.resolve.outputs.repository == 'civitaspo/securefix-merge-verification' &&
-          fromJSON(needs.resolve.outputs.manifest).pullRequest.number == 7 &&
-          vars.MERGE_VERIFICATION_REPOSITORY == 'civitaspo/securefix-merge-verification'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        env:
-          ACCEPTED_HEAD: ${{ steps.ready.outputs.head_sha }}
-        with:
-          github-token: ${{ steps.merge-token.outputs.token }}
-          script: |
-            const owner = 'civitaspo'
-            const repo = 'securefix-merge-verification'
-            try {
-              await github.rest.git.updateRef({ owner, repo, ref: 'heads/main', sha: process.env.ACCEPTED_HEAD, force: false })
-              throw new Error('Unexpectedly allowed a Server App direct push to scratch main.')
-            } catch (error) {
-              if (error.status !== 422 || !JSON.stringify(error.response?.data).includes('Cannot update this protected ref')) throw error
-              core.info('Server App direct push rejected by Restrict updates.')
-            }
-            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: 4 })
-            const review = await github.graphql(`query { repository(owner: "civitaspo", name: "securefix-merge-verification") {
-              pullRequest(number: 4) { reviewDecision }
-            } }`)
-            if (pr.state !== 'open' || pr.head.sha !== 'da2c1f72c8ae013294502e2dc5e9cd554250bd7a' ||
-                review.repository.pullRequest.reviewDecision !== 'REVIEW_REQUIRED') {
-              throw new Error('The pending-review scratch fixture changed.')
-            }
-            try {
-              await github.rest.pulls.merge({ owner, repo, pull_number: 4, sha: pr.head.sha, merge_method: 'squash' })
-              throw new Error('Unexpectedly allowed a Server App merge without the required review.')
-            } catch (error) {
-              if (error.status !== 405 || !JSON.stringify(error.response?.data).toLowerCase().includes('approv')) throw error
-              core.info('Server App merge rejected by the separate required-review ruleset.')
-            }
       - name: Merge the accepted head SHA
         id: merge
         if: steps.ready.outcome == 'success'
