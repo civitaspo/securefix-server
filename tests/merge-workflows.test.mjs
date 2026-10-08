@@ -579,55 +579,79 @@ test('the contents-write token is created only after readiness succeeds', () => 
   assert.doesNotMatch(mergeScript, /commit_title/)
 })
 
-test('merge sends the accepted pull-request head SHA and preserves the description', async () => {
-  const manifest = {
-    repository: { id: 5, fullName: 'civitaspo/example' },
-    pullRequest: { number: 7, headSha: sha, baseRef: 'main' },
-    comment: { id: 11, updatedAt: null },
-    acceptedAt: new Date().toISOString(),
-    runId: 9,
-  }
-  let mergeInput
-  const github = {
-    rest: {
-      repos: {
-        get: async () => ({ data: { id: 5, default_branch: 'main' } }),
-        getCombinedStatusForRef: async () => ({ data: { statuses: [] } }),
+for (const signatureState of ['verified', 'unsigned', 'missing', 'empty', 'wrong-head', 'unsigned-parent']) {
+  test(`merge validates ${signatureState} source commits before sending the accepted SHA`, async () => {
+    const manifest = {
+      repository: { id: 5, fullName: 'civitaspo/example' },
+      pullRequest: { number: 7, headSha: sha, baseRef: 'main' },
+      comment: { id: 11, updatedAt: null },
+      acceptedAt: new Date().toISOString(),
+      runId: 9,
+    }
+    let mergeInput
+    const github = {
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 5, default_branch: 'main' } }),
+          getCombinedStatusForRef: async () => ({ data: { statuses: [] } }),
+        },
+        pulls: {
+          get: async () => ({ data: {
+            state: 'open', draft: false, body: 'A useful PR description.',
+            base: { ref: 'main' }, head: { sha, repo: { full_name: 'civitaspo/example' } },
+          } }),
+          listCommits: async () => ({ data: signatureState === 'empty' ? [] : [
+            ...(signatureState === 'unsigned-parent' ? [{ sha: 'b'.repeat(40), commit: {
+              message: 'Unsigned parent.', verification: { verified: false },
+            } }] : []),
+            { sha: signatureState === 'wrong-head' ? 'b'.repeat(40) : sha, commit: {
+              message: 'change\n\nCo-authored-by: Ada <ada@example.com>',
+              verification: signatureState === 'missing' ? undefined : { verified: signatureState !== 'unsigned' },
+            } },
+          ] }),
+          merge: async input => { mergeInput = input; return { data: { merged: true, sha: 'd'.repeat(40) } } },
+        },
+        issues: {
+          getComment: async () => ({ data: { body: '/merge', user: { id: 4525500 }, updated_at: null } }),
+          listEventsForTimeline: async () => ({ data: [] }),
+        },
+        checks: { listForRef: async () => ({ data: { check_runs: [{
+          name: 'status-check', status: 'completed', conclusion: 'success',
+        }] } }) },
       },
-      pulls: {
-        get: async () => ({ data: {
-          state: 'open', draft: false, body: 'A useful PR description.',
-          base: { ref: 'main' }, head: { sha, repo: { full_name: 'civitaspo/example' } },
-        } }),
-        listCommits: async () => ({ data: [{ commit: { message: 'change\n\nCo-authored-by: Ada <ada@example.com>' } }] }),
-        merge: async input => { mergeInput = input; return { data: { merged: true, sha: 'd'.repeat(40) } } },
+      paginate: async method => {
+        const response = await method()
+        return Array.isArray(response) ? response : response.data?.check_runs || response.data
       },
-      issues: {
-        getComment: async () => ({ data: { body: '/merge', user: { id: 4525500 }, updated_at: null } }),
-        listEventsForTimeline: async () => ({ data: [] }),
-      },
-      checks: { listForRef: async () => ({ data: { check_runs: [{
-        name: 'status-check', status: 'completed', conclusion: 'success',
-      }] } }) },
-    },
-    paginate: async method => {
-      const response = await method()
-      return Array.isArray(response) ? response : response.data?.check_runs || response.data
-    },
-    graphql: async () => ({ repository: { pullRequest: { reviewDecision: 'APPROVED' } } }),
-  }
-  const result = await run(scriptFor('.github/workflows/merge.yml', 'Merge the accepted head SHA'), {
-    env: { SOURCE_REPOSITORY: 'civitaspo/example', MANIFEST: JSON.stringify(manifest) },
-    github,
+      graphql: async () => ({ repository: { pullRequest: { reviewDecision: 'APPROVED' } } }),
+    }
+    const readinessRun = run(scriptFor('.github/workflows/merge.yml', 'Wait for required checks and approval'), {
+      env: { SOURCE_REPOSITORY: 'civitaspo/example', MANIFEST: JSON.stringify(manifest) },
+      github,
+    })
+    if (signatureState !== 'verified') {
+      const expectedError = ['empty', 'wrong-head'].includes(signatureState)
+        ? /The pull request commit list does not match the accepted head SHA/
+        : /All pull request commits must have verified signatures/
+      await assert.rejects(readinessRun, expectedError)
+      assert.equal(mergeInput, undefined)
+      return
+    }
+    const readiness = await readinessRun
+    assert.equal(readiness.outputs.head_sha, sha)
+    const result = await run(scriptFor('.github/workflows/merge.yml', 'Merge the accepted head SHA'), {
+      env: { SOURCE_REPOSITORY: 'civitaspo/example', MANIFEST: JSON.stringify(manifest) },
+      github,
+    })
+    assert.deepEqual(result.errors, [])
+    assert.equal(result.outputs.merge_sha, 'd'.repeat(40))
+    assert.equal(mergeInput.sha, sha)
+    assert.equal(mergeInput.merge_method, 'squash')
+    assert.equal(mergeInput.commit_title, undefined)
+    assert.match(mergeInput.commit_message, /A useful PR description\./)
+    assert.match(mergeInput.commit_message, /Co-authored-by: Ada <ada@example\.com>/)
   })
-  assert.deepEqual(result.errors, [])
-  assert.equal(result.outputs.merge_sha, 'd'.repeat(40))
-  assert.equal(mergeInput.sha, sha)
-  assert.equal(mergeInput.merge_method, 'squash')
-  assert.equal(mergeInput.commit_title, undefined)
-  assert.match(mergeInput.commit_message, /A useful PR description\./)
-  assert.match(mergeInput.commit_message, /Co-authored-by: Ada <ada@example\.com>/)
-})
+}
 
 test('merge rejects a head change observed by the Merge API SHA precondition', async () => {
   const manifest = manifestFixture()
@@ -642,7 +666,7 @@ test('merge rejects a head change observed by the Merge API SHA precondition', a
           state: 'open', draft: false, body: 'Description.',
           base: { ref: 'main' }, head: { sha, repo: { full_name: 'civitaspo/example' } },
         } }),
-        listCommits: async () => ({ data: [] }),
+        listCommits: async () => ({ data: [{ commit: { message: 'Signed change.', verification: { verified: true } } }] }),
         merge: async () => { throw Object.assign(new Error('head changed'), { status: 409 }) },
       },
       issues: {

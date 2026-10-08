@@ -367,6 +367,15 @@ jobs:
               const pr = await validateRequest()
               const state = await readiness(pr)
               if (state.approved && state.allRequiredChecksPassed) {
+                const commits = await github.paginate(github.rest.pulls.listCommits, {
+                  owner, repo, pull_number: manifest.pullRequest.number, per_page: 100,
+                })
+                if (commits.at(-1)?.sha !== manifest.pullRequest.headSha) {
+                  throw new Error('The pull request commit list does not match the accepted head SHA.')
+                }
+                if (commits.some(commit => commit.commit.verification?.verified !== true)) {
+                  throw new Error('All pull request commits must have verified signatures.')
+                }
                 core.setOutput('head_sha', manifest.pullRequest.headSha)
                 core.info('Required checks and review are ready for the accepted head SHA.')
                 return
