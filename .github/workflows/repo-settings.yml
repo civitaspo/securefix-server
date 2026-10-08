@@ -242,8 +242,8 @@ jobs:
               failures=1
             fi
 
-            queued="$(gh api --paginate --slurp "repos/${OWNER}/${repo}/pulls?state=open&per_page=100" \
-              --jq '[.[][] | select(.auto_merge != null) | .number] | .[]')"
+            queued="$(gh api --paginate "repos/${OWNER}/${repo}/pulls?state=open&per_page=100" \
+              --jq '.[] | select(.auto_merge != null) | .number')"
             if [[ -n "${queued}" ]]; then
               echo "${OWNER}/${repo} has native auto-merge requests on PRs: ${queued//$'\n'/, }. Clear them before rollout."
               failures=1
