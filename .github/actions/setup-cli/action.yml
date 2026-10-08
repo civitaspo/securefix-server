@@ -1,0 +1,20 @@
+name: Build trusted Securefix CLI
+description: Compile this checkout with its locked toolchain and dependencies
+outputs:
+  binary:
+    description: Absolute path to the compiled CLI
+    value: ${{ steps.build.outputs.binary }}
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      run: rustup toolchain install 1.99.0 --profile minimal
+    - name: Build CLI
+      id: build
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      run: |
+        cargo +1.99.0 build --locked --release
+        echo "binary=$PWD/target/release/securefix" >> "$GITHUB_OUTPUT"

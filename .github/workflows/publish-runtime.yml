@@ -1,0 +1,86 @@
+name: Publish Runtime
+on:
+  workflow_dispatch:
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+concurrency:
+  group: publish-runtime-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - name: Assemble runtime archive
+        run: |
+          install -Dm755 target/release/securefix runtime/securefix
+          cp policy.json runtime/policy.json
+          cp -R repo-settings runtime/repo-settings
+          cp securefix-config.yaml runtime/securefix-config.yaml
+          mkdir distribution
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf distribution/securefix-runtime-linux-x86_64.tar.gz -C runtime .
+      - name: Attest exact runtime archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: distribution/securefix-runtime-linux-x86_64.tar.gz
+          create-storage-record: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: securefix-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: distribution/
+          if-no-files-found: error
+          retention-days: 1
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: read
+    timeout-minutes: 5
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: distribution
+          merge-multiple: true
+      - name: Verify producer archive before extraction
+        run: >-
+          gh attestation verify distribution/securefix-runtime-linux-x86_64.tar.gz
+          --repo civitaspo/securefix-server
+          --source-digest "$SECUREFIX_SOURCE_SHA"
+          --source-ref refs/heads/main
+          --signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml
+          --signer-digest "$SECUREFIX_SOURCE_SHA"
+          --cert-oidc-issuer https://token.actions.githubusercontent.com
+          --predicate-type https://slsa.dev/provenance/v1
+          --deny-self-hosted-runners
+      - name: Stage verified publisher
+        run: |
+          mkdir "$RUNNER_TEMP/securefix-runtime"
+          tar -xzf distribution/securefix-runtime-linux-x86_64.tar.gz -C "$RUNNER_TEMP/securefix-runtime" --no-same-owner
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - run: securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz

@@ -4,9 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: >-
-          Explicit release version without the leading v (for example 0.0.1-pre.1).
-          Empty computes the next version with git-cliff.
+        description: Explicit release version, or empty to compute it with git-cliff
         required: false
         type: string
         default: ""
@@ -14,156 +12,56 @@ on:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
 
-# Shared Securefix client app + server repository (not per-client vars).
-env:
-  SECUREFIX_CLIENT_APP_ID: "3872492"
-  SECUREFIX_SERVER_REPOSITORY: securefix-server
-
 permissions: {}
 
 jobs:
+  cli:
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      contents: read
+      attestations: read
+
   prepare:
-    name: prepare release pull request
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      !startsWith(github.event.head_commit.message, 'chore(release):')
+    needs: cli
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     timeout-minutes: 15
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Set up mise
-        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
         with:
-          # mise CLI pin (tools come from the caller repository mise.lock).
           version: "2026.8.3"
           install_args: "--locked"
           cache: false
-
-      - name: Compute release
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - name: Prepare release metadata
         id: release
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          # Prefer the newer of the latest git tag and .release-version on main.
-          # After a release merge, Release Tag may still be creating the tag while
-          # a later push already runs this workflow; without the shipped version
-          # floor, git-cliff falls back to an older tag and re-proposes the same
-          # release.
-          # Pre-release tags (vX.Y.Z-*) never become the bump base.
-          latest_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' 2>/dev/null || printf '%s\n' v0.0.0)
-          if [ -f .release-version ]; then
-            shipped_tag="v$(tr -d '[:space:]' < .release-version)"
-            if printf '%s\n' "$shipped_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-              latest_tag=$(printf '%s\n%s\n' "$latest_tag" "$shipped_tag" | sort -V | tail -n1)
-            fi
-          fi
-          echo "Using base tag: $latest_tag"
-
-          # When .release-version is ahead of the real git tag, point a local tag
-          # at the release commit so git-cliff bumps from the shipped version.
-          # Never push this tag. The v0.0.0 fallback (no release yet) needs no tag.
-          if [ "${latest_tag}" != v0.0.0 ] && ! git rev-parse --verify --quiet "${latest_tag}^{commit}" >/dev/null; then
-            version_no_v=${latest_tag#v}
-            ship_commit=$(
-              git log --grep="^chore(release): v${version_no_v}$" --format='%H' -1 2>/dev/null || true
-            )
-            if [ -z "${ship_commit}" ]; then
-              ship_commit=$(
-                git log --grep="^chore(release): prepare v${version_no_v}$" --format='%H' -1 2>/dev/null || true
-              )
-            fi
-            if [ -z "${ship_commit}" ]; then
-              echo "Base tag ${latest_tag} does not exist and no matching release commit was found." >&2
-              exit 1
-            fi
-            git tag -f "${latest_tag}" "${ship_commit}"
-            echo "Created local tag ${latest_tag} at ${ship_commit}"
-          fi
-
-          if [ -n "${INPUT_VERSION}" ]; then
-            # Explicit versions (including pre-releases) skip git-cliff bumping.
-            bumped=${INPUT_VERSION#v}
-            if ! printf '%s\n' "$bumped" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
-              echo "Invalid explicit version: ${INPUT_VERSION}" >&2
-              exit 1
-            fi
-            if git rev-parse --verify --quiet "refs/tags/v${bumped}" >/dev/null; then
-              echo "Tag v${bumped} already exists." >&2
-              exit 1
-            fi
-          else
-            bumped=$(git cliff --bumped-version)
-            bumped=${bumped#v}
-            base=${latest_tag#v}
-            if [ -z "${bumped}" ] || [ "${bumped}" = "${base}" ]; then
-              echo "No releasable commits found."
-              echo "releasable=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          git cliff --tag "v${bumped}" --output CHANGELOG.md
-          printf '%s\n' "${bumped}" > .release-version
-
-          files=$'.release-version\nCHANGELOG.md'
-          body_extra='release metadata'
-          if [ -f dbt_project.yml ] || [ -f pyproject.toml ]; then
-            python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          version = Path(".release-version").read_text().strip()
-          if Path("dbt_project.yml").is_file():
-              path = Path("dbt_project.yml")
-              text = path.read_text()
-              path.write_text(
-                  re.sub(r"(?m)^version:\s*.*$", f"version: {version}", text, count=1)
-              )
-          if Path("pyproject.toml").is_file():
-              path = Path("pyproject.toml")
-              text = path.read_text()
-              path.write_text(
-                  re.sub(r'(?m)^version\s*=\s*".*"$', f'version = "{version}"', text, count=1)
-              )
-          print(f"Updated package metadata to {version}")
-          PY
-            body_extra='package version metadata'
-            if [ -f dbt_project.yml ]; then
-              files+=$'\ndbt_project.yml'
-            fi
-            if [ -f pyproject.toml ]; then
-              files+=$'\npyproject.toml'
-            fi
-          fi
-
-          {
-            echo "version=${bumped}"
-            echo "releasable=true"
-            echo "body_extra=${body_extra}"
-            echo "files<<EOF"
-            printf '%s\n' "$files"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Request release pull request
+        run: securefix release prepare --version "$INPUT_VERSION"
+      - name: Request signed release PR update
         if: steps.release.outputs.releasable == 'true'
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
           action: client
-          app_id: ${{ env.SECUREFIX_CLIENT_APP_ID }}
+          app_id: "3872492"
           app_private_key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-          server_repository: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
+          server_repository: securefix-server
           files: ${{ steps.release.outputs.files }}
           use_git_ls_files: "false"
           branch: release/next
@@ -176,45 +74,3 @@ jobs:
             - Update the changelog and ${{ steps.release.outputs.body_extra }}
 
             This pull request is managed by the Release PR workflow.
-
-      - name: Write server follow-up links
-        if: steps.release.outputs.releasable == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SERVER_REPOSITORY: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          server_full_name="${GITHUB_REPOSITORY_OWNER}/${SERVER_REPOSITORY}"
-          workflow_url="https://github.com/${server_full_name}/actions/workflows/securefix.yml"
-          query=$(jq -nr --arg q 'workflow:Securefix' '$q|@uri')
-          filter_url="https://github.com/${server_full_name}/actions?query=${query}"
-
-          pr_url=$(
-            gh pr list --repo "$GITHUB_REPOSITORY" \
-              --head release/next --base main --state open \
-              --json url --jq '.[0].url // empty'
-          )
-
-          {
-            echo "## Follow on securefix-server"
-            echo ""
-            echo "Requested Securefix to prepare release \`v${VERSION}\` on \`release/next\`."
-            echo ""
-            echo "The signed commit / PR update continues there (not in this repository):"
-            echo ""
-            echo "- **Securefix runs:** ${filter_url}"
-            echo "- **Securefix workflow:** ${workflow_url}"
-            if [ -n "$pr_url" ]; then
-              echo "- **Client release PR:** ${pr_url}"
-            else
-              echo "- **Client release branch:** https://github.com/${GITHUB_REPOSITORY}/tree/release/next"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "Server follow-up:"
-          echo "  $filter_url"
-          echo "  $workflow_url"
-          if [ -n "$pr_url" ]; then
-            echo "Client release PR: $pr_url"
-          fi

@@ -1,59 +1,55 @@
-name: Reusable Approve Request
-
+name: Policy Request
 on:
   workflow_call:
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
-
 permissions: {}
-
 jobs:
-  build:
+  cli:
     uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
       attestations: read
 
-  capture:
-    needs: build
+  request:
+    needs: cli
     runs-on: ubuntu-latest
-    environment: ${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}
     permissions:
+      actions: read
       contents: read
-      issues: read
       pull-requests: read
     timeout-minutes: 10
     env:
-      GITHUB_TOKEN: ${{ github.token }}
-      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
           path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
         with:
           binary: ${{ runner.temp }}/securefix-runtime/securefix
-      - name: Capture and validate the approval request
-        run: securefix request capture-approve
+      - run: securefix check capture
+        id: capture
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: securefix-request-${{ github.run_id }}
-          path: request/manifest.json
+          name: ${{ steps.capture.outputs.artifact_name }}
+          path: policy-request/manifest.json
           if-no-files-found: error
           retention-days: 1
-          overwrite: false
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: client-token
+        id: app
         with:
-          app-id: ${{ vars.SECUREFIX_CLIENT_APP_ID || '3872492' }}
+          app-id: '3872492'
           private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
           owner: civitaspo
           repositories: securefix-server
           permission-issues: write
-      - name: Dispatch the request to Securefix Server
+      - run: securefix check dispatch
         env:
-          SECUREFIX_APP_TOKEN: ${{ steps.client-token.outputs.token }}
-        run: securefix request dispatch
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_APP_TOKEN: ${{ steps.app.outputs.token }}

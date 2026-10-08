@@ -1,69 +1,85 @@
 name: Securefix
-
 on:
   label:
-    types:
-      - created
-
+    types: [created]
 permissions: {}
-
 concurrency:
   group: securefix-${{ github.event.label.name }}
   cancel-in-progress: false
-
 jobs:
+  runtime:
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      contents: read
+      attestations: read
   fix:
+    needs: runtime
     if: startsWith(github.event.label.name, 'securefix-')
     runs-on: ubuntu-latest
     environment: main
+    timeout-minutes: 15
     permissions:
+      contents: read
+      actions: read
       issues: write
-    timeout-minutes: 10
-
+      pull-requests: read
     steps:
-      - name: Checkout Securefix configuration
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          persist-credentials: false
-          sparse-checkout: securefix-config.yaml
-          sparse-checkout-cone-mode: false
-
-      - name: Prepare Securefix request
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - name: Validate label event and source capability
+        id: event
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+        run: securefix securefix validate-event
+      - name: Prepare fix with Securefix Action
         id: prepare
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
           action: prepare
-          allow_workflow_fix: true
-          app_id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
+          app_id: "3872533"
           app_private_key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          config_file: securefix-config.yaml
+          label_name: ${{ steps.event.outputs.source_label }}
+          label_description: ${{ github.event.label.description }}
           workflow_name: ""
-
-      - name: Allowlist client workflows
+          allow_workflow_fix: "true"
+          allow_members_read: "false"
+          allow_organization_projects_write: "false"
+          config_file: ${{ runner.temp }}/securefix-runtime/securefix-config.yaml
+          delete_label: "true"
+          github_token_to_delete_label: ${{ github.token }}
+      - name: Validate Securefix prepare outputs
+        id: gate
         env:
-          WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
-        run: |
-          set -euo pipefail
-          name=$(printf '%s' "$WORKFLOW_RUN" | jq -r '.name')
-          case "$name" in
-            CI|Release\ PR)
-              echo "Allowed client workflow: $name"
-              ;;
-            *)
-              echo "Denied client workflow: $name" >&2
-              exit 1
-              ;;
-          esac
-
-      - name: Create Securefix commit
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          SECUREFIX_CLIENT_REPOSITORY: ${{ steps.prepare.outputs.client_repository }}
+          SECUREFIX_PUSH_REPOSITORY: ${{ steps.prepare.outputs.push_repository }}
+          SECUREFIX_BRANCH: ${{ steps.prepare.outputs.branch }}
+          SECUREFIX_WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
+          SECUREFIX_PULL_REQUEST: ${{ steps.prepare.outputs.pull_request }}
+          SECUREFIX_CREATE_PULL_REQUEST: ${{ steps.prepare.outputs.create_pull_request }}
+        run: securefix securefix validate-prepared
+      - name: Apply fix with Securefix Action
+        id: commit
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
           action: commit
-          outputs: ${{ toJson(steps.prepare.outputs) }}
-
-      - name: Notify Securefix failure
-        if: failure()
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+          outputs: ${{ toJSON(steps.prepare.outputs) }}
+      - name: Notify validated fix failure
+        if: failure() && steps.gate.outcome == 'success' && steps.commit.outcome == 'failure'
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
           action: notify
-          outputs: ${{ toJson(steps.prepare.outputs) }}
+          outputs: ${{ toJSON(steps.prepare.outputs) }}
+          commit_error: ${{ steps.commit.outputs.error }}

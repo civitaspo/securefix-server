@@ -1,0 +1,113 @@
+name: Policy Check
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  label:
+    types: [created]
+permissions: {}
+jobs:
+  cli:
+    if: github.event_name != 'label' || startsWith(github.event.label.name, 'policy-request-')
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      contents: read
+      attestations: read
+  request:
+    if: github.event_name != 'label' && github.run_attempt == 1
+    needs: cli
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - run: securefix check capture
+        id: capture
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.capture.outputs.artifact_name }}
+          path: policy-request/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app
+        with:
+          app-id: '3872492'
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-issues: write
+      - run: securefix check dispatch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_APP_TOKEN: ${{ steps.app.outputs.token }}
+  process:
+    if: github.event_name == 'label' && startsWith(github.event.label.name, 'policy-request-') && github.event.sender.id == 288068203 && github.run_attempt == 1
+    needs: cli
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 10
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - run: securefix check locate
+        id: locate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.locate.outputs.repository_name }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+      - run: securefix check validate
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: write
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.locate.outputs.repository_name }}
+          permission-checks: write
+      - run: securefix check apply
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.write.outputs.token }}
+      - if: always()
+        run: securefix check cleanup
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,22 @@
+name: Install Securefix CLI
+description: Install a verified Securefix CLI on PATH
+inputs:
+  binary:
+    description: Path to the verified Securefix executable
+    required: true
+outputs:
+  binary:
+    description: Absolute path to the installed Securefix executable
+    value: ${{ steps.install.outputs.binary }}
+runs:
+  using: composite
+  steps:
+    - name: Install CLI on PATH
+      id: install
+      shell: bash
+      env:
+        SECUREFIX_BINARY: ${{ inputs.binary }}
+      run: |
+        install -D -m 755 "$SECUREFIX_BINARY" "$RUNNER_TEMP/securefix-bin/securefix"
+        echo "$RUNNER_TEMP/securefix-bin" >> "$GITHUB_PATH"
+        echo "binary=$RUNNER_TEMP/securefix-bin/securefix" >> "$GITHUB_OUTPUT"
