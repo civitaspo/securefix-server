@@ -45,7 +45,7 @@ jobs:
             const label = context.payload.label
             const match = /^merge-request-([0-9]+)$/.exec(label.name)
             const fields = /^civitaspo\/([A-Za-z0-9._-]{1,100})\/([0-9]+)$/.exec(label.description || '')
-            if (!match || !fields || match[1] !== fields[2] || context.runAttempt !== 1 ||
+            if (!match || !fields || match[1] !== fields[2] || Number(process.env.GITHUB_RUN_ATTEMPT) !== 1 ||
                 context.payload.sender?.id !== 288068203 || context.payload.sender?.type !== 'Bot') {
               core.setFailed('The merge label must contain only a valid source repository and run locator.')
               return

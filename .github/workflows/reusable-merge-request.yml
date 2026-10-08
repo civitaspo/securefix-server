@@ -90,7 +90,7 @@ jobs:
               },
               acceptedAt,
               runId: context.runId,
-              runAttempt: context.runAttempt,
+              runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
               workflowSha: context.sha,
             }
             const directory = join(process.env.GITHUB_WORKSPACE, 'merge-request')

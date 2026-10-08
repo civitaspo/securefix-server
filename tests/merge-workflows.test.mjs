@@ -35,7 +35,7 @@ async function run(script, { github, context = {}, env = {}, core = {}, clock } 
     summary: { addHeading() { return this }, addRaw() { return this }, async write() {} },
     ...core,
   }
-  const actionProcess = { env: { ...env } }
+  const actionProcess = { env: { GITHUB_RUN_ATTEMPT: '1', ...env } }
   const clockDate = clock?.Date || Date
   const timeout = clock?.setTimeout || setTimeout
   await vm.runInNewContext(`(async () => {\n${script}\n})()`, {
@@ -193,7 +193,7 @@ test('intake records the request snapshot before creating a server label', async
       },
     }
     const result = await run(scriptFor('.github/workflows/reusable-merge-request.yml', 'Capture the merge request'), {
-      context: { payload: { comment, repository, issue: { number: 7 } }, runId: 9, runAttempt: 1, sha: workflowSha },
+      context: { payload: { comment, repository, issue: { number: 7 } }, runId: 9, sha: workflowSha },
       env: { GITHUB_WORKSPACE: workspace },
       github,
     })
@@ -303,6 +303,21 @@ test('server rejects missing, duplicate, or expired source artifacts', async t =
   })
 })
 
+test('server accepts an authenticated first attempt without a context runAttempt property', async () => {
+  const result = await run(scriptFor('.github/workflows/merge.yml', 'Resolve the source run locator'), {
+    env: { VERIFICATION_REPOSITORY: 'civitaspo/example', GITHUB_RUN_ATTEMPT: '1' },
+    context: { payload: {
+      label: { name: 'merge-request-9', description: 'civitaspo/example/9' },
+      sender: { id: 288068203, type: 'Bot' },
+    } },
+    github: {},
+  })
+  assert.deepEqual(result.errors, [])
+  assert.deepEqual(result.outputs, {
+    repository: 'civitaspo/example', repository_name: 'example', run_id: '9',
+  })
+})
+
 test('server rejects a label created by a human', async () => {
   const result = await run(scriptFor('.github/workflows/merge.yml', 'Resolve the source run locator'), {
     env: { VERIFICATION_REPOSITORY: '' },
@@ -318,11 +333,11 @@ test('server rejects a label created by a human', async () => {
 
 test('server rejects a label workflow rerun', async () => {
   const result = await run(scriptFor('.github/workflows/merge.yml', 'Resolve the source run locator'), {
-    env: { VERIFICATION_REPOSITORY: '' },
+    env: { VERIFICATION_REPOSITORY: '', GITHUB_RUN_ATTEMPT: '2' },
     context: { payload: {
       label: { name: 'merge-request-9', description: 'civitaspo/example/9' },
       sender: { id: 288068203, type: 'Bot' },
-    }, runAttempt: 2 },
+    } },
     github: {},
   })
   assert.deepEqual(result.errors, ['The merge label must contain only a valid source repository and run locator.'])
