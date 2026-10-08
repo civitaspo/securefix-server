@@ -32,7 +32,7 @@ async function run(script, { github, context = {}, env = {}, core = {}, clock } 
     setOutput(name, value) { outputs[name] = value },
     info() {},
     warning() {},
-    summary: { addHeading() { return this }, addText() { return this }, async write() {} },
+    summary: { addHeading() { return this }, addRaw() { return this }, async write() {} },
     ...core,
   }
   const actionProcess = { env: { ...env } }

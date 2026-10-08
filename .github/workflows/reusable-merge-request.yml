@@ -140,5 +140,5 @@ jobs:
               description,
             })
             core.summary.addHeading('Merge request sent to Securefix Server')
-              .addText(`Request ${process.env.SOURCE_RUN_ID} for ${process.env.SOURCE_REPOSITORY} is queued for validation.`)
+              .addRaw(`Request ${process.env.SOURCE_RUN_ID} for ${process.env.SOURCE_REPOSITORY} is queued for validation.`)
             await core.summary.write()
