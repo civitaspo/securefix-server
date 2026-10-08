@@ -65,5 +65,6 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 CI also runs pinned actionlint and structural workflow tests.
+The [Rust GitHub verification](docs/github-verification-2026-10-08.md) records PR CI, isolated live API checks, and the remaining deployment tests.
 See [migration and rollout](docs/migration.md), the [domain glossary](CONTEXT.md), and [architecture decisions](docs/adr/).
 The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence; the Rust implementation still needs deployment validation before activation.

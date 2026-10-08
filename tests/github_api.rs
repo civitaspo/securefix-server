@@ -81,8 +81,10 @@ fn live_commit_api_guard_cas_signature_and_stale_merge() -> Result<()> {
         deletions: vec![],
     });
     ensure!(
-        stale_result.is_err(),
-        "stale expectedHeadOid unexpectedly committed"
+        stale_result.as_ref().err().is_some_and(|error| {
+            error.to_string() == "GitHub rejected the commit; the branch may have changed"
+        }),
+        "stale expectedHeadOid did not receive a semantic GitHub rejection"
     );
     ensure!(
         branch_head(&api, &repository, &branch)? == first_commit,
