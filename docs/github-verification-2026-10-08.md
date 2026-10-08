@@ -150,3 +150,30 @@ The test now waits with a bounded retry for GitHub's PR head representation befo
 The Rust approval implementation remains because this upstream version cannot preserve owner authorization of a captured head when a later head arrives before its lookup.
 See the [integration decision](adr/0005-upstream-securefix-protocol.md).
 Full privileged workflow E2E, including replacement Securefix intake and cleanup, still requires deployment under the accepted production revision and environment restrictions.
+
+## Branches, CLI installation, and staging CI follow-up (2026-10-09)
+
+The seven exact Securefix client repositories now have branch patterns `**` for both source and push branches.
+The pinned distributed action accepted this configuration with `validate-config` locally, without credentials or writes.
+Rust still rejects a different destination repository and direct default-branch pushes.
+Ordinary PR CI can update only its own source branch; a trusted default-branch release-PR workflow can choose any non-default destination after the release capability and provenance checks.
+The product release commands retain `release/next` as their working branch convention.
+
+All operational jobs install the supplied runtime through one `install-cli` composite action and invoke `securefix` on `PATH`.
+Runtime, policy, configuration, and settings downloads live under `runner.temp`, outside client checkout and artifact extraction.
+The [checkout-free action prototype](https://github.com/civitaspo/testing-securefix-server/actions/runs/37802713895) passed at scratch commit `948b88e4b948a521434f4e9320d8732ed7abae5a`.
+Its native `$/` reference resolved to the defining workflow's repository and running commit.
+GitHub documents that resolution for [reusable workflows called from another repository](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#example-using-an-action-in-the-same-repository-as-the-workflow-at-the-running-commit-recommended).
+Pinned actionlint v1.7.12 does not recognize this new syntax; CI suppresses only its specific diagnostic for `$/.github/actions/install-cli`, alongside its existing `job.workflow_sha` compatibility diagnostic.
+Rust structural tests require the known installer path and immutable runtime source rather than accepting arbitrary unpinned actions.
+The final local suite passes 82 Rust tests, with three credential-dependent live tests ignored.
+Formatting, warnings-denied Clippy, actionlint with these two compatibility diagnostics excluded, and whitespace checks pass.
+An independent same-model security review found no remaining proven blocker; the comment review required no deletions.
+The release-PR and provider-build workflows install the CLI after their PATH-changing tool setup so subsequent commands resolve the installed executable.
+
+The dedicated [scratch testing workflow](../.github/workflows/testing-securefix-server.yml) builds a reviewed server SHA without custom secrets and uploads one immutable same-run artifact.
+Its separate probe job checks CLI discovery, mode `755`, valid and invalid policy, the upstream configuration, and an exact-scratch metadata-only Client App token.
+It creates no Release and needs no additional secret or cross-repository artifact credential.
+Production runtime publication is now an owner-only manual dispatch on server main.
+The exact-current-main guard remains: operations stop after main advances until that stable revision is promoted and caller pins are updated.
+Full privileged lifecycle E2E remains a deployment check.

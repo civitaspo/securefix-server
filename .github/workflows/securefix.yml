@@ -27,10 +27,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - name: Restore trusted runtime permissions
-        run: chmod 700 "$RUNNER_TEMP/securefix/securefix"
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Validate label event and source capability
         id: event
         env:
@@ -38,8 +39,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
-        working-directory: ${{ runner.temp }}/securefix
-        run: ./securefix securefix validate-event
+        run: securefix securefix validate-event
       - name: Prepare fix with Securefix Action
         id: prepare
         uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
@@ -53,7 +53,7 @@ jobs:
           allow_workflow_fix: "true"
           allow_members_read: "false"
           allow_organization_projects_write: "false"
-          config_file: ${{ runner.temp }}/securefix/securefix-config.yaml
+          config_file: ${{ runner.temp }}/securefix-runtime/securefix-config.yaml
           delete_label: "true"
           github_token_to_delete_label: ${{ github.token }}
       - name: Validate Securefix prepare outputs
@@ -69,8 +69,7 @@ jobs:
           SECUREFIX_WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
           SECUREFIX_PULL_REQUEST: ${{ steps.prepare.outputs.pull_request }}
           SECUREFIX_CREATE_PULL_REQUEST: ${{ steps.prepare.outputs.create_pull_request }}
-        working-directory: ${{ runner.temp }}/securefix
-        run: ./securefix securefix validate-prepared
+        run: securefix securefix validate-prepared
       - name: Apply fix with Securefix Action
         id: commit
         uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3

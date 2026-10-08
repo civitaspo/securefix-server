@@ -30,10 +30,12 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - run: chmod +x runtime/securefix
-      - run: runtime/securefix check capture
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - run: securefix check capture
         id: capture
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -51,7 +53,7 @@ jobs:
           owner: civitaspo
           repositories: securefix-server
           permission-issues: write
-      - run: runtime/securefix check dispatch
+      - run: securefix check dispatch
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_APP_TOKEN: ${{ steps.app.outputs.token }}
@@ -70,10 +72,12 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - run: chmod +x runtime/securefix
-      - run: runtime/securefix check locate
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - run: securefix check locate
         id: locate
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -88,7 +92,7 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
           permission-checks: read
-      - run: runtime/securefix check validate
+      - run: securefix check validate
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -99,11 +103,11 @@ jobs:
           owner: civitaspo
           repositories: ${{ steps.locate.outputs.repository_name }}
           permission-checks: write
-      - run: runtime/securefix check apply
+      - run: securefix check apply
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
           SECUREFIX_WRITE_TOKEN: ${{ steps.write.outputs.token }}
       - if: always()
-        run: runtime/securefix check cleanup
+        run: securefix check cleanup
         env:
           GITHUB_TOKEN: ${{ github.token }}

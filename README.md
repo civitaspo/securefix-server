@@ -4,11 +4,13 @@ Privileged OSS automation for civitaspo repositories, based on the client/server
 The Rust `securefix` executable owns approval, merge, release, settings, and request validation.
 GitHub Actions workflows route events, load the verified prebuilt executable, isolate credentials, and call its commands.
 
-`Publish Runtime` builds once for each protected `main` commit and publishes `securefix-runtime-<full-SHA>` to GitHub Releases.
+After staging succeeds, the owner manually runs `Publish Runtime` on protected `main` to publish `securefix-runtime-<full-SHA>`.
+Intermediate commits and test candidates do not create Releases.
 `Load CLI` downloads that exact release and verifies its archive against the server SHA and publishing workflow's GitHub attestation before extraction.
 It transfers the verified runtime to execution jobs using an immutable same-run artifact ID.
 Normal operations never compile Rust; a missing release or failed verification stops the operation.
 See the [runtime distribution decision](docs/adr/0006-prebuilt-runtime.md) for provenance and retry behavior.
+Execution jobs use one `install-cli` composite action to install the executable with mode `755` on `PATH`; trusted runtime data stays under `runner.temp`.
 
 ## Policy and trust
 
@@ -26,7 +28,8 @@ Ordinary Renovate automerge remains possible under the same required checks and 
 Securefix uses pinned upstream `prepare`, `commit`, and `notify` actions for its artifact protocol and repair commits.
 Rust validates the Client App event, exact repository capabilities, source workflow provenance, and destination scope between preparation and commit.
 It accepts `CI` and `Release PR` workflows and denies direct default-branch pushes.
-The trusted [`securefix-config.yaml`](securefix-config.yaml) permits release-capable clients to prepare `release/next`; it travels with the attested runtime outside the client artifact workspace.
+The trusted [`securefix-config.yaml`](securefix-config.yaml) permits the fixed release-capable clients on any branch name; it travels with the attested runtime outside the client artifact workspace.
+PR CI fixes its own branch, and a trusted release-PR source can target any non-default branch in the same repository.
 Securefix requests may come from a running or failed CI run because the client deliberately fails after dispatching a same-branch fix.
 The [upstream integration decision](docs/adr/0005-upstream-securefix-protocol.md) records the accepted stale-artifact limitation and why approval remains in Rust.
 
@@ -74,6 +77,7 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 CI also runs pinned actionlint and structural workflow tests.
+The [scratch verification CI](docs/testing.md) builds a reviewed server revision in `testing-securefix-server` and transfers its executable by immutable same-run artifact ID, without publishing a Release.
 The [Rust GitHub verification](docs/github-verification-2026-10-08.md) records PR CI, isolated live API checks, and the remaining deployment tests.
 See [migration and rollout](docs/migration.md), the [domain glossary](CONTEXT.md), and [architecture decisions](docs/adr/).
 The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence; the Rust implementation still needs deployment validation before activation.

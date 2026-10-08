@@ -48,15 +48,20 @@ jobs:
         run: cargo +1.99.0 clippy --locked --all-targets -- -D warnings
 
       - uses: ./.github/actions/setup-cli
+        id: build-cli
+
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ steps.build-cli.outputs.binary }}
 
       - name: Verify release executable
-        run: target/release/securefix runtime publish --help
+        run: securefix runtime publish --help
 
       - name: Run actionlint
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           -shellcheck=
-          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:'
+          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/install-cli" in invalid format because ref is missing'
 
   status-check:
     runs-on: ubuntu-latest

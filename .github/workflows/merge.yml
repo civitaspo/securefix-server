@@ -39,10 +39,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - name: Restore trusted CLI executable mode
-        run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: read-token
         with:
@@ -59,7 +60,7 @@ jobs:
         id: validate
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
-        run: runtime/securefix merge validate
+        run: securefix merge validate
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: steps.validate.outcome == 'success'
         id: authorization-token
@@ -77,13 +78,13 @@ jobs:
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_AUTHORIZATION_TOKEN: ${{ steps.authorization-token.outputs.token }}
-        run: runtime/securefix merge authorize
+        run: securefix merge authorize
       - name: Wait for current checks and review approval
         id: wait
         if: steps.authorize.outcome == 'success'
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
-        run: runtime/securefix merge wait
+        run: securefix merge wait
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: steps.wait.outcome == 'success'
         id: merge-token
@@ -100,7 +101,7 @@ jobs:
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
-        run: runtime/securefix merge apply
+        run: securefix merge apply
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: always() && steps.validate.outcome == 'success'
         id: notify-token
@@ -117,7 +118,7 @@ jobs:
           SECUREFIX_NOTIFY_TOKEN: ${{ steps.notify-token.outputs.token }}
           SECUREFIX_MERGE_RESULT: ${{ steps.apply.outcome }}
           SECUREFIX_MERGE_SHA: ${{ steps.apply.outputs.merge_sha }}
-        run: runtime/securefix merge notify
+        run: securefix merge notify
 
   cleanup:
     needs: [build, merge]
@@ -132,11 +133,12 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - name: Restore trusted CLI executable mode
-        run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Delete the one-time request label
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: runtime/securefix merge cleanup
+        run: securefix merge cleanup

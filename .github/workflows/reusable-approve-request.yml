@@ -31,12 +31,13 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - name: Restore trusted CLI executable mode
-        run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Capture and validate the approval request
-        run: runtime/securefix request capture-approve
+        run: securefix request capture-approve
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: securefix-request-${{ github.run_id }}
@@ -55,4 +56,4 @@ jobs:
       - name: Dispatch the request to Securefix Server
         env:
           SECUREFIX_APP_TOKEN: ${{ steps.client-token.outputs.token }}
-        run: runtime/securefix request dispatch
+        run: securefix request dispatch

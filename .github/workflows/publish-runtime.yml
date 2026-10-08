@@ -1,7 +1,6 @@
 name: Publish Runtime
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 permissions: {}
 defaults:
   run:
@@ -11,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main'
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -79,7 +78,9 @@ jobs:
           --deny-self-hosted-runners
       - name: Stage verified publisher
         run: |
-          mkdir runtime
-          tar -xzf distribution/securefix-runtime-linux-x86_64.tar.gz -C runtime --no-same-owner
-          chmod 755 runtime/securefix
-      - run: runtime/securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz
+          mkdir "$RUNNER_TEMP/securefix-runtime"
+          tar -xzf distribution/securefix-runtime-linux-x86_64.tar.gz -C "$RUNNER_TEMP/securefix-runtime" --no-same-owner
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - run: securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz

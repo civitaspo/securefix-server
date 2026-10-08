@@ -35,9 +35,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Validate merged release PR
         id: resolve
         env:
@@ -45,7 +47,7 @@ jobs:
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           RELEASE_PR_NUMBER: ${{ inputs.release_pr_number || github.event.pull_request.number }}
         run: |
-          runtime/securefix release resolve-pr --release-pr-number "$RELEASE_PR_NUMBER"
+          securefix release resolve-pr --release-pr-number "$RELEASE_PR_NUMBER"
           echo "pr_number=$RELEASE_PR_NUMBER" >> "$GITHUB_OUTPUT"
 
   build:
@@ -58,26 +60,28 @@ jobs:
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
-          merge-multiple: true
-      - run: chmod 755 runtime/securefix
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           cache: false
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Build fixed provider target matrix
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
-        run: runtime/securefix release build-provider --release-pr-number "$RELEASE_PR_NUMBER"
+        run: securefix release build-provider --release-pr-number "$RELEASE_PR_NUMBER"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
@@ -98,9 +102,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Create and verify release tag manifest
         id: manifest
         env:
@@ -108,7 +114,7 @@ jobs:
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           PROVIDER_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id || '0' }}
-        run: runtime/securefix release tag-pr --release-pr-number "$RELEASE_PR_NUMBER" --artifact-id "$PROVIDER_ARTIFACT_ID"
+        run: securefix release tag-pr --release-pr-number "$RELEASE_PR_NUMBER" --artifact-id "$PROVIDER_ARTIFACT_ID"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-manifest
@@ -129,4 +135,4 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.server-token.outputs.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
-        run: runtime/securefix release request-server
+        run: securefix release request-server

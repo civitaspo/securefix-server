@@ -8,7 +8,9 @@ entries:
         - civitaspo/herdr-linear-agent
         - civitaspo/hook-relay-client-rs
         - civitaspo/herdr-infobox
+      branches:
+        - "**"
     push:
       branches:
-        - release/next
+        - "**"
     pull_request: {}

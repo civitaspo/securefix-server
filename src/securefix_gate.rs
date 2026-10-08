@@ -163,10 +163,6 @@ fn validate_prepared_source(
         p.repository(source_repository)?
             .require(Capability::Release)?;
         validate_release_provenance(api, p, &workflow_run, source_repository, source_sha)?;
-        ensure!(
-            prepared.branch == "release/next",
-            "default-branch fixes may only update release/next"
-        );
         if let Some(options) = nonempty(prepared.create_pull_request.as_deref()) {
             validate_pull_request_options(options, default_branch)?;
         }
@@ -353,11 +349,7 @@ fn validate_destination(
         "Securefix may not directly update a default branch"
     );
     ensure!(
-        if source_branch == default_branch {
-            destination == "release/next"
-        } else {
-            destination == source_branch
-        },
+        source_branch == default_branch || destination == source_branch,
         "Securefix destination branch is outside the allowed scope"
     );
     Ok(())
@@ -586,7 +578,7 @@ mod tests {
             let prepared = PreparedFix {
                 client_repository: repository.into(),
                 push_repository: repository.into(),
-                branch: "release/next".into(),
+                branch: "release/feature/2026-10".into(),
                 workflow_run: run.to_string(),
                 pull_request: Some(String::new()),
                 create_pull_request: Some(
@@ -633,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_must_be_same_repo_non_default_and_policy_branch() {
+    fn destination_must_be_same_repo_non_default_and_source_branch_for_prs() {
         assert!(
             validate_destination(
                 "civitaspo/example",
@@ -667,11 +659,24 @@ mod tests {
             )
             .is_err()
         );
+        for destination in ["feature/ai-fix", "release/next", "release/2026-q4"] {
+            assert!(
+                validate_destination(
+                    "civitaspo/example",
+                    "civitaspo/example",
+                    destination,
+                    "civitaspo/example",
+                    "main",
+                    "main"
+                )
+                .is_ok()
+            );
+        }
         assert!(
             validate_destination(
                 "civitaspo/example",
                 "civitaspo/example",
-                "other",
+                "main",
                 "civitaspo/example",
                 "main",
                 "main"
@@ -682,10 +687,10 @@ mod tests {
             validate_destination(
                 "civitaspo/example",
                 "civitaspo/example",
-                "release/next",
+                "other",
                 "civitaspo/example",
-                "main",
-                "trunk"
+                "feature/source",
+                "main"
             )
             .is_err()
         );

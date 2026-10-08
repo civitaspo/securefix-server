@@ -7,7 +7,9 @@ This keeps client protocol changes with their upstream implementation instead of
 
 The runtime and `securefix-config.yaml` come from the same attested server archive and stay outside `GITHUB_WORKSPACE`.
 Preparation extracts client files into that workspace; those files must not replace the executable or authorization configuration.
-The config permits only the seven release-capable clients to push from their protected default branch to their own `release/next`.
+The config permits the seven fixed release-capable clients on any branch name, with the destination repository kept the same as the source.
+Rust permits a trusted default-branch release-PR source to target any non-default branch, after checking release capability and the pinned reusable workflow provenance.
+PR CI fixes still target their own branch; the separate release product commands continue using `release/next`.
 Same-branch fixes bypass upstream config matching, so Rust still checks the exact source repository and workflow.
 Default-branch writes and cross-repository writes remain forbidden by that gate.
 

@@ -41,8 +41,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Prepare desired reconciliation
         id: cli
         env:
@@ -53,8 +56,8 @@ jobs:
           INPUT_MERGE_CONTROLS_READY: ${{ inputs.merge_controls_ready }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-        working-directory: runtime
-        run: chmod +x ./securefix && ./securefix settings prepare
+        working-directory: ${{ runner.temp }}/securefix-runtime
+        run: securefix settings prepare
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: steps.cli.outputs.activate_merge_controls == 'true'
         id: app-token
@@ -77,8 +80,8 @@ jobs:
           INPUT_REPOSITORY: ${{ inputs.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-        working-directory: runtime
-        run: ./securefix settings activation-preflight
+        working-directory: ${{ runner.temp }}/securefix-runtime
+        run: securefix settings activation-preflight
   reconcile:
     needs: [build, prepare]
     runs-on: ubuntu-latest
@@ -93,8 +96,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Reconcile repository settings
         env:
           GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
@@ -103,8 +109,8 @@ jobs:
           INPUT_CREATE_IF_MISSING: ${{ inputs.create_if_missing }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-        working-directory: runtime
-        run: chmod +x ./securefix && ./securefix settings reconcile --repository "$REPOSITORY"
+        working-directory: ${{ runner.temp }}/securefix-runtime
+        run: securefix settings reconcile --repository "$REPOSITORY"
   controlled-merges:
     needs: [build, prepare, reconcile]
     if: needs.prepare.outputs.activate == 'true' || github.event_name == 'schedule'
@@ -116,8 +122,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Mint scoped token for controlled merge checks
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
@@ -138,5 +147,5 @@ jobs:
           INPUT_REPOSITORY: ${{ inputs.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-        working-directory: runtime
-        run: chmod +x ./securefix && ./securefix settings controlled-merges
+        working-directory: ${{ runner.temp }}/securefix-runtime
+        run: securefix settings controlled-merges

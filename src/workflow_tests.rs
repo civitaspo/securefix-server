@@ -13,11 +13,18 @@ fn workflows() -> Vec<(String, Value)> {
 }
 
 fn workflow(name: &str) -> Value {
-    serde_yaml::from_slice(
+    let mut yaml: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(".github/workflows/{name}"))
             .unwrap_or_else(|error| panic!("cannot read {name}: {error}")),
     )
-    .unwrap_or_else(|error| panic!("cannot parse {name}: {error}"))
+    .unwrap_or_else(|error| panic!("cannot parse {name}: {error}"));
+    // serde_yaml follows YAML 1.1 and parses GitHub Actions' `on` key as true.
+    if let Some(mapping) = yaml.as_mapping_mut()
+        && let Some(on) = mapping.remove(serde_yaml::Value::Bool(true))
+    {
+        mapping.insert(serde_yaml::Value::String("on".into()), on);
+    }
+    serde_json::to_value(yaml).unwrap()
 }
 
 #[test]
@@ -57,7 +64,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                 let Some(uses) = step["uses"].as_str() else {
                     continue;
                 };
-                if !uses.starts_with("./") {
+                if !uses.starts_with("./") && !uses.starts_with("$/") {
                     let (_, revision) = uses.rsplit_once('@').unwrap();
                     assert!(
                         securefix::policy::validate_sha(revision).is_ok(),
@@ -210,16 +217,13 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     );
 
     let publisher = workflow("publish-runtime.yml");
+    assert!(publisher["on"].get("workflow_dispatch").is_some());
+    assert!(publisher["on"].get("push").is_none());
     assert_eq!(
-        publisher["on"]["push"]["branches"],
-        serde_json::json!(["main"])
+        publisher["jobs"]["build"]["if"],
+        "github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'"
     );
-    assert!(publisher["on"].get("workflow_dispatch").is_none());
     let build = &publisher["jobs"]["build"];
-    assert_eq!(
-        build["if"],
-        "github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main'"
-    );
     assert_eq!(
         build["permissions"],
         serde_json::json!({
@@ -316,10 +320,13 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     });
     let invoked = publish_index(&|step| {
         step["run"].as_str().is_some_and(|run| {
-            run.contains("runtime/securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz")
+            run.contains("securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz")
         })
     });
-    assert!(downloaded < verified && verified < staged && staged < invoked);
+    let installed = publish_index(&|step| step["uses"] == "$/.github/actions/install-cli");
+    assert!(
+        downloaded < verified && verified < staged && staged < installed && installed < invoked
+    );
     let verification = publish_steps[verified]["run"].as_str().unwrap();
     for required in [
         "--repo civitaspo/securefix-server",
@@ -374,7 +381,8 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         setup_users,
         [
             ".github/workflows/ci.yml",
-            ".github/workflows/publish-runtime.yml"
+            ".github/workflows/publish-runtime.yml",
+            ".github/workflows/testing-securefix-server.yml"
         ],
         "only secret-free CI and runtime producer compile CLI"
     );
@@ -386,6 +394,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             continue;
         }
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
+            if path == ".github/workflows/testing-securefix-server.yml" && job_id == "build" {
+                continue;
+            }
             for step in job["steps"].as_array().into_iter().flatten() {
                 if let Some(run) = step["run"].as_str() {
                     assert!(
@@ -396,9 +407,16 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             }
         }
     }
-    let composite = fs::read_to_string(".github/actions/setup-cli/action.yml").unwrap();
-    assert!(composite.contains("build --locked --release"));
-    assert!(!composite.contains("secrets."));
+    let setup = fs::read_to_string(".github/actions/setup-cli/action.yml").unwrap();
+    assert!(setup.contains("build --locked --release"));
+    assert!(!setup.contains("secrets."));
+    let installer: Value =
+        serde_yaml::from_slice(&fs::read(".github/actions/install-cli/action.yml").unwrap())
+            .unwrap();
+    let install = installer["runs"]["steps"][0]["run"].as_str().unwrap();
+    assert!(install.contains("install -D -m 755"));
+    assert!(install.contains("$GITHUB_PATH"));
+    assert!(installer["inputs"].get("binary").is_some());
 }
 
 #[test]
@@ -416,7 +434,10 @@ fn securefix_uses_the_pinned_upstream_action_behind_the_rust_policy_gate() {
                 .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
         })
         .unwrap();
-    assert_eq!(download["with"]["path"], "${{ runner.temp }}/securefix");
+    assert_eq!(
+        download["with"]["path"],
+        "${{ runner.temp }}/securefix-runtime"
+    );
     let position = |name: &str| {
         steps
             .iter()
@@ -444,7 +465,7 @@ fn securefix_uses_the_pinned_upstream_action_behind_the_rust_policy_gate() {
     assert_eq!(prepare["with"]["allow_workflow_fix"], "true");
     assert_eq!(
         prepare["with"]["config_file"],
-        "${{ runner.temp }}/securefix/securefix-config.yaml"
+        "${{ runner.temp }}/securefix-runtime/securefix-config.yaml"
     );
     let gate = &steps[gate];
     for output in [
@@ -471,7 +492,7 @@ fn securefix_uses_the_pinned_upstream_action_behind_the_rust_policy_gate() {
 }
 
 #[test]
-fn securefix_config_only_allows_release_clients_to_create_release_next_prs() {
+fn securefix_config_allows_every_branch_for_exact_policy_clients() {
     let config: Value =
         serde_yaml::from_slice(&fs::read("securefix-config.yaml").unwrap()).unwrap();
     let entries = config["entries"].as_array().unwrap();
@@ -497,12 +518,9 @@ fn securefix_config_only_allows_release_clients_to_create_release_next_prs() {
         .map(|repository| repository.repository.clone())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(allowed, expected);
-    assert!(entries[0]["client"].get("branches").is_none());
+    assert_eq!(entries[0]["client"]["branches"], serde_json::json!(["**"]));
     assert!(entries[0]["push"].get("repositories").is_none());
-    assert_eq!(
-        entries[0]["push"]["branches"],
-        serde_json::json!(["release/next"])
-    );
+    assert_eq!(entries[0]["push"]["branches"], serde_json::json!(["**"]));
     assert_eq!(entries[0]["pull_request"], serde_json::json!({}));
     let publisher: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/publish-runtime.yml").unwrap())
@@ -520,7 +538,7 @@ fn securefix_config_only_allows_release_clients_to_create_release_next_prs() {
 }
 
 #[test]
-fn cli_jobs_restore_executable_mode_and_supply_runtime_identity() {
+fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
     for (path, workflow) in workflows() {
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             let Some(steps) = job["steps"].as_array() else {
@@ -530,12 +548,46 @@ fn cli_jobs_restore_executable_mode_and_supply_runtime_identity() {
                 step["uses"]
                     .as_str()
                     .is_some_and(|u| u.starts_with("actions/download-artifact@"))
-                    && step["with"]["path"]
-                        .as_str()
-                        .is_some_and(|p| p == "runtime" || p == "distribution")
+                    && step["with"]["artifact-ids"].is_string()
             });
-            let mut executable = !downloads_cli;
-            for step in steps {
+            let installer = steps
+                .iter()
+                .position(|step| step["uses"] == "$/.github/actions/install-cli");
+            if downloads_cli {
+                assert!(
+                    installer.is_some(),
+                    "{path}/{job_id}: downloaded CLI must use the installer"
+                );
+                let download = steps
+                    .iter()
+                    .position(|step| {
+                        step["uses"].as_str().is_some_and(|u| {
+                            u.starts_with("actions/download-artifact@")
+                                && step["with"]["artifact-ids"].is_string()
+                        })
+                    })
+                    .unwrap();
+                assert!(
+                    download < installer.unwrap(),
+                    "{path}/{job_id}: install follows immutable artifact download"
+                );
+                let last_path_setup = steps.iter().rposition(|step| {
+                    step["uses"].as_str().is_some_and(|uses| {
+                        uses.starts_with("jdx/mise-action@")
+                            || uses.starts_with("actions/setup-go@")
+                            || uses.starts_with("actions/setup-node@")
+                            || uses.starts_with("actions/setup-python@")
+                            || uses.starts_with("actions/setup-java@")
+                    })
+                });
+                if let Some(setup) = last_path_setup {
+                    assert!(
+                        setup < installer.unwrap(),
+                        "{path}/{job_id}: install follows PATH-changing tool setup"
+                    );
+                }
+            }
+            for (index, step) in steps.iter().enumerate() {
                 let Some(run) = step["run"].as_str() else {
                     continue;
                 };
@@ -551,28 +603,27 @@ fn cli_jobs_restore_executable_mode_and_supply_runtime_identity() {
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust"
                 );
-                if run.contains("chmod") && run.contains("securefix") {
-                    executable = true;
-                }
-                let invokes_cli = run.lines().any(|line| {
-                    let line = line.trim();
-                    line.starts_with("runtime/securefix ")
-                        || line.starts_with("./securefix ")
-                        || line.starts_with("distribution/securefix ")
-                        || line.contains("&& runtime/securefix ")
-                        || line.contains("&& ./securefix ")
-                        || line.contains("&& distribution/securefix ")
-                });
+                assert!(
+                    !run.contains("chmod") || !run.contains("securefix"),
+                    "{path}/{job_id}: CLI permissions belong in installer action"
+                );
+                let invokes_cli = run
+                    .lines()
+                    .any(|line| line.trim().starts_with("securefix "));
                 if invokes_cli {
-                    assert!(
-                        executable,
-                        "{path}/{job_id}: artifact permissions need restoring"
-                    );
-                    assert!(
-                        job["env"]["SECUREFIX_SOURCE_SHA"].is_string()
-                            || step["env"]["SECUREFIX_SOURCE_SHA"].is_string(),
-                        "{path}/{job_id}: runtime revision required"
-                    );
+                    if let Some(installer) = installer {
+                        assert!(
+                            index > installer,
+                            "{path}/{job_id}: CLI must run after installer"
+                        );
+                    }
+                    if !run.contains("--help") && !run.contains("policy validate") {
+                        assert!(
+                            job["env"]["SECUREFIX_SOURCE_SHA"].is_string()
+                                || step["env"]["SECUREFIX_SOURCE_SHA"].is_string(),
+                            "{path}/{job_id}: runtime revision required"
+                        );
+                    }
                     if run.contains("request capture-") || run.contains("request dispatch") {
                         assert!(
                             job["env"]["GITHUB_TOKEN"].is_string()
@@ -584,6 +635,78 @@ fn cli_jobs_restore_executable_mode_and_supply_runtime_identity() {
             }
         }
     }
+}
+
+#[test]
+fn scratch_test_workflow_builds_and_probes_same_run_artifact_without_releases() {
+    let workflow = workflow("testing-securefix-server.yml");
+    assert!(
+        workflow["on"]
+            .get("workflow_call")
+            .is_some_and(Value::is_object)
+    );
+    assert_eq!(
+        workflow["on"]["workflow_call"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"]["required"],
+        true
+    );
+    let build = &workflow["jobs"]["build"];
+    let probe = &workflow["jobs"]["probe"];
+    let build_text = serde_json::to_string(build).unwrap();
+    assert!(!build_text.contains("secrets."));
+    assert!(build_text.contains("job.workflow_sha"));
+    assert_eq!(probe["needs"], "build");
+    let probe_text = serde_json::to_string(probe).unwrap();
+    assert!(probe_text.contains("github.actor_id == '4525500'"));
+    assert!(probe_text.contains("civitaspo/testing-securefix-server"));
+    assert!(probe_text.contains("$/.github/actions/install-cli"));
+    assert!(probe_text.contains("needs.build.outputs.artifact-id"));
+    assert!(probe_text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+    assert!(probe_text.contains("client_app_token_is_scoped_to_scratch_repository"));
+    assert!(!probe_text.contains("contents: write"));
+    assert!(!probe_text.contains("pull-requests: write"));
+    assert!(!probe_text.contains("releases/create"));
+    let probe_steps = probe["steps"].as_array().unwrap();
+    let token = probe_steps
+        .iter()
+        .position(|step| step["id"] == "client-token")
+        .unwrap();
+    let api_test = probe_steps
+        .iter()
+        .position(|step| step["name"] == "Confirm the Client App token is scoped to scratch")
+        .unwrap();
+    let validate_config = probe_steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Validate Securefix branch configuration with upstream action"
+        })
+        .unwrap();
+    assert!(validate_config < token && token < api_test);
+    assert_eq!(
+        probe_steps[token]["with"]["repositories"],
+        "testing-securefix-server"
+    );
+    assert_eq!(probe_steps[token]["with"]["permission-metadata"], "read");
+    assert_eq!(
+        probe_steps[api_test]["env"]["SECUREFIX_CLIENT_INSTALLATION_TOKEN"],
+        "${{ steps.client-token.outputs.token }}"
+    );
+    assert!(
+        probe_steps[api_test]["env"]
+            .get("SECUREFIX_CLIENT_PRIVATE_KEY")
+            .is_none()
+    );
+    assert!(probe_steps.iter().any(|step| {
+        step["run"].as_str().is_some_and(|run| {
+            run.contains("install -D -m 755") && run.contains("github-api-tests")
+        })
+    }));
+    let installed_cli = probe_steps
+        .iter()
+        .find(|step| step["name"] == "Verify installed CLI and candidate policy")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(installed_cli.contains("stat -c '%a' \"$SECUREFIX_BINARY\")"));
 }
 
 #[test]

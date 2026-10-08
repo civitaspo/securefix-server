@@ -30,6 +30,11 @@ jobs:
       pull-requests: read
     timeout-minutes: 15
     steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -39,19 +44,16 @@ jobs:
           version: "2026.8.3"
           install_args: "--locked"
           cache: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: $/.github/actions/install-cli
         with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
-          merge-multiple: true
-      - run: chmod 755 runtime/securefix
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Prepare release metadata
         id: release
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           INPUT_VERSION: ${{ inputs.version }}
-        run: runtime/securefix release prepare --version "$INPUT_VERSION"
+        run: securefix release prepare --version "$INPUT_VERSION"
       - name: Request signed release PR update
         if: steps.release.outputs.releasable == 'true'
         uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3

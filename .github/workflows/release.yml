@@ -33,15 +33,17 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Parse untrusted request locator
         id: parse
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
-        run: runtime/securefix release parse-request
+        run: securefix release parse-request
 
   preflight:
     needs: [cli, resolve-request]
@@ -60,9 +62,11 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
-      - run: chmod 755 runtime/securefix
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Create read-only client token
         id: client-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -80,7 +84,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.client-token.outputs.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
-        run: runtime/securefix release preflight
+        run: securefix release preflight
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
@@ -102,14 +106,16 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.preflight.outputs.artifact_id }}
           path: release-input
           merge-multiple: true
-      - run: chmod 755 runtime/securefix
       - name: Import provider release signing key
         id: gpg
         uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
@@ -122,7 +128,7 @@ jobs:
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
           GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
-        run: runtime/securefix release sign
+        run: securefix release sign
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
@@ -146,14 +152,16 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.preflight.outputs.strategy == 'terraform-provider' && needs.sign.outputs.artifact_id || needs.preflight.outputs.artifact_id }}
           path: release-package
           merge-multiple: true
-      - run: chmod 755 runtime/securefix
       - name: Create content-scoped client token
         id: client-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -171,7 +179,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.client-token.outputs.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
-        run: runtime/securefix release publish
+        run: securefix release publish
 
   cleanup:
     if: always() && startsWith(github.event.label.name, 'release-request-')
@@ -187,10 +195,13 @@ jobs:
         continue-on-error: true
         with:
           artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: runtime
+          path: ${{ runner.temp }}/securefix-runtime
           merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - if: needs.cli.result == 'success'
-        run: chmod 755 runtime/securefix && runtime/securefix release cleanup
+        run: securefix release cleanup
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}

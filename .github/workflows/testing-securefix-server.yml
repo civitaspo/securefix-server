@@ -1,0 +1,106 @@
+name: Test Securefix Server in Scratch Repository
+on:
+  workflow_call:
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: true
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  build:
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Run secret-free Rust tests
+        run: cargo +1.99.0 test --locked
+      - uses: ./.github/actions/setup-cli
+      - name: Build the read-only GitHub API probe
+        run: |
+          cargo +1.99.0 test --locked --test github_api --no-run
+          install -Dm755 "$(find target/debug/deps -maxdepth 1 -type f -name 'github_api-*' -executable | head -n 1)" runtime/github-api-tests
+      - name: Assemble same-run test artifact
+        run: |
+          install -Dm755 target/release/securefix runtime/securefix
+          cp policy.json runtime/policy.json
+          cp securefix-config.yaml runtime/securefix-config.yaml
+          cp -R repo-settings runtime/repo-settings
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: securefix-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runtime/
+          if-no-files-found: error
+          retention-days: 1
+  probe:
+    needs: build
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        id: install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - name: Restore the read-only API probe executable mode
+        run: install -D -m 755 "$RUNNER_TEMP/securefix-runtime/github-api-tests" "$RUNNER_TEMP/securefix-test-bin/github-api-tests"
+      - name: Verify installed CLI and candidate policy
+        env:
+          SECUREFIX_BINARY: ${{ steps.install-cli.outputs.binary }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          EXPECTED_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: |
+          test "$SECUREFIX_SOURCE_SHA" = "$EXPECTED_SOURCE_SHA"
+          test "$(command -v securefix)" = "$RUNNER_TEMP/securefix-bin/securefix"
+          test -x "$RUNNER_TEMP/securefix-bin/securefix"
+          test "$(stat -c '%a' "$SECUREFIX_BINARY")" = 755
+          securefix --help >/dev/null
+          securefix policy validate --policy "$RUNNER_TEMP/securefix-runtime/policy.json"
+          printf '{"version":2}\n' > "$RUNNER_TEMP/invalid-policy.json"
+          if securefix policy validate --policy "$RUNNER_TEMP/invalid-policy.json"; then
+            exit 1
+          fi
+      - name: Validate Securefix branch configuration with upstream action
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
+        with:
+          action: validate-config
+          config_file: ${{ runner.temp }}/securefix-runtime/securefix-config.yaml
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-token
+        with:
+          app-id: '3872492'
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-metadata: read
+      - name: Confirm the Client App token is scoped to scratch
+        env:
+          SECUREFIX_LIVE_TEST_REPOSITORY: civitaspo/testing-securefix-server
+          SECUREFIX_CLIENT_INSTALLATION_TOKEN: ${{ steps.client-token.outputs.token }}
+        run: >-
+          "$RUNNER_TEMP/securefix-test-bin/github-api-tests"
+          client_app_token_is_scoped_to_scratch_repository
+          --exact --ignored --nocapture
