@@ -78,7 +78,7 @@ impl Fixture {
                     }
                 };
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .set_read_timeout(Some(Duration::from_secs(15)))
                     .unwrap();
                 let mut request = Vec::new();
                 let header_end = loop {

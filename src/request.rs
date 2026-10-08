@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::fs;
+use std::{collections::HashSet, fs};
 
 use securefix::{
     api::GitHub,
@@ -661,10 +661,26 @@ pub fn validate_pr_authorization(
             .all(|c| c["commit"]["verification"]["verified"] == true),
         "every commit must have a verified signature"
     );
+    let web_flow_commits = commits
+        .iter()
+        .filter(|commit| {
+            commit["committer"]["login"] == "web-flow"
+                && is_trusted_login(
+                    commit["author"]["login"].as_str(),
+                    &policy.trusted_committers,
+                )
+        })
+        .collect::<Vec<_>>();
+    let github_signed = github_signed_commits(api, repository, &web_flow_commits)?;
     ensure!(
-        commits
-            .iter()
-            .all(|c| repo_trusted_committer(c, &policy.trusted_committers)),
+        commits.iter().all(|commit| {
+            let sha = commit["sha"].as_str().unwrap_or_default();
+            repo_trusted_committer(
+                commit,
+                &policy.trusted_committers,
+                github_signed.contains(sha),
+            )
+        }),
         "commit committer is not an allowed committer"
     );
     let files = api.paginate(&format!("/repos/{repository}/pulls/{number}/files"))?;
@@ -684,15 +700,80 @@ pub fn validate_pr_authorization(
     Ok(sensitive)
 }
 
-fn repo_trusted_committer(commit: &Value, trusted: &[String]) -> bool {
-    commit["committer"]["login"]
-        .as_str()
-        .or_else(|| commit["author"]["login"].as_str())
-        .is_some_and(|login| {
-            trusted
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(login))
-        })
+fn repo_trusted_committer(commit: &Value, trusted: &[String], github_signed: bool) -> bool {
+    let committer = commit["committer"]["login"].as_str();
+    if committer == Some("web-flow") {
+        return commit["commit"]["verification"]["verified"] == true
+            && github_signed
+            && is_trusted_login(commit["author"]["login"].as_str(), trusted);
+    }
+    is_trusted_login(
+        committer.or_else(|| commit["author"]["login"].as_str()),
+        trusted,
+    )
+}
+
+fn is_trusted_login(login: Option<&str>, trusted: &[String]) -> bool {
+    login.is_some_and(|login| {
+        trusted
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(login))
+    })
+}
+
+fn github_signed_commits(
+    api: &GitHub,
+    repository: &str,
+    commits: &[&Value],
+) -> Result<HashSet<String>> {
+    if commits.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let (owner, name) = repository
+        .split_once('/')
+        .context("invalid repository name")?;
+    let mut fields = Vec::with_capacity(commits.len());
+    let mut expected = Vec::with_capacity(commits.len());
+    for (index, commit) in commits.iter().enumerate() {
+        let sha = commit["sha"].as_str().context("commit has no SHA")?;
+        validate_sha(sha)?;
+        fields.push(format!(
+            "c{index}:object(expression:\"{sha}\"){{... on Commit{{oid committedViaWeb author{{user{{login}}}} signature{{isValid state wasSignedByGitHub}}}}}}"
+        ));
+        expected.push((
+            format!("c{index}"),
+            sha.to_owned(),
+            commit["author"]["login"]
+                .as_str()
+                .context("web-flow commit has no REST author login")?
+                .to_owned(),
+        ));
+    }
+    let query = format!(
+        "query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{{}}}}}",
+        fields.join(" ")
+    );
+    let response = api.graphql(&query, json!({"owner":owner,"name":name}))?;
+    let repository_data = response["repository"]
+        .as_object()
+        .context("GraphQL response has no repository")?;
+    let mut signed = HashSet::new();
+    for (alias, sha, rest_author) in expected {
+        let node = repository_data
+            .get(&alias)
+            .with_context(|| format!("GraphQL response is missing {alias}"))?;
+        ensure!(node["oid"] == sha, "GraphQL commit identity mismatch");
+        let graphql_author = node["author"]["user"]["login"].as_str();
+        if node["committedViaWeb"] == true
+            && graphql_author.is_some_and(|login| login.eq_ignore_ascii_case(&rest_author))
+            && node["signature"]["state"] == "VALID"
+            && node["signature"]["isValid"] == true
+            && node["signature"]["wasSignedByGitHub"] == true
+        {
+            signed.insert(sha);
+        }
+    }
+    Ok(signed)
 }
 
 pub fn require_owner_marker(
@@ -1049,12 +1130,199 @@ mod tests {
     #[test]
     fn trusted_committer_is_used_in_preference_to_trusted_author() {
         let commit = json!({"author":{"login":"trusted"},"committer":{"login":"untrusted"}});
-        assert!(!repo_trusted_committer(&commit, &["trusted".into()]));
+        assert!(!repo_trusted_committer(&commit, &["trusted".into()], false));
         let missing_committer = json!({"author":{"login":"trusted"},"committer":{}});
         assert!(repo_trusted_committer(
             &missing_committer,
-            &["TRUSTED".into()]
+            &["TRUSTED".into()],
+            false
         ));
+    }
+
+    #[test]
+    fn web_flow_requires_trusted_author_and_github_signature() {
+        let trusted = ["civitaspo-securefix-server[bot]".into()];
+        let commit = json!({
+            "commit":{"verification":{"verified":true}},
+            "author":{"login":"civitaspo-securefix-server[bot]"},
+            "committer":{"login":"web-flow"}
+        });
+        assert!(repo_trusted_committer(&commit, &trusted, true));
+        assert!(!repo_trusted_committer(&commit, &trusted, false));
+        let impostor = json!({
+            "commit":{"verification":{"verified":false}},
+            "author":{"login":"attacker"},
+            "committer":{"login":"web-flow"}
+        });
+        assert!(!repo_trusted_committer(&impostor, &trusted, true));
+    }
+
+    #[test]
+    fn web_flow_signature_lookup_requires_all_identity_and_signature_fields() {
+        let sha = "a".repeat(40);
+        let trusted_author = "civitaspo-securefix-server[bot]";
+        let commit = json!({"sha":sha,"author":{"login":trusted_author}});
+        let cases = [
+            (
+                "valid GitHub web commit",
+                json!({"oid":sha,"committedViaWeb":true,"author":{"user":{"login":trusted_author}},"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}}),
+                true,
+                false,
+            ),
+            (
+                "missing author",
+                json!({"oid":sha,"committedViaWeb":true,"author":null,"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}}),
+                false,
+                false,
+            ),
+            (
+                "missing author user",
+                json!({"oid":sha,"committedViaWeb":true,"author":{"user":null},"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}}),
+                false,
+                false,
+            ),
+            (
+                "author mismatch",
+                json!({"oid":sha,"committedViaWeb":true,"author":{"user":{"login":"attacker"}},"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}}),
+                false,
+                false,
+            ),
+            (
+                "not committed via web",
+                json!({"oid":sha,"committedViaWeb":false,"author":{"user":{"login":trusted_author}},"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}}),
+                false,
+                false,
+            ),
+            (
+                "missing signature",
+                json!({"oid":sha,"committedViaWeb":true,"author":{"user":{"login":trusted_author}},"signature":null}),
+                false,
+                false,
+            ),
+            (
+                "missing signature state",
+                json!({"oid":sha,"committedViaWeb":true,"author":{"user":{"login":trusted_author}},"signature":{"isValid":true,"wasSignedByGitHub":true}}),
+                false,
+                false,
+            ),
+            (
+                "signature not GitHub-signed",
+                json!({"oid":sha,"committedViaWeb":true,"author":{"user":{"login":trusted_author}},"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":false}}),
+                false,
+                false,
+            ),
+            (
+                "wrong object identity",
+                json!({"oid":"b".repeat(40),"committedViaWeb":true,"author":{"user":{"login":trusted_author}},"signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}}),
+                false,
+                true,
+            ),
+        ];
+        for (name, node, accepted, errors) in cases {
+            let fixture = Fixture::new(vec![Route::request(
+                "POST",
+                "/graphql",
+                200,
+                json!({"data":{"repository":{"c0":node}}}),
+            )]);
+            let result = github_signed_commits(&fixture.api, "civitaspo/example", &[&commit]);
+            if errors {
+                assert!(result.is_err(), "{name} must fail closed");
+            } else {
+                assert_eq!(result.unwrap().contains(&sha), accepted, "{name}");
+            }
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn verified_github_signed_web_flow_commit_authorizes_full_pr_validation() {
+        let policy = Policy::load("policy.json").unwrap();
+        let sha = "a".repeat(40);
+        let commit = json!({
+            "sha":sha,
+            "commit":{"verification":{"verified":true}},
+            "author":{"login":"civitaspo-securefix-server[bot]"},
+            "committer":{"login":"web-flow"}
+        });
+        let fixture = Fixture::new(vec![
+            authorization_route(&sha),
+            Route::get(
+                "/repos/civitaspo/dbt-authorized-models/pulls/7/commits?per_page=100&page=1",
+                json!([commit]),
+            ),
+            Route::request(
+                "POST",
+                "/graphql",
+                200,
+                json!({"data":{"repository":{"c0":{
+                    "oid":sha,
+                    "committedViaWeb":true,
+                    "author":{"user":{"login":"civitaspo-securefix-server[bot]"}},
+                    "signature":{"isValid":true,"state":"VALID","wasSignedByGitHub":true}
+                }}}}),
+            ),
+            Route::get(
+                "/repos/civitaspo/dbt-authorized-models/pulls/7/files?per_page=100&page=1",
+                json!([{"filename":"README.md"}]),
+            ),
+        ]);
+        assert!(
+            validate_pr_authorization(
+                &fixture.api,
+                &policy,
+                "civitaspo/dbt-authorized-models",
+                7,
+                &sha,
+                true
+            )
+            .is_ok()
+        );
+        fixture.finish();
+    }
+
+    #[test]
+    #[ignore = "requires SECUREFIX_LIVE_TEST_TOKEN for read-only public GitHub API verification"]
+    fn live_known_github_web_flow_commits_match_trusted_author_identities() -> Result<()> {
+        let token = std::env::var("SECUREFIX_LIVE_TEST_TOKEN")?;
+        ensure!(!token.is_empty(), "SECUREFIX_LIVE_TEST_TOKEN is empty");
+        let api = GitHub::new("https://api.github.com", token)?;
+        let policy = Policy::load("policy.json")?;
+        let cases = [
+            (
+                "civitaspo/testing-securefix-server",
+                "9fe2d1a90d09ab70458aedee1ecc9a13ac4de2e3",
+                "civitaspo",
+            ),
+            (
+                "civitaspo/dbt-authorized-models",
+                "1394a5e3fd2d32a9a3d3c8b641559b22472e45c3",
+                "civitaspo-securefix-server[bot]",
+            ),
+        ];
+        for (repository, sha, expected_author) in cases {
+            let commit: Value = api.get(&format!("/repos/{repository}/commits/{sha}"))?;
+            ensure!(
+                commit["sha"] == sha,
+                "commit lookup returned a different OID"
+            );
+            ensure!(
+                commit["author"]["login"] == expected_author
+                    && commit["committer"]["login"] == "web-flow"
+                    && commit["commit"]["verification"]["verified"] == true,
+                "known fixture no longer has its expected REST identities/signature"
+            );
+            let signed = github_signed_commits(&api, repository, &[&commit])?;
+            ensure!(
+                signed.contains(sha),
+                "known commit failed GitHub signature checks"
+            );
+            ensure!(
+                repo_trusted_committer(&commit, &policy.trusted_committers, true),
+                "known commit author is no longer trusted"
+            );
+        }
+        Ok(())
     }
 
     #[test]

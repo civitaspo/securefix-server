@@ -14,7 +14,7 @@ The existing Approve Request workflow also succeeded, but it ran the legacy defa
 ## Live API checks
 
 The public [testing-securefix-server](https://github.com/civitaspo/testing-securefix-server) repository was created for isolated fixtures.
-This test added no custom secrets, App keys, production policy capability, or production branch-protection changes.
+The API test added no custom secrets, App keys, production policy capability, or production branch-protection changes.
 The test uses an ephemeral authenticated-user token in the local process and writes only to this exact repository.
 Its branches and open PRs remain available for inspection; no fixture PR was merged.
 
@@ -39,6 +39,30 @@ The test refuses any other repository.
 It reads the current production main SHA only to exercise the shared API write guard.
 It calls the API helper directly; it does not claim that the PR's runtime is the active production revision.
 
+## GitHub-signed committer regression
+
+The live fixtures exposed a legitimate-commit rejection in the initial implementation.
+GitHub-native commits use REST committer `web-flow`, which was absent from the trusted committer list.
+The same representation appears on an existing [Server App commit](https://github.com/civitaspo/dbt-authorized-models/commit/1394a5e3fd2d32a9a3d3c8b641559b22472e45c3).
+
+The fix keeps `web-flow` out of that list.
+For this committer only, authorization looks up the exact commit OID and requires `committedViaWeb`, a valid GitHub signature with state `VALID`, and a GraphQL author account matching the REST author and the existing trusted-author policy.
+Other committers retain the existing committer-first check, and every commit must still have a verified signature.
+Missing, mismatched, or invalid identity and signature fields fail closed.
+GitHub documents [credential-bound native authorship](https://docs.github.com/en/graphql/reference/commits) and the [GitHub signing-key signal](https://docs.github.com/en/graphql/reference/git).
+
+The ignored read-only regression passed against both fixture commit `9fe2d1a90d09ab70458aedee1ecc9a13ac4de2e3` and Server App commit `1394a5e3fd2d32a9a3d3c8b641559b22472e45c3`.
+It exercises the same signature lookup and trusted-committer predicate used by approval, merge, and policy checks.
+This read-only probe does not establish App token permissions or full request provenance.
+
+```sh
+cargo test --locked --bin securefix live_known_github_web_flow_commits_match_trusted_author_identities -- --ignored --nocapture
+```
+
+Provide `SECUREFIX_LIVE_TEST_TOKEN` through the process environment.
+The regular HTTP regressions cover identity mismatches, absent metadata, non-GitHub signatures, and successful PR authorization.
+A separate same-model reviewer found no material blocker in this change.
+
 ## Deployment checks still required
 
 Full approval, merge, release, settings activation, and Securefix intake/provenance/artifact flows remain unverified against GitHub for the Rust implementation.
@@ -50,6 +74,9 @@ It does not yet contain `policy.json`; a pre-deployment call to Rust `securefix 
 Running PR code as an active privileged runtime would violate the accepted revision and environment boundaries.
 No production ruleset, environment restriction, runtime check, or client pin was changed to enable this probe.
 
-For the full scratch lifecycle, both Client App ID `3872492` and Server App ID `3872533` must be installed for the scratch repository, and its client credentials and exact reviewed capability entry must be configured during staging.
-Their installation state was not verified with an App-authenticated token in this run.
+The operator reports installing the Client App, Server App, and Renovate for the scratch repository.
+The repository secret metadata confirms `SECUREFIX_CLIENT_PRIVATE_KEY` was registered on 2026-10-08.
+These provisioning steps do not activate the Rust runtime or add the scratch repository to production policy.
+The Client installation is probed separately with a repository-scoped, read-only App token.
+The Server installation and its full requested permissions still require App-authenticated lifecycle verification during staging.
 Follow the [migration sequence](migration.md) after review and deployment; the API probe does not replace those lifecycle tests or activation attestation.

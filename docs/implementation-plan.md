@@ -12,7 +12,9 @@ Workflows retain event routing, permissions, environments, isolated jobs, pinned
 
 Local completion means the CLI builds with locked dependencies, formatting and Clippy pass, workflow validation passes, and regression tests exercise authorization decisions through typed input or HTTP fixtures.
 Deployment is a separate operation.
-No live repository settings, tags, approvals, releases, or merges are changed during this migration.
+The migration PR is not deployed, and production settings, tags, releases, and merges are unchanged.
+The existing default-branch approval workflow automatically reviewed the migration PR.
+Live API fixtures and App credential probes are recorded in the [GitHub verification report](github-verification-2026-10-08.md).
 
 The implementation runs across three disjoint workstreams.
 Approval and merge share request provenance and owner authorization.

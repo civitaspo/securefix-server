@@ -199,3 +199,39 @@ fn encode_path(path: &str) -> String {
         })
         .collect()
 }
+
+#[test]
+#[ignore = "requires the dedicated scratch repository and a read-only Client App installation token"]
+fn client_app_token_is_scoped_to_scratch_repository() -> Result<()> {
+    let repository = std::env::var("SECUREFIX_LIVE_TEST_REPOSITORY")
+        .context("SECUREFIX_LIVE_TEST_REPOSITORY is required")?;
+    ensure!(
+        repository == SCRATCH_REPOSITORY,
+        "live test is restricted to {SCRATCH_REPOSITORY}"
+    );
+    let token = std::env::var("SECUREFIX_CLIENT_INSTALLATION_TOKEN")
+        .context("SECUREFIX_CLIENT_INSTALLATION_TOKEN is required")?;
+    ensure!(
+        !token.is_empty(),
+        "SECUREFIX_CLIENT_INSTALLATION_TOKEN is empty"
+    );
+
+    let api = GitHub::new("https://api.github.com", token)?;
+    let installation: Value = api.get("/installation/repositories")?;
+    let repositories = installation["repositories"]
+        .as_array()
+        .context("installation response has no repositories array")?;
+    ensure!(
+        installation["total_count"].as_u64() == Some(1)
+            && repositories.len() == 1
+            && repositories[0]["full_name"] == SCRATCH_REPOSITORY,
+        "Client App token must be scoped to exactly the scratch repository"
+    );
+
+    let repo: Value = api.get(&format!("/repos/{SCRATCH_REPOSITORY}"))?;
+    ensure!(
+        repo["full_name"] == SCRATCH_REPOSITORY && repo["id"].as_u64().is_some_and(|id| id > 0),
+        "scratch repository identity is missing or unexpected"
+    );
+    Ok(())
+}
