@@ -10,8 +10,8 @@ The checks below distinguish live API behavior from the full privileged workflow
 Formatting, 76 Rust tests, Clippy with warnings denied, actionlint, and the aggregate `status-check` succeeded.
 The live integration test is ignored by ordinary CI and must be run explicitly with credentials.
 The existing Approve Request workflow also succeeded, but it ran the legacy default-branch implementation and is not evidence for the new Rust approval flow.
-After the GitHub-signed-commit change, [CI run 37780866451](https://github.com/civitaspo/securefix-server/actions/runs/37780866451) passed on `678e10c6d968b17cb967b5a3589f40f7aae6cf65`, including 79 Rust tests.
-The subsequent absent-committer rejection also passed 79 local Rust tests, formatting, Clippy, actionlint, and a locked release build.
+After both authorization fixes, [CI run 37781458718](https://github.com/civitaspo/securefix-server/actions/runs/37781458718) passed on `cb2c408dbb59418542f4313039569a8809d9496f`, including 79 Rust tests.
+The final code also passed 79 local Rust tests, formatting, Clippy, actionlint, and a locked release build.
 All three credential-dependent live tests are ignored by regular CI.
 
 ## Live API checks
@@ -35,7 +35,7 @@ The second run strengthened stale-head rejection to require a semantic GraphQL r
 To repeat, set `SECUREFIX_LIVE_TEST_REPOSITORY=civitaspo/testing-securefix-server` and provide `SECUREFIX_LIVE_TEST_TOKEN` through the process environment, then run:
 
 ```sh
-cargo test --locked --test github_api -- --ignored --nocapture
+cargo test --locked --test github_api live_commit_api_guard_cas_signature_and_stale_merge -- --exact --ignored --nocapture
 ```
 
 The test refuses any other repository.
@@ -83,10 +83,15 @@ No production ruleset, environment restriction, runtime check, or client pin was
 The operator reports installing the Client App, Server App, and Renovate for the scratch repository.
 The repository secret metadata confirms `SECUREFIX_CLIENT_PRIVATE_KEY` was registered on 2026-10-08.
 These provisioning steps do not activate the Rust runtime or add the scratch repository to production policy.
-The [Client App credential probe](https://github.com/civitaspo/testing-securefix-server/actions/runs/37781078478) builds the reviewed Rust test without credentials and requests a repository-scoped, read-only token in a separate job.
-The build succeeded, but the token action failed while parsing the registered private key with `DECODER routines::unsupported`, before GitHub authentication.
-No installation token was issued, so Client installation scope remains unverified.
-The secret needs a valid PEM private key, preserving its real newlines; its value must not be shared in logs or review comments.
-The same manual workflow can be rerun after correcting the secret.
+The [Client App credential probe](https://github.com/civitaspo/testing-securefix-server/actions/runs/37781890589) passed.
+It builds the reviewed Rust test at server commit `678e10c6d968b17cb967b5a3589f40f7aae6cf65` without credentials and downloads the exact artifact ID in a separate job.
+That job authenticates Client App ID `3872492`, requests only `Metadata: read`, and scopes the token to `testing-securefix-server`.
+The Rust probe confirmed `/installation/repositories` returned exactly this repository and its identity lookup succeeded.
+The token action revoked the token after the job.
+
+The [initial attempts](https://github.com/civitaspo/testing-securefix-server/actions/runs/37781078478) caught a PEM value with lost newlines and an unnecessary `Contents: read` request unsupported by the installation.
+The operator restored the raw PEM, and the probe was reduced to its required metadata permission.
+No App permissions were expanded.
+The [manual probe workflow](https://github.com/civitaspo/testing-securefix-server/blob/b0db14244026157c52d9c6eee18c42b28e78feb7/.github/workflows/client-app-smoke.yml) and ignored Rust test remain available to rerun.
 The Server installation and its full requested permissions still require App-authenticated lifecycle verification during staging.
 Follow the [migration sequence](migration.md) after review and deployment; the API probe does not replace those lifecycle tests or activation attestation.
