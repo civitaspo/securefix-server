@@ -3,276 +3,193 @@ run-name: Release (${{ github.event.label.name }})
 
 on:
   label:
-    types:
-      - created
+    types: [created]
 
 permissions: {}
-
 concurrency:
   group: release-${{ github.event.label.name }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  cli:
+    if: startsWith(github.event.label.name, 'release-request-')
+    uses: ./.github/workflows/build-cli.yml
+    permissions:
+      contents: read
+
+  resolve-request:
+    needs: cli
+    if: startsWith(github.event.label.name, 'release-request-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      repository: ${{ steps.parse.outputs.repository }}
+      repo_name: ${{ steps.parse.outputs.repo_name }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - run: chmod 755 runtime/securefix
+      - name: Parse untrusted request locator
+        id: parse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: runtime/securefix release parse-request
+
+  preflight:
+    needs: [cli, resolve-request]
     if: startsWith(github.event.label.name, 'release-request-')
     runs-on: ubuntu-latest
     environment: main
     permissions:
       contents: read
-      issues: write
-    timeout-minutes: 30
-
+      actions: read
+    outputs:
+      strategy: ${{ steps.preflight.outputs.strategy }}
+      tag: ${{ steps.preflight.outputs.tag }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    timeout-minutes: 10
     steps:
-      - name: Parse release request
-        id: request
-        env:
-          DESCRIPTION: ${{ github.event.label.description }}
-        run: |
-          set -euo pipefail
-          # Description formats:
-          #   owner/repo/run_id
-          #   owner/repo/run_id/tag
-          #   owner/repo/run_id/tag/sha (preferred; sha is the tagged merge commit)
-          repository=$(printf '%s' "$DESCRIPTION" | cut -d/ -f1-2)
-          run_id=$(printf '%s' "$DESCRIPTION" | cut -d/ -f3)
-          tag=$(printf '%s' "$DESCRIPTION" | cut -d/ -f4)
-          expected_sha=$(printf '%s' "$DESCRIPTION" | cut -d/ -f5)
-
-          case "$run_id" in
-            ''|*[!0-9]*)
-              echo "Invalid workflow run ID" >&2
-              exit 1
-              ;;
-          esac
-          if [ -n "$tag" ] && ! printf '%s' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-            echo "Invalid tag in label description: $tag" >&2
-            exit 1
-          fi
-          if [ -n "$expected_sha" ] && ! printf '%s' "$expected_sha" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "Invalid commit SHA in label description: $expected_sha" >&2
-            exit 1
-          fi
-          # Reject trailing junk beyond owner/repo/run_id[/tag[/sha]].
-          if [ "$(printf '%s' "$DESCRIPTION" | awk -F/ '{print NF}')" -gt 5 ]; then
-            echo "Invalid label description field count: $DESCRIPTION" >&2
-            exit 1
-          fi
-          if ! printf '%s' "$repository" | grep -Eq '^[^/]+/[^/]+$'; then
-            echo "Invalid repository in label description: $repository" >&2
-            exit 1
-          fi
-
-          echo "repository=$repository" >> "$GITHUB_OUTPUT"
-          echo "repo_name=${repository#*/}" >> "$GITHUB_OUTPUT"
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "expected_sha=$expected_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Check out allowlist
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            release-clients.yaml
-          sparse-checkout-cone-mode: false
-
-      - name: Resolve publish strategy from allowlist
-        id: allowlist
-        env:
-          REPOSITORY: ${{ steps.request.outputs.repository }}
-        run: |
-          set -euo pipefail
-          publish=$(
-            REPOSITORY="$REPOSITORY" ruby -ryaml -e '
-              config = YAML.load_file("release-clients.yaml")
-              clients = config.fetch("clients")
-              entry = clients.find { |c| c["repository"] == ENV.fetch("REPOSITORY") }
-              abort "Denied client repository: #{ENV.fetch("REPOSITORY")}" if entry.nil?
-              publish = entry.fetch("publish")
-              unless %w[github-release goreleaser].include?(publish)
-                abort "Unsupported publish strategy: #{publish}"
-              end
-              puts publish
-            '
-          )
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "Allowed $REPOSITORY with publish=$publish"
-
-      - name: Create client installation token
-        id: app-token
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - run: chmod 755 runtime/securefix
+      - name: Create read-only client token
+        id: client-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
+          app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ steps.request.outputs.repo_name }}
+          repositories: ${{ needs.resolve-request.outputs.repo_name }}
           permission-actions: read
-          permission-contents: write
+          permission-contents: read
           permission-pull-requests: read
-
-      - name: Validate Release Tag workflow run
-        id: validate
+      - name: Validate current release provenance
+        id: preflight
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPOSITORY: ${{ steps.request.outputs.repository }}
-          RUN_ID: ${{ steps.request.outputs.run_id }}
-          REQUESTED_TAG: ${{ steps.request.outputs.tag }}
-          REQUESTED_SHA: ${{ steps.request.outputs.expected_sha }}
-        run: |
-          set -euo pipefail
-          workflow_run=$(curl --fail --silent --show-error \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$REPOSITORY/actions/runs/$RUN_ID")
-
-          printf '%s' "$workflow_run" | jq -e \
-            --arg repository "$REPOSITORY" '
-            .name == "Release Tag"
-            and .repository.full_name == $repository
-            and .head_repository.full_name == $repository
-            and (
-              .status == "in_progress"
-              or .status == "queued"
-              or (.status == "completed" and .conclusion == "success")
-            )
-          ' >/dev/null
-
-          event=$(printf '%s' "$workflow_run" | jq -er '.event')
-          head_sha=$(printf '%s' "$workflow_run" | jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))')
-          tag=$REQUESTED_TAG
-          if [ -z "$tag" ]; then
-            head_branch=$(printf '%s' "$workflow_run" | jq -r '.head_branch // empty')
-            if printf '%s' "$head_branch" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-              tag=$head_branch
-            fi
-          fi
-          if [ -z "$tag" ]; then
-            echo "Release tag missing from label description and workflow head_branch" >&2
-            exit 1
-          fi
-
-          # Release Tag on pull_request.closed tags the squash merge commit on main,
-          # but workflow_run.head_sha is the PR head (release/next tip). Prefer the
-          # merge commit SHA from the label, then resolve it from the PR, and only
-          # fall back to head_sha for workflow_dispatch (tags main HEAD).
-          expected_sha=$REQUESTED_SHA
-          if [ -z "$expected_sha" ]; then
-            case "$event" in
-              pull_request)
-                pulls=$(curl --fail --silent --show-error \
-                  --header "Accept: application/vnd.github+json" \
-                  --header "Authorization: Bearer $GH_TOKEN" \
-                  --header "X-GitHub-Api-Version: 2022-11-28" \
-                  "https://api.github.com/repos/$REPOSITORY/commits/$head_sha/pulls")
-                expected_sha=$(printf '%s' "$pulls" | jq -er '
-                  map(select(
-                    .base.ref == "main"
-                    and .head.ref == "release/next"
-                    and .merged_at != null
-                    and (.merge_commit_sha | test("^[0-9a-f]{40}$"))
-                  ))
-                  | sort_by(.merged_at)
-                  | reverse
-                  | .[0].merge_commit_sha
-                ')
-                ;;
-              workflow_dispatch)
-                expected_sha=$head_sha
-                ;;
-              *)
-                echo "Unsupported Release Tag event for SHA resolution: $event" >&2
-                exit 1
-                ;;
-            esac
-          fi
-          if ! printf '%s' "$expected_sha" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "Could not resolve expected release commit SHA" >&2
-            exit 1
-          fi
-
-          echo "Allowed Release Tag run $RUN_ID for $REPOSITORY at $tag (expected $expected_sha)"
-          echo "expected_sha=$expected_sha" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Check out client tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.client-token.outputs.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: runtime/securefix release preflight
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
         with:
-          repository: ${{ steps.request.outputs.repository }}
-          ref: ${{ steps.validate.outputs.tag }}
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 0
-          persist-credentials: false
+          name: release-input
+          path: release-input/
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Verify tag is contained in main
-        env:
-          EXPECTED_SHA: ${{ steps.validate.outputs.expected_sha }}
-          TAG: ${{ steps.validate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          tag_commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
-          test "$(git rev-parse HEAD)" = "$tag_commit"
-          test "$EXPECTED_SHA" = "$tag_commit"
-          git merge-base --is-ancestor "$tag_commit" origin/main
-
-      - name: Publish GitHub Release
-        if: steps.allowlist.outputs.publish == 'github-release'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPOSITORY: ${{ steps.request.outputs.repository }}
-          TAG: ${{ steps.validate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists."
-            exit 0
-          fi
-          # Tags with a semver pre-release part (vX.Y.Z-*) become pre-releases.
-          prerelease=false
-          case "$TAG" in
-            *-*) prerelease=true ;;
-          esac
-          # Draft → publish once so immutable releases remain compatible.
-          gh release create "$TAG" \
-            --repo "$REPOSITORY" \
-            --title "$TAG" \
-            --generate-notes \
-            --prerelease="$prerelease" \
-            --draft
-          gh release edit "$TAG" --repo "$REPOSITORY" --draft=false
-
-      - name: Set up Go
-        if: steps.allowlist.outputs.publish == 'goreleaser'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+  sign:
+    needs: [cli, resolve-request, preflight]
+    if: needs.preflight.outputs.strategy == 'terraform-provider'
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          go-version: 1.26.x
-
-      - name: Import release signing key
-        if: steps.allowlist.outputs.publish == 'goreleaser'
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.artifact_id }}
+          path: release-input
+          merge-multiple: true
+      - run: chmod 755 runtime/securefix
+      - name: Import provider release signing key
         id: gpg
         uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
         with:
           gpg_private_key: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
-
-      - name: Release with GoReleaser
-        if: steps.allowlist.outputs.publish == 'goreleaser'
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          distribution: goreleaser
-          version: v2.17.0
-          args: release --clean
+      - name: Sign canonical provider checksums
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+          GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+        run: runtime/securefix release sign
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: release-package
+          path: release-input/
+          if-no-files-found: error
+          retention-days: 1
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
 
-      - name: Delete release request label
-        if: always()
+  publish:
+    needs: [cli, resolve-request, preflight, sign]
+    if: always() && needs.preflight.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.strategy == 'terraform-provider' && needs.sign.outputs.artifact_id || needs.preflight.outputs.artifact_id }}
+          path: release-package
+          merge-multiple: true
+      - run: chmod 755 runtime/securefix
+      - name: Create content-scoped client token
+        id: client-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ needs.resolve-request.outputs.repo_name }}
+          permission-actions: read
+          permission-administration: read
+          permission-contents: write
+          permission-pull-requests: read
+      - name: Publish verified release plan
         env:
-          GH_TOKEN: ${{ github.token }}
-          LABEL_NAME: ${{ github.event.label.name }}
-        run: |
-          set -euo pipefail
-          encoded_label=$(jq -rn --arg label "$LABEL_NAME" '$label | @uri')
-          gh api --method DELETE "repos/${{ github.repository }}/labels/$encoded_label"
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.client-token.outputs.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: runtime/securefix release publish
+
+  cleanup:
+    if: always() && startsWith(github.event.label.name, 'release-request-')
+    needs: [cli, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.cli.result == 'success'
+        continue-on-error: true
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - if: needs.cli.result == 'success'
+        run: chmod 755 runtime/securefix && runtime/securefix release cleanup
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}

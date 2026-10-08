@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "owner_id": 4525500,
+  "client_bot_id": 288068203,
+  "server_bot_id": 288069019,
+  "trusted_committers": [
+    "civitaspo",
+    "cursoragent",
+    "civitaspo-securefix-server[bot]",
+    "renovate[bot]",
+    "dependabot[bot]"
+  ],
+  "merge_controls_enabled": true,
+  "repositories": [
+    {
+      "repository": "civitaspo/dotfiles",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "settings"
+      ],
+      "release": null,
+      "protect_tags": false
+    },
+    {
+      "repository": "civitaspo/securefix-server",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "settings"
+      ],
+      "release": null,
+      "sensitive_paths": [
+        "**"
+      ],
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/dbt-authorized-models",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "github-release",
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/dbt-snowflake-iceberg-sync",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "github-release",
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/dbt-snowflake-rap-enforcement",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "github-release",
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/terraform-provider-sigma",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "terraform-provider",
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/nagi",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "settings"
+      ],
+      "release": null,
+      "protect_tags": false
+    },
+    {
+      "repository": "civitaspo/herdr-linear-agent",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "github-release",
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/hook-relay-client-rs",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "github-release",
+      "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/herdr-infobox",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release",
+        "settings"
+      ],
+      "release": "github-release",
+      "protect_tags": true
+    }
+  ],
+  "default_sensitive_paths": [
+    ".github/workflows/**",
+    ".github/actions/**",
+    "**/Cargo.toml",
+    "**/Cargo.lock",
+    "**/go.mod",
+    "**/go.sum",
+    "**/package.json",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/pyproject.toml",
+    "**/uv.lock",
+    "**/requirements*.txt",
+    "**/mise.toml",
+    "**/.mise.toml",
+    "**/mise.lock",
+    "**/.mise.lock",
+    "**/Makefile",
+    "**/Dockerfile*",
+    ".goreleaser.*",
+    "scripts/**",
+    "**/build.rs",
+    ".cargo/**",
+    "**/.cargo/**"
+  ]
+}

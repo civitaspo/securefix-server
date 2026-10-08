@@ -6,75 +6,52 @@ on:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
 
-# Shared Securefix client app + server repository (not per-client vars).
-# Keep allowed_committers in sync with approve.yml and approve-request.yml.
-env:
-  SECUREFIX_CLIENT_APP_ID: "3872492"
-  SECUREFIX_SERVER_REPOSITORY: securefix-server
-
 permissions: {}
 
 jobs:
-  approve:
-    name: approve
-    if: |
-      (
-        github.event_name == 'pull_request_target' &&
-        contains(fromJSON('["civitaspo", "renovate[bot]", "dependabot[bot]", "civitaspo-securefix-server[bot]"]'), github.actor)
-      ) || (
-        github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request &&
-        github.event.comment.body == '/approve' &&
-        github.event.comment.user.login == 'civitaspo'
-      )
-    runs-on: ubuntu-latest
+  build:
+    uses: ./.github/workflows/build-cli.yml
     permissions:
       contents: read
+
+  capture:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}
+    permissions:
+      contents: read
+      issues: read
       pull-requests: read
     timeout-minutes: 10
-
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
     steps:
-      - name: Request pull request approval
-        uses: csm-actions/approve-pr-action@452271472f121d6d2f8e7a0761488d2fcc29b715 # v0.2.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          app_id: ${{ env.SECUREFIX_CLIENT_APP_ID }}
-          app_private_key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-          server_repository_name: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
-          pull_request_number: ${{ github.event.pull_request.number || github.event.issue.number }}
-          # Client validates before creating the server label. Defaults are only
-          # renovate/dependabot, so trusted human/bot committers must be listed
-          # here as well (must stay in sync with approve.yml).
-          allowed_committers: |
-            civitaspo
-            cursoragent
-            civitaspo-securefix-server[bot]
-            renovate[bot]
-            dependabot[bot]
-
-      - name: Write server follow-up links
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - name: Restore trusted CLI executable mode
+        run: chmod 755 runtime/securefix
+      - name: Capture and validate the approval request
+        run: runtime/securefix request capture-approve
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: securefix-request-${{ github.run_id }}
+          path: request/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-token
+        with:
+          app-id: ${{ vars.SECUREFIX_CLIENT_APP_ID || '3872492' }}
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-issues: write
+      - name: Dispatch the request to Securefix Server
         env:
-          SERVER_REPOSITORY: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-        run: |
-          set -euo pipefail
-          server_full_name="${GITHUB_REPOSITORY_OWNER}/${SERVER_REPOSITORY}"
-          target="${GITHUB_REPOSITORY}/${PR_NUMBER}"
-          workflow_url="https://github.com/${server_full_name}/actions/workflows/approve.yml"
-          query=$(jq -nr --arg q "workflow:\"Approve Pull Request\"" '$q|@uri')
-          filter_url="https://github.com/${server_full_name}/actions?query=${query}"
-
-          {
-            echo "## Follow on securefix-server"
-            echo ""
-            echo "Approval was requested for \`${target}\`."
-            echo ""
-            echo "The machine-user approve continues there (not in this repository):"
-            echo ""
-            echo "- **Approve Pull Request runs:** ${filter_url}"
-            echo "- **Approve Pull Request workflow:** ${workflow_url}"
-            echo "- Look for a job named like \`Approve Pull Request (${target})\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "Server follow-up:"
-          echo "  $filter_url"
-          echo "  $workflow_url"
+          SECUREFIX_APP_TOKEN: ${{ steps.client-token.outputs.token }}
+        run: runtime/securefix request dispatch

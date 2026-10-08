@@ -4,22 +4,18 @@ on:
   workflow_call:
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY:
-        required: false
-
-env:
-  SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}
-  SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}
+        required: true
 
 permissions: {}
 
 jobs:
-  request:
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      github.event.comment.body == '/merge' &&
-      github.event.comment.user.id == 4525500 &&
-      github.run_attempt == 1
+  build:
+    uses: ./.github/workflows/build-cli.yml
+    permissions:
+      contents: read
+
+  capture:
+    needs: build
     runs-on: ubuntu-latest
     environment: ${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}
     permissions:
@@ -27,118 +23,35 @@ jobs:
       issues: read
       pull-requests: read
     timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
     steps:
-      - name: Require the configured Client App credentials
-        env:
-          APP_ID: ${{ env.SECUREFIX_CLIENT_APP_ID }}
-          SERVER_REPOSITORY: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
-          APP_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          test "${APP_ID}" = "3872492"
-          test "${SERVER_REPOSITORY}" = "securefix-server"
-          test -n "${APP_PRIVATE_KEY}"
-      - name: Capture the merge request
-        id: manifest
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          script: |
-            const { writeFileSync, mkdirSync } = require('node:fs')
-            const { join } = require('node:path')
-
-            const comment = context.payload.comment
-            const repository = context.payload.repository
-            const number = context.payload.issue.number
-            if (repository.owner.login !== 'civitaspo' || comment.user.id !== 4525500 || comment.body !== '/merge') {
-              core.setFailed('Only civitaspo can request a merge with an exact /merge comment.')
-              return
-            }
-            const acceptedAt = new Date().toISOString()
-
-            const { data: pr } = await github.rest.pulls.get({
-              owner: repository.owner.login,
-              repo: repository.name,
-              pull_number: number,
-            })
-            const { data: defaultRepo } = await github.rest.repos.get({
-              owner: repository.owner.login,
-              repo: repository.name,
-            })
-            const { data: currentComment } = await github.rest.issues.getComment({
-              owner: repository.owner.login,
-              repo: repository.name,
-              comment_id: comment.id,
-            })
-
-            if (pr.state !== 'open' || pr.draft || pr.base.ref !== defaultRepo.default_branch) {
-              core.setFailed('The pull request must be open, ready for review, and target the default branch.')
-              return
-            }
-            if (currentComment.body !== '/merge' || currentComment.user.id !== 4525500) {
-              core.setFailed('The request comment changed before it could be recorded.')
-              return
-            }
-
-            const manifest = {
-              version: 1,
-              repository: { id: repository.id, fullName: repository.full_name },
-              pullRequest: { number, headSha: pr.head.sha, baseRef: pr.base.ref },
-              comment: {
-                id: currentComment.id,
-                authorId: currentComment.user.id,
-                updatedAt: currentComment.updated_at,
-              },
-              acceptedAt,
-              runId: context.runId,
-              runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
-              workflowSha: context.sha,
-            }
-            const directory = join(process.env.GITHUB_WORKSPACE, 'merge-request')
-            mkdirSync(directory, { recursive: true })
-            writeFileSync(join(directory, 'manifest.json'), `${JSON.stringify(manifest)}\n`, { mode: 0o600 })
-            core.setOutput('repository', repository.name)
-            core.setOutput('run_id', String(context.runId))
-      - name: Upload the immutable request record
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - name: Restore trusted CLI executable mode
+        run: chmod 755 runtime/securefix
+      - name: Capture and validate the merge request
+        run: runtime/securefix request capture-merge
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: securefix-merge-request-${{ github.run_id }}
-          path: merge-request/manifest.json
+          name: securefix-request-${{ github.run_id }}
+          path: request/manifest.json
           if-no-files-found: error
           retention-days: 1
           overwrite: false
-      - name: Create the Securefix request label
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: app-token
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-token
         with:
-          app-id: ${{ vars.SECUREFIX_CLIENT_APP_ID }}
+          app-id: ${{ vars.SECUREFIX_CLIENT_APP_ID || '3872492' }}
           private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}
+          repositories: securefix-server
           permission-issues: write
-      - name: Notify Securefix Server
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      - name: Dispatch the request to Securefix Server
         env:
-          SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}
-          SOURCE_REPOSITORY: ${{ github.repository }}
-          SOURCE_RUN_ID: ${{ steps.manifest.outputs.run_id }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const name = `merge-request-${process.env.SOURCE_RUN_ID}`
-            const description = `${process.env.SOURCE_REPOSITORY}/${process.env.SOURCE_RUN_ID}`
-            if (owner !== 'civitaspo' || name.length > 50 || description.length > 100) {
-              core.setFailed('The merge request label fields are invalid.')
-              return
-            }
-
-            await github.rest.issues.createLabel({
-              owner,
-              repo: process.env.SERVER_REPOSITORY,
-              name,
-              color: '1f6feb',
-              description,
-            })
-            core.summary.addHeading('Merge request sent to Securefix Server')
-              .addRaw(`Request ${process.env.SOURCE_RUN_ID} for ${process.env.SOURCE_REPOSITORY} is queued for validation.`)
-            await core.summary.write()
+          SECUREFIX_APP_TOKEN: ${{ steps.client-token.outputs.token }}
+        run: runtime/securefix request dispatch

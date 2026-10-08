@@ -1,5 +1,5 @@
 name: Merge Pull Request
-run-name: Merge Pull Request (${{ github.event.label.name }})
+run-name: Merge Pull Request (${{ github.event.label.description }})
 
 on:
   label:
@@ -9,557 +9,133 @@ on:
 permissions: {}
 
 concurrency:
-  group: merge-request-${{ github.event.label.name }}
+  group: merge-${{ github.event.label.description }}
   cancel-in-progress: false
 
 jobs:
-  resolve:
+  build:
     if: startsWith(github.event.label.name, 'merge-request-')
-    runs-on: ubuntu-latest
-    environment: main
+    uses: ./.github/workflows/build-cli.yml
     permissions:
-      actions: read
       contents: read
-    timeout-minutes: 10
-    outputs:
-      repository: ${{ steps.manifest.outputs.repository }}
-      repository_name: ${{ steps.locator.outputs.repository_name }}
-      number: ${{ steps.manifest.outputs.number }}
-      manifest: ${{ steps.manifest.outputs.manifest }}
-    steps:
-      - name: Check out the repository allowlist
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          sparse-checkout: repo-settings/allowlist.json
-          sparse-checkout-cone-mode: false
-      - name: Resolve the source run locator
-        id: locator
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        env:
-          VERIFICATION_REPOSITORY: ${{ vars.MERGE_VERIFICATION_REPOSITORY }}
-        with:
-          script: |
-            const fs = require('node:fs')
-            const allowlist = JSON.parse(fs.readFileSync('repo-settings/allowlist.json', 'utf8'))
-            const label = context.payload.label
-            const match = /^merge-request-([0-9]+)$/.exec(label.name)
-            const fields = /^civitaspo\/([A-Za-z0-9._-]{1,100})\/([0-9]+)$/.exec(label.description || '')
-            if (!match || !fields || match[1] !== fields[2] || Number(process.env.GITHUB_RUN_ATTEMPT) !== 1 ||
-                context.payload.sender?.id !== 288068203 || context.payload.sender?.type !== 'Bot') {
-              core.setFailed('The merge label must contain only a valid source repository and run locator.')
-              return
-            }
-
-            const repository = `civitaspo/${fields[1]}`
-            const verificationRepository = process.env.VERIFICATION_REPOSITORY
-            if (!allowlist.includes(fields[1]) && (!verificationRepository || repository !== verificationRepository)) {
-              core.setFailed(`Merge requests are not enabled for ${repository}.`)
-              return
-            }
-            core.setOutput('repository', repository)
-            core.setOutput('repository_name', fields[1])
-            core.setOutput('run_id', match[1])
-      - name: Reject a previously handled source request
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        env:
-          SOURCE_RUN_ID: ${{ steps.locator.outputs.run_id }}
-        with:
-          script: |
-            const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-            const priorRuns = await github.paginate(github.rest.actions.listWorkflowRuns, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'merge.yml',
-              event: 'label',
-              created: `>=${since}`,
-              per_page: 100,
-            })
-            const expectedTitle = `Merge Pull Request (merge-request-${process.env.SOURCE_RUN_ID})`
-            if (priorRuns.some(run => run.id !== context.runId && run.display_title === expectedTitle)) {
-              core.setFailed('This source request already has a server workflow run. Post a fresh /merge comment to retry.')
-            }
-      - name: Create a source read token
-        id: read-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: ${{ steps.locator.outputs.repository_name }}
-          permission-actions: read
-          permission-checks: read
-          permission-contents: read
-          permission-pull-requests: read
-          permission-statuses: read
-      - name: Validate the source run
-        id: source
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        env:
-          SOURCE_REPOSITORY: ${{ steps.locator.outputs.repository }}
-          SOURCE_RUN_ID: ${{ steps.locator.outputs.run_id }}
-        with:
-          github-token: ${{ steps.read-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const runId = Number(process.env.SOURCE_RUN_ID)
-            const deadline = Date.now() + 120_000
-            let run
-            do {
-              const response = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId })
-              run = response.data
-              if (run.status === 'completed') break
-              await new Promise(resolve => setTimeout(resolve, 5000))
-            } while (Date.now() < deadline)
-
-            if (!run || run.status !== 'completed' || run.conclusion !== 'success') {
-              core.setFailed('The source request workflow did not complete successfully within two minutes.')
-              return
-            }
-            if (run.run_attempt !== 1 || run.event !== 'issue_comment' || run.repository.full_name !== process.env.SOURCE_REPOSITORY) {
-              core.setFailed('The source run is a rerun or did not originate from the expected repository event.')
-              return
-            }
-
-            const { data: sourceRepo } = await github.rest.repos.get({ owner, repo })
-            const { data: workflow } = await github.rest.actions.getWorkflow({ owner, repo, workflow_id: run.workflow_id })
-            const workflowPath = '.github/workflows/merge-request.yml'
-            if (workflow.path !== workflowPath || (run.path || '').split('@')[0] !== workflowPath || run.head_branch !== sourceRepo.default_branch) {
-              core.setFailed('The source run did not use the approved default-branch intake workflow.')
-              return
-            }
-
-            const { data: sourceCompare } = await github.request('GET /repos/{owner}/{repo}/compare/{basehead}', {
-              owner, repo, basehead: `${run.head_sha}...${sourceRepo.default_branch}`,
-            })
-            if (!['ahead', 'identical'].includes(sourceCompare.status)) {
-              core.setFailed('The source workflow revision is not an ancestor of the current default branch.')
-              return
-            }
-
-            const { data: wrapper } = await github.rest.repos.getContent({
-              owner, repo, path: workflowPath, ref: run.head_sha,
-            })
-            if (Array.isArray(wrapper) || wrapper.encoding !== 'base64') {
-              core.setFailed('The source intake workflow could not be verified.')
-              return
-            }
-            const wrapperText = Buffer.from(wrapper.content, 'base64').toString('utf8')
-            const reusablePins = [...wrapperText.matchAll(/uses:\s*civitaspo\/securefix-server\/\.github\/workflows\/reusable-merge-request\.yml@([0-9a-f]{40})(?=\s|$)/g)]
-            const pin = reusablePins[0]?.[1]
-            const reusableWorkflowPrefix = 'civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@'
-            const reusablePath = `${reusableWorkflowPrefix}${pin}`
-            const referencedWorkflows = Array.isArray(run.referenced_workflows) ? run.referenced_workflows : []
-            const referencedReusableWorkflows = referencedWorkflows.filter(reference =>
-              typeof reference.path === 'string' && reference.path.startsWith(reusableWorkflowPrefix))
-            if (reusablePins.length !== 1 || !/^[0-9a-f]{40}$/.test(pin || '') ||
-                referencedReusableWorkflows.length !== 1 || referencedReusableWorkflows[0].path !== reusablePath ||
-                referencedReusableWorkflows[0].sha !== pin) {
-              core.setFailed('The source workflow must call the approved Securefix merge reusable commit SHA.')
-              return
-            }
-
-            const server = await github.rest.repos.get({ owner: 'civitaspo', repo: 'securefix-server' })
-            const serverCompare = await github.request('GET /repos/{owner}/{repo}/compare/{basehead}', {
-              owner: 'civitaspo', repo: 'securefix-server',
-              basehead: `${pin}...${server.data.default_branch}`,
-            })
-            if (!['ahead', 'identical'].includes(serverCompare.data.status)) {
-              core.setFailed('The source workflow calls a reusable workflow revision that is not on the Securefix Server default branch.')
-              return
-            }
-
-            const expectedName = `securefix-merge-request-${runId}`
-            const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
-              owner, repo, run_id: runId, per_page: 100,
-            })
-            const matches = artifacts.artifacts.filter(item => item.name === expectedName && !item.expired)
-            if (matches.length !== 1 || matches[0].size_in_bytes > 16_384) {
-              core.setFailed('The source run must have exactly one small, unexpired merge request artifact.')
-              return
-            }
-
-            core.setOutput('artifact_id', String(matches[0].id))
-            core.setOutput('artifact_name', expectedName)
-            core.setOutput('head_sha', run.head_sha)
-      - name: Download the source request artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ steps.source.outputs.artifact_name }}
-          repository: ${{ steps.locator.outputs.repository }}
-          run-id: ${{ steps.locator.outputs.run_id }}
-          github-token: ${{ steps.read-token.outputs.token }}
-          path: ${{ runner.temp }}/merge-request
-      - name: Validate the request record and current pull request
-        id: manifest
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        env:
-          SOURCE_REPOSITORY: ${{ steps.locator.outputs.repository }}
-          SOURCE_RUN_ID: ${{ steps.locator.outputs.run_id }}
-          SOURCE_HEAD_SHA: ${{ steps.source.outputs.head_sha }}
-          MANIFEST_PATH: ${{ runner.temp }}/merge-request/manifest.json
-        with:
-          github-token: ${{ steps.read-token.outputs.token }}
-          script: |
-            const fs = require('node:fs')
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const raw = fs.readFileSync(process.env.MANIFEST_PATH)
-            if (raw.byteLength > 16_384) {
-              core.setFailed('The request manifest is too large.')
-              return
-            }
-            let manifest
-            try { manifest = JSON.parse(raw.toString('utf8')) } catch {
-              core.setFailed('The request manifest is not valid JSON.')
-              return
-            }
-
-            const fail = message => core.setFailed(message)
-            const shaPattern = /^[0-9a-f]{40}$/
-            const acceptedAt = Date.parse(manifest.acceptedAt)
-            const now = Date.now()
-            if (manifest.version !== 1 || manifest.repository?.fullName !== process.env.SOURCE_REPOSITORY ||
-                !Number.isSafeInteger(manifest.repository?.id) ||
-                !Number.isSafeInteger(manifest.pullRequest?.number) || manifest.pullRequest.number < 1 ||
-                !shaPattern.test(manifest.pullRequest?.headSha || '') ||
-                typeof manifest.pullRequest?.baseRef !== 'string' || manifest.pullRequest.baseRef.length < 1 ||
-                !Number.isSafeInteger(manifest.comment?.id) || manifest.comment.authorId !== 4525500 ||
-                !(manifest.comment.updatedAt === null || typeof manifest.comment.updatedAt === 'string') ||
-                manifest.runId !== Number(process.env.SOURCE_RUN_ID) || manifest.runAttempt !== 1 ||
-                !shaPattern.test(manifest.workflowSha || '') || manifest.workflowSha !== process.env.SOURCE_HEAD_SHA ||
-                !Number.isFinite(acceptedAt) || acceptedAt > now || now - acceptedAt > 60 * 60 * 1000) {
-              fail('The request manifest has invalid fields or an expired deadline.')
-              return
-            }
-
-            const { data: sourceRepo } = await github.rest.repos.get({ owner, repo })
-            if (sourceRepo.id !== manifest.repository.id) {
-              fail('The request repository ID does not match the source repository.')
-              return
-            }
-            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: manifest.pullRequest.number })
-            const { data: comment } = await github.rest.issues.getComment({ owner, repo, comment_id: manifest.comment.id })
-            if (pr.state !== 'open' || pr.draft || pr.base.repo.full_name !== process.env.SOURCE_REPOSITORY ||
-                pr.base.ref !== sourceRepo.default_branch || pr.base.ref !== manifest.pullRequest.baseRef ||
-                pr.head.sha !== manifest.pullRequest.headSha || !pr.head.repo ||
-                comment.issue_url !== `https://api.github.com/repos/${owner}/${repo}/issues/${manifest.pullRequest.number}` ||
-                comment.body !== '/merge' || comment.user.id !== 4525500 || comment.updated_at !== manifest.comment.updatedAt) {
-              fail('The comment or pull request no longer matches the accepted request.')
-              return
-            }
-
-            const marker = `<!-- securefix-merge-request:${manifest.runId} -->`
-            const priorComments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number: manifest.pullRequest.number, per_page: 100,
-            })
-            if (priorComments.some(item => item.user?.id === 288069019 && item.body?.includes(marker))) {
-              fail('This source request has already reached a terminal result.')
-              return
-            }
-
-            const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
-              owner, repo, issue_number: manifest.pullRequest.number, per_page: 100,
-            })
-            const timelineCutoff = Math.floor(acceptedAt / 1000) * 1000
-            const invalidatingEvents = new Set([
-              'head_ref_force_pushed', 'head_ref_deleted', 'base_ref_force_pushed',
-              'base_ref_deleted', 'base_ref_changed', 'merged', 'closed', 'reopened',
-              'convert_to_draft', 'ready_for_review',
-            ])
-            if (events.some(event => Date.parse(event.created_at || 0) >= timelineCutoff && invalidatingEvents.has(event.event))) {
-              fail('The pull request changed after the merge request was accepted.')
-              return
-            }
-
-            core.setOutput('repository', process.env.SOURCE_REPOSITORY)
-            core.setOutput('number', String(manifest.pullRequest.number))
-            core.setOutput('manifest', JSON.stringify(manifest))
 
   merge:
-    needs: resolve
-    if: needs.resolve.result == 'success'
+    needs: build
+    if: needs.build.result == 'success' && startsWith(github.event.label.name, 'merge-request-')
     runs-on: ubuntu-latest
     environment: main
-    concurrency:
-      group: merge-${{ needs.resolve.outputs.repository }}-${{ needs.resolve.outputs.number }}
-      cancel-in-progress: false
     permissions:
       contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
     timeout-minutes: 70
-    outputs:
-      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
     steps:
-      - name: Create a source read token
-        id: read-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          app-id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - name: Restore trusted CLI executable mode
+        run: chmod 755 runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ needs.resolve.outputs.repository_name }}
           permission-actions: read
           permission-checks: read
           permission-contents: read
+          permission-issues: read
           permission-pull-requests: read
           permission-statuses: read
-      - name: Wait for required checks and approval
-        id: ready
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      - name: Validate source proof and accepted head
+        id: validate
         env:
-          SOURCE_REPOSITORY: ${{ needs.resolve.outputs.repository }}
-          MANIFEST: ${{ needs.resolve.outputs.manifest }}
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: runtime/securefix merge validate
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: steps.validate.outcome == 'success'
+        id: authorization-token
         with:
-          github-token: ${{ steps.read-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const manifest = JSON.parse(process.env.MANIFEST)
-            const acceptedAt = Date.parse(manifest.acceptedAt)
-            const deadline = acceptedAt + 60 * 60 * 1000
-            const invalidatingEvents = new Set([
-              'head_ref_force_pushed', 'head_ref_deleted', 'base_ref_force_pushed',
-              'base_ref_deleted', 'base_ref_changed', 'merged', 'closed', 'reopened',
-              'convert_to_draft', 'ready_for_review',
-            ])
-
-            async function validateRequest() {
-              const { data: sourceRepo } = await github.rest.repos.get({ owner, repo })
-              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: manifest.pullRequest.number })
-              const { data: comment } = await github.rest.issues.getComment({ owner, repo, comment_id: manifest.comment.id })
-              if (sourceRepo.id !== manifest.repository.id || pr.state !== 'open' || pr.draft ||
-                  pr.base.ref !== sourceRepo.default_branch || pr.base.ref !== manifest.pullRequest.baseRef ||
-                  pr.head.sha !== manifest.pullRequest.headSha || !pr.head.repo || comment.body !== '/merge' ||
-                  comment.user.id !== 4525500 || comment.updated_at !== manifest.comment.updatedAt) {
-                throw new Error('The accepted comment or pull request changed while waiting.')
-              }
-              const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
-                owner, repo, issue_number: manifest.pullRequest.number, per_page: 100,
-              })
-              const timelineCutoff = Math.floor(acceptedAt / 1000) * 1000
-              if (events.some(event => Date.parse(event.created_at || 0) >= timelineCutoff && invalidatingEvents.has(event.event))) {
-                throw new Error('The pull request timeline contains an invalidating change.')
-              }
-              return pr
-            }
-
-            async function readiness(pr) {
-              const review = await github.graphql(`
-                query($owner: String!, $name: String!, $number: Int!) {
-                  repository(owner: $owner, name: $name) {
-                    pullRequest(number: $number) { reviewDecision }
-                  }
-                }
-              `, { owner, name: repo, number: manifest.pullRequest.number })
-              const checks = await github.paginate(github.rest.checks.listForRef, {
-                owner, repo, ref: manifest.pullRequest.headSha, per_page: 100,
-              })
-              const statuses = await github.rest.repos.getCombinedStatusForRef({
-                owner, repo, ref: manifest.pullRequest.headSha,
-              })
-              const aggregate = checks.find(candidate => candidate.name === 'status-check')
-              const legacyStatus = statuses.data.statuses.find(candidate => candidate.context === 'status-check')
-              const allRequiredChecksPassed = aggregate
-                ? aggregate.status === 'completed' && ['success', 'skipped'].includes(aggregate.conclusion)
-                : legacyStatus?.state === 'success'
-              return { approved: review.repository.pullRequest.reviewDecision === 'APPROVED', allRequiredChecksPassed }
-            }
-
-            while (Date.now() < deadline) {
-              const pr = await validateRequest()
-              const state = await readiness(pr)
-              if (state.approved && state.allRequiredChecksPassed) {
-                const commits = await github.paginate(github.rest.pulls.listCommits, {
-                  owner, repo, pull_number: manifest.pullRequest.number, per_page: 100,
-                })
-                if (commits.at(-1)?.sha !== manifest.pullRequest.headSha) {
-                  throw new Error('The pull request commit list does not match the accepted head SHA.')
-                }
-                if (commits.some(commit => commit.commit.verification?.verified !== true)) {
-                  throw new Error('All pull request commits must have verified signatures.')
-                }
-                core.setOutput('head_sha', manifest.pullRequest.headSha)
-                core.info('Required checks and review are ready for the accepted head SHA.')
-                return
-              }
-              await new Promise(resolve => setTimeout(resolve, Math.min(30_000, Math.max(0, deadline - Date.now()))))
-            }
-            core.setFailed('Required checks and review did not become ready within the fixed 60-minute deadline.')
-      - name: Create a merge token after readiness
-        id: merge-token
-        if: steps.ready.outcome == 'success'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
+          app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ needs.resolve.outputs.repository_name }}
-          permission-checks: read
-          permission-statuses: read
+          repositories: ${{ steps.validate.outputs.repository_name }}
+          permission-checks: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Record owner authorization for the exact head
+        id: authorize
+        if: steps.validate.outcome == 'success'
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_AUTHORIZATION_TOKEN: ${{ steps.authorization-token.outputs.token }}
+        run: runtime/securefix merge authorize
+      - name: Wait for current checks and review approval
+        id: wait
+        if: steps.authorize.outcome == 'success'
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: runtime/securefix merge wait
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: steps.wait.outcome == 'success'
+        id: merge-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.validate.outputs.repository_name }}
           permission-contents: write
           permission-pull-requests: write
-      - name: Merge the accepted head SHA
-        id: merge
-        if: steps.ready.outcome == 'success'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      - name: Merge the accepted SHA
+        id: apply
+        if: steps.wait.outcome == 'success'
         env:
-          SOURCE_REPOSITORY: ${{ needs.resolve.outputs.repository }}
-          MANIFEST: ${{ needs.resolve.outputs.manifest }}
-          DEADLINE: ${{ fromJSON(needs.resolve.outputs.manifest).acceptedAt }}
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
+        run: runtime/securefix merge apply
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: always() && steps.validate.outcome == 'success'
+        id: notify-token
         with:
-          github-token: ${{ steps.merge-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const manifest = JSON.parse(process.env.MANIFEST)
-            const acceptedAt = Date.parse(manifest.acceptedAt)
-            const deadline = acceptedAt + 60 * 60 * 1000
-            const invalidatingEvents = new Set([
-              'head_ref_force_pushed', 'head_ref_deleted', 'base_ref_force_pushed',
-              'base_ref_deleted', 'base_ref_changed', 'merged', 'closed', 'reopened',
-              'convert_to_draft', 'ready_for_review',
-            ])
-
-            async function revalidate() {
-              const { data: sourceRepo } = await github.rest.repos.get({ owner, repo })
-              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: manifest.pullRequest.number })
-              const { data: comment } = await github.rest.issues.getComment({ owner, repo, comment_id: manifest.comment.id })
-              if (sourceRepo.id !== manifest.repository.id || pr.state !== 'open' || pr.draft ||
-                  pr.base.ref !== sourceRepo.default_branch || pr.base.ref !== manifest.pullRequest.baseRef ||
-                  pr.head.sha !== manifest.pullRequest.headSha || comment.body !== '/merge' ||
-                  comment.user.id !== 4525500 || comment.updated_at !== manifest.comment.updatedAt) {
-                throw new Error('The accepted comment or pull request changed before merge.')
-              }
-              const events = await github.paginate(github.rest.issues.listEventsForTimeline, {
-                owner, repo, issue_number: manifest.pullRequest.number, per_page: 100,
-              })
-              const timelineCutoff = Math.floor(acceptedAt / 1000) * 1000
-              if (events.some(event => Date.parse(event.created_at || 0) >= timelineCutoff && invalidatingEvents.has(event.event))) {
-                throw new Error('The pull request timeline contains an invalidating change.')
-              }
-              return pr
-            }
-
-            function requiredChecksReady(checks, statuses) {
-              const aggregate = checks.find(candidate => candidate.name === 'status-check')
-              const legacyStatus = statuses.find(candidate => candidate.context === 'status-check')
-              return aggregate
-                ? aggregate.status === 'completed' && ['success', 'skipped'].includes(aggregate.conclusion)
-                : legacyStatus?.state === 'success'
-            }
-
-            function mergeMessage(body, commits) {
-              const lines = body ? body.trimEnd().split('\n') : []
-              const seen = new Set(lines.filter(line => /^Co-authored-by:\s*/i.test(line)).map(line => line.toLowerCase()))
-              const trailers = []
-              for (const commit of commits) {
-                for (const line of commit.commit.message.split('\n')) {
-                  if (/^Co-authored-by:\s*\S.+$/i.test(line) && !seen.has(line.toLowerCase())) {
-                    seen.add(line.toLowerCase())
-                    trailers.push(line)
-                  }
-                }
-              }
-              return [...lines, ...(trailers.length ? ['', ...trailers] : [])].join('\n')
-            }
-
-            while (Date.now() < deadline) {
-              const pr = await revalidate()
-              const review = await github.graphql(`
-                query($owner: String!, $name: String!, $number: Int!) {
-                  repository(owner: $owner, name: $name) {
-                    pullRequest(number: $number) { reviewDecision }
-                  }
-                }
-              `, { owner, name: repo, number: manifest.pullRequest.number })
-              const checks = await github.paginate(github.rest.checks.listForRef, {
-                owner, repo, ref: manifest.pullRequest.headSha, per_page: 100,
-              })
-              const statuses = await github.rest.repos.getCombinedStatusForRef({
-                owner, repo, ref: manifest.pullRequest.headSha,
-              })
-              if (review.repository.pullRequest.reviewDecision === 'APPROVED' &&
-                  requiredChecksReady(checks, statuses.data.statuses)) {
-                const commits = await github.paginate(github.rest.pulls.listCommits, {
-                  owner, repo, pull_number: manifest.pullRequest.number, per_page: 100,
-                })
-                const message = mergeMessage(pr.body || '', commits)
-                try {
-                  const result = await github.rest.pulls.merge({
-                    owner, repo, pull_number: manifest.pullRequest.number,
-                    sha: manifest.pullRequest.headSha, merge_method: 'squash', commit_message: message || undefined,
-                  })
-                  if (!result.data.merged || !/^[0-9a-f]{40}$/.test(result.data.sha || '')) {
-                    throw new Error('GitHub did not confirm the squash merge result.')
-                  }
-                  core.setOutput('merge_sha', result.data.sha)
-                  core.info(`Merged ${manifest.repository.fullName}#${manifest.pullRequest.number} at ${result.data.sha}.`)
-                  return
-                } catch (error) {
-                  if (error.status === 409) throw new Error('The accepted head SHA changed before GitHub merged it.')
-                  if (![405, 422, 503].includes(error.status)) throw error
-                  core.info(`GitHub has not accepted the merge yet (${error.status}); checking again.`)
-                }
-              }
-              await new Promise(resolve => setTimeout(resolve, Math.min(30_000, Math.max(0, deadline - Date.now()))))
-            }
-            core.setFailed('GitHub did not accept the merge before the fixed 60-minute deadline.')
-
-  notify:
-    needs: [resolve, merge]
-    if: always() && needs.resolve.result == 'success'
-    runs-on: ubuntu-latest
-    environment: main
-    permissions: {}
-    timeout-minutes: 10
-    steps:
-      - name: Create a result notification token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
+          app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ needs.resolve.outputs.repository_name }}
+          repositories: ${{ steps.validate.outputs.repository_name }}
+          permission-issues: write
           permission-pull-requests: write
       - name: Report the terminal result
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        if: always() && steps.validate.outcome == 'success' && steps.notify-token.outcome == 'success'
         env:
-          SOURCE_REPOSITORY: ${{ needs.resolve.outputs.repository }}
-          MANIFEST: ${{ needs.resolve.outputs.manifest }}
-          MERGE_RESULT: ${{ needs.merge.result }}
-          MERGE_SHA: ${{ needs.merge.outputs.merge_sha }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.SOURCE_REPOSITORY.split('/')
-            const manifest = JSON.parse(process.env.MANIFEST)
-            const marker = `<!-- securefix-merge-request:${manifest.runId} -->`
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number: manifest.pullRequest.number, per_page: 100,
-            })
-            if (comments.some(comment => comment.user?.id === 288069019 && comment.body?.includes(marker))) return
-
-            const succeeded = process.env.MERGE_RESULT === 'success' && /^[0-9a-f]{40}$/.test(process.env.MERGE_SHA || '')
-            const message = succeeded
-              ? `Securefix merged this pull request with squash at ${process.env.MERGE_SHA}.`
-              : 'Securefix could not merge this request. The request expired or a validation check failed. Post a new exact `/merge` comment after resolving the issue.'
-            await github.rest.issues.createComment({
-              owner, repo, issue_number: manifest.pullRequest.number,
-              body: `${marker}\n${message}\n\nServer run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-            })
+          SECUREFIX_NOTIFY_TOKEN: ${{ steps.notify-token.outputs.token }}
+          SECUREFIX_MERGE_RESULT: ${{ steps.apply.outcome }}
+          SECUREFIX_MERGE_SHA: ${{ steps.apply.outputs.merge_sha }}
+        run: runtime/securefix merge notify
 
   cleanup:
-    needs: [resolve, merge, notify]
-    if: always() && startsWith(github.event.label.name, 'merge-request-')
+    needs: [build, merge]
+    if: always() && needs.build.result == 'success' && startsWith(github.event.label.name, 'merge-request-')
     runs-on: ubuntu-latest
     permissions:
       issues: write
-    timeout-minutes: 10
+    timeout-minutes: 5
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
     steps:
-      - name: Delete the one-time request label
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          script: |
-            try {
-              await github.rest.issues.deleteLabel({ owner: context.repo.owner, repo: context.repo.repo, name: context.payload.label.name })
-            } catch (error) {
-              if (error.status !== 404) throw error
-            }
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - name: Restore trusted CLI executable mode
+        run: chmod 755 runtime/securefix
+      - name: Delete the one-time request label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: runtime/securefix merge cleanup

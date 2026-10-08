@@ -1,69 +1,92 @@
 name: Securefix
-
 on:
   label:
-    types:
-      - created
-
+    types: [created]
 permissions: {}
-
 concurrency:
   group: securefix-${{ github.event.label.name }}
   cancel-in-progress: false
-
 jobs:
-  fix:
+  build:
+    uses: ./.github/workflows/build-cli.yml
+    permissions:
+      contents: read
+  gate:
+    needs: build
     if: startsWith(github.event.label.name, 'securefix-')
     runs-on: ubuntu-latest
     environment: main
+    timeout-minutes: 15
     permissions:
+      contents: read
+      actions: read
       issues: write
-    timeout-minutes: 10
-
     steps:
-      - name: Checkout Securefix configuration
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          persist-credentials: false
-          sparse-checkout: securefix-config.yaml
-          sparse-checkout-cone-mode: false
-
-      - name: Prepare Securefix request
-        id: prepare
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
-        with:
-          action: prepare
-          allow_workflow_fix: true
-          app_id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
-          app_private_key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          config_file: securefix-config.yaml
-          workflow_name: ""
-
-      - name: Allowlist client workflows
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix
+          merge-multiple: true
+      - name: Restore trusted CLI permissions
+        run: chmod 700 "$RUNNER_TEMP/securefix/securefix"
+      - name: Validate label event and source scope
+        id: event
         env:
-          WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
-        run: |
-          set -euo pipefail
-          name=$(printf '%s' "$WORKFLOW_RUN" | jq -r '.name')
-          case "$name" in
-            CI|Release\ PR)
-              echo "Allowed client workflow: $name"
-              ;;
-            *)
-              echo "Denied client workflow: $name" >&2
-              exit 1
-              ;;
-          esac
-
-      - name: Create Securefix commit
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+        working-directory: ${{ runner.temp }}/securefix
+        run: ./securefix securefix validate-event
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
         with:
-          action: commit
-          outputs: ${{ toJson(steps.prepare.outputs) }}
-
-      - name: Notify Securefix failure
-        if: failure()
-        uses: csm-actions/securefix-action@4d885e1bcb71f4f110215c833002ce9fa0ee0fa6 # v0.6.0
+          app-id: 3872533
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.event.outputs.source_repository }}
+          permission-actions: read
+          permission-pull-requests: read
+          permission-contents: read
+      - name: Validate source workflow run and artifact
+        id: source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_READ_TOKEN: ${{ steps.read-token.outputs.token }}
+          SOURCE_REPOSITORY: ${{ steps.event.outputs.source_repository }}
+          SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}
+          SOURCE_LABEL: ${{ steps.event.outputs.source_label }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+        working-directory: ${{ runner.temp }}/securefix
+        run: ./securefix securefix validate-source
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: write-token
         with:
-          action: notify
-          outputs: ${{ toJson(steps.prepare.outputs) }}
+          app-id: 3872533
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.event.outputs.source_repository }}
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Revalidate source and apply the exact inspected artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_READ_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
+          SOURCE_REPOSITORY: ${{ steps.event.outputs.source_repository }}
+          SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}
+          SOURCE_LABEL: ${{ steps.event.outputs.source_label }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+        working-directory: ${{ runner.temp }}/securefix
+        run: ./securefix securefix apply
+      - name: Consume validated request label
+        if: always() && steps.event.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+        working-directory: ${{ runner.temp }}/securefix
+        run: ./securefix securefix cleanup

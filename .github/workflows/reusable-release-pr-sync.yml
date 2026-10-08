@@ -1,68 +1,34 @@
 name: Reusable Release PR Sync
 
-# securefix-action creates a release/next PR once, but does not update the
-# title/body when later Release PR runs push new prepare commits. Sync metadata
-# from .release-version after each push to release/next.
-
 on:
   workflow_call:
-
 permissions: {}
-
 jobs:
+  cli:
+    uses: ./.github/workflows/build-cli.yml
+    permissions:
+      contents: read
+
   sync:
-    name: sync release pull request metadata
+    needs: cli
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     timeout-minutes: 5
-
     steps:
-      - name: Check out release/next
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: release/next
           persist-credentials: false
-
-      - name: Sync pull request title and body
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - run: chmod 755 runtime/securefix
+      - name: Sync release PR title and summary
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          version=$(tr -d '[:space:]' < .release-version)
-          if ! printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
-            echo "Invalid .release-version: ${version}" >&2
-            exit 1
-          fi
-
-          pr_number=$(gh pr list \
-            --head release/next \
-            --base main \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')
-          if [ -z "$pr_number" ]; then
-            echo "No open pull request for release/next; nothing to sync."
-            exit 0
-          fi
-
-          if [ -f dbt_project.yml ] || [ -f pyproject.toml ]; then
-            body_extra='package version metadata'
-          else
-            body_extra='release metadata'
-          fi
-
-          body=$(
-            printf '%s\n' \
-              '## Summary' \
-              "- Prepare release v${version}" \
-              "- Update the changelog and ${body_extra}" \
-              '' \
-              'This pull request is managed by the Release PR workflow.'
-          )
-
-          gh pr edit "$pr_number" \
-            --title "chore(release): v${version}" \
-            --body "$body"
-          echo "Updated pull request #${pr_number} to v${version}."
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: runtime/securefix release sync-pr

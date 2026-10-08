@@ -1,0 +1,52 @@
+name: Policy Request
+on:
+  workflow_call:
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: true
+permissions: {}
+jobs:
+  cli:
+    uses: ./.github/workflows/build-cli.yml
+    permissions:
+      contents: read
+
+  request:
+    needs: cli
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - run: chmod +x runtime/securefix
+      - run: runtime/securefix check capture
+        id: capture
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.capture.outputs.artifact_name }}
+          path: policy-request/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app
+        with:
+          app-id: '3872492'
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-issues: write
+      - run: runtime/securefix check dispatch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_APP_TOKEN: ${{ steps.app.outputs.token }}

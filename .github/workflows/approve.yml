@@ -1,5 +1,5 @@
 name: Approve Pull Request
-run-name: Approve Pull Request (${{ github.event.label.name }})
+run-name: Approve Pull Request (${{ github.event.label.description }})
 
 on:
   label:
@@ -13,23 +13,88 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    if: startsWith(github.event.label.name, 'approve-request-')
+    uses: ./.github/workflows/build-cli.yml
+    permissions:
+      contents: read
+
   approve:
-    if: startsWith(github.event.label.name, 'approve-pr-')
-    name: Approve Pull Request (${{ github.event.label.description }})
+    needs: build
+    if: needs.build.result == 'success' && startsWith(github.event.label.name, 'approve-request-')
     runs-on: ubuntu-latest
     environment: main
-    permissions: {}
-    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    timeout-minutes: 15
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
     steps:
-      - name: Approve pull request
-        uses: csm-actions/approve-pr-action@452271472f121d6d2f8e7a0761488d2fcc29b715 # v0.2.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          github_token: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
-          app_id: ${{ vars.SECUREFIX_SERVER_APP_ID }}
-          app_private_key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          allowed_committers: |
-            civitaspo
-            cursoragent
-            civitaspo-securefix-server[bot]
-            renovate[bot]
-            dependabot[bot]
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - name: Restore trusted CLI executable mode
+        run: chmod 755 runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Validate request and all current commits
+        id: validate
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: runtime/securefix approve validate
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: steps.validate.outcome == 'success'
+        id: write-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.validate.outputs.repository_name }}
+          permission-checks: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Approve the accepted commit
+        id: apply
+        if: steps.validate.outcome == 'success'
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
+          SECUREFIX_APPROVE_TOKEN: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
+        run: runtime/securefix approve apply
+
+  cleanup:
+    needs: [build, approve]
+    if: always() && needs.build.result == 'success' && startsWith(github.event.label.name, 'approve-request-')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    timeout-minutes: 5
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: runtime
+          merge-multiple: true
+      - name: Restore trusted CLI executable mode
+        run: chmod 755 runtime/securefix
+      - name: Delete the one-time request label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: runtime/securefix approve cleanup

@@ -1,75 +1,69 @@
 # securefix-server
 
-Securefix Action server repository for `civitaspo` repositories.
+Privileged OSS automation for civitaspo repositories, based on the client/server trust model of [csm-actions/securefix-action](https://github.com/csm-actions/securefix-action).
+The Rust `securefix` executable owns approval, merge, release, settings, and request validation.
+GitHub Actions workflows route events, build the trusted executable, isolate credentials, and call its commands.
 
-This repository is built around [`csm-actions/securefix-action`](https://github.com/csm-actions/securefix-action). Thank you to the maintainers for providing the client/server workflow used here.
+## Policy and trust
 
-The server workflow receives Securefix client requests through `securefix-*` label events and creates signed fix commits with the server GitHub App.
+[`policy.json`](policy.json) grants named operations to exact repositories and defines sensitive paths.
+Requests must originate from the configured Client App, a successful first-attempt workflow run, and the current server revision.
+Client wrappers pin a full server commit SHA; older ancestors are rejected.
+Every server commit therefore requires client pin updates.
 
-## Required configuration
+Owner commands `/approve` and `/merge` bind authorization to the PR head observed at intake.
+All source commits need verified signatures and an allowed committer.
+Sensitive changes need owner authorization for that exact head.
+The server publishes `securefix-policy-check` from the Server App; an approval for an earlier head cannot satisfy it for an updated head.
+Ordinary Renovate automerge remains possible under the same required checks and stale-review dismissal.
 
-Create a GitHub App for the server and install it into this repository and the client repositories.
+The Securefix client keeps its pinned upstream artifact protocol.
+Rust reads that exact artifact ID, validates metadata and file paths, and creates signed commits with the captured head as an API precondition.
+It accepts `CI` and `Release PR` workflows and denies direct default-branch pushes.
 
-Repository variables and secrets:
+## Operations
 
-- Variable `SECUREFIX_SERVER_APP_ID`
-- Secret `SECUREFIX_SERVER_PRIVATE_KEY`
+| Operation | CLI | Contract |
+| --- | --- | --- |
+| Approve | `request`, `approve` | [Approval and merge](docs/merging.md) |
+| Merge | `request`, `merge`, `check` | [Approval and merge](docs/merging.md) |
+| Release | `release` | [Client releases](docs/client-releases.md) |
+| Settings | `settings` | [Settings and activation](docs/repo-settings.md) |
+| Signed fixes | `securefix` | [Migration](docs/migration.md) |
 
-The server app needs these permissions:
+Provider releases use a secret-free fixed build, a GPG-only signer, and a publisher with a repository-scoped contents token.
+Publication requires immutable releases to be enabled and verifies the published release's immutable state.
+Client release configuration and hooks never run in signing or publishing jobs.
+Manual release retries identify a verified merged release PR, rather than an arbitrary commit SHA.
+Scheduled settings reconciliation cannot create or reactivate merge restrictions.
 
-- `contents: write`
-- `actions: read`
-- `checks: read`
-- `commit statuses: read`
-- `pull_requests: write`
-- `workflows: write`
+## Credentials
 
-`workflows: write` is required because the current client use case fixes files under `.github/workflows`.
+The existing `main` environment holds these secrets:
 
-## Repository hardening
+| Secret | Use |
+| --- | --- |
+| `SECUREFIX_SERVER_PRIVATE_KEY` | Narrow Server App tokens for reads, checks, commits, merges, publication, and activation |
+| `SECUREFIX_CLIENT_PRIVATE_KEY` | This repository's client request labels |
+| `CIVITASPO_BOT_PR_APPROVE_TOKEN` | Reviews as `civitaspo-bot`; its identity and non-author status are checked |
+| `CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN` | Repository administration as civitaspo |
+| `CIVITASPO_BOT_REPO_INVITE_TOKEN` | Optional acceptance of the bot's collaborator invitation |
+| `TERRAFORM_PROVIDER_GPG_PRIVATE_KEY` | Provider checksum signing only |
+| `TERRAFORM_PROVIDER_GPG_PASSPHRASE` | Provider checksum signing only |
 
-The repository intentionally keeps only the features needed by Securefix:
+The Server App ID is `3872533`; the Client App ID is `3872492`.
+Clients provide only `SECUREFIX_CLIENT_PRIVATE_KEY` to the reusables.
+`civitaspo-bot` must retain write collaborator access for its reviews to count.
+The operation documents list the required App permissions.
 
-- Issues: enabled, because Securefix uses repository labels.
-- Pull requests: enabled for repository maintenance.
-- Projects, wiki, discussions, and downloads: disabled.
-- Main branch: protected by ruleset, requiring signed commits, linear history, pull requests, status checks, and blocking deletion and force pushes.
-- Security features: secret scanning, push protection, private vulnerability reporting, and Dependabot security updates are enabled.
+## Development and rollout
 
-## Pull request approval
+```sh
+cargo fmt --all -- --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
 
-Pull requests **to this repository** are auto-requested for approval by the `Approve Request` workflow (same CSM client pattern as other civitaspo repos). It creates an `approve-pr-*` label; the `Approve Pull Request` workflow then approves with the machine-user PAT.
-
-Trusted authors / committers (single policy, shared with client reusables): `civitaspo`, `cursoragent`, `civitaspo-securefix-server[bot]`, `renovate[bot]`, `dependabot[bot]`. You can also comment `/approve` as `civitaspo`.
-
-Client configuration on this repository:
-
-- `main` environment secret `SECUREFIX_CLIENT_PRIVATE_KEY` (this repository's Approve Request stays inline with `environment: main`; client repos call `reusable-approve-request.yml` with a repository secret instead)
-
-Server-side approval still needs `CIVITASPO_BOT_PR_APPROVE_TOKEN` on the `main` environment, plus `SECUREFIX_SERVER_APP_ID` / `SECUREFIX_SERVER_PRIVATE_KEY`. `civitaspo-bot` must remain a write collaborator so its approvals count toward the ruleset.
-
-## Securefix client workflows
-
-The Securefix server accepts requests only from the `CI` and `Release PR` client workflows. Requests from other workflow names are denied before a commit is created. `CI` is the top-level pull-request workflow (`pull_request.yml`) after the single-PR CI migration.
-
-Clients may request an allowed destination branch, including `release/next`, within `civitaspo/*` repositories. The server validates these requests with `securefix-config.yaml`. Commit messages supplied by clients are honored; the server does not override them.
-
-## Client releases
-
-Privileged publish runs only in this repository (`environment: main`). Clients call reusable workflows defined here, create an annotated tag, and open a `release-request-*` label; the server validates against [`release-clients.yaml`](release-clients.yaml) and publishes.
-
-**Full specification:** [docs/client-releases.md](docs/client-releases.md) (architecture, label contract, allowlist, reusables, onboarding, approval policy).
-
-Quick facts:
-
-- Allowlist gate: exact `owner/repo` entries in `release-clients.yaml` (no wildcards); add via PR to this repo
-- Label: `release-request-<run_id>-<tag>` with description `owner/repo/run_id/tag/sha`
-- Clients pin `reusable-release-*.yml` / `reusable-approve-request.yml` by commit SHA (Renovate bumps)
-- Client secret required: `SECUREFIX_CLIENT_PRIVATE_KEY` only (App ID and server name are hardcoded in the reusables)
-- Caller jobs must grant the `permissions` scopes the reusable jobs request (see the doc)
-
-## Repository settings reconcile
-
-OSS repositories under `civitaspo` get shared merge settings, a default-branch ruleset, and the `civitaspo-bot` collaborator from [`.github/workflows/repo-settings.yml`](.github/workflows/repo-settings.yml) applied from [`repo-settings/`](repo-settings/) (`gh` + schedule / `workflow_dispatch`). See [docs/repo-settings.md](docs/repo-settings.md).
-
-Human pull request merges use a `/merge` comment from `civitaspo` and run through Securefix Server. Renovate keeps its existing automerge scopes through its GitHub App. Merge controls remain disabled until the real App permissions and merge behavior pass rollout checks. See [docs/client-releases.md](docs/client-releases.md) and [docs/repo-settings.md](docs/repo-settings.md).
+CI also runs pinned actionlint and structural workflow tests.
+See [migration and rollout](docs/migration.md), the [domain glossary](CONTEXT.md), and [architecture decisions](docs/adr/).
+The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence; the Rust implementation still needs deployment validation before activation.

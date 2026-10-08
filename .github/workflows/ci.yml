@@ -35,21 +35,32 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test merge request validation
-        run: node --test tests/merge-workflows.test.mjs
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Check formatting
+        run: cargo +1.99.0 fmt --all -- --check
+
+      - name: Run Rust tests
+        run: cargo +1.99.0 test --locked
+
+      - name: Run Clippy
+        run: cargo +1.99.0 clippy --locked --all-targets -- -D warnings
 
       - name: Run actionlint
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
+        run: >-
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          -shellcheck=
+          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:'
 
   status-check:
     runs-on: ubuntu-latest
-    if: >-
-      always() &&
-      github.event_name == 'pull_request' &&
-      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    if: always()
     timeout-minutes: 10
     permissions: {}
     needs:
       - workflows
     steps:
-      - run: exit 1
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo 'Required checks passed.'
