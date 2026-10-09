@@ -658,6 +658,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_state_accepts_ascii_whitespace_around_the_owner_command() {
+        for body in ["/merge", " \t/merge\r\n"] {
+            let mut comment = valid_owner_comment();
+            comment["body"] = json!(body);
+            let mut routes = comment_routes(comment);
+            let timeline = "/repos/civitaspo/dbt-authorized-models/issues/7/timeline?per_page=100&page=1";
+            routes.push(Route::get(
+                timeline,
+                json!([]),
+            ));
+            let fixture = Fixture::new(routes);
+            let policy = Policy::load("policy.json").unwrap();
+            let result = validate_state(&fixture.api, &policy, &state_manifest());
+            if result.is_err() {
+                let _: Value = fixture.api.get(timeline).unwrap();
+            }
+            fixture.finish();
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
     fn validate_state_rejects_deleted_owner_comment() {
         let mut routes = state_prefix(valid_pr());
         routes.push(Route::request(
