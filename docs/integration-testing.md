@@ -55,6 +55,31 @@ exact contents and an idempotent retry. Release tagging uses the production anno
 helper and verifies retries and target mismatch before deleting the disposable tag.
 Attested stable runtime publication remains a separate protected-main operation.
 
+To exercise review creation as well, prepare an owner-authored PR in the configured
+scratch repository before dispatching the prepare phase. Its branch must be
+`securefix-integration-approval-<first 12 characters of candidate SHA>`. It must
+contain one owner-authored, verified signed commit whose sole parent is the current
+scratch default head. The only added file must be
+`.securefix-integration/approval-<full candidate SHA>.txt`, containing exactly
+`candidate=<full candidate SHA>\nscenario=approval\n`. Post one owner `/approve`
+comment, then pass its PR number and exact head SHA as `approval_fixture_pr` and
+`approval_fixture_head` workflow inputs. Both inputs are required together.
+
+The candidate verifies the fixture's author, repository IDs, base, branch, signed
+head and exact file bytes before writing. The scratch-scoped Server App then runs
+the shared review creation core as a different identity from the PR author. The
+test verifies an `APPROVED` review with that App's exact configured identity and
+commit SHA. Production still authenticates the configured User reviewer before
+calling the same core. No production reviewer token enters the candidate. Close
+the owner-created fixture and remove its branch after collecting the review and
+CI evidence; it is separate from the three harness-owned fixtures.
+
+This probe covers review mutation and current-head readback. The production
+source-run artifact and label-event pipeline remains covered separately; the
+scratch probe does not claim to execute that full workflow. Prepare also runs the
+repository-settings installation scope validator against the real singleton
+scratch App token before it creates the harness-owned fixtures.
+
 The candidate policy used by the harness is constructed in memory from the
 trusted runtime policy, narrowed to the scratch repository, and assigned the candidate
 SHA. This is an explicit test context; production `Policy::active` and

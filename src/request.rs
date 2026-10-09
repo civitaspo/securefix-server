@@ -636,6 +636,13 @@ pub fn has_current_head_approval(
     Ok(current_review_approval(&reviews, sha, author_id))
 }
 
+pub(crate) fn review_order(review: &Value) -> Option<(chrono::DateTime<chrono::FixedOffset>, u64)> {
+    let submitted_at =
+        chrono::DateTime::parse_from_rfc3339(review["submitted_at"].as_str()?).ok()?;
+    let id = review["id"].as_u64().filter(|id| *id > 0)?;
+    Some((submitted_at, id))
+}
+
 fn current_review_approval(reviews: &[Value], head_sha: &str, author_id: u64) -> bool {
     let mut latest = std::collections::HashMap::<u64, &Value>::new();
     for review in reviews.iter().filter(|review| {
@@ -644,18 +651,18 @@ fn current_review_approval(reviews: &[Value], head_sha: &str, author_id: u64) ->
             Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
         )
     }) {
-        let Some(user_id) = review["user"]["id"].as_u64().filter(|id| *id != author_id) else {
-            continue;
+        let Some(user_id) = review["user"]["id"].as_u64().filter(|id| *id > 0) else {
+            return false;
         };
-        let replace = latest.get(&user_id).is_none_or(|previous| {
-            (
-                review["submitted_at"].as_str().unwrap_or_default(),
-                review["id"].as_u64().unwrap_or_default(),
-            ) > (
-                previous["submitted_at"].as_str().unwrap_or_default(),
-                previous["id"].as_u64().unwrap_or_default(),
-            )
-        });
+        if user_id == author_id {
+            continue;
+        }
+        let Some(order) = review_order(review) else {
+            return false;
+        };
+        let replace = latest
+            .get(&user_id)
+            .is_none_or(|previous| order > review_order(previous).expect("stored valid review"));
         if replace {
             latest.insert(user_id, review);
         }
@@ -1492,5 +1499,29 @@ mod tests {
             json!({"id":2,"user":{"id":9},"state":"CHANGES_REQUESTED","commit_id":head,"submitted_at":"2026-01-02T00:00:00Z"}),
         ];
         assert!(!current_review_approval(&reviews, &head, 1));
+    }
+
+    #[test]
+    fn malformed_decisive_reviews_fail_closed_and_timezone_offsets_are_ordered() {
+        let head = "b".repeat(40);
+        let approved = json!({"id":1,"user":{"id":9},"state":"APPROVED","commit_id":head,"submitted_at":"2026-01-01T00:00:00Z"});
+        for malformed in [
+            json!({"id":2,"user":{"id":9},"state":"CHANGES_REQUESTED","commit_id":head,"submitted_at":"2026-01-02T00:00:00Z"}),
+            json!({"user":{"id":9},"state":"DISMISSED","commit_id":head,"submitted_at":"2026-01-02T00:00:00Z"}),
+            json!({"id":2,"user":{"id":9},"state":"CHANGES_REQUESTED","commit_id":head,"submitted_at":"yesterday"}),
+            json!({"id":2,"user":{},"state":"APPROVED","commit_id":head,"submitted_at":"2026-01-02T00:00:00Z"}),
+        ] {
+            assert!(!current_review_approval(
+                &[approved.clone(), malformed],
+                &head,
+                1
+            ));
+        }
+
+        let timezone_order = vec![
+            json!({"id":3,"user":{"id":9},"state":"APPROVED","commit_id":head,"submitted_at":"2026-01-01T01:00:00+01:00"}),
+            json!({"id":4,"user":{"id":9},"state":"CHANGES_REQUESTED","commit_id":head,"submitted_at":"2026-01-01T00:30:00Z"}),
+        ];
+        assert!(!current_review_approval(&timezone_order, &head, 1));
     }
 }
