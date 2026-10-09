@@ -58,6 +58,8 @@ jobs:
           github_token_to_delete_label: ${{ github.token }}
       - name: Validate Securefix prepare outputs
         id: gate
+        if: ${{ !startsWith(github.event.label.description, 'civitaspo/securefix-server/') }}
+
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -70,12 +72,45 @@ jobs:
           SECUREFIX_PULL_REQUEST: ${{ steps.prepare.outputs.pull_request }}
           SECUREFIX_CREATE_PULL_REQUEST: ${{ steps.prepare.outputs.create_pull_request }}
         run: securefix securefix validate-prepared
+      - name: Validate runtime distribution request
+        id: distribution-gate
+        if: startsWith(github.event.label.description, 'civitaspo/securefix-server/')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_DISTRIBUTION_TOKEN: ${{ steps.prepare.outputs.github_token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          SECUREFIX_WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
+          SECUREFIX_METADATA: ${{ steps.prepare.outputs.metadata }}
+          SECUREFIX_FIXED_FILES: ${{ steps.prepare.outputs.fixed_files }}
+          SECUREFIX_PUSH_REPOSITORY: ${{ steps.prepare.outputs.push_repository }}
+          SECUREFIX_BRANCH: ${{ steps.prepare.outputs.branch }}
+        run: securefix distribute validate-prepared
       - name: Apply fix with Securefix Action
         id: commit
+        if: (steps.gate.outcome == 'success' || (steps.distribution-gate.outcome == 'success' && steps.distribution-gate.outputs.already_current != 'true'))
         uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         with:
           action: commit
           outputs: ${{ toJSON(steps.prepare.outputs) }}
+      - name: Reconcile runtime migration pull request
+        if: steps.distribution-gate.outcome == 'success' && (steps.commit.outcome == 'success' || steps.distribution-gate.outputs.already_current == 'true')
+        id: reconcile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_DISTRIBUTION_TOKEN: ${{ steps.prepare.outputs.github_token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          SECUREFIX_WORKFLOW_RUN: ${{ steps.prepare.outputs.workflow_run }}
+          SECUREFIX_METADATA: ${{ steps.prepare.outputs.metadata }}
+          SECUREFIX_FIXED_FILES: ${{ steps.prepare.outputs.fixed_files }}
+          SECUREFIX_PUSH_REPOSITORY: ${{ steps.prepare.outputs.push_repository }}
+          SECUREFIX_BRANCH: ${{ steps.prepare.outputs.branch }}
+        run: securefix distribute reconcile-pull-request
       - name: Notify validated fix failure
         if: failure() && steps.gate.outcome == 'success' && steps.commit.outcome == 'failure'
         uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3

@@ -810,15 +810,45 @@ pub fn post_owner_marker(
     head_sha: &str,
     comment_id: u64,
 ) -> Result<()> {
-    validate_repository(repository)?;
-    validate_sha(head_sha)?;
-    ensure!(comment_id > 0, "invalid owner comment ID");
-    let marker = format!("<!-- securefix:v2:owner:{head_sha}:{comment_id} -->");
+    let run_id: u64 = std::env::var("GITHUB_RUN_ID")?.parse()?;
+    let run_attempt: u32 = std::env::var("GITHUB_RUN_ATTEMPT")?.parse()?;
+    let body = render_owner_marker(
+        repository,
+        number,
+        head_sha,
+        comment_id,
+        run_id,
+        run_attempt,
+    )?;
     let _: Value = api.post(
         &format!("/repos/{repository}/issues/{number}/comments"),
-        &json!({"body":marker}),
+        &json!({"body":body}),
     )?;
     Ok(())
+}
+
+fn render_owner_marker(
+    repository: &str,
+    number: u64,
+    head_sha: &str,
+    comment_id: u64,
+    run_id: u64,
+    run_attempt: u32,
+) -> Result<String> {
+    validate_repository(repository)?;
+    validate_sha(head_sha)?;
+    ensure!(
+        number > 0 && comment_id > 0,
+        "invalid pull request or comment ID"
+    );
+    ensure!(
+        run_id > 0 && run_attempt > 0,
+        "invalid workflow run identity"
+    );
+    Ok(format!(
+        "Owner authorization verified for this commit.\n\n<!-- securefix:v2:owner:{head_sha}:{comment_id} -->\n\n<sub><a href=\"https://github.com/{repository}/pull/{number}#issuecomment-{comment_id}\">Owner request</a> · <a href=\"https://github.com/{repository}/commit/{head_sha}\">Commit {}</a> · <a href=\"https://github.com/{SERVER}/actions/runs/{run_id}/attempts/{run_attempt}\">Server CI run {run_id}, attempt {run_attempt}</a></sub>",
+        &head_sha[..7]
+    ))
 }
 
 #[cfg(test)]
@@ -1105,10 +1135,11 @@ mod tests {
         let policy = Policy::load("policy.json").unwrap();
         let head = "a".repeat(40);
         let wrong_head = "b".repeat(40);
+        let human_text = "Owner authorization verified for this commit.\n\n";
         let cases = [
-            json!({"user":{"id":SERVER_BOT_ID,"type":"Bot"},"body":format!("<!-- securefix:v2:owner:{wrong_head}:12 -->")}),
-            json!({"user":{"id":CLIENT_BOT_ID,"type":"Bot"},"body":format!("<!-- securefix:v2:owner:{head}:12 -->")}),
-            json!({"user":{"id":SERVER_BOT_ID,"type":"User"},"body":format!("<!-- securefix:v2:owner:{head}:12 -->")}),
+            json!({"user":{"id":SERVER_BOT_ID,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{wrong_head}:12 -->")}),
+            json!({"user":{"id":CLIENT_BOT_ID,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
+            json!({"user":{"id":SERVER_BOT_ID,"type":"User"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
         ];
         for comment in cases {
             let fixture = Fixture::new(vec![Route::get(
@@ -1120,6 +1151,26 @@ mod tests {
             );
             fixture.finish();
         }
+    }
+
+    #[test]
+    fn rendered_owner_authorization_comment_is_readable_and_accepted() {
+        let head = "a".repeat(40);
+        let body = render_owner_marker("civitaspo/example", 7, &head, 12, 345, 2).unwrap();
+        assert_eq!(
+            body,
+            format!(
+                "Owner authorization verified for this commit.\n\n<!-- securefix:v2:owner:{head}:12 -->\n\n<sub><a href=\"https://github.com/civitaspo/example/pull/7#issuecomment-12\">Owner request</a> · <a href=\"https://github.com/civitaspo/example/commit/{head}\">Commit aaaaaaa</a> · <a href=\"https://github.com/civitaspo/securefix-server/actions/runs/345/attempts/2\">Server CI run 345, attempt 2</a></sub>"
+            )
+        );
+
+        let policy = Policy::load("policy.json").unwrap();
+        let fixture = Fixture::new(vec![Route::get(
+            "/repos/civitaspo/example/issues/7/comments?per_page=100&page=1",
+            json!([{"user":{"id":SERVER_BOT_ID,"type":"Bot"},"body":body}]),
+        )]);
+        require_owner_marker(&fixture.api, &policy, "civitaspo/example", 7, &head).unwrap();
+        fixture.finish();
     }
 
     #[test]

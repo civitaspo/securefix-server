@@ -496,32 +496,64 @@ fn securefix_config_allows_every_branch_for_exact_policy_clients() {
     let config: Value =
         serde_yaml::from_slice(&fs::read("securefix-config.yaml").unwrap()).unwrap();
     let entries = config["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    let allowed = entries[0]["client"]["repositories"]
+    assert_eq!(entries.len(), 2);
+    let policy = securefix::policy::Policy::load("policy.json").unwrap();
+    let expected: std::collections::BTreeSet<_> = policy
+        .repositories
+        .iter()
+        .filter(|r| {
+            r.capabilities
+                .contains(&securefix::policy::Capability::Securefix)
+                && r.capabilities
+                    .contains(&securefix::policy::Capability::Release)
+        })
+        .map(|r| r.repository.clone())
+        .collect();
+    let clients: std::collections::BTreeSet<_> = entries[0]["client"]["repositories"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|repository| repository.as_str().unwrap().to_owned())
-        .collect::<std::collections::BTreeSet<_>>();
-    let policy = securefix::policy::Policy::load("policy.json").unwrap();
-    let expected = policy
-        .repositories
-        .iter()
-        .filter(|repository| {
-            repository
-                .capabilities
-                .contains(&securefix::policy::Capability::Securefix)
-                && repository
-                    .capabilities
-                    .contains(&securefix::policy::Capability::Release)
-        })
-        .map(|repository| repository.repository.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(allowed, expected);
+        .map(|r| r.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(clients, expected);
     assert_eq!(entries[0]["client"]["branches"], serde_json::json!(["**"]));
     assert!(entries[0]["push"].get("repositories").is_none());
     assert_eq!(entries[0]["push"]["branches"], serde_json::json!(["**"]));
     assert_eq!(entries[0]["pull_request"], serde_json::json!({}));
+    let distribution: std::collections::BTreeSet<_> = entries[1]["push"]["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_owned())
+        .collect();
+    let expected_distribution: std::collections::BTreeSet<_> = policy
+        .repositories
+        .iter()
+        .filter(|r| {
+            r.repository != securefix::policy::SERVER
+                && r.capabilities
+                    .contains(&securefix::policy::Capability::Securefix)
+                && r.capabilities
+                    .contains(&securefix::policy::Capability::Approve)
+                && r.capabilities
+                    .contains(&securefix::policy::Capability::Merge)
+        })
+        .map(|r| r.repository.clone())
+        .collect();
+    assert_eq!(distribution, expected_distribution);
+    assert_eq!(
+        entries[1]["client"]["repositories"],
+        serde_json::json!([securefix::policy::SERVER])
+    );
+    assert_eq!(
+        entries[1]["client"]["branches"],
+        serde_json::json!(["main"])
+    );
+    assert_eq!(
+        entries[1]["push"]["branches"],
+        serde_json::json!(["automation/securefix-runtime"])
+    );
+    assert_eq!(entries[1]["pull_request"], serde_json::json!({}));
     let publisher: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/publish-runtime.yml").unwrap())
             .unwrap();
@@ -634,6 +666,45 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn server_request_callers_pass_the_required_environment_secret_by_name() {
+    for operation in ["approve", "merge"] {
+        let caller = workflow(&format!("{operation}-request.yml"));
+        assert_eq!(
+            caller["jobs"]["request"]["secrets"],
+            serde_json::json!({
+                "SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+            }),
+            "environment-only secrets must be declared explicitly at call time"
+        );
+        let reusable = workflow(&format!("reusable-{operation}-request.yml"));
+        assert_eq!(
+            reusable["on"]["workflow_call"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"]["required"],
+            true
+        );
+        let build = &reusable["jobs"]["build"];
+        assert!(build.get("secrets").is_none());
+        let capture = &reusable["jobs"]["capture"];
+        assert_eq!(
+            capture["environment"],
+            "${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}"
+        );
+        let token = capture["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == "client-token")
+            .unwrap();
+        assert_eq!(
+            token["with"]["private-key"],
+            "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+        );
+        assert_eq!(token["with"]["owner"], "civitaspo");
+        assert_eq!(token["with"]["repositories"], "securefix-server");
+        assert_eq!(token["with"]["permission-issues"], "write");
     }
 }
 

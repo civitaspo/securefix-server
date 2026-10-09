@@ -176,8 +176,13 @@ fn apply() -> Result<()> {
             && review["commit_id"] == manifest.pull_request.head_sha
     });
     if !already_approved {
-        let _: Value = approve.post(&format!("/repos/{repository}/pulls/{}/reviews", manifest.pull_request.number),
-            &json!({"event":"APPROVE","commit_id":manifest.pull_request.head_sha,"body":"Securefix approval after policy validation."}))?;
+        let _: Value = approve.post(
+            &format!(
+                "/repos/{repository}/pulls/{}/reviews",
+                manifest.pull_request.number
+            ),
+            &json!({"event":"APPROVE","commit_id":manifest.pull_request.head_sha}),
+        )?;
     }
     ensure!(
         request::has_current_head_approval(

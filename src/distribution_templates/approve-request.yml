@@ -18,12 +18,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  request:
-    uses: ./.github/workflows/reusable-approve-request.yml
+  approve:
     permissions:
       contents: read
       attestations: read
       issues: read
       pull-requests: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@@SECUREFIX_RUNTIME_SHA@
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

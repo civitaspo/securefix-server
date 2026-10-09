@@ -1,0 +1,71 @@
+name: Approve Request
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  issue_comment:
+    types:
+      - created
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  approve:
+    name: approve
+    if: |
+      (
+        github.event_name == 'pull_request_target' &&
+        contains(fromJSON('["civitaspo", "cursoragent", "renovate[bot]", "dependabot[bot]", "civitaspo-securefix-server[bot]"]'), github.actor)
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/approve' &&
+        github.event.comment.user.login == 'civitaspo'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    env:
+      SECUREFIX_CLIENT_APP_ID: "3872492"
+      SECUREFIX_SERVER_REPOSITORY: securefix-server
+
+    steps:
+      - name: Check Securefix configuration
+        env:
+          CLIENT_APP_ID: ${{ env.SECUREFIX_CLIENT_APP_ID }}
+          CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          SERVER_REPOSITORY: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
+        run: |
+          if [[ -z "${CLIENT_APP_ID}" || -z "${CLIENT_PRIVATE_KEY}" || "${SERVER_REPOSITORY}" != "securefix-server" ]]; then
+            echo "Securefix approval configuration is incomplete." >&2
+            echo "Configure the SECUREFIX_CLIENT_PRIVATE_KEY repository secret and install the Securefix apps." >&2
+            exit 1
+          fi
+
+      - name: Request pull request approval
+        uses: csm-actions/approve-pr-action@a8fdc60ab4d9b446694140534bbcc71c29fb499c # v1.0.0
+        with:
+          app_id: ${{ env.SECUREFIX_CLIENT_APP_ID }}
+          app_private_key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          server_repository_name: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
+          pull_request_number: ${{ github.event.pull_request.number || github.event.issue.number }}
+          allowed_committers: |
+            civitaspo
+            cursoragent
+            renovate[bot]
+            dependabot[bot]
+            civitaspo-securefix-server[bot]

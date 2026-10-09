@@ -5,6 +5,8 @@ The Rust `securefix` executable owns approval, merge, release, settings, and req
 GitHub Actions workflows route events, load the verified prebuilt executable, isolate credentials, and call its commands.
 
 After staging succeeds, the owner manually runs `Publish Runtime` on protected `main` to publish `securefix-runtime-<full-SHA>`.
+Successful publication starts the server default-head Policy Check and opens or updates signed runtime migration PRs in the configured callers.
+Review and merge those PRs through the [upgrade maintenance procedure](docs/migration.md#subsequent-server-upgrades).
 Intermediate commits and test candidates do not create Releases.
 `Load CLI` downloads that exact release and verifies its archive against the server SHA and publishing workflow's GitHub attestation before extraction.
 It transfers the verified runtime to execution jobs using an immutable same-run artifact ID.
@@ -27,10 +29,13 @@ Ordinary Renovate automerge remains possible under the same required checks and 
 
 Securefix uses pinned upstream `prepare`, `commit`, and `notify` actions for its artifact protocol and repair commits.
 Rust validates the Client App event, exact repository capabilities, source workflow provenance, and destination scope between preparation and commit.
-It accepts `CI` and `Release PR` workflows and denies direct default-branch pushes.
+It accepts client `CI` and `Release PR` workflows and denies direct default-branch pushes.
 The trusted [`securefix-config.yaml`](securefix-config.yaml) permits the fixed release-capable clients on any branch name; it travels with the attested runtime outside the client artifact workspace.
 PR CI fixes its own branch, and a trusted release-PR source can target any non-default branch in the same repository.
 Securefix requests may come from a running or failed CI run because the client deliberately fails after dispatching a same-branch fix.
+The separate runtime distribution route requires a successful server distribution run for a published current-main runtime.
+It permits only generated caller workflows on `automation/securefix-runtime` and reuses one review PR per caller.
+See the [runtime rollout decision](docs/adr/0007-published-runtime-rollout.md).
 The [upstream integration decision](docs/adr/0005-upstream-securefix-protocol.md) records the accepted stale-artifact limitation and why approval remains in Rust.
 
 ## Operations
@@ -42,6 +47,7 @@ The [upstream integration decision](docs/adr/0005-upstream-securefix-protocol.md
 | Release | `release` | [Client releases](docs/client-releases.md) |
 | Settings | `settings` | [Settings and activation](docs/repo-settings.md) |
 | Signed fixes | `securefix` | [Migration](docs/migration.md) |
+| Runtime rollout | `runtime` | [Published runtime rollout](docs/adr/0007-published-runtime-rollout.md) |
 
 Provider releases use a secret-free fixed build, a GPG-only signer, and a publisher with a repository-scoped contents token.
 Publication requires immutable releases to be enabled and verifies the published release's immutable state.
@@ -65,6 +71,8 @@ The existing `main` environment holds these secrets:
 
 The Server App ID is `3872533`; the Client App ID is `3872492`.
 Clients provide only `SECUREFIX_CLIENT_PRIVATE_KEY` to the reusables.
+The server's approve and merge callers also pass that secret by name.
+The capture job receives its value from the protected `main` environment; the explicit mapping satisfies the reusable workflow's required-secret contract before that job starts.
 `civitaspo-bot` must retain write collaborator access for its reviews to count.
 The operation documents list the required App permissions.
 

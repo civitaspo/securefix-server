@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use securefix::{api, event, output, policy, workflow};
 
 mod approval;
+mod distribution;
 #[cfg(test)]
 mod fixtures;
 mod merge;
@@ -58,6 +59,11 @@ enum Command {
         #[command(subcommand)]
         command: runtime::Command,
     },
+    #[command(about = "Distribute a published runtime through reviewed caller pull requests")]
+    Distribute {
+        #[command(subcommand)]
+        command: distribution::Command,
+    },
     #[command(about = "Reconcile repository settings and activate merge controls")]
     Settings {
         #[command(subcommand)]
@@ -83,6 +89,7 @@ fn main() -> Result<()> {
         Command::Merge { command } => merge::run(command),
         Command::Release { command } => release::run(command),
         Command::Runtime { command } => runtime::run(command),
+        Command::Distribute { command } => distribution::run(command),
         Command::Settings { command } => settings::run(command),
         Command::Securefix { command } => securefix_gate::run(command),
         Command::Check { command } => policy_check::run(command),
