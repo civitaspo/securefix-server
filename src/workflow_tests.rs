@@ -709,6 +709,20 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
 }
 
 #[test]
+fn merge_workflow_prefilter_allows_whitespace_for_rust_command_validation() {
+    let caller = workflow("merge-request.yml");
+    let active_if = caller["jobs"]["request"]["if"].as_str().unwrap();
+    let template = fs::read_to_string("src/distribution_templates/merge-request.yml").unwrap();
+    for condition in [active_if, &template] {
+        assert!(condition.contains("contains(github.event.comment.body, '/merge')"));
+        assert!(condition.contains("github.event.issue.pull_request"));
+        assert!(condition.contains("github.event.comment.user.id == 4525500"));
+        assert!(condition.contains("github.run_attempt == 1"));
+        assert!(!condition.contains("github.event.comment.body == '/merge'"));
+    }
+}
+
+#[test]
 fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
     let merge = workflow("merge.yml");
     let job = &merge["jobs"]["merge"];

@@ -415,3 +415,53 @@ fn migration_renderer_rejects_custom_jobs_and_unknown_legacy_approval_steps() {
     let legacy = b"name: Approve Request\non: pull_request_target\npermissions: {}\njobs:\n  approve:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo custom\n      - uses: attacker/action@main\n";
     assert!(validate_existing(".github/workflows/approve-request.yml", legacy, "main").is_err());
 }
+
+#[test]
+fn migration_renderer_accepts_only_the_previous_exact_merge_body_prefilter() {
+    let canonical = rendered_files(&"a".repeat(40), "main", false).unwrap();
+    let canonical = std::str::from_utf8(&canonical[".github/workflows/merge-request.yml"]).unwrap();
+    assert!(
+        validate_existing(
+            ".github/workflows/merge-request.yml",
+            canonical.as_bytes(),
+            "main"
+        )
+        .is_ok()
+    );
+    let prior_condition = canonical.replace(
+        "contains(github.event.comment.body, '/merge')",
+        "github.event.comment.body == '/merge'",
+    );
+    assert_ne!(canonical, prior_condition);
+    assert!(
+        validate_existing(
+            ".github/workflows/merge-request.yml",
+            prior_condition.as_bytes(),
+            "main"
+        )
+        .is_ok()
+    );
+
+    let relaxed_owner = prior_condition.replace(
+        "github.event.comment.user.id == 4525500",
+        "github.event.comment.user.id > 0",
+    );
+    assert!(
+        validate_existing(
+            ".github/workflows/merge-request.yml",
+            relaxed_owner.as_bytes(),
+            "main"
+        )
+        .is_err()
+    );
+    let relaxed_attempt =
+        prior_condition.replace("github.run_attempt == 1", "github.run_attempt < 3");
+    assert!(
+        validate_existing(
+            ".github/workflows/merge-request.yml",
+            relaxed_attempt.as_bytes(),
+            "main"
+        )
+        .is_err()
+    );
+}

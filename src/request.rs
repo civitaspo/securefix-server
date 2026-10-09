@@ -39,6 +39,18 @@ pub enum RequestKind {
     Merge,
 }
 
+impl RequestKind {
+    pub fn matches_comment_body(self, body: &Value) -> bool {
+        body.as_str().is_some_and(|body| {
+            body.trim_ascii()
+                == match self {
+                    Self::Approve => "/approve",
+                    Self::Merge => "/merge",
+                }
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Authorization {
@@ -158,12 +170,8 @@ fn capture(kind: RequestKind) -> Result<()> {
             "unsupported owner request"
         );
         let comment = &payload["comment"];
-        let expected = match kind {
-            RequestKind::Approve => "/approve",
-            RequestKind::Merge => "/merge",
-        };
         ensure!(
-            comment["body"] == expected
+            kind.matches_comment_body(&comment["body"])
                 && comment["user"]["id"] == OWNER_ID
                 && comment["user"]["type"] == "User",
             "request comment is unauthorized"
@@ -172,7 +180,7 @@ fn capture(kind: RequestKind) -> Result<()> {
         let current_comment: Value =
             token.get(&format!("/repos/{repo}/issues/comments/{comment_id}"))?;
         ensure!(
-            current_comment["body"] == expected
+            kind.matches_comment_body(&current_comment["body"])
                 && current_comment["user"]["id"] == OWNER_ID
                 && current_comment["user"]["type"] == "User",
             "request comment changed during capture"
@@ -462,12 +470,7 @@ pub fn load_source_request(
                 && comment["issue_url"].as_str().is_some_and(|url| {
                     url.ends_with(&format!("/issues/{}", manifest.pull_request.number))
                 })
-                && comment["body"]
-                    == if kind == RequestKind::Approve {
-                        "/approve"
-                    } else {
-                        "/merge"
-                    }
+                && kind.matches_comment_body(&comment["body"])
                 && comment["updated_at"]
                     .as_str()
                     .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
@@ -855,6 +858,38 @@ fn render_owner_marker(
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn request_kind_matches_only_ascii_whitespace_trimmed_commands() {
+        for (kind, exact, padded, wrong) in [
+            (
+                RequestKind::Approve,
+                "/approve",
+                " \t/approve\r\n",
+                "/merge",
+            ),
+            (RequestKind::Merge, "/merge", " \t/merge\r\n", "/approve"),
+        ] {
+            assert!(kind.matches_comment_body(&json!(exact)));
+            assert!(kind.matches_comment_body(&json!(padded)));
+            let invalid = [
+                wrong.to_owned(),
+                exact.to_ascii_uppercase(),
+                format!("{exact} please"),
+                format!("please {exact}"),
+                format!("{exact}\n{exact}"),
+                format!("\u{00a0}{exact}"),
+            ];
+            for body in invalid {
+                assert!(!kind.matches_comment_body(&json!(body)), "{body:?}");
+            }
+            assert!(!kind.matches_comment_body(&json!(17)));
+            assert!(!kind.matches_comment_body(&json!({"other":"/approve"})["body"]));
+        }
+        assert!(!RequestKind::Approve.matches_comment_body(&json!("\u{00a0}/approve")));
+        assert!(!RequestKind::Merge.matches_comment_body(&json!("/merge\u{00a0}")));
+    }
+
     fn manifest() -> RequestManifest {
         RequestManifest {
             version: 1,

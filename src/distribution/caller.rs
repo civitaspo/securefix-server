@@ -230,7 +230,7 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
         .get(path)
         .context("managed workflow missing from canonical template set")?;
     let mut expected_yaml: serde_yaml::Value = serde_yaml::from_slice(expected_bytes)?;
-    legacy_release_shape(path, &value, &mut expected_yaml);
+    legacy_workflow_shape(path, &value, &mut expected_yaml);
     validate_permission_subset(
         &job["permissions"],
         &expected_yaml["jobs"][job_name]["permissions"],
@@ -285,7 +285,18 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
     Ok(())
 }
 
-fn legacy_release_shape(path: &str, actual: &serde_yaml::Value, expected: &mut serde_yaml::Value) {
+fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut serde_yaml::Value) {
+    if path == ".github/workflows/merge-request.yml"
+        && let Some(condition) = expected["jobs"]["request"]["if"].as_str()
+    {
+        let prior = condition.replace(
+            "contains(github.event.comment.body, '/merge')",
+            "github.event.comment.body == '/merge'",
+        );
+        if actual["jobs"]["request"]["if"].as_str() == Some(prior.as_str()) {
+            expected["jobs"]["request"]["if"] = serde_yaml::Value::String(prior);
+        }
+    }
     let actual_on = actual
         .as_mapping()
         .and_then(|m| m.get("on").or_else(|| m.get(serde_yaml::Value::Bool(true))))

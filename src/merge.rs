@@ -333,7 +333,7 @@ fn validate_state(api: &GitHub, policy: &Policy, manifest: &RequestManifest) -> 
         manifest.repository.full_name
     ))?;
     ensure!(
-        comment["body"] == "/merge"
+        RequestKind::Merge.matches_comment_body(&comment["body"])
             && comment["user"]["id"].as_u64() == Some(policy.owner_id)
             && comment["user"]["type"] == "User"
             && comment["issue_url"].as_str().is_some_and(
@@ -645,14 +645,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_state_rejects_changed_owner_comment_identity_body_and_edit_time() {
+    fn validate_state_rejects_changed_owner_comment_identity_body_url_and_edit_time() {
         let mut wrong_actor = valid_owner_comment();
         wrong_actor["user"]["id"] = json!(999);
+        let mut wrong_type = valid_owner_comment();
+        wrong_type["user"]["type"] = json!("Bot");
+        let mut wrong_url = valid_owner_comment();
+        wrong_url["issue_url"] =
+            json!("https://api.github.com/repos/civitaspo/dbt-authorized-models/issues/8");
         let mut wrong_body = valid_owner_comment();
         wrong_body["body"] = json!("/approve");
         let mut edited = valid_owner_comment();
         edited["updated_at"] = json!("2026-01-01T00:00:01Z");
-        for comment in [wrong_actor, wrong_body, edited] {
+        for comment in [wrong_actor, wrong_type, wrong_url, wrong_body, edited] {
             assert!(validate_state_with(comment_routes(comment)).is_err());
         }
     }
@@ -663,11 +668,9 @@ mod tests {
             let mut comment = valid_owner_comment();
             comment["body"] = json!(body);
             let mut routes = comment_routes(comment);
-            let timeline = "/repos/civitaspo/dbt-authorized-models/issues/7/timeline?per_page=100&page=1";
-            routes.push(Route::get(
-                timeline,
-                json!([]),
-            ));
+            let timeline =
+                "/repos/civitaspo/dbt-authorized-models/issues/7/timeline?per_page=100&page=1";
+            routes.push(Route::get(timeline, json!([])));
             let fixture = Fixture::new(routes);
             let policy = Policy::load("policy.json").unwrap();
             let result = validate_state(&fixture.api, &policy, &state_manifest());

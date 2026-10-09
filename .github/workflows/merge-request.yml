@@ -15,7 +15,7 @@ jobs:
   request:
     if: >-
       github.event.issue.pull_request &&
-      github.event.comment.body == '/merge' &&
+      contains(github.event.comment.body, '/merge') &&
       github.event.comment.user.id == 4525500 &&
       github.run_attempt == 1
     uses: ./.github/workflows/reusable-merge-request.yml
