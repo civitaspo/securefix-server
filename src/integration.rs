@@ -25,6 +25,10 @@ const WORKFLOW_PATH: &str = ".github/workflows/testing-securefix-server.yml";
 const FIX_PATH_PREFIX: &str = ".securefix-integration/";
 const BRANCH_PREFIX: &str = "securefix-integration-";
 const STATE_VERSION: u32 = 2;
+const OBSOLETE_SCRATCH_WORKFLOWS: [&str; 2] = [
+    ".github/workflows/verify-published-runtime.yml",
+    ".github/workflows/verify-server.yml",
+];
 
 fn trusted_config() -> Result<&'static crate::config::TrustedConfig> {
     crate::config::trusted()
@@ -240,20 +244,17 @@ fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result
         server.repository
     ))?;
     let server_repo: Value = api.get(&format!("/repos/{}", server.repository))?;
+    validate_client_source_run(
+        &run,
+        run_id,
+        workflow_sha,
+        &server.repository,
+        server.id,
+        trusted.owner_id,
+    )?;
     ensure!(
-        run["id"].as_u64() == Some(run_id)
-            && run["repository"]["full_name"] == server.repository
-            && run["repository"]["id"].as_u64() == Some(server.id)
-            && run["head_repository"]["id"].as_u64() == Some(server.id)
-            && server_repo["id"].as_u64() == Some(server.id)
-            && run["head_sha"] == workflow_sha
-            && run["event"] == "workflow_dispatch"
-            && run["run_attempt"].as_u64() == Some(1)
-            && run["status"] == "in_progress"
-            && run["actor"]["id"].as_u64() == Some(trusted.owner_id)
-            && run["triggering_actor"]["id"].as_u64() == Some(trusted.owner_id)
-            && workflow_run_matches(&run, workflow_sha)?,
-        "client smoke source is not the successful first-attempt owner workflow run"
+        server_repo["id"].as_u64() == Some(server.id),
+        "configured source repository ID does not match GitHub"
     );
     let artifacts: Value = api.get(&format!(
         "/repos/{}/actions/runs/{run_id}/artifacts",
@@ -368,6 +369,40 @@ fn prepare_client_input() -> Result<()> {
         ".securefix-client-smoke/request.txt",
         format!("Securefix client smoke {run_id}\n"),
     )?;
+    Ok(())
+}
+
+fn validate_client_source_run(
+    run: &Value,
+    run_id: u64,
+    workflow_sha: &str,
+    server_repository: &str,
+    server_repository_id: u64,
+    owner_id: u64,
+) -> Result<()> {
+    let workflow_matches = workflow_run_matches(run, workflow_sha)?;
+    let actual_run_id = run["id"].as_u64();
+    let repo_full_name = run["repository"]["full_name"].as_str().unwrap_or_default();
+    let repo_id = run["repository"]["id"].as_u64();
+    let head_repo_id = run["head_repository"]["id"].as_u64();
+    let head_sha = run["head_sha"].as_str().unwrap_or_default();
+    let event = run["event"].as_str().unwrap_or_default();
+    let attempt = run["run_attempt"].as_u64();
+    let actor_id = run["actor"]["id"].as_u64();
+    let triggering_actor_id = run["triggering_actor"]["id"].as_u64();
+    ensure!(
+        run["id"].as_u64() == Some(run_id)
+            && run["repository"]["full_name"] == server_repository
+            && repo_id == Some(server_repository_id)
+            && head_repo_id == Some(server_repository_id)
+            && head_sha == workflow_sha
+            && event == "workflow_dispatch"
+            && attempt == Some(1)
+            && actor_id == Some(owner_id)
+            && triggering_actor_id == Some(owner_id)
+            && workflow_matches,
+        "client smoke run {run_id} provenance mismatch: actual_run_id={actual_run_id:?}, repository={repo_full_name}, repo_id={repo_id:?}, head_repo_id={head_repo_id:?}, head_sha={head_sha}, event={event}, attempt={attempt:?}, actor_id={actor_id:?}, triggering_actor_id={triggering_actor_id:?}, workflow_matches={workflow_matches}"
+    );
     Ok(())
 }
 
@@ -757,7 +792,8 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         !rendered.is_empty(),
         "distribution renderer returned no workflows"
     );
-    let distribution = create_pr(
+    let obsolete_workflows = existing_scratch_workflows(&server, &base_sha)?;
+    let distribution = create_pr_with_changes(
         &server,
         &base_sha,
         &default_branch,
@@ -767,6 +803,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             &candidate_sha[..12]
         ),
         rendered.clone(),
+        obsolete_workflows,
     )?;
     validate_rendered_files(&rendered)?;
 
@@ -1517,7 +1554,42 @@ fn verify_rendered_files(
             "rendered workflow has no name at {path}"
         );
     }
+    for path in OBSOLETE_SCRATCH_WORKFLOWS {
+        ensure!(
+            optional_file(api, path, &fixture.head_sha)?.is_none(),
+            "scratch distribution PR retained obsolete test workflow {path}"
+        );
+    }
     Ok(())
+}
+
+fn existing_scratch_workflows(api: &GitHub, base_sha: &str) -> Result<Vec<String>> {
+    OBSOLETE_SCRATCH_WORKFLOWS
+        .into_iter()
+        .filter_map(|path| match optional_file(api, path, base_sha) {
+            Ok(Some(_)) => Some(Ok(path.to_owned())),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn optional_file(api: &GitHub, path: &str, revision: &str) -> Result<Option<Value>> {
+    match api.get(&format!(
+        "/repos/{}/contents/{path}?ref={revision}",
+        integration_repository()?
+    )) {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("check scratch fixture workflow {path} at {revision}")),
+    }
 }
 
 fn distribution_fixture_files(
@@ -2350,6 +2422,61 @@ mod tests {
         );
         assert_eq!(scratch["repositories"], original["repositories"]);
         assert_eq!(scratch["owner_id"], original["owner_id"]);
+    }
+
+    #[test]
+    fn client_source_run_accepts_nonterminal_status_but_rejects_identity_mismatches() {
+        let trusted = trusted_config().unwrap();
+        let server = &trusted.deployment.server;
+        let run_id = 42;
+        let workflow_sha = "a".repeat(40);
+        let branch = format!("integration/native-{}", &workflow_sha[..12]);
+        let run = json!({
+            "id": run_id,
+            "repository": {"full_name": server.repository, "id": server.id},
+            "head_repository": {"id": server.id},
+            "head_sha": workflow_sha,
+            "head_branch": branch,
+            "path": format!("{WORKFLOW_PATH}@refs/heads/{branch}"),
+            "event": "workflow_dispatch",
+            "run_attempt": 1,
+            "status": "queued",
+            "actor": {"id": trusted.owner_id},
+            "triggering_actor": {"id": trusted.owner_id}
+        });
+        assert!(
+            validate_client_source_run(
+                &run,
+                run_id,
+                &workflow_sha,
+                &server.repository,
+                server.id,
+                trusted.owner_id
+            )
+            .is_ok()
+        );
+
+        let mut wrong_actor = run.clone();
+        wrong_actor["actor"]["id"] = json!(trusted.owner_id + 1);
+        let mut wrong_sha = run.clone();
+        wrong_sha["head_sha"] = json!("b".repeat(40));
+        let mut wrong_repository = run.clone();
+        wrong_repository["repository"]["id"] = json!(server.id + 1);
+        let mut wrong_attempt = run.clone();
+        wrong_attempt["run_attempt"] = json!(2);
+        for wrong in [wrong_actor, wrong_sha, wrong_repository, wrong_attempt] {
+            assert!(
+                validate_client_source_run(
+                    &wrong,
+                    run_id,
+                    &workflow_sha,
+                    &server.repository,
+                    server.id,
+                    trusted.owner_id
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
