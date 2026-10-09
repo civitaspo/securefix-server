@@ -16,17 +16,39 @@ use crate::{
     request::{self, Authorization, PullRequestRef, RepositoryRef, RequestKind, RequestManifest},
 };
 use securefix::{
-    api::{ApiError, GitHub, SCRATCH_REPOSITORY, SCRATCH_REPOSITORY_ID},
+    api::{ApiError, GitHub},
     policy::{Capability, Policy, ReleaseStrategy, validate_sha},
     workflow,
 };
 
-const OWNER_ID: u64 = 4_525_500;
-const SERVER_REPOSITORY_ID: u64 = 1_250_079_425;
 const WORKFLOW_PATH: &str = ".github/workflows/testing-securefix-server.yml";
 const FIX_PATH_PREFIX: &str = ".securefix-integration/";
 const BRANCH_PREFIX: &str = "securefix-integration-";
 const STATE_VERSION: u32 = 1;
+
+fn trusted_config() -> Result<&'static crate::config::TrustedConfig> {
+    crate::config::trusted()
+}
+
+fn integration_repository() -> Result<&'static str> {
+    Ok(&trusted_config()?.deployment.integration.repository)
+}
+
+fn integration_repository_id() -> Result<u64> {
+    Ok(trusted_config()?.deployment.integration.id)
+}
+
+fn server_repository() -> Result<&'static str> {
+    Ok(&trusted_config()?.deployment.server.repository)
+}
+
+fn server_repository_id() -> Result<u64> {
+    Ok(trusted_config()?.deployment.server.id)
+}
+
+fn owner_id() -> Result<u64> {
+    Ok(trusted_config()?.owner_id)
+}
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -50,9 +72,23 @@ pub enum Command {
         #[arg(long)]
         state_file: PathBuf,
     },
+    /// Validate this workflow's frozen producer branch before GitHub App tokens are minted.
+    ValidateProducer {
+        #[arg(long)]
+        workflow_sha: String,
+    },
+    /// Validate the bounded files emitted by the isolated candidate container.
+    ValidateOutputs {
+        #[arg(long, value_enum)]
+        phase: Phase,
+        #[arg(long)]
+        candidate_sha: String,
+        #[arg(long)]
+        state_file: PathBuf,
+    },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Phase {
     Prepare,
     Verify,
@@ -84,6 +120,7 @@ struct PullRequestFixture {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Verification {
     version: u32,
     repository: String,
@@ -99,6 +136,7 @@ struct Verification {
 }
 
 pub fn run(command: Command) -> Result<()> {
+    crate::config::trusted()?;
     match command {
         Command::Run {
             phase,
@@ -122,7 +160,80 @@ pub fn run(command: Command) -> Result<()> {
             validate_state_path(&state_file)?;
             fetch_state(&candidate_sha, run_id, &state_file)
         }
+        Command::ValidateProducer { workflow_sha } => validate_producer(&workflow_sha),
+        Command::ValidateOutputs {
+            phase,
+            candidate_sha,
+            state_file,
+        } => {
+            validate_sha(&candidate_sha)?;
+            let workspace = std::env::current_dir()?;
+            validate_outputs(&workspace, &state_file, &candidate_sha, phase)
+        }
     }
+}
+
+fn validate_producer(workflow_sha: &str) -> Result<()> {
+    validate_sha(workflow_sha)?;
+    let trusted = crate::config::trusted()?;
+    let configured_server = &trusted.deployment.server.repository;
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY")
+            .is_ok_and(|repository| repository == configured_server.as_str()),
+        "producer must run in the Securefix Server repository"
+    );
+    ensure!(
+        std::env::var("GITHUB_ACTOR_ID")
+            .is_ok_and(|actor| actor.parse::<u64>().ok() == Some(trusted.owner_id))
+            && std::env::var("GITHUB_ACTOR")
+                .is_ok_and(|actor| actor == trusted.deployment.owner_login.as_str())
+            && std::env::var("GITHUB_RUN_ATTEMPT").is_ok_and(|attempt| attempt == "1"),
+        "producer must be an owner-triggered first attempt"
+    );
+    let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
+    validate_workflow_ref(workflow_sha, &workflow_ref)?;
+
+    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
+    let api = GitHub::new("https://api.github.com", token)?;
+    let repository: Value = api.get(&format!("/repos/{}", server_repository()?))?;
+    ensure!(
+        repository["full_name"] == server_repository()?
+            && repository["id"].as_u64() == Some(server_repository_id()?),
+        "producer repository identity changed"
+    );
+    let branch = workflow_ref
+        .strip_prefix("refs/heads/")
+        .context("integration producer must run from a branch")?;
+    let encoded_branch = branch.replace('/', "%2F");
+    let source: Value = api.get(&format!(
+        "/repos/{}/commits/{encoded_branch}",
+        server_repository()?
+    ))?;
+    ensure!(
+        source["sha"] == workflow_sha,
+        "trusted integration workflow branch moved from its source SHA"
+    );
+    Ok(())
+}
+
+fn validate_workflow_ref(workflow_sha: &str, workflow_ref: &str) -> Result<()> {
+    validate_sha(workflow_sha)?;
+    let workflow_branch = workflow_ref
+        .strip_prefix("refs/heads/")
+        .context("integration producer must run from a branch")?;
+    ensure!(
+        workflow_run_matches(
+            &json!({
+                "head_sha":workflow_sha,
+                "head_branch":workflow_branch,
+                "path":format!("{WORKFLOW_PATH}@{workflow_ref}")
+            }),
+            workflow_sha,
+        )?,
+        "integration producer branch is not trusted"
+    );
+    Ok(())
 }
 
 fn fetch_state(candidate_sha: &str, run_id: u64, state_file: &Path) -> Result<()> {
@@ -132,11 +243,11 @@ fn fetch_state(candidate_sha: &str, run_id: u64, state_file: &Path) -> Result<()
     let api = GitHub::new("https://api.github.com", token)?;
     let run: Value = api.get(&format!(
         "/repos/{}/actions/runs/{run_id}",
-        securefix::policy::SERVER
+        server_repository()?
     ))?;
     let artifacts: Value = api.get(&format!(
         "/repos/{}/actions/runs/{run_id}/artifacts",
-        securefix::policy::SERVER
+        server_repository()?
     ))?;
     let matching = artifacts["artifacts"]
         .as_array()
@@ -162,27 +273,28 @@ fn fetch_state(candidate_sha: &str, run_id: u64, state_file: &Path) -> Result<()
     let bytes = api.download(
         &format!(
             "/repos/{}/actions/artifacts/{artifact_id}/zip",
-            securefix::policy::SERVER
+            server_repository()?
         ),
         64 * 1024,
     )?;
     let scenario = scenario_from_zip(&bytes)?;
     validate_scenario(&scenario, candidate_sha)?;
-    let server_repo: Value = api.get(&format!("/repos/{}", securefix::policy::SERVER))?;
+    let server_repo: Value = api.get(&format!("/repos/{}", server_repository()?))?;
+    let workflow_matches = workflow_run_matches(&run, &scenario.workflow_sha)?;
     ensure!(
         run["id"].as_u64() == Some(run_id)
-            && run["repository"]["full_name"] == securefix::policy::SERVER
-            && run["repository"]["id"].as_u64() == Some(SERVER_REPOSITORY_ID)
-            && run["head_repository"]["id"].as_u64() == Some(SERVER_REPOSITORY_ID)
-            && server_repo["id"].as_u64() == Some(SERVER_REPOSITORY_ID)
+            && run["repository"]["full_name"] == server_repository()?
+            && run["repository"]["id"].as_u64() == Some(server_repository_id()?)
+            && run["head_repository"]["id"].as_u64() == Some(server_repository_id()?)
+            && server_repo["id"].as_u64() == Some(server_repository_id()?)
             && run["head_sha"] == scenario.workflow_sha
             && run["event"] == "workflow_dispatch"
             && run["run_attempt"] == 1
             && run["status"] == "completed"
             && run["conclusion"] == "success"
-            && run["actor"]["id"].as_u64() == Some(OWNER_ID)
-            && run["triggering_actor"]["id"].as_u64() == Some(OWNER_ID)
-            && workflow_run_matches(&run, &scenario.workflow_sha),
+            && run["actor"]["id"].as_u64() == Some(owner_id()?)
+            && run["triggering_actor"]["id"].as_u64() == Some(owner_id()?)
+            && workflow_matches,
         "fixture state source is not the successful owner-run candidate workflow"
     );
     let candidate_artifacts = artifacts["artifacts"]
@@ -246,36 +358,15 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         .context("missing SECUREFIX_TEST_WORKFLOW_SHA")?;
     validate_sha(&workflow_sha)?;
     let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
-    let workflow_branch = workflow_ref
-        .strip_prefix("refs/heads/")
-        .context("integration producer must run from a branch")?;
+    validate_workflow_ref(&workflow_sha, &workflow_ref)?;
+    let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
+    let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
+    let repository: Value = server.get(&format!("/repos/{}", integration_repository()?))?;
     ensure!(
-        workflow_run_matches(
-            &json!({
-                "head_sha":workflow_sha,
-                "head_branch":workflow_branch,
-                "path":format!("{WORKFLOW_PATH}@{workflow_ref}")
-            }),
-            &workflow_sha,
-        ),
-        "integration producer branch is not trusted"
-    );
-    let encoded_branch = workflow_branch.replace('/', "%2F");
-    let source: Value = GitHub::anonymous()?.get(&format!(
-        "/repos/{}/commits/{encoded_branch}",
-        securefix::policy::SERVER
-    ))?;
-    ensure!(
-        source["sha"] == workflow_sha,
-        "trusted integration workflow branch moved from its source SHA"
-    );
-    let server = GitHub::scratch_from_env("SECUREFIX_SERVER_TOKEN", candidate_sha)?;
-    let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_TOKEN", candidate_sha)?;
-    let repository: Value = server.get(&format!("/repos/{SCRATCH_REPOSITORY}"))?;
-    ensure!(
-        repository["full_name"] == SCRATCH_REPOSITORY
-            && repository["id"].as_u64() == Some(SCRATCH_REPOSITORY_ID)
-            && repository["owner"]["id"].as_u64() == Some(OWNER_ID),
+        repository["full_name"] == integration_repository()?
+            && repository["id"].as_u64() == Some(integration_repository_id()?)
+            && repository["owner"]["id"].as_u64()
+                == Some(trusted_config()?.deployment.repository_owner.id),
         "scratch repository identity changed"
     );
     let default_branch = repository["default_branch"]
@@ -283,7 +374,8 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         .context("scratch repository has no default branch")?
         .to_owned();
     let base: Value = server.get(&format!(
-        "/repos/{SCRATCH_REPOSITORY}/commits/{default_branch}"
+        "/repos/{}/commits/{default_branch}",
+        integration_repository()?
     ))?;
     let base_sha = base["sha"]
         .as_str()
@@ -348,8 +440,8 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
 
     let state = Scenario {
         version: STATE_VERSION,
-        repository: SCRATCH_REPOSITORY.to_owned(),
-        repository_id: SCRATCH_REPOSITORY_ID,
+        repository: integration_repository()?.to_owned(),
+        repository_id: integration_repository_id()?,
         candidate_sha: candidate_sha.to_owned(),
         workflow_sha,
         default_branch,
@@ -404,12 +496,12 @@ fn create_pr_with_changes(
         "integration fixture commit has no files"
     );
     let _: Value = api.post(
-        &format!("/repos/{SCRATCH_REPOSITORY}/git/refs"),
+        &format!("/repos/{}/git/refs", integration_repository()?),
         &json!({"ref":format!("refs/heads/{branch}"),"sha":base_sha}),
     )?;
     let message = format!("{title}\n\nCandidate: {base_sha}");
     let head_sha = api.create_commit(
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         branch,
         base_sha,
         &message,
@@ -417,7 +509,7 @@ fn create_pr_with_changes(
         deletions,
     )?;
     let pull: Value = api.post(
-        &format!("/repos/{SCRATCH_REPOSITORY}/pulls"),
+        &format!("/repos/{}/pulls", integration_repository()?),
         &json!({"title":title,"head":branch,"base":base_branch,"body":"Created by the native Securefix scratch integration harness."}),
     )?;
     ensure!(
@@ -451,7 +543,7 @@ fn create_nativefix_positive_pr(
 ) -> Result<PullRequestFixture> {
     let label = format!("securefix-integration-{}", fix.run_id);
     let source = crate::securefix_gate::SourceRequest {
-        repository: SCRATCH_REPOSITORY,
+        repository: integration_repository()?,
         run_id: fix.run_id,
         label: &label,
         branch,
@@ -459,12 +551,12 @@ fn create_nativefix_positive_pr(
     };
     let plan = crate::securefix_gate::FixPlan {
         version: 1,
-        source_repository: SCRATCH_REPOSITORY.to_owned(),
+        source_repository: integration_repository()?.to_owned(),
         source_run_id: fix.run_id,
         source_sha: candidate_sha.to_owned(),
         artifact_name: label.clone(),
         artifact_id: 1,
-        destination_repository: SCRATCH_REPOSITORY.to_owned(),
+        destination_repository: integration_repository()?.to_owned(),
         destination_branch: branch.to_owned(),
         expected_head: base_sha.to_owned(),
         destination_branch_exists: false,
@@ -478,7 +570,7 @@ fn create_nativefix_positive_pr(
         plan: &plan,
         fix,
         server_url: "https://github.com",
-        server_repository: SCRATCH_REPOSITORY,
+        server_repository: integration_repository()?,
         server_run: "integration",
     })?;
     ensure!(
@@ -486,7 +578,8 @@ fn create_nativefix_positive_pr(
         "nativefix first apply did not create the signed commit and pull request"
     );
     let commit: Value = api.get(&format!(
-        "/repos/{SCRATCH_REPOSITORY}/commits/{}",
+        "/repos/{}/commits/{}",
+        integration_repository()?,
         first.commit_sha
     ))?;
     ensure!(
@@ -499,7 +592,7 @@ fn create_nativefix_positive_pr(
         "nativefix scratch commit has invalid authorship, signature, or parent"
     );
     let actual = api.content(
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         fix.additions
             .keys()
             .next()
@@ -529,7 +622,7 @@ fn create_nativefix_positive_pr(
         plan: &retry_plan,
         fix,
         server_url: "https://github.com",
-        server_repository: SCRATCH_REPOSITORY,
+        server_repository: integration_repository()?,
         server_run: "integration",
     })?;
     ensure!(
@@ -538,7 +631,10 @@ fn create_nativefix_positive_pr(
             && retry.pull_request_number == Some(pr_number),
         "nativefix retry was not idempotent"
     );
-    let pull: Value = api.get(&format!("/repos/{SCRATCH_REPOSITORY}/pulls/{pr_number}"))?;
+    let pull: Value = api.get(&format!(
+        "/repos/{}/pulls/{pr_number}",
+        integration_repository()?
+    ))?;
     ensure!(
         pull["state"] == "open"
             && pull["base"]["ref"] == base_branch
@@ -582,7 +678,7 @@ fn prepare_positive_artifact(
     fs::write(
         &event_path,
         serde_json::to_vec(&json!({
-            "repository":{"full_name":SCRATCH_REPOSITORY}
+            "repository":{"full_name":integration_repository()?}
         }))?,
     )?;
     let output_path = workspace_path.join("github-output");
@@ -598,14 +694,14 @@ fn prepare_positive_artifact(
         .env("GITHUB_WORKSPACE", workspace_path)
         .env("GITHUB_OUTPUT", &output_path)
         .env("GITHUB_EVENT_PATH", &event_path)
-        .env("GITHUB_REPOSITORY", SCRATCH_REPOSITORY)
+        .env("GITHUB_REPOSITORY", integration_repository()?)
         .env("GITHUB_RUN_ID", run_id.to_string())
         .env("GITHUB_RUN_ATTEMPT", "1")
         .env("GITHUB_SHA", candidate_sha)
         .env("GITHUB_SERVER_URL", "https://github.com")
         .env("GITHUB_REF", format!("refs/heads/{branch}"))
         .env("GITHUB_EVENT_NAME", "workflow_dispatch")
-        .env("GITHUB_ACTOR", "civitaspo")
+        .env("GITHUB_ACTOR", &trusted_config()?.deployment.owner_login)
         .args([
             "securefix",
             "client-prepare",
@@ -616,7 +712,7 @@ fn prepare_positive_artifact(
         .arg(&fixture_path)
         .args([
             "--repository",
-            SCRATCH_REPOSITORY,
+            integration_repository()?,
             "--branch",
             branch,
             "--commit-message",
@@ -655,13 +751,13 @@ fn prepare_positive_artifact(
     let fix = crate::securefix_gate::artifact::parse(
         &archive,
         artifact_name,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         run_id,
         candidate_sha,
         branch,
     )?;
     ensure!(
-        fix.repository == SCRATCH_REPOSITORY
+        fix.repository == integration_repository()?
             && fix.branch == branch
             && fix.additions.len() == 1
             && fix.additions.get(&fixture_path).is_some_and(|bytes| {
@@ -683,8 +779,8 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
         serde_json::from_slice(&fs::read(state_file).context("read integration state file")?)
             .context("parse integration state file")?;
     validate_scenario(&scenario, candidate_sha)?;
-    let server = GitHub::scratch_from_env("SECUREFIX_SERVER_TOKEN", candidate_sha)?;
-    let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_TOKEN", candidate_sha)?;
+    let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
+    let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
     let policy = scratch_policy(candidate_sha)?;
     verify_remote_identity(&server, &scenario)?;
 
@@ -692,7 +788,10 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
     let cleanup = cleanup(&server, &scenario);
     match (result, cleanup) {
         (Ok(verification), Ok(())) => {
-            workflow::write_json(state_file, &verification)?;
+            workflow::write_json(
+                state_file.with_file_name("verification.json"),
+                &verification,
+            )?;
             println!("Verified native scratch integration; all fixtures were merged or closed.");
             println!("{}", serde_json::to_string(&verification)?);
             Ok(())
@@ -749,7 +848,7 @@ fn verify_inner(
     request::validate_pr_authorization(
         api,
         policy,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         scenario.positive.number,
         &scenario.positive.head_sha,
         true,
@@ -759,7 +858,7 @@ fn verify_inner(
         .context("owner approval comment has no ID")?;
     request::post_owner_marker(
         api,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         scenario.positive.number,
         &scenario.positive.head_sha,
         approve_comment_id,
@@ -767,13 +866,13 @@ fn verify_inner(
     request::require_owner_marker(
         api,
         policy,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         scenario.positive.number,
         &scenario.positive.head_sha,
     )?;
     policy_check::publish(
         api,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         &scenario.positive.head_sha,
         true,
         "Integration fixture passed production PR authorization checks.",
@@ -805,7 +904,7 @@ fn verify_inner(
         "scratch positive PR lacks required checks or approved review"
     );
     let merged: Value = api.put(
-        &format!("/repos/{SCRATCH_REPOSITORY}/pulls/{}/merge", scenario.positive.number),
+        &format!("/repos/{}/pulls/{}/merge", integration_repository()?, scenario.positive.number),
         &json!({"sha":scenario.positive.head_sha,"merge_method":"squash","commit_message":format!("Securefix integration test for {}", scenario.candidate_sha)}),
     )?;
     ensure!(
@@ -831,7 +930,7 @@ fn verify_inner(
     request::validate_pr_authorization(
         api,
         policy,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         scenario.stale.number,
         &scenario.stale.head_sha,
         true,
@@ -844,7 +943,7 @@ fn verify_inner(
     )?;
     merge::validate_state(api, policy, &stale_manifest)?;
     let stale_head_sha = api.create_commit(
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         &scenario.stale.branch,
         &scenario.stale.head_sha,
         "test: advance scratch head after owner acceptance",
@@ -862,7 +961,7 @@ fn verify_inner(
         request::validate_pr_authorization(
             api,
             policy,
-            SCRATCH_REPOSITORY,
+            integration_repository()?,
             scenario.stale.number,
             &scenario.stale.head_sha,
             true,
@@ -876,7 +975,8 @@ fn verify_inner(
     );
     let stale_merge = api.put::<Value>(
         &format!(
-            "/repos/{SCRATCH_REPOSITORY}/pulls/{}/merge",
+            "/repos/{}/pulls/{}/merge",
+            integration_repository()?,
             scenario.stale.number
         ),
         &json!({"sha":scenario.stale.head_sha,"merge_method":"squash"}),
@@ -898,7 +998,7 @@ fn verify_inner(
     let managed_files = files.keys().cloned().collect::<Vec<_>>();
     Ok(Verification {
         version: STATE_VERSION,
-        repository: SCRATCH_REPOSITORY.to_owned(),
+        repository: integration_repository()?.to_owned(),
         candidate_sha: scenario.candidate_sha.clone(),
         positive_pr: scenario.positive.number,
         merged_sha,
@@ -919,7 +1019,7 @@ fn verify_disposable_release_tag(
 ) -> Result<()> {
     use crate::release::{CommitSha, ReleaseTag, Repository};
 
-    let repository = Repository::parse(SCRATCH_REPOSITORY)?;
+    let repository = Repository::parse(integration_repository()?)?;
     let target = CommitSha::parse(merged_sha)?;
     let tag = ReleaseTag::parse(&format!(
         "v0.0.0-securefix-integration.{}.{}",
@@ -928,7 +1028,11 @@ fn verify_disposable_release_tag(
     ))?;
     crate::release::create_annotated_tag(api, &repository, &tag, &target)?;
     let verification = (|| {
-        let ref_path = format!("/repos/{SCRATCH_REPOSITORY}/git/ref/tags/{}", tag.as_str());
+        let ref_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            integration_repository()?,
+            tag.as_str()
+        );
         let reference: Value = api.get(&ref_path)?;
         ensure!(
             reference["object"]["type"] == "tag",
@@ -938,7 +1042,8 @@ fn verify_disposable_release_tag(
             .as_str()
             .context("scratch annotated tag ref lacks an object SHA")?;
         let object: Value = api.get(&format!(
-            "/repos/{SCRATCH_REPOSITORY}/git/tags/{object_sha}"
+            "/repos/{}/git/tags/{object_sha}",
+            integration_repository()?
         ))?;
         ensure!(
             object["object"]["sha"] == merged_sha,
@@ -952,14 +1057,19 @@ fn verify_disposable_release_tag(
         );
         Ok(())
     })();
-    let ref_path = format!("/repos/{SCRATCH_REPOSITORY}/git/refs/tags/{}", tag.as_str());
+    let ref_path = format!(
+        "/repos/{}/git/refs/tags/{}",
+        integration_repository()?,
+        tag.as_str()
+    );
     let cleanup = api.delete(&ref_path);
     match (verification, cleanup) {
         (Err(error), _) => Err(error).context("verify disposable scratch release tag"),
         (Ok(()), Err(error)) => Err(error).context("delete disposable scratch release tag"),
         (Ok(()), Ok(())) => {
             let absent = api.get::<Value>(&format!(
-                "/repos/{SCRATCH_REPOSITORY}/git/ref/tags/{}",
+                "/repos/{}/git/ref/tags/{}",
+                integration_repository()?,
                 tag.as_str()
             ));
             ensure!(
@@ -979,7 +1089,7 @@ fn validate_signed_pr(api: &GitHub, policy: &Policy, fixture: &PullRequestFixtur
     request::validate_pr_authorization(
         api,
         policy,
-        SCRATCH_REPOSITORY,
+        integration_repository()?,
         fixture.number,
         &fixture.head_sha,
         true,
@@ -997,7 +1107,7 @@ fn verify_rendered_files(
         crate::distribution::caller::rendered_files(candidate_sha, default_branch, true)?;
     validate_rendered_files(&expected)?;
     for (path, expected_bytes) in expected {
-        let actual = api.content(SCRATCH_REPOSITORY, &path, &fixture.head_sha)?;
+        let actual = api.content(integration_repository()?, &path, &fixture.head_sha)?;
         ensure!(
             actual == expected_bytes,
             "scratch distribution PR changed managed workflow bytes at {path}"
@@ -1049,13 +1159,15 @@ fn wait_for_owner_comment(
 ) -> Result<Value> {
     loop {
         let comments = api.paginate(&format!(
-            "/repos/{SCRATCH_REPOSITORY}/issues/{}/comments",
+            "/repos/{}/issues/{}/comments",
+            integration_repository()?,
             fixture.number
         ))?;
+        let owner_id = owner_id()?;
         let matches = comments
             .into_iter()
             .filter(|comment| {
-                comment["user"]["id"].as_u64() == Some(OWNER_ID)
+                comment["user"]["id"].as_u64() == Some(owner_id)
                     && comment["user"]["type"] == "User"
                     && comment["issue_url"]
                         .as_str()
@@ -1090,7 +1202,7 @@ fn wait_for_current_head_approval(
     loop {
         if request::has_current_head_approval(
             api,
-            SCRATCH_REPOSITORY,
+            integration_repository()?,
             fixture.number,
             &fixture.head_sha,
         )? {
@@ -1165,14 +1277,15 @@ fn verify_pr_identity(
     expected_head: &str,
 ) -> Result<()> {
     let pull: Value = api.get(&format!(
-        "/repos/{SCRATCH_REPOSITORY}/pulls/{}",
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
         fixture.number
     ))?;
     ensure!(
         pull["state"] == "open"
-            && pull["base"]["repo"]["full_name"] == SCRATCH_REPOSITORY
+            && pull["base"]["repo"]["full_name"] == integration_repository()?
             && pull["base"]["ref"] == base
-            && pull["head"]["repo"]["full_name"] == SCRATCH_REPOSITORY
+            && pull["head"]["repo"]["full_name"] == integration_repository()?
             && pull["head"]["ref"] == fixture.branch
             && pull["head"]["sha"] == expected_head,
         "scratch pull request changed after preparation"
@@ -1183,10 +1296,10 @@ fn verify_pr_identity(
 fn verify_remote_identity(api: &GitHub, scenario: &Scenario) -> Result<()> {
     let repo: Value = api.get(&format!("/repos/{}", scenario.repository))?;
     ensure!(
-        scenario.repository == SCRATCH_REPOSITORY
-            && scenario.repository_id == SCRATCH_REPOSITORY_ID
-            && repo["full_name"] == SCRATCH_REPOSITORY
-            && repo["id"].as_u64() == Some(SCRATCH_REPOSITORY_ID),
+        scenario.repository == integration_repository()?
+            && scenario.repository_id == integration_repository_id()?
+            && repo["full_name"] == integration_repository()?
+            && repo["id"].as_u64() == Some(integration_repository_id()?),
         "integration state is not bound to the dedicated scratch repository"
     );
     Ok(())
@@ -1195,18 +1308,24 @@ fn verify_remote_identity(api: &GitHub, scenario: &Scenario) -> Result<()> {
 fn cleanup(api: &GitHub, scenario: &Scenario) -> Result<()> {
     for fixture in [&scenario.positive, &scenario.stale, &scenario.distribution] {
         let pull: Value = api.get(&format!(
-            "/repos/{SCRATCH_REPOSITORY}/pulls/{}",
+            "/repos/{}/pulls/{}",
+            integration_repository()?,
             fixture.number
         ))?;
         if pull["state"] == "open" {
             let _: Value = api.patch(
-                &format!("/repos/{SCRATCH_REPOSITORY}/pulls/{}", fixture.number),
+                &format!(
+                    "/repos/{}/pulls/{}",
+                    integration_repository()?,
+                    fixture.number
+                ),
                 &json!({"state":"closed"}),
             )?;
         }
         validate_branch(&fixture.branch)?;
         match api.delete(&format!(
-            "/repos/{SCRATCH_REPOSITORY}/git/refs/heads/{}",
+            "/repos/{}/git/refs/heads/{}",
+            integration_repository()?,
             fixture.branch
         )) {
             Ok(()) => {}
@@ -1223,8 +1342,8 @@ fn cleanup(api: &GitHub, scenario: &Scenario) -> Result<()> {
 fn validate_scenario(scenario: &Scenario, candidate_sha: &str) -> Result<()> {
     ensure!(
         scenario.version == STATE_VERSION
-            && scenario.repository == SCRATCH_REPOSITORY
-            && scenario.repository_id == SCRATCH_REPOSITORY_ID
+            && scenario.repository == integration_repository()?
+            && scenario.repository_id == integration_repository_id()?
             && scenario.candidate_sha == candidate_sha,
         "integration state identity mismatch"
     );
@@ -1246,9 +1365,10 @@ fn validate_scenario(scenario: &Scenario, candidate_sha: &str) -> Result<()> {
     for fixture in [&scenario.positive, &scenario.stale, &scenario.distribution] {
         ensure!(
             fixture.number > 0
-                && fixture
-                    .url
-                    .starts_with("https://github.com/civitaspo/testing-securefix-server/pull/"),
+                && fixture.url.starts_with(&format!(
+                    "https://github.com/{}/pull/",
+                    integration_repository()?
+                )),
             "invalid scratch pull request URL"
         );
         validate_sha(&fixture.head_sha)?;
@@ -1263,7 +1383,20 @@ fn validate_scenario(scenario: &Scenario, candidate_sha: &str) -> Result<()> {
     Ok(())
 }
 
-fn workflow_run_matches(run: &Value, workflow_sha: &str) -> bool {
+fn workflow_run_matches(run: &Value, workflow_sha: &str) -> Result<bool> {
+    let default_branch = &crate::config::trusted()?.deployment.server.default_branch;
+    Ok(workflow_run_matches_for_default_branch(
+        run,
+        workflow_sha,
+        default_branch,
+    ))
+}
+
+fn workflow_run_matches_for_default_branch(
+    run: &Value,
+    workflow_sha: &str,
+    default_branch: &str,
+) -> bool {
     let expected_branch = format!("integration/native-{}", &workflow_sha[..12]);
     let path = run["path"].as_str().unwrap_or_default();
     let (workflow_path, reference) = path.split_once('@').unwrap_or((path, ""));
@@ -1271,9 +1404,9 @@ fn workflow_run_matches(run: &Value, workflow_sha: &str) -> bool {
         && run["head_sha"] == workflow_sha
         && run["head_branch"]
             .as_str()
-            .is_some_and(|branch| branch == "main" || branch == expected_branch)
+            .is_some_and(|branch| branch == default_branch || branch == expected_branch)
         && (reference.is_empty()
-            || reference == "refs/heads/main"
+            || reference == format!("refs/heads/{default_branch}")
             || reference == format!("refs/heads/{expected_branch}"))
 }
 
@@ -1287,6 +1420,134 @@ fn validate_state_path(path: &Path) -> Result<()> {
         "integration state path must be relative and cannot contain traversal"
     );
     Ok(())
+}
+
+fn validate_outputs(
+    workspace: &Path,
+    state_file: &Path,
+    candidate_sha: &str,
+    phase: Phase,
+) -> Result<()> {
+    validate_state_path(state_file)?;
+    ensure!(
+        state_file.file_name().and_then(|name| name.to_str()) == Some("state.json"),
+        "integration output must use state.json"
+    );
+    let workspace = fs::canonicalize(workspace).context("resolve candidate workspace")?;
+    let directory = state_file.parent().context("state file has no directory")?;
+    let dir_meta = safe_output_metadata(&workspace, directory)?;
+    ensure!(
+        dir_meta.is_dir(),
+        "integration output directory is not a directory"
+    );
+
+    let expected: &[&str] = match phase {
+        Phase::Prepare => &["state.json"],
+        Phase::Verify => &["state.json", "verification.json"],
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(workspace.join(directory))? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("integration output filename is not UTF-8"))?;
+        ensure!(
+            expected.contains(&name.as_str()),
+            "unexpected integration output file: {name}"
+        );
+        let relative = directory.join(&name);
+        let metadata = safe_output_metadata(&workspace, &relative)?;
+        ensure!(
+            metadata.is_file(),
+            "integration output is not a regular file: {name}"
+        );
+        ensure!(
+            metadata.len() <= 16 * 1024,
+            "integration output exceeds size limit: {name}"
+        );
+        names.insert(name);
+    }
+    ensure!(
+        names.len() == expected.len() && expected.iter().all(|name| names.contains(*name)),
+        "integration output file set is incomplete"
+    );
+
+    let state_bytes = read_output_file(&workspace, state_file)?;
+    let scenario: Scenario =
+        serde_json::from_slice(&state_bytes).context("parse output scenario")?;
+    validate_scenario(&scenario, candidate_sha)?;
+    if phase == Phase::Verify {
+        let verification_path = directory.join("verification.json");
+        let bytes = read_output_file(&workspace, &verification_path)?;
+        let verification: Verification =
+            serde_json::from_slice(&bytes).context("parse verification output")?;
+        ensure!(
+            verification.version == STATE_VERSION
+                && verification.repository == integration_repository()?
+                && verification.candidate_sha == candidate_sha
+                && verification.positive_pr == scenario.positive.number
+                && validate_sha(&verification.merged_sha).is_ok()
+                && validate_sha(&verification.stale_head_sha).is_ok()
+                && verification.annotated_tag_verified
+                && verification.closed_or_merged,
+            "verification output does not match the validated scenario"
+        );
+    }
+    Ok(())
+}
+
+fn safe_output_metadata(workspace: &Path, relative: &Path) -> Result<fs::Metadata> {
+    ensure!(
+        relative.is_relative()
+            && !relative.as_os_str().is_empty()
+            && relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "integration output path must stay beneath the workspace"
+    );
+    let mut current = PathBuf::new();
+    let components = relative.components().collect::<Vec<_>>();
+    let mut metadata = None;
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        let next = fs::symlink_metadata(workspace.join(&current))?;
+        ensure!(
+            !next.file_type().is_symlink(),
+            "integration output contains a symbolic link"
+        );
+        if index + 1 < components.len() {
+            ensure!(
+                next.is_dir(),
+                "integration output parent is not a directory"
+            );
+        }
+        metadata = Some(next);
+    }
+    metadata.context("integration output path is empty")
+}
+
+fn read_output_file(workspace: &Path, relative: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let metadata = safe_output_metadata(workspace, relative)?;
+    ensure!(
+        metadata.is_file(),
+        "integration output is not a regular file"
+    );
+    ensure!(
+        metadata.len() <= 16 * 1024,
+        "integration output exceeds size limit"
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(workspace.join(relative))?
+        .take(16 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 16 * 1024 && bytes.len() as u64 == metadata.len(),
+        "integration output size changed while reading"
+    );
+    Ok(bytes)
 }
 
 fn validate_branch(branch: &str) -> Result<()> {
@@ -1303,9 +1564,9 @@ fn validate_branch(branch: &str) -> Result<()> {
 
 fn scratch_policy(candidate_sha: &str) -> Result<Policy> {
     validate_sha(candidate_sha)?;
-    let mut policy = Policy::parse(include_bytes!("../policy.json"))?;
+    let mut policy = Policy::parse(&crate::config::trusted_policy_bytes()?)?;
     policy.repositories = vec![securefix::policy::RepositoryPolicy {
-        repository: SCRATCH_REPOSITORY.to_owned(),
+        repository: integration_repository()?.to_owned(),
         capabilities: vec![
             Capability::Approve,
             Capability::Merge,
@@ -1319,7 +1580,7 @@ fn scratch_policy(candidate_sha: &str) -> Result<Policy> {
     policy.revision = candidate_sha.to_owned();
     ensure!(
         policy
-            .repository(SCRATCH_REPOSITORY)?
+            .repository(integration_repository()?)?
             .capabilities
             .contains(&Capability::Merge),
         "scratch policy lacks merge capability"
@@ -1359,9 +1620,12 @@ mod tests {
         let revision = "a".repeat(40);
         let policy = scratch_policy(&revision).unwrap();
         assert_eq!(policy.repositories.len(), 1);
-        assert_eq!(policy.repositories[0].repository, SCRATCH_REPOSITORY);
+        assert_eq!(
+            policy.repositories[0].repository,
+            integration_repository().unwrap()
+        );
         assert_eq!(policy.revision, revision);
-        assert!(policy.repository("civitaspo/securefix-server").is_err());
+        assert!(policy.repository(server_repository().unwrap()).is_err());
     }
 
     #[test]
@@ -1378,22 +1642,44 @@ mod tests {
     #[test]
     fn producer_workflow_sha_is_distinct_from_candidate_and_branch_pinned() {
         let sha = "a".repeat(40);
+        let default_branch = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .default_branch
+            .clone();
         let run = json!({
             "head_sha":sha,
-            "head_branch":"main",
-            "path":".github/workflows/testing-securefix-server.yml@refs/heads/main"
+            "head_branch":default_branch,
+            "path":format!("{WORKFLOW_PATH}@refs/heads/{default_branch}")
         });
-        assert!(workflow_run_matches(&run, &sha));
+        assert!(workflow_run_matches(&run, &sha).unwrap());
+        assert!(validate_workflow_ref(&sha, &format!("refs/heads/{default_branch}")).is_ok());
         let mut wrong_branch = run.clone();
         wrong_branch["head_branch"] = json!("feature/untrusted");
-        assert!(!workflow_run_matches(&wrong_branch, &sha));
+        assert!(!workflow_run_matches(&wrong_branch, &sha).unwrap());
         let frozen = format!("integration/native-{}", &sha[..12]);
         let frozen_run = json!({
             "head_sha":sha,
             "head_branch":frozen,
             "path":format!("{WORKFLOW_PATH}@refs/heads/{frozen}")
         });
-        assert!(workflow_run_matches(&frozen_run, &sha));
+        assert!(workflow_run_matches(&frozen_run, &sha).unwrap());
+        assert!(validate_workflow_ref(&sha, &format!("refs/heads/{frozen}")).is_ok());
+        assert!(validate_workflow_ref(&sha, "refs/heads/feature/untrusted").is_err());
+        assert!(validate_workflow_ref(&sha, "refs/tags/v1.0.0").is_err());
+
+        let alternate_default = "trunk";
+        let trunk_run = json!({
+            "head_sha":sha,
+            "head_branch":alternate_default,
+            "path":format!("{WORKFLOW_PATH}@refs/heads/{alternate_default}")
+        });
+        assert!(workflow_run_matches_for_default_branch(
+            &trunk_run,
+            &sha,
+            alternate_default
+        ));
     }
 
     #[test]
@@ -1404,18 +1690,104 @@ mod tests {
     }
 
     #[test]
+    fn candidate_outputs_are_bounded_and_match_the_validated_scenario() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fixtures = workspace.path().join("fixtures");
+        fs::create_dir(&fixtures).unwrap();
+        let candidate_sha = "a".repeat(40);
+        let scenario = Scenario {
+            version: STATE_VERSION,
+            repository: integration_repository().unwrap().into(),
+            repository_id: integration_repository_id().unwrap(),
+            candidate_sha: candidate_sha.clone(),
+            workflow_sha: "b".repeat(40),
+            default_branch: "main".into(),
+            base_sha: "c".repeat(40),
+            prepared_at: Utc::now(),
+            positive: fixture(17),
+            stale: fixture(18),
+            distribution: fixture(19),
+        };
+        let state_file = Path::new("fixtures/state.json");
+        fs::write(
+            workspace.path().join(state_file),
+            serde_json::to_vec(&scenario).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            validate_outputs(workspace.path(), state_file, &candidate_sha, Phase::Prepare).is_ok()
+        );
+
+        let verification = Verification {
+            version: STATE_VERSION,
+            repository: integration_repository().unwrap().into(),
+            candidate_sha: candidate_sha.clone(),
+            positive_pr: scenario.positive.number,
+            merged_sha: "d".repeat(40),
+            stale_pr: scenario.stale.number,
+            stale_head_sha: "e".repeat(40),
+            distribution_pr: scenario.distribution.number,
+            managed_files: vec![],
+            annotated_tag_verified: true,
+            closed_or_merged: true,
+        };
+        fs::write(
+            fixtures.join("verification.json"),
+            serde_json::to_vec(&verification).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            validate_outputs(workspace.path(), state_file, &candidate_sha, Phase::Verify).is_ok()
+        );
+        let mut wrong = verification;
+        wrong.positive_pr += 1;
+        fs::write(
+            fixtures.join("verification.json"),
+            serde_json::to_vec(&wrong).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            validate_outputs(workspace.path(), state_file, &candidate_sha, Phase::Verify).is_err()
+        );
+    }
+
+    #[test]
+    fn candidate_output_rejects_symlinked_fixture_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("state.json"), b"{}").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("fixtures")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), workspace.path().join("fixtures"))
+            .unwrap();
+        assert!(
+            validate_outputs(
+                workspace.path(),
+                Path::new("fixtures/state.json"),
+                &"a".repeat(40),
+                Phase::Prepare,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn integration_state_cannot_retarget_outside_the_scratch_repository() {
         let sha = "a".repeat(40);
         let fixture = PullRequestFixture {
             number: 17,
             branch: format!("{BRANCH_PREFIX}test"),
             head_sha: sha.clone(),
-            url: "https://github.com/civitaspo/testing-securefix-server/pull/17".into(),
+            url: format!(
+                "https://github.com/{}/pull/17",
+                integration_repository().unwrap()
+            ),
         };
         let mut scenario = Scenario {
             version: STATE_VERSION,
-            repository: SCRATCH_REPOSITORY.into(),
-            repository_id: SCRATCH_REPOSITORY_ID,
+            repository: integration_repository().unwrap().into(),
+            repository_id: integration_repository_id().unwrap(),
             candidate_sha: sha.clone(),
             workflow_sha: "b".repeat(40),
             default_branch: "main".into(),
@@ -1432,7 +1804,7 @@ mod tests {
             },
         };
         assert!(validate_scenario(&scenario, &sha).is_ok());
-        scenario.repository = "civitaspo/securefix-server".into();
+        scenario.repository = server_repository().unwrap().into();
         assert!(validate_scenario(&scenario, &sha).is_err());
     }
 
@@ -1445,8 +1817,8 @@ mod tests {
     fn fixture_state_zip_requires_one_safe_state_json_entry() {
         let scenario = Scenario {
             version: STATE_VERSION,
-            repository: SCRATCH_REPOSITORY.into(),
-            repository_id: SCRATCH_REPOSITORY_ID,
+            repository: integration_repository().unwrap().into(),
+            repository_id: integration_repository_id().unwrap(),
             candidate_sha: "a".repeat(40),
             workflow_sha: "c".repeat(40),
             default_branch: "main".into(),
@@ -1483,7 +1855,10 @@ mod tests {
             number,
             branch: format!("{BRANCH_PREFIX}{number}"),
             head_sha: "c".repeat(40),
-            url: format!("https://github.com/{SCRATCH_REPOSITORY}/pull/{number}"),
+            url: format!(
+                "https://github.com/{}/pull/{number}",
+                integration_repository().unwrap()
+            ),
         }
     }
 }

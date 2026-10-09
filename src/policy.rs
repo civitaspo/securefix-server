@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashSet, path::Path};
 
-pub const SERVER: &str = "civitaspo/securefix-server";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Capability {
@@ -60,6 +58,7 @@ impl RepositoryPolicy {
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub version: u32,
+    pub deployment: crate::config::Deployment,
     pub owner_id: u64,
     pub client_bot_id: u64,
     pub server_bot_id: u64,
@@ -79,11 +78,15 @@ impl Policy {
         ensure!(bytes.len() <= 256 * 1024, "policy exceeds size limit");
         let mut policy: Self = serde_json::from_slice(bytes)?;
         ensure!(policy.version == 1, "unsupported policy version");
+        policy.deployment.validate()?;
         ensure!(
-            policy.owner_id == 4525500
-                && policy.client_bot_id == 288068203
-                && policy.server_bot_id == 288069019,
-            "unexpected security principal"
+            policy.owner_id > 0
+                && policy.client_bot_id > 0
+                && policy.server_bot_id > 0
+                && policy.owner_id != policy.client_bot_id
+                && policy.owner_id != policy.server_bot_id
+                && policy.client_bot_id != policy.server_bot_id,
+            "invalid security principals"
         );
         ensure!(
             !policy.trusted_committers.is_empty(),
@@ -102,8 +105,9 @@ impl Policy {
             }
             validate_repository(&repository.repository)?;
             ensure!(
-                repository.repository.starts_with("civitaspo/"),
-                "repository must be owned by civitaspo"
+                repository.repository.split('/').next()
+                    == Some(policy.deployment.repository_owner.login.as_str()),
+                "repository must belong to the configured account"
             );
             ensure!(
                 names.insert(&repository.repository),
@@ -131,8 +135,20 @@ impl Policy {
     }
     pub fn active(api: &GitHub) -> Result<Self> {
         let revision = latest_revision(api, ".github/workflows/ci.yml")?;
-        let bytes = api.content(SERVER, "policy.json", &revision)?;
+        let bytes = api.content(
+            &crate::config::trusted()?.deployment.server.repository,
+            "policy.json",
+            &revision,
+        )?;
         let mut policy = Self::parse(&bytes)?;
+        let trusted = crate::config::trusted()?;
+        ensure!(
+            policy.deployment == trusted.deployment
+                && policy.owner_id == trusted.owner_id
+                && policy.client_bot_id == trusted.client_bot_id
+                && policy.server_bot_id == trusted.server_bot_id,
+            "active policy identity differs from trusted runtime"
+        );
         policy.revision = revision;
         Ok(policy)
     }
@@ -180,12 +196,17 @@ pub fn latest_revision(api: &GitHub, workflow_path: &str) -> Result<String> {
             && !workflow_path.contains(".."),
         "invalid reusable workflow path"
     );
-    let repository: Value = api.get(&format!("/repos/{SERVER}"))?;
+    let server = &crate::config::trusted()?.deployment.server;
+    let repository: Value = api.get(&format!("/repos/{}", server.repository))?;
     ensure!(
-        repository["default_branch"] == "main",
+        repository["default_branch"] == server.default_branch
+            && repository["id"].as_u64() == Some(server.id),
         "unexpected server default branch"
     );
-    let commit: Value = api.get(&format!("/repos/{SERVER}/commits/main"))?;
+    let commit: Value = api.get(&format!(
+        "/repos/{}/commits/{}",
+        server.repository, server.default_branch
+    ))?;
     let sha = commit["sha"].as_str().context("missing server revision")?;
     validate_sha(sha)?;
     Ok(sha.to_string())
@@ -213,7 +234,7 @@ mod tests {
     use super::*;
     #[test]
     fn central_policy_is_exact_and_has_no_duplicate_repositories() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         assert_eq!(policy.repositories.len(), 10);
         assert!(policy.repository("civitaspo/unlisted").is_err());
         let mut invalid = serde_json::to_value(&policy).unwrap();
@@ -222,8 +243,10 @@ mod tests {
     }
     #[test]
     fn sensitive_paths_cover_code_workflows_and_dependencies() {
-        let policy = Policy::load("policy.json").unwrap();
-        let server = policy.repository(SERVER).unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        let server = policy
+            .repository(&policy.deployment.server.repository)
+            .unwrap();
         assert!(server.sensitive(["README.md"]).unwrap());
         let client = policy
             .repository("civitaspo/dbt-authorized-models")
@@ -245,5 +268,45 @@ mod tests {
                 .sensitive(["README.md", "models/example.sql"])
                 .unwrap()
         );
+    }
+    #[test]
+    fn alternate_deployment_requires_no_personal_identities() {
+        let mut value =
+            serde_json::to_value(Policy::load("tests/fixtures/policy.json").unwrap()).unwrap();
+        value["owner_id"] = 101.into();
+        value["client_bot_id"] = 202.into();
+        value["server_bot_id"] = 303.into();
+        let deployment = &mut value["deployment"];
+        deployment["server"] = serde_json::json!({"repository":"example-org/controller","id":404,"default_branch":"trunk"});
+        deployment["integration"] = serde_json::json!({"repository":"example-org/sandbox","id":405,"default_branch":"trunk"});
+        deployment["repository_owner"] = serde_json::json!({"login":"example-org","id":406});
+        deployment["owner_login"] = "maintainer".into();
+        deployment["client_app_id"] = 501.into();
+        deployment["server_app_id"] = 502.into();
+        deployment["client_bot_login"] = "example-client[bot]".into();
+        deployment["server_bot_login"] = "example-server[bot]".into();
+        deployment["approval_reviewer"] = serde_json::json!({"login":"reviewer","id":601});
+        deployment["checks"] = serde_json::json!({"status_app_id":701,"policy_app_id":502});
+        deployment["release_branch"] = "releases/candidate".into();
+        deployment["runtime_update_branch"] = "automation/runtime".into();
+        value["trusted_committers"] = serde_json::json!(["maintainer", "example-server[bot]"]);
+        value["repositories"] = serde_json::json!([{"repository":"example-org/project","capabilities":["approve","merge","securefix","release"],"release":"github-release","protect_tags":true}]);
+        let parsed = Policy::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(parsed.repository("example-org/project").is_ok());
+        for (field, invalid) in [
+            ("server_app_id", serde_json::json!(501)),
+            ("integration", value["deployment"]["server"].clone()),
+            ("runtime_update_branch", serde_json::json!("trunk")),
+            ("release_branch", serde_json::json!("bad^branch")),
+        ] {
+            let mut malformed = value.clone();
+            malformed["deployment"][field] = invalid;
+            assert!(
+                Policy::parse(&serde_json::to_vec(&malformed).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        value["repositories"][0]["repository"] = "other-org/project".into();
+        assert!(Policy::parse(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 }

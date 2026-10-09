@@ -3,7 +3,7 @@ name: Release PR Sync
 on:
   push:
     branches:
-      - release/next
+      - @RELEASE_BRANCH@
   workflow_dispatch:
 
 permissions: {}
@@ -18,4 +18,4 @@ jobs:
       contents: read
       attestations: read
       pull-requests: write
-    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@@SECUREFIX_RUNTIME_SHA@
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr-sync.yml@@SECUREFIX_RUNTIME_SHA@

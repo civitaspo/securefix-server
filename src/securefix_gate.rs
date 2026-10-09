@@ -3,7 +3,7 @@ use clap::{Args, Subcommand};
 use securefix::{
     api::GitHub,
     event, output, output_multiline,
-    policy::{Capability, Policy, SERVER, validate_repository, validate_sha},
+    policy::{Capability, Policy, validate_repository, validate_sha},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,8 +16,6 @@ use std::{
 #[path = "artifact.rs"]
 pub(crate) mod artifact;
 
-const CLIENT_BOT_ID: u64 = 288_068_203;
-const OWNER_ID: u64 = 4_525_500;
 const LABEL_PREFIX: &str = "securefix-";
 const CLIENT_CI_WORKFLOW: &str = ".github/workflows/pull_request.yml";
 const RELEASE_PR_WORKFLOW: &str = ".github/workflows/release-pr.yml";
@@ -431,8 +429,9 @@ fn ensure_no_symlink_components(base: &Path, relative: &Path) -> Result<bool> {
 }
 
 fn client_dispatch(artifact_name: &str, server_repository: &str) -> Result<()> {
+    let trusted = crate::config::trusted()?;
     ensure!(
-        server_repository.eq_ignore_ascii_case(SERVER),
+        server_repository.eq_ignore_ascii_case(&trusted.deployment.server.repository),
         "Securefix labels may only target the server repository"
     );
     ensure!(
@@ -448,7 +447,7 @@ fn client_dispatch(artifact_name: &str, server_repository: &str) -> Result<()> {
     );
     let api = GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
     let _: Value = api.post(
-        &format!("/repos/{SERVER}/labels"),
+        &format!("/repos/{}/labels", trusted.deployment.server.repository),
         &json!({
             "name": artifact_name,
             "description": format!("{repository}/{run_id}")
@@ -499,21 +498,24 @@ fn cleanup() -> Result<()> {
         .and_then(|(_, run)| run.parse::<u64>().ok())
         .context("invalid Securefix label source run ID")?;
     require_live_label(&api, &label, source_repository, run_id)?;
-    api.delete(&label_definition_path(&label))?;
+    api.delete(&label_definition_path(&label)?)?;
     output("label_deleted", "true")?;
     Ok(())
 }
 
 fn parse_label_event(p: &Policy, payload: &Value, repo: &str) -> Result<(String, u64, String)> {
+    let trusted = crate::config::trusted()?;
     validate_repository(repo)?;
     ensure!(
-        repo.eq_ignore_ascii_case(SERVER)
+        repo.eq_ignore_ascii_case(&trusted.deployment.server.repository)
             && payload["repository"]["full_name"] == repo
-            && payload["repository"]["owner"]["id"].as_u64() == Some(OWNER_ID),
+            && payload["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
+            && payload["repository"]["owner"]["id"].as_u64()
+                == Some(trusted.deployment.repository_owner.id),
         "unexpected event repository"
     );
     ensure!(
-        payload["sender"]["id"].as_u64() == Some(CLIENT_BOT_ID)
+        payload["sender"]["id"].as_u64() == Some(trusted.client_bot_id)
             && payload["sender"]["type"] == "Bot",
         "label was not created by Securefix Client"
     );
@@ -680,7 +682,14 @@ fn apply(plan_path: &Path) -> Result<()> {
     let write_api = GitHub::from_env("SECUREFIX_WRITE_TOKEN")?;
     let server_url =
         std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".into());
-    let server_repository = std::env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| SERVER.into());
+    let server_repository = match std::env::var("GITHUB_REPOSITORY") {
+        Ok(repository) => repository,
+        Err(_) => crate::config::trusted()?
+            .deployment
+            .server
+            .repository
+            .clone(),
+    };
     let server_run = std::env::var("GITHUB_RUN_ID").unwrap_or_default();
     let result = apply_core(ApplyCore {
         read_api: &read_api,
@@ -1166,12 +1175,16 @@ fn receipt_matches(
     actual == expected && actual.len() == files.len() && files.len() < 300
 }
 
-fn label_definition_path(label: &str) -> String {
-    format!("/repos/{SERVER}/labels/{}", path_component(label))
+fn label_definition_path(label: &str) -> Result<String> {
+    Ok(format!(
+        "/repos/{}/labels/{}",
+        crate::config::trusted()?.deployment.server.repository,
+        path_component(label)
+    ))
 }
 
 fn require_live_label(api: &GitHub, label: &str, repository: &str, run_id: u64) -> Result<()> {
-    let live: Value = api.get(&label_definition_path(label))?;
+    let live: Value = api.get(&label_definition_path(label)?)?;
     ensure!(
         live["name"] == label && live["description"] == format!("{repository}/{run_id}"),
         "Securefix event label no longer matches its live request"
@@ -1518,7 +1531,7 @@ mod tests {
 
         let repository = "civitaspo/dbt-authorized-models";
         let source_sha = "a".repeat(40);
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let fix = artifact::FixArtifact {
             repository: repository.into(),
             branch: "release/feature/2026-10".into(),
@@ -1571,7 +1584,7 @@ mod tests {
         use crate::fixtures::{Fixture, Route};
 
         let repository = "civitaspo/dbt-authorized-models";
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let route = |id| {
             Route::get(
                 format!(
@@ -1794,7 +1807,7 @@ mod tests {
     fn prepared_ci_run_accepts_in_progress_and_failed_runs_after_pr_head_advances() {
         use crate::fixtures::{Fixture, Route};
 
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         for (status, conclusion) in [
             ("in_progress", Value::Null),
             ("completed", json!("failure")),
@@ -1856,12 +1869,18 @@ mod tests {
         use base64::Engine;
 
         let repository = "civitaspo/dbt-authorized-models";
-        let mut policy = Policy::load("policy.json").unwrap();
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
         policy.revision = "a".repeat(40);
+        let server_repository = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository
+            .clone();
         let source_sha = "b".repeat(40);
         let current_sha = source_sha.clone();
         let caller = format!(
-            "jobs:\n  release:\n    uses: {SERVER}/{REUSABLE_RELEASE_PR}@{}\n",
+            "jobs:\n  release:\n    uses: {server_repository}/{REUSABLE_RELEASE_PR}@{}\n",
             policy.revision
         );
         for (status, conclusion) in [
@@ -1881,7 +1900,7 @@ mod tests {
                 "event":"push",
                 "name":"Release PR",
                 "referenced_workflows":[{
-                    "path":format!("{SERVER}/{REUSABLE_RELEASE_PR}@{}", policy.revision),
+                    "path":format!("{server_repository}/{REUSABLE_RELEASE_PR}@{}", policy.revision),
                     "sha":policy.revision
                 }]
             });
@@ -1935,7 +1954,7 @@ mod tests {
         use crate::fixtures::{Fixture, Route};
 
         let repository = "civitaspo/dbt-authorized-models";
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let run = json!({"head_branch":"main"});
         let fixture = Fixture::new(vec![Route::get(
             format!("/repos/{repository}/commits/main"),

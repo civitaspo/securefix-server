@@ -2,11 +2,12 @@ use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use serde_json::{Value, json};
 
+use crate::config;
 use crate::request::{self, Authorization, RequestKind, RequestManifest};
 use securefix::{
     api::GitHub,
     event, output,
-    policy::{Capability, Policy, SERVER},
+    policy::{Capability, Policy},
 };
 
 #[derive(Subcommand)]
@@ -25,15 +26,18 @@ pub fn run(command: Command) -> Result<()> {
 }
 
 fn validate() -> Result<()> {
+    let deployment = &config::trusted()?.deployment;
+    let server = deployment.server.repository.as_str();
     let api = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&api)?;
     let source_sha =
         securefix::workflow::require_current_runtime(&api, ".github/workflows/approve.yml")?;
+    let payload = event()?;
     ensure!(
-        std::env::var("GITHUB_REPOSITORY")? == SERVER,
+        std::env::var("GITHUB_REPOSITORY")? == server
+            && payload["repository"]["id"].as_u64() == Some(deployment.server.id),
         "approval processor must run in the server repository"
     );
-    let payload = event()?;
     ensure!(
         payload["action"] == "created" && payload["label"]["name"].is_string(),
         "event is not a label creation"
@@ -46,8 +50,12 @@ fn validate() -> Result<()> {
         .context("unexpected approval request label")?
         .parse()?;
     ensure!(
-        payload["sender"]["id"].as_u64() == Some(policy.client_bot_id)
-            && payload["sender"]["type"] == "Bot",
+        request::matches_principal(
+            &payload["sender"],
+            config::trusted()?.client_bot_id,
+            &deployment.client_bot_login,
+            "Bot",
+        ),
         "approval request label was not created by the Client App"
     );
     let description = payload["label"]["description"]
@@ -97,6 +105,7 @@ fn validate() -> Result<()> {
 }
 
 fn apply() -> Result<()> {
+    let deployment = &config::trusted()?.deployment;
     let read = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&read)?;
     let manifest: RequestManifest =
@@ -156,8 +165,10 @@ fn apply() -> Result<()> {
     let approve = GitHub::from_env("SECUREFIX_APPROVE_TOKEN")?;
     let approver: Value = approve.get("/user")?;
     ensure!(
-        approver["login"] == "civitaspo-bot" && approver["type"] == "User",
-        "approval token must authenticate as civitaspo-bot"
+        approver["login"] == deployment.approval_reviewer.login
+            && approver["id"].as_u64() == Some(deployment.approval_reviewer.id)
+            && approver["type"] == "User",
+        "approval token must authenticate as the configured review account"
     );
     ensure!(
         approver["id"] != pr["user"]["id"],
@@ -243,7 +254,10 @@ fn cleanup() -> Result<()> {
     );
     let api = GitHub::from_env("GITHUB_TOKEN")?;
     securefix::workflow::require_current_runtime(&api, ".github/workflows/approve.yml")?;
-    match api.delete(&format!("/repos/{SERVER}/labels/{label}")) {
+    match api.delete(&format!(
+        "/repos/{}/labels/{label}",
+        config::trusted()?.deployment.server.repository
+    )) {
         Ok(()) => Ok(()),
         Err(error) if error.to_string().contains("returned 404") => Ok(()),
         Err(error) => Err(error),

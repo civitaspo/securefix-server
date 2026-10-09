@@ -18,5 +18,6 @@ runs:
         SECUREFIX_BINARY: ${{ inputs.binary }}
       run: |
         install -D -m 755 "$SECUREFIX_BINARY" "$RUNNER_TEMP/securefix-bin/securefix"
+        install -m 644 "$(dirname "$SECUREFIX_BINARY")/policy.json" "$RUNNER_TEMP/securefix-bin/policy.json"
         echo "$RUNNER_TEMP/securefix-bin" >> "$GITHUB_PATH"
         echo "binary=$RUNNER_TEMP/securefix-bin/securefix" >> "$GITHUB_OUTPUT"

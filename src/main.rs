@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use securefix::{api, event, output, policy, workflow};
+use securefix::{api, config, event, output, policy, workflow};
 
 mod approval;
 mod distribution;
@@ -21,7 +21,7 @@ mod workflow_tests;
 #[command(
     name = "securefix",
     version,
-    about = "Scoped OSS automation for civitaspo repositories"
+    about = "Policy-bound GitHub automation with isolated credentials"
 )]
 struct Cli {
     #[command(subcommand)]

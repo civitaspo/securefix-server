@@ -1,4 +1,4 @@
-use super::{CallerMigration, UPDATE_BRANCH, caller_names, validate_branch};
+use super::{CallerMigration, caller_names, validate_branch};
 use crate::{
     api::{ApiError, GitHub},
     policy::{Capability, Policy, validate_sha},
@@ -20,6 +20,8 @@ pub(super) fn prepare_caller(
     repository: &str,
     source_sha: &str,
 ) -> Result<CallerMigration> {
+    let config = crate::config::trusted()?;
+    let update_branch = config.deployment.runtime_update_branch.as_str();
     let allowed = caller_names(policy)?;
     ensure!(
         allowed.iter().any(|caller| caller == repository),
@@ -28,7 +30,7 @@ pub(super) fn prepare_caller(
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     ensure!(
         repo["full_name"] == repository
-            && repo["owner"]["id"] == policy.owner_id
+            && repo["owner"]["id"].as_u64() == Some(config.deployment.repository_owner.id)
             && repo["owner"]["id"].as_u64().is_some_and(|id| id > 0),
         "caller owner mismatch"
     );
@@ -37,7 +39,7 @@ pub(super) fn prepare_caller(
         .context("caller default branch missing")?;
     validate_branch(default_branch)?;
     ensure!(
-        default_branch != UPDATE_BRANCH,
+        default_branch != update_branch,
         "runtime update branch cannot be the caller default branch"
     );
     let base: Value = api.get(&format!("/repos/{repository}/commits/{default_branch}"))?;
@@ -83,6 +85,10 @@ pub(crate) fn rendered_files(
     validate_sha(source_sha)?;
     validate_branch(default_branch)?;
     let branch = serde_json::to_string(default_branch)?;
+    let config = crate::config::trusted()?;
+    let server_repository = config.deployment.server.repository.as_str();
+    let release_branch = config.deployment.release_branch.as_str();
+    let owner_id = config.owner_id.to_string();
     let templates = [
         (".github/workflows/approve-request.yml", APPROVE),
         (".github/workflows/merge-request.yml", MERGE),
@@ -92,7 +98,15 @@ pub(crate) fn rendered_files(
     for (path, template) in templates {
         files.insert(
             path.to_owned(),
-            render(template, source_sha, &branch)?.into_bytes(),
+            render(
+                template,
+                source_sha,
+                &branch,
+                server_repository,
+                release_branch,
+                &owner_id,
+            )?
+            .into_bytes(),
         );
     }
     if releases {
@@ -103,19 +117,41 @@ pub(crate) fn rendered_files(
         ] {
             files.insert(
                 path.to_owned(),
-                render(template, source_sha, &branch)?.into_bytes(),
+                render(
+                    template,
+                    source_sha,
+                    &branch,
+                    server_repository,
+                    release_branch,
+                    &owner_id,
+                )?
+                .into_bytes(),
             );
         }
     }
     Ok(files)
 }
 
-fn render(template: &str, source_sha: &str, branch: &str) -> Result<String> {
+fn render(
+    template: &str,
+    source_sha: &str,
+    branch: &str,
+    server_repository: &str,
+    release_branch: &str,
+    owner_id: &str,
+) -> Result<String> {
     let rendered = template
         .replace("@SECUREFIX_RUNTIME_SHA@", source_sha)
-        .replace("@DEFAULT_BRANCH@", branch);
+        .replace("@DEFAULT_BRANCH@", branch)
+        .replace("@SERVER_REPOSITORY@", server_repository)
+        .replace("@RELEASE_BRANCH@", release_branch)
+        .replace("@OWNER_ID@", owner_id);
     ensure!(
-        !rendered.contains("@SECUREFIX_RUNTIME_SHA@") && !rendered.contains("@DEFAULT_BRANCH@"),
+        !rendered.contains("@SECUREFIX_RUNTIME_SHA@")
+            && !rendered.contains("@DEFAULT_BRANCH@")
+            && !rendered.contains("@SERVER_REPOSITORY@")
+            && !rendered.contains("@RELEASE_BRANCH@")
+            && !rendered.contains("@OWNER_ID@"),
         "template contains an unresolved placeholder"
     );
     Ok(rendered)
@@ -245,7 +281,12 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
             },
         "managed workflow job name changed: {path}"
     );
-    let expected = format!("civitaspo/securefix-server/.github/workflows/{expected_reusable}");
+    let server_repository = crate::config::trusted()?
+        .deployment
+        .server
+        .repository
+        .as_str();
+    let expected = format!("{server_repository}/.github/workflows/{expected_reusable}");
     let uses = uses.context("managed workflow must call its exact reusable workflow")?;
     let (reusable, sha) = uses
         .rsplit_once('@')
@@ -471,16 +512,108 @@ fn validate_legacy_approval(workflow: &serde_yaml::Value) -> Result<()> {
     normalized["jobs"]["approve"]["steps"][1]["uses"] = serde_yaml::Value::String(
         "csm-actions/approve-pr-action@a8fdc60ab4d9b446694140534bbcc71c29fb499c".into(),
     );
-    for template in [
-        include_str!("legacy-approve.yml"),
-        include_str!("legacy-approve-infobox.yml"),
-    ] {
-        let audited: serde_yaml::Value = serde_yaml::from_str(template)?;
+    normalize_legacy_approval_order(&mut normalized)?;
+    for template in legacy_approval_templates()? {
+        let mut audited: serde_yaml::Value = serde_yaml::from_str(&template)?;
+        normalize_legacy_approval_order(&mut audited)?;
         if normalized == audited {
             return Ok(());
         }
     }
     anyhow::bail!("legacy approval workflow contains unsupported customization")
+}
+
+fn normalize_legacy_approval_order(workflow: &mut serde_yaml::Value) -> Result<()> {
+    let condition = workflow["jobs"]["approve"]["if"]
+        .as_str()
+        .context("legacy approval condition missing")?
+        .to_owned();
+    let (before, remainder) = condition
+        .split_once("fromJSON('")
+        .context("legacy trusted committer expression missing")?;
+    let (committers, after) = remainder
+        .split_once("')")
+        .context("legacy trusted committer expression is malformed")?;
+    let mut committers: Vec<String> = serde_json::from_str(committers)?;
+    committers.sort();
+    let canonical = format!(
+        "{before}fromJSON('{}'){after}",
+        serde_json::to_string(&committers)?
+    );
+    workflow["jobs"]["approve"]["if"] = serde_yaml::Value::String(canonical);
+
+    let allowed = workflow["jobs"]["approve"]["steps"][1]["with"]["allowed_committers"]
+        .as_str()
+        .context("legacy allowed committer list missing")?;
+    let mut allowed: Vec<&str> = allowed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    allowed.sort_unstable();
+    let allowed = format!("{}\n", allowed.join("\n"));
+    workflow["jobs"]["approve"]["steps"][1]["with"]["allowed_committers"] =
+        serde_yaml::Value::String(allowed);
+    Ok(())
+}
+
+pub(super) fn legacy_approval_templates() -> Result<Vec<String>> {
+    let policy = Policy::parse(&crate::config::trusted_policy_bytes()?)?;
+    ensure!(
+        policy.trusted_committers.iter().all(|login| {
+            !login.is_empty()
+                && login.len() <= 100
+                && login
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_[].".contains(&byte))
+        }),
+        "trusted committer login is invalid"
+    );
+    let trusted_committers = serde_json::to_string(&policy.trusted_committers)?;
+    let allowed_committers = policy
+        .trusted_committers
+        .iter()
+        .map(|login| format!("            {login}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let config = crate::config::trusted()?;
+    let server_repository_name = config
+        .deployment
+        .server
+        .repository
+        .split('/')
+        .nth(1)
+        .context("server repository name missing")?;
+    [
+        include_str!("legacy-approve.yml"),
+        include_str!("legacy-approve-infobox.yml"),
+    ]
+    .into_iter()
+    .map(|template| {
+        let rendered = template
+            .replace("@TRUSTED_COMMITTERS_JSON@", &trusted_committers)
+            .replace("@ALLOWED_COMMITTERS@", &allowed_committers)
+            .replace("@OWNER_LOGIN@", &config.deployment.owner_login)
+            .replace(
+                "@CLIENT_APP_ID@",
+                &config.deployment.client_app_id.to_string(),
+            )
+            .replace("@SERVER_REPOSITORY_NAME@", server_repository_name);
+        ensure!(
+            ![
+                "@TRUSTED_COMMITTERS_JSON@",
+                "@ALLOWED_COMMITTERS@",
+                "@OWNER_LOGIN@",
+                "@CLIENT_APP_ID@",
+                "@SERVER_REPOSITORY_NAME@",
+            ]
+            .iter()
+            .any(|placeholder| rendered.contains(placeholder)),
+            "legacy approval template has unresolved placeholders"
+        );
+        Ok(rendered)
+    })
+    .collect()
 }
 
 fn optional_content(

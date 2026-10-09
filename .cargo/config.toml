@@ -1,0 +1,4 @@
+# Cargo-launched development/test processes use immutable fixture identities.
+# Installed runtimes use their attested, executable-adjacent policy instead.
+[env]
+SECUREFIX_POLICY_PATH = { value = "tests/fixtures/policy.json", relative = true, force = false }

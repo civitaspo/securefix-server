@@ -50,7 +50,9 @@ jobs:
         id: upload
         with:
           name: trusted-runtime
-          path: target/release/securefix
+          path: |
+            target/release/securefix
+            target/release/policy.json
           if-no-files-found: error
           retention-days: 7
 
@@ -77,7 +79,9 @@ jobs:
         id: upload
         with:
           name: candidate-runtime
-          path: target/release/securefix
+          path: |
+            target/release/securefix
+            target/release/policy.json
           if-no-files-found: error
           retention-days: 7
 
@@ -120,7 +124,9 @@ jobs:
         id: upload
         with:
           name: candidate-runtime
-          path: candidate-runtime/securefix
+          path: |
+            candidate-runtime/securefix
+            candidate-runtime/policy.json
           if-no-files-found: error
           retention-days: 7
 
@@ -135,25 +141,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        if: inputs.phase == 'prepare'
-        with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: candidate-runtime
-          merge-multiple: true
-      - uses: $/.github/actions/install-cli
-        if: inputs.phase == 'prepare'
-        with:
-          binary: candidate-runtime/securefix
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        if: inputs.phase == 'verify'
         with:
           artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.trusted-build.outputs.artifact-id }}
           path: trusted-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
-        if: inputs.phase == 'verify'
         with:
           binary: trusted-runtime/securefix
+      - name: Validate the defining workflow before minting credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: $RUNNER_TEMP/securefix-bin/securefix integration validate-producer --workflow-sha "$WORKFLOW_SHA"
       - name: Validate fixture state with trusted runtime
         if: inputs.phase == 'verify'
         id: state
@@ -163,13 +162,11 @@ jobs:
           FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
         run: $RUNNER_TEMP/securefix-bin/securefix integration fetch-state --candidate-sha "$CANDIDATE_SHA" --run-id "$FIXTURE_RUN_ID" --state-file fixtures/state.json
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        if: inputs.phase == 'verify'
         with:
-          artifact-ids: ${{ needs.reuse.outputs.artifact-id }}
+          artifact-ids: ${{ needs.build.outputs.artifact-id || needs.reuse.outputs.artifact-id }}
           path: candidate-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
-        if: inputs.phase == 'verify'
         with:
           binary: candidate-runtime/securefix
       # The `main` environment must restrict access to main and the manually approved,
@@ -196,17 +193,43 @@ jobs:
           repositories: testing-securefix-server
           permission-issues: write
       - name: Execute candidate against the isolated scratch repository
+        id: execute
         env:
-          SECUREFIX_SERVER_TOKEN: ${{ steps.server.outputs.token }}
-          SECUREFIX_CLIENT_TOKEN: ${{ steps.client.outputs.token }}
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
           SECUREFIX_TEST_WORKFLOW_SHA: ${{ job.workflow_sha }}
           CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
           TEST_PHASE: ${{ inputs.phase }}
-        run: securefix integration run --phase "$TEST_PHASE" --candidate-sha "$CANDIDATE_SHA" --state-file fixtures/state.json
+        run: |
+          mkdir -p fixtures
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /fixtures \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/usr/local/bin/securefix,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/policy.json,target=/usr/local/bin/policy.json,readonly" \
+            --mount "type=bind,source=$PWD/fixtures,target=/fixtures" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA \
+            -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            securefix integration run --phase "$TEST_PHASE" --candidate-sha "$CANDIDATE_SHA" --state-file state.json
+      - uses: $/.github/actions/install-cli
+        if: always() && steps.execute.outcome == 'success'
+        with:
+          binary: trusted-runtime/securefix
+      - name: Validate candidate output files with the trusted runtime
+        id: validate-outputs
+        if: always() && steps.execute.outcome == 'success'
+        env:
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
+          TEST_PHASE: ${{ inputs.phase }}
+        run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase "$TEST_PHASE" --state-file fixtures/state.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
+        if: always() && steps.validate-outputs.outcome == 'success'
         with:
           name: scratch-fixtures
-          path: fixtures/
-          if-no-files-found: ignore
+          path: |
+            fixtures/state.json
+            fixtures/verification.json
+          if-no-files-found: error
           retention-days: 7

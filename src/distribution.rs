@@ -1,7 +1,7 @@
 use crate::{
     api::{ApiError, GitHub},
     output,
-    policy::{Capability, Policy, SERVER, validate_sha},
+    policy::{Capability, Policy, validate_sha},
     workflow,
 };
 use anyhow::{Context, Result, ensure};
@@ -13,10 +13,8 @@ use std::{collections::BTreeMap, path::Path};
 pub(crate) mod caller;
 use caller::{prepare_caller, rendered_files, validate_migration_files, write_migration};
 
-const UPDATE_BRANCH: &str = "automation/securefix-runtime";
 const DISTRIBUTOR_WORKFLOW: &str = ".github/workflows/distribute-runtime.yml";
 const PUBLISHER_WORKFLOW: &str = ".github/workflows/publish-runtime.yml";
-const PUBLISHER_ACTOR: u64 = 4_525_500;
 const RUNTIME_ASSET: &str = "securefix-runtime-linux-x86_64.tar.gz";
 
 #[derive(Subcommand)]
@@ -123,11 +121,12 @@ fn current_runtime(api: &GitHub) -> Result<String> {
 }
 
 fn caller_names(policy: &Policy) -> Result<Vec<String>> {
+    let server_repository = &crate::config::trusted()?.deployment.server.repository;
     let mut callers: Vec<String> = policy
         .repositories
         .iter()
         .filter(|repository| {
-            repository.repository != SERVER
+            repository.repository != *server_repository
                 && repository.capabilities.contains(&Capability::Securefix)
                 && repository.capabilities.contains(&Capability::Approve)
                 && repository.capabilities.contains(&Capability::Merge)
@@ -144,46 +143,54 @@ fn caller_names(policy: &Policy) -> Result<Vec<String>> {
 
 pub(crate) fn validate_promotion(
     api: &GitHub,
-    policy: &Policy,
+    _policy: &Policy,
     publisher_run_id: u64,
 ) -> Result<PublishedRuntime> {
+    let trusted = crate::config::trusted()?;
+    let server_repository = trusted.deployment.server.repository.as_str();
+    let default_branch = trusted.deployment.server.default_branch.as_str();
     ensure!(publisher_run_id > 0, "invalid publisher run ID");
-    let run: Value = api.get(&format!("/repos/{SERVER}/actions/runs/{publisher_run_id}"))?;
+    let run: Value = api.get(&format!(
+        "/repos/{server_repository}/actions/runs/{publisher_run_id}"
+    ))?;
     ensure!(
         run["id"].as_u64() == Some(publisher_run_id)
-            && run["repository"]["full_name"] == SERVER
-            && run["repository"]["id"] == run["head_repository"]["id"]
-            && run["head_repository"]["full_name"] == SERVER
-            && workflow_path(&run["path"], PUBLISHER_WORKFLOW)
+            && run["repository"]["full_name"] == server_repository
+            && run["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
+            && run["head_repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
+            && run["head_repository"]["full_name"] == server_repository
+            && workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)
             && run["event"] == "workflow_dispatch"
-            && run["head_branch"] == "main"
+            && run["head_branch"] == default_branch
             && run["run_attempt"]
                 .as_u64()
                 .is_some_and(|attempt| attempt >= 1)
             && run["status"] == "completed"
             && run["conclusion"] == "success"
-            && run["actor"]["id"].as_u64() == Some(PUBLISHER_ACTOR)
-            && run["triggering_actor"]["id"].as_u64() == Some(PUBLISHER_ACTOR),
+            && run["actor"]["id"].as_u64() == Some(trusted.owner_id)
+            && run["triggering_actor"]["id"].as_u64() == Some(trusted.owner_id),
         "runtime publication is not a successful owner-dispatched run"
     );
     let source_sha = run["head_sha"]
         .as_str()
         .context("publisher source SHA missing")?;
     validate_sha(source_sha)?;
-    let repository: Value = api.get(&format!("/repos/{SERVER}"))?;
+    let repository: Value = api.get(&format!("/repos/{server_repository}"))?;
     ensure!(
-        repository["full_name"] == SERVER
-            && repository["owner"]["id"] == policy.owner_id
-            && repository["owner"]["id"].as_u64().is_some_and(|id| id > 0),
+        repository["full_name"] == server_repository
+            && repository["id"].as_u64() == Some(trusted.deployment.server.id)
+            && repository["owner"]["id"].as_u64() == Some(trusted.deployment.repository_owner.id),
         "unexpected server owner"
     );
-    let main: Value = api.get(&format!("/repos/{SERVER}/commits/main"))?;
+    let main: Value = api.get(&format!(
+        "/repos/{server_repository}/commits/{default_branch}"
+    ))?;
     ensure!(
         main["sha"] == source_sha,
         "publisher is not the current server main revision"
     );
     let tag = format!("securefix-runtime-{source_sha}");
-    let release: Value = api.get(&format!("/repos/{SERVER}/releases/tags/{tag}"))?;
+    let release: Value = api.get(&format!("/repos/{server_repository}/releases/tags/{tag}"))?;
     ensure!(
         release["tag_name"] == tag
             && release["target_commitish"] == source_sha
@@ -211,9 +218,12 @@ pub(crate) fn validate_promotion(
 }
 
 fn validate_distributor_context(publisher_run_id: u64) -> Result<()> {
+    let trusted = crate::config::trusted()?;
+    let server_repository = &trusted.deployment.server.repository;
+    let default_branch = &trusted.deployment.server.default_branch;
     ensure!(
-        std::env::var("GITHUB_REPOSITORY")? == SERVER
-            && std::env::var("GITHUB_REF")? == "refs/heads/main",
+        std::env::var("GITHUB_REPOSITORY")? == *server_repository
+            && std::env::var("GITHUB_REF")? == format!("refs/heads/{default_branch}"),
         "runtime distribution can run only from the server default branch"
     );
     match std::env::var("GITHUB_EVENT_NAME")?.as_str() {
@@ -225,7 +235,7 @@ fn validate_distributor_context(publisher_run_id: u64) -> Result<()> {
             );
         }
         "workflow_dispatch" => ensure!(
-            std::env::var("GITHUB_ACTOR_ID")?.parse::<u64>()? == PUBLISHER_ACTOR,
+            std::env::var("GITHUB_ACTOR_ID")?.parse::<u64>()? == trusted.owner_id,
             "runtime distribution retry requires the repository owner"
         ),
         _ => anyhow::bail!("unsupported runtime distribution trigger"),
@@ -233,11 +243,13 @@ fn validate_distributor_context(publisher_run_id: u64) -> Result<()> {
     Ok(())
 }
 
-fn workflow_path(actual: &Value, expected: &str) -> bool {
+fn workflow_path(actual: &Value, expected: &str, default_branch: &str) -> bool {
     actual.as_str().is_some_and(|path| {
         let (path, reference) = path.split_once('@').unwrap_or((path, ""));
         path == expected
-            && (reference.is_empty() || reference == "main" || reference == "refs/heads/main")
+            && (reference.is_empty()
+                || reference == default_branch
+                || reference == format!("refs/heads/{default_branch}"))
     })
 }
 
@@ -296,9 +308,13 @@ fn validate_automation_branch(
     policy: &Policy,
     migration: &CallerMigration,
 ) -> Result<(bool, Option<String>)> {
+    let update_branch = crate::config::trusted()?
+        .deployment
+        .runtime_update_branch
+        .as_str();
     let ref_path = format!(
         "/repos/{}/git/ref/heads/{}",
-        migration.repository, UPDATE_BRANCH
+        migration.repository, update_branch
     );
     let branch = match api.get::<Value>(&ref_path) {
         Ok(value) => value,
@@ -455,7 +471,16 @@ fn validate_existing_pull_request(
     policy: &Policy,
     migration: &CallerMigration,
 ) -> Result<()> {
-    let head = format!("civitaspo:{UPDATE_BRANCH}");
+    let update_branch = crate::config::trusted()?
+        .deployment
+        .runtime_update_branch
+        .as_str();
+    let owner = migration
+        .repository
+        .split('/')
+        .next()
+        .context("invalid caller repository")?;
+    let head = format!("{owner}:{update_branch}");
     let pulls: Vec<Value> = api.paginate(&format!(
         "/repos/{}/pulls?state=open&head={head}",
         migration.repository
@@ -468,7 +493,7 @@ fn validate_existing_pull_request(
         ensure!(
             pr["user"]["id"].as_u64() == Some(policy.server_bot_id)
                 && pr["head"]["repo"]["full_name"] == migration.repository
-                && pr["head"]["ref"] == UPDATE_BRANCH
+                && pr["head"]["ref"] == update_branch
                 && pr["base"]["repo"]["full_name"] == migration.repository
                 && pr["base"]["ref"] == migration.default_branch,
             "existing runtime migration PR is not bot-owned with the fixed base and head"
@@ -500,10 +525,19 @@ fn reconcile_pull_request(
     policy: &Policy,
     migration: &CallerMigration,
 ) -> Result<u64> {
+    let update_branch = crate::config::trusted()?
+        .deployment
+        .runtime_update_branch
+        .as_str();
     if migration.default_current {
         return Ok(0);
     }
-    let head = format!("civitaspo:{UPDATE_BRANCH}");
+    let owner = migration
+        .repository
+        .split('/')
+        .next()
+        .context("invalid caller repository")?;
+    let head = format!("{owner}:{update_branch}");
     let pulls: Vec<Value> = api.paginate(&format!(
         "/repos/{}/pulls?state=open&head={head}",
         migration.repository
@@ -516,7 +550,7 @@ fn reconcile_pull_request(
         ensure!(
             pr["user"]["id"].as_u64() == Some(policy.server_bot_id)
                 && pr["head"]["repo"]["full_name"] == migration.repository
-                && pr["head"]["ref"] == UPDATE_BRANCH
+                && pr["head"]["ref"] == update_branch
                 && pr["base"]["repo"]["full_name"] == migration.repository
                 && pr["base"]["ref"] == migration.default_branch,
             "runtime migration pull request has an unexpected base or head"
@@ -543,7 +577,7 @@ fn reconcile_pull_request(
     let pr: Value = api.post(
         &format!("/repos/{}/pulls", migration.repository),
         &json!({
-            "head": UPDATE_BRANCH,
+            "head": update_branch,
             "base": migration.default_branch,
             "title": "chore: update Securefix caller workflows",
             "body": "Update the server-owned Securefix caller workflows to the promoted runtime. Each changed reusable-workflow reference pins the full runtime revision.\n\nGenerated by the Securefix Runtime Distributor after successful runtime publication. Review the workflow diff before merging.",
@@ -553,7 +587,7 @@ fn reconcile_pull_request(
     ensure!(
         pr["user"]["id"].as_u64() == Some(policy.server_bot_id)
             && pr["head"]["repo"]["full_name"] == migration.repository
-            && pr["head"]["ref"] == UPDATE_BRANCH
+            && pr["head"]["ref"] == update_branch
             && pr["base"]["repo"]["full_name"] == migration.repository
             && pr["base"]["ref"] == migration.default_branch,
         "created runtime migration PR has an unexpected base or head"
@@ -570,6 +604,10 @@ fn apply_caller_migration(
     policy: &Policy,
     migration: &CallerMigration,
 ) -> Result<u64> {
+    let update_branch = crate::config::trusted()?
+        .deployment
+        .runtime_update_branch
+        .as_str();
     if migration.default_current {
         return Ok(0);
     }
@@ -589,12 +627,12 @@ fn apply_caller_migration(
             None => {
                 let response: Result<Value> = api.post(
                     &format!("/repos/{}/git/refs", migration.repository),
-                    &json!({"ref":format!("refs/heads/{UPDATE_BRANCH}"),"sha":base_sha}),
+                    &json!({"ref":format!("refs/heads/{update_branch}"),"sha":base_sha}),
                 );
                 match response {
                     Ok(value) => {
                         ensure!(
-                            value["ref"] == format!("refs/heads/{UPDATE_BRANCH}")
+                            value["ref"] == format!("refs/heads/{update_branch}")
                                 && value["object"]["sha"] == base_sha,
                             "created runtime migration branch has an unexpected head"
                         );
@@ -609,9 +647,11 @@ fn apply_caller_migration(
                             )
                         }) =>
                     {
-                        let head = automation_branch_head(api, &migration.repository)?.context(
-                            "runtime migration branch creation raced but branch is missing",
-                        )?;
+                        let head =
+                            automation_branch_head(api, &migration.repository, update_branch)?
+                                .context(
+                                    "runtime migration branch creation raced but branch is missing",
+                                )?;
                         ensure!(
                             head == base_sha,
                             "runtime migration branch changed during creation"
@@ -624,7 +664,7 @@ fn apply_caller_migration(
         };
         api.create_commit(
             &migration.repository,
-            UPDATE_BRANCH,
+            update_branch,
             &expected_head,
             &format!(
                 "chore: update Securefix workflows to {}",
@@ -637,9 +677,13 @@ fn apply_caller_migration(
     reconcile_pull_request(api, policy, migration)
 }
 
-fn automation_branch_head(api: &GitHub, repository: &str) -> Result<Option<String>> {
+fn automation_branch_head(
+    api: &GitHub,
+    repository: &str,
+    update_branch: &str,
+) -> Result<Option<String>> {
     match api.get::<Value>(&format!(
-        "/repos/{repository}/git/ref/heads/{UPDATE_BRANCH}"
+        "/repos/{repository}/git/ref/heads/{update_branch}"
     )) {
         Ok(value) => {
             let head = value["object"]["sha"]

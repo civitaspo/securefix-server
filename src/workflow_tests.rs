@@ -508,7 +508,10 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
     );
     assert!(trusted_steps.iter().any(|step| {
         step["with"]["name"] == "trusted-runtime"
-            && step["with"]["path"] == "target/release/securefix"
+            && step["with"]["path"].as_str().is_some_and(|path| {
+                path.lines()
+                    .eq(["target/release/securefix", "target/release/policy.json"])
+            })
     }));
     let build = &candidate["jobs"]["build"];
     assert_eq!(build["permissions"], serde_json::json!({"contents":"read"}));
@@ -523,13 +526,15 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         .iter()
         .position(|step| {
             step["uses"] == "$/.github/actions/install-cli"
-                && step["if"] == "inputs.phase == 'verify'"
                 && step["with"]["binary"] == "trusted-runtime/securefix"
         })
         .unwrap();
     let candidate_install = steps
         .iter()
-        .rposition(|step| step["uses"] == "$/.github/actions/install-cli")
+        .position(|step| {
+            step["uses"] == "$/.github/actions/install-cli"
+                && step["with"]["binary"] == "candidate-runtime/securefix"
+        })
         .unwrap();
     let server_token = steps
         .iter()
@@ -542,6 +547,17 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         })
         .unwrap();
     assert!(trusted_install < trusted_fetch && trusted_fetch < candidate_install);
+    let producer_check = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Validate the defining workflow before minting credentials"
+        })
+        .unwrap();
+    assert!(trusted_install < producer_check && producer_check < candidate_install);
+    assert_eq!(
+        steps[producer_check]["env"]["GITHUB_TOKEN"],
+        "${{ github.token }}"
+    );
     assert!(candidate_install < server_token);
     assert!(server_token < candidate_run);
     assert!(
@@ -553,8 +569,52 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
     assert!(steps[trusted_fetch]["env"].get("GITHUB_TOKEN").is_some());
     assert_eq!(scratch["environment"], "main");
     assert!(steps[candidate_run]["env"].get("GITHUB_TOKEN").is_none());
-    assert!(steps[candidate_run]["env"]["SECUREFIX_SERVER_TOKEN"].is_string());
-    assert!(steps[candidate_run]["env"]["SECUREFIX_CLIENT_TOKEN"].is_string());
+    assert!(steps[candidate_run]["env"]["SECUREFIX_SERVER_APP_TOKEN"].is_string());
+    assert!(steps[candidate_run]["env"]["SECUREFIX_CLIENT_APP_TOKEN"].is_string());
+    let isolated_run = steps[candidate_run]["run"].as_str().unwrap();
+    for guard in [
+        "docker run --rm --read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--user",
+        "--pids-limit",
+        "ubuntu@sha256:",
+    ] {
+        assert!(
+            isolated_run.contains(guard),
+            "missing candidate isolation: {guard}"
+        );
+    }
+    for forbidden in [
+        "docker.sock",
+        "--privileged",
+        "--pid=host",
+        "--network=host",
+        "-e GITHUB_TOKEN",
+        "-e GITHUB_ENV",
+        "-e GITHUB_OUTPUT",
+        "target=/home",
+        "target=/var/run",
+    ] {
+        assert!(
+            !isolated_run.contains(forbidden),
+            "unsafe candidate isolation: {forbidden}"
+        );
+    }
+    let output_validation = steps
+        .iter()
+        .position(|step| step["id"] == "validate-outputs")
+        .unwrap();
+    assert!(candidate_run < output_validation);
+    let fixture_upload = steps
+        .iter()
+        .position(|step| step["with"]["name"] == "scratch-fixtures")
+        .unwrap();
+    assert!(output_validation < fixture_upload);
+    assert_eq!(
+        steps[fixture_upload]["if"],
+        "always() && steps.validate-outputs.outcome == 'success'"
+    );
     for step in steps {
         if step["uses"]
             .as_str()
@@ -754,7 +814,12 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
 fn merge_workflow_prefilter_allows_whitespace_for_rust_command_validation() {
     let caller = workflow("merge-request.yml");
     let active_if = caller["jobs"]["request"]["if"].as_str().unwrap();
-    let template = fs::read_to_string("src/distribution_templates/merge-request.yml").unwrap();
+    let template = fs::read_to_string("src/distribution_templates/merge-request.yml")
+        .unwrap()
+        .replace(
+            "@OWNER_ID@",
+            &crate::config::trusted().unwrap().owner_id.to_string(),
+        );
     for condition in [active_if, &template] {
         assert!(condition.contains("contains(github.event.comment.body, '/merge')"));
         assert!(condition.contains("github.event.issue.pull_request"));

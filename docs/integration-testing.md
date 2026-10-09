@@ -24,7 +24,7 @@ exact owner `/merge` comment to the stale-head PR. The positive PR also needs a
 current non-author review approval and the required checks. Run the workflow's
 verify phase with the successful prepare run ID. A validator compiled from the trusted defining workflow revision fetches state
 only from that exact successful owner-run `workflow_dispatch`, validates the
-server repository ID, owner actor, workflow path, producer SHA, main or
+server repository ID, owner actor, workflow path, producer SHA, the configured default branch or
 SHA-named frozen integration branch, and single bounded artifact. Prepare also
 checks that the named producer branch currently resolves to the recorded
 producer SHA; keep a frozen integration branch protected against updates while
@@ -48,6 +48,8 @@ helper and verifies retries and target mismatch before deleting the disposable t
 Immutable release publication remains a separate protected-main operation.
 
 The candidate policy used by the harness is constructed in memory from the
-bundled policy, narrowed to the scratch repository, and assigned the candidate
+trusted runtime policy, narrowed to the scratch repository, and assigned the candidate
 SHA. This is an explicit test context; production `Policy::active` and
-main-revision write checks remain unchanged.
+default-branch revision write checks remain unchanged.
+
+The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.

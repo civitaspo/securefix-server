@@ -1,6 +1,7 @@
 use crate::{
     api::{ApiError, GitHub},
-    policy::{Capability, Policy, RepositoryPolicy, SERVER, validate_repository},
+    config::{self, Checks},
+    policy::{Capability, Policy, RepositoryPolicy, validate_repository},
     workflow::require_current_runtime,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -23,9 +24,6 @@ const CLIENT_WORKFLOWS: &[(&str, &str)] = &[
         "reusable-policy-check.yml",
     ),
 ];
-const STATUS_CHECK_APP: u64 = 15368;
-const POLICY_CHECK_APP: u64 = 3872533;
-
 #[derive(Subcommand)]
 pub enum Command {
     Prepare,
@@ -51,12 +49,14 @@ fn api() -> Result<GitHub> {
 }
 
 fn prepare() -> Result<()> {
+    let trusted = config::trusted()?;
+    let deployment = &trusted.deployment;
     let api = api()?;
     require_current_runtime(&api, ".github/workflows/repo-settings.yml")?;
     let login: Value = api.get("/user")?;
     ensure!(
-        login["login"] == "civitaspo",
-        "settings token must authenticate as civitaspo"
+        login["login"] == deployment.owner_login && login["id"].as_u64() == Some(trusted.owner_id),
+        "settings token must authenticate as the configured owner"
     );
     let policy = Policy::active(&api)?;
     validate_desired_settings()?;
@@ -64,7 +64,7 @@ fn prepare() -> Result<()> {
     let input_repo = if input_name.trim().is_empty() {
         String::new()
     } else {
-        let full_name = format!("civitaspo/{input_name}");
+        let full_name = format!("{}/{input_name}", deployment.repository_owner.login);
         validate_repository(&full_name)?;
         full_name
     };
@@ -100,7 +100,10 @@ fn prepare() -> Result<()> {
         "activate_merge_controls",
         matches!(activation, ActivationMode::AttestedFullRollout).to_string(),
     )?;
-    crate::output("bot_invite", token_present("BOT_TOKEN").to_string())?;
+    crate::output(
+        "bot_invite",
+        token_present("SECUREFIX_CLIENT_BOT_TOKEN").to_string(),
+    )?;
     Ok(())
 }
 
@@ -177,7 +180,11 @@ fn reconcile_one(
         Err(error) => return Err(error),
     };
     if let Some(existing) = &existing {
-        ensure_owner(existing, repository)?;
+        ensure_owner(
+            existing,
+            repository,
+            config::trusted()?.deployment.repository_owner.id,
+        )?;
     } else {
         ensure!(create_if_missing, "repository does not exist: {repository}");
         ensure!(
@@ -203,9 +210,10 @@ fn reconcile_one(
         delete_legacy_tag_rulesets(api, repository)?;
     }
     ensure_immutable_releases(api, repo_policy)?;
-    invite_collaborator(api, repository)?;
-    if token_present("BOT_TOKEN") {
-        accept_invitation(api, repository)?;
+    let client_bot = &config::trusted()?.deployment.client_bot_login;
+    invite_collaborator(api, repository, client_bot)?;
+    if token_present("SECUREFIX_CLIENT_BOT_TOKEN") {
+        accept_invitation(api, repository, client_bot)?;
     }
     Ok(())
 }
@@ -277,40 +285,53 @@ fn activation_preflight() -> Result<()> {
 }
 
 fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
-    let repositories = merge_repositories(policy)?;
+    let trusted = config::trusted()?;
+    let deployment = &trusted.deployment;
+    let repositories = merge_repositories(policy, &deployment.server.repository)?;
     let expected_sha = &policy.revision;
     ensure!(!expected_sha.is_empty(), "policy revision is missing");
-    validate_server_app_installation(&repositories)?;
+    validate_server_app_installation(
+        &repositories,
+        deployment.repository_owner.id,
+        deployment.server_app_id,
+    )?;
     for repository in &repositories {
         validate_repo_identity(api, repository)?;
-        validate_default_branch_ruleset(api, repository)?;
-        validate_current_policy_check(api, repository)?;
-        validate_collaborator(api, repository)?;
-        if repository != SERVER {
+        validate_default_branch_ruleset(api, repository, &deployment.checks)?;
+        validate_current_policy_check(api, repository, &deployment.checks)?;
+        validate_collaborator(api, repository, &deployment.approval_reviewer.login)?;
+        if repository != &deployment.server.repository {
             for (wrapper, reusable) in CLIENT_WORKFLOWS {
-                validate_wrapper_pin(api, repository, wrapper, reusable, expected_sha)?;
+                validate_wrapper_pin(
+                    api,
+                    repository,
+                    wrapper,
+                    reusable,
+                    expected_sha,
+                    &deployment.server.repository,
+                )?;
             }
         }
     }
     Ok(())
 }
 
-fn merge_repositories(policy: &Policy) -> Result<Vec<String>> {
+fn merge_repositories(policy: &Policy, server: &str) -> Result<Vec<String>> {
     let mut clients = policy
         .repositories
         .iter()
-        .filter(|r| r.capabilities.contains(&Capability::Merge) && r.repository != SERVER)
+        .filter(|r| r.capabilities.contains(&Capability::Merge) && r.repository != server)
         .map(|r| r.repository.clone())
         .collect::<Vec<_>>();
     clients.sort();
     ensure!(
         policy
-            .repository(SERVER)?
+            .repository(server)?
             .capabilities
             .contains(&Capability::Merge),
         "server merge capability is not enabled"
     );
-    clients.push(SERVER.to_string());
+    clients.push(server.to_owned());
     Ok(clients)
 }
 
@@ -320,7 +341,8 @@ fn reconcile_existing_controlled_merges(ruleset: &Value) -> bool {
 
 fn activate_controls(api: &GitHub, policy: &Policy) -> Result<()> {
     let ruleset = read_json(&format!("{RULESET_DIR}/controlled-merges.json"))?;
-    for repository in merge_repositories(policy)? {
+    let server = &config::trusted()?.deployment.server.repository;
+    for repository in merge_repositories(policy, server)? {
         validate_repo_identity(api, &repository)?;
         upsert_ruleset(api, &repository, &ruleset)?;
     }
@@ -329,7 +351,8 @@ fn activate_controls(api: &GitHub, policy: &Policy) -> Result<()> {
 
 fn reconcile_active_controls(api: &GitHub, policy: &Policy) -> Result<()> {
     let ruleset = read_json(&format!("{RULESET_DIR}/controlled-merges.json"))?;
-    for repository in merge_repositories(policy)? {
+    let server = &config::trusted()?.deployment.server.repository;
+    for repository in merge_repositories(policy, server)? {
         let matches = repository_rulesets(api, &repository, "controlled-merges")?;
         ensure!(
             matches.len() <= 1,
@@ -349,16 +372,26 @@ fn reconcile_active_controls(api: &GitHub, policy: &Policy) -> Result<()> {
 
 fn validate_repo_identity(api: &GitHub, repository: &str) -> Result<()> {
     let value: Value = api.get(&format!("/repos/{repository}"))?;
-    ensure_owner(&value, repository)
+    let trusted = config::trusted()?;
+    ensure_owner(&value, repository, trusted.deployment.repository_owner.id)?;
+    let server = &trusted.deployment.server;
+    if repository == server.repository {
+        ensure!(
+            value["id"].as_u64() == Some(server.id)
+                && value["default_branch"] == server.default_branch,
+            "configured server repository identity or default branch changed"
+        );
+    }
+    Ok(())
 }
 
-fn ensure_owner(repo: &Value, expected: &str) -> Result<()> {
+fn ensure_owner(repo: &Value, expected: &str, owner_id: u64) -> Result<()> {
     ensure!(
         repo["full_name"] == expected,
         "repository identity mismatch"
     );
     ensure!(
-        repo["owner"]["id"].as_u64() == Some(4525500),
+        repo["owner"]["id"].as_u64() == Some(owner_id),
         "repository is not owned by the configured organization"
     );
     Ok(())
@@ -370,6 +403,7 @@ fn validate_wrapper_pin(
     path: &str,
     reusable: &str,
     expected_sha: &str,
+    server_repository: &str,
 ) -> Result<()> {
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     let branch = repo["default_branch"]
@@ -379,13 +413,16 @@ fn validate_wrapper_pin(
     let yaml: Value = serde_yaml::from_slice(&bytes)
         .with_context(|| format!("invalid workflow {repository}/{path}"))?;
     let uses = find_uses(&yaml);
-    let expected =
-        format!("civitaspo/securefix-server/.github/workflows/{reusable}@{expected_sha}");
+    let expected = wrapper_pin(server_repository, reusable, expected_sha);
     ensure!(
         uses.iter().filter(|value| **value == expected).count() == 1 && uses.len() == 1,
         "{repository}/{path} must call {reusable} at the current server revision"
     );
     Ok(())
+}
+
+fn wrapper_pin(server_repository: &str, reusable: &str, expected_sha: &str) -> String {
+    format!("{server_repository}/.github/workflows/{reusable}@{expected_sha}")
 }
 
 fn find_uses(value: &Value) -> Vec<&str> {
@@ -411,7 +448,7 @@ fn find_uses(value: &Value) -> Vec<&str> {
     found
 }
 
-fn validate_current_policy_check(api: &GitHub, repository: &str) -> Result<()> {
+fn validate_current_policy_check(api: &GitHub, repository: &str, checks: &Checks) -> Result<()> {
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     let branch = repo["default_branch"]
         .as_str()
@@ -420,15 +457,15 @@ fn validate_current_policy_check(api: &GitHub, repository: &str) -> Result<()> {
     let sha = reference["object"]["sha"]
         .as_str()
         .context("default branch SHA missing")?;
-    let checks: Value = api.get(&format!(
+    let response: Value = api.get(&format!(
         "/repos/{repository}/commits/{sha}/check-runs?per_page=100"
     ))?;
-    let check_runs = checks["check_runs"]
+    let check_runs = response["check_runs"]
         .as_array()
         .context("check-runs missing")?;
     for (name, app_id) in [
-        ("status-check", STATUS_CHECK_APP),
-        ("securefix-policy-check", POLICY_CHECK_APP),
+        ("status-check", checks.status_app_id),
+        ("securefix-policy-check", checks.policy_app_id),
     ] {
         ensure!(
             check_runs.iter().any(|check| check["name"] == name
@@ -441,16 +478,16 @@ fn validate_current_policy_check(api: &GitHub, repository: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_default_branch_ruleset(api: &GitHub, repository: &str) -> Result<()> {
+fn validate_default_branch_ruleset(api: &GitHub, repository: &str, checks: &Checks) -> Result<()> {
     let matches = repository_rulesets(api, repository, "default-branch")?;
     ensure!(
         matches.len() == 1,
         "{repository} must have exactly one default-branch ruleset"
     );
-    validate_default_ruleset(&matches[0], repository)
+    validate_default_ruleset(&matches[0], repository, checks)
 }
 
-fn validate_default_ruleset(ruleset: &Value, repository: &str) -> Result<()> {
+fn validate_default_ruleset(ruleset: &Value, repository: &str, checks: &Checks) -> Result<()> {
     ensure!(
         ruleset["enforcement"] == "active"
             && ruleset["bypass_actors"]
@@ -476,16 +513,16 @@ fn validate_default_ruleset(ruleset: &Value, repository: &str) -> Result<()> {
             && pull_request["parameters"]["dismiss_stale_reviews_on_push"] == true,
         "{repository} review rules must require one approval and dismiss stale approvals"
     );
-    let checks = rules
+    let required_checks = rules
         .iter()
         .find(|rule| rule["type"] == "required_status_checks")
         .context("{repository} lacks required status checks")?;
-    let statuses = checks["parameters"]["required_status_checks"]
+    let statuses = required_checks["parameters"]["required_status_checks"]
         .as_array()
         .context("required status checks missing")?;
     for (name, integration_id) in [
-        ("status-check", STATUS_CHECK_APP),
-        ("securefix-policy-check", POLICY_CHECK_APP),
+        ("status-check", checks.status_app_id),
+        ("securefix-policy-check", checks.policy_app_id),
     ] {
         ensure!(
             statuses.iter().any(|check| check["context"] == name
@@ -496,8 +533,17 @@ fn validate_default_ruleset(ruleset: &Value, repository: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_server_app_installation(repositories: &[String]) -> Result<()> {
-    let api = GitHub::from_env("SECUREFIX_APP_TOKEN")?;
+fn validate_server_app_installation(
+    repositories: &[String],
+    owner_id: u64,
+    server_app_id: u64,
+) -> Result<()> {
+    let api = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
+    let installation: Value = api.get("/installation")?;
+    ensure!(
+        installation["app_id"].as_u64() == Some(server_app_id),
+        "configured Securefix Server App token has the wrong App identity"
+    );
     let mut installed = BTreeSet::new();
     for page in 1..=100 {
         let response: Value = api.get(&format!(
@@ -508,8 +554,8 @@ fn validate_server_app_installation(repositories: &[String]) -> Result<()> {
             .context("installation repositories missing")?;
         for repository in values {
             ensure!(
-                repository["owner"]["id"].as_u64() == Some(4525500),
-                "Securefix Server App installation contains a repository outside civitaspo"
+                repository["owner"]["id"].as_u64() == Some(owner_id),
+                "Securefix Server App installation contains a repository outside the configured owner"
             );
             if let Some(name) = repository["full_name"].as_str() {
                 installed.insert(name.to_string());
@@ -537,32 +583,33 @@ fn validate_server_app_installation(repositories: &[String]) -> Result<()> {
 }
 
 fn validate_approval_token_if_present(repositories: &[String]) -> Result<()> {
+    let reviewer = &config::trusted()?.deployment.approval_reviewer;
     ensure!(
-        token_present("CIVITASPO_BOT_PR_APPROVE_TOKEN"),
-        "CIVITASPO_BOT_PR_APPROVE_TOKEN is required for full activation readiness"
+        token_present("SECUREFIX_APPROVAL_REVIEWER_TOKEN"),
+        "SECUREFIX_APPROVAL_REVIEWER_TOKEN is required for full activation readiness"
     );
-    let api = GitHub::from_env("CIVITASPO_BOT_PR_APPROVE_TOKEN")?;
+    let api = GitHub::from_env("SECUREFIX_APPROVAL_REVIEWER_TOKEN")?;
     let user: Value = api.get("/user")?;
     ensure!(
-        user["login"] == "civitaspo-bot",
-        "approval token must authenticate as civitaspo-bot"
+        user["login"] == reviewer.login && user["id"].as_u64() == Some(reviewer.id),
+        "approval token must authenticate as the configured reviewer"
     );
     for repository in repositories {
-        validate_collaborator(&api, repository)?;
+        validate_collaborator(&api, repository, &reviewer.login)?;
     }
     Ok(())
 }
 
-fn validate_collaborator(api: &GitHub, repository: &str) -> Result<()> {
+fn validate_collaborator(api: &GitHub, repository: &str, reviewer: &str) -> Result<()> {
     let collaborator: Value = api.get(&format!(
-        "/repos/{repository}/collaborators/civitaspo-bot/permission"
+        "/repos/{repository}/collaborators/{reviewer}/permission"
     ))?;
     ensure!(
         matches!(
             collaborator["permission"].as_str(),
             Some("push" | "maintain" | "admin")
         ),
-        "civitaspo-bot lacks effective write permission on {repository}"
+        "configured approval reviewer lacks effective write permission on {repository}"
     );
     Ok(())
 }
@@ -610,11 +657,8 @@ fn delete_legacy_tag_rulesets(api: &GitHub, repository: &str) -> Result<()> {
     Ok(())
 }
 
-fn invite_collaborator(api: &GitHub, repository: &str) -> Result<()> {
+fn invite_collaborator(api: &GitHub, repository: &str, username: &str) -> Result<()> {
     let collaborator = read_json("repo-settings/collaborator.json")?;
-    let username = collaborator["username"]
-        .as_str()
-        .context("collaborator username missing")?;
     let permission = collaborator["permission"]
         .as_str()
         .context("collaborator permission missing")?;
@@ -625,12 +669,14 @@ fn invite_collaborator(api: &GitHub, repository: &str) -> Result<()> {
     Ok(())
 }
 
-fn accept_invitation(_api: &GitHub, repository: &str) -> Result<()> {
-    let api = GitHub::from_env("BOT_TOKEN")?;
-    let username = read_json("repo-settings/collaborator.json")?["username"]
-        .as_str()
-        .context("collaborator username missing")?
-        .to_string();
+fn accept_invitation(_api: &GitHub, repository: &str, username: &str) -> Result<()> {
+    let api = GitHub::from_env("SECUREFIX_CLIENT_BOT_TOKEN")?;
+    let trusted = config::trusted()?;
+    let identity: Value = api.get("/user")?;
+    ensure!(
+        identity["login"] == username && identity["id"].as_u64() == Some(trusted.client_bot_id),
+        "invitation token must authenticate as the configured Client bot"
+    );
     let invitations: Vec<Value> = api.paginate("/user/repository_invitations")?;
     let full_name = repository.to_lowercase();
     if let Some(invitation) = invitations.iter().find(|item| {
@@ -665,11 +711,8 @@ fn validate_desired_settings() -> Result<()> {
     );
     let collaborator = read_json("repo-settings/collaborator.json")?;
     ensure!(
-        collaborator["username"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty())
-            && collaborator["permission"] == "push",
-        "collaborator.json must grant push access to a named collaborator"
+        collaborator["permission"] == "push",
+        "collaborator.json must grant push access"
     );
     let default = read_json(&format!("{RULESET_DIR}/default-branch.json"))?;
     ensure!(
@@ -756,20 +799,34 @@ mod tests {
 
     #[test]
     fn activation_readiness_covers_the_full_merge_set_and_keeps_server_last() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let expected = policy
             .repositories
             .iter()
             .filter(|repo| repo.capabilities.contains(&Capability::Merge))
             .map(|repo| repo.repository.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        let activation = merge_repositories(&policy).unwrap();
+        let activation = merge_repositories(
+            &policy,
+            &config::trusted().unwrap().deployment.server.repository,
+        )
+        .unwrap();
         let actual = activation
             .iter()
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual, expected);
-        assert_eq!(activation.last().map(String::as_str), Some(SERVER));
+        assert_eq!(
+            activation.last().map(String::as_str),
+            Some(
+                config::trusted()
+                    .unwrap()
+                    .deployment
+                    .server
+                    .repository
+                    .as_str()
+            )
+        );
         assert!(
             activation[..activation.len() - 1]
                 .windows(2)
@@ -779,24 +836,43 @@ mod tests {
 
     #[test]
     fn default_ruleset_requires_all_review_and_check_sources() {
+        let checks = config::Checks {
+            status_app_id: 17,
+            policy_app_id: 23,
+        };
         let valid = json!({
             "enforcement":"active", "bypass_actors":[], "rules":[
                 {"type":"required_signatures"},
                 {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
                 {"type":"required_status_checks","parameters":{"required_status_checks":[
-                    {"context":"status-check","integration_id":15368},
-                    {"context":"securefix-policy-check","integration_id":3872533}
+                    {"context":"status-check","integration_id":17},
+                    {"context":"securefix-policy-check","integration_id":23}
                 ]}}
             ]
         });
-        assert!(validate_default_ruleset(&valid, "civitaspo/example").is_ok());
+        assert!(validate_default_ruleset(&valid, "forge/example", &checks).is_ok());
         let mut wrong_source = valid.clone();
         wrong_source["rules"][2]["parameters"]["required_status_checks"][1]["integration_id"] =
             json!(15368);
-        assert!(validate_default_ruleset(&wrong_source, "civitaspo/example").is_err());
+        assert!(validate_default_ruleset(&wrong_source, "forge/example", &checks).is_err());
         let mut stale_reviews = valid;
         stale_reviews["rules"][1]["parameters"]["dismiss_stale_reviews_on_push"] = json!(false);
-        assert!(validate_default_ruleset(&stale_reviews, "civitaspo/example").is_err());
+        assert!(validate_default_ruleset(&stale_reviews, "forge/example", &checks).is_err());
+    }
+
+    #[test]
+    fn server_wrapper_pin_uses_the_trusted_deployment_repository() {
+        assert_eq!(
+            wrapper_pin(
+                "forge/securefix",
+                "reusable-approve-request.yml",
+                &"a".repeat(40)
+            ),
+            format!(
+                "forge/securefix/.github/workflows/reusable-approve-request.yml@{}",
+                "a".repeat(40)
+            )
+        );
     }
 
     #[test]

@@ -9,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const REPOSITORY: &str = crate::policy::SERVER;
 const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const ASSET: &str = "securefix-runtime-linux-x86_64.tar.gz";
 
@@ -34,13 +33,16 @@ pub fn run(command: Command) -> Result<()> {
 }
 
 fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
+    let trusted = crate::config::trusted()?;
+    let repository = trusted.deployment.server.repository.as_str();
+    let default_branch = trusted.deployment.server.default_branch.as_str();
     crate::policy::validate_sha(source_sha)?;
     let (archive, digest) = read_archive(archive_path)?;
     let archive_size = archive.len() as u64;
     let tag = format!("securefix-runtime-{source_sha}");
-    let ref_path = format!("/repos/{REPOSITORY}/git/ref/tags/{tag}");
+    let ref_path = format!("/repos/{repository}/git/ref/tags/{tag}");
 
-    let current_main: Value = api.get(&format!("/repos/{REPOSITORY}/commits/main"))?;
+    let current_main: Value = api.get(&format!("/repos/{repository}/commits/{default_branch}"))?;
     ensure!(
         current_main["sha"] == source_sha,
         "runtime is no longer current; publication denied"
@@ -50,18 +52,18 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
         Some(tag_ref) => validate_ref(&tag_ref, source_sha)?,
         None => {
             let created: Value = api.post(
-                &format!("/repos/{REPOSITORY}/git/refs"),
+                &format!("/repos/{repository}/git/refs"),
                 &json!({"ref": format!("refs/tags/{tag}"), "sha": source_sha}),
             )?;
             validate_ref(&created, source_sha)?;
         }
     }
 
-    let release_path = format!("/repos/{REPOSITORY}/releases/tags/{tag}");
+    let release_path = format!("/repos/{repository}/releases/tags/{tag}");
     let release = match get_optional(api, &release_path)? {
         Some(release) => release,
         None => api.post(
-            &format!("/repos/{REPOSITORY}/releases"),
+            &format!("/repos/{repository}/releases"),
             &json!({
                 "tag_name": tag,
                 "name": tag,
@@ -83,14 +85,14 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
     match validate_assets(assets, &digest, archive_size, release["draft"] == true)? {
         AssetState::EmptyDraft => {
             let upload_url = format!(
-                "https://uploads.github.com/repos/{REPOSITORY}/releases/{release_id}/assets?name={ASSET}"
+                "https://uploads.github.com/repos/{repository}/releases/{release_id}/assets?name={ASSET}"
             );
             let _: Value = api.upload(&upload_url, archive, "application/gzip")?;
         }
         AssetState::Matching => {}
     }
 
-    let current: Value = api.get(&format!("/repos/{REPOSITORY}/releases/{release_id}"))?;
+    let current: Value = api.get(&format!("/repos/{repository}/releases/{release_id}"))?;
     validate_release(&current, source_sha, &tag)?;
     let assets = current["assets"]
         .as_array()
@@ -102,11 +104,11 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
     );
     if current["draft"] == true {
         let _: Value = api.patch(
-            &format!("/repos/{REPOSITORY}/releases/{release_id}"),
+            &format!("/repos/{repository}/releases/{release_id}"),
             &json!({"draft": false}),
         )?;
     }
-    let published: Value = api.get(&format!("/repos/{REPOSITORY}/releases/{release_id}"))?;
+    let published: Value = api.get(&format!("/repos/{repository}/releases/{release_id}"))?;
     validate_release(&published, source_sha, &tag)?;
     ensure!(
         published["draft"] == false,
@@ -228,9 +230,26 @@ mod tests {
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const TAG: &str = "securefix-runtime-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const RELEASE: &str = "/repos/civitaspo/securefix-server/releases/tags/securefix-runtime-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const REF: &str = "/repos/civitaspo/securefix-server/git/ref/tags/securefix-runtime-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const MAIN: &str = "/repos/civitaspo/securefix-server/commits/main";
+
+    fn path(suffix: &str) -> String {
+        format!(
+            "/repos/{}{suffix}",
+            crate::config::trusted()
+                .unwrap()
+                .deployment
+                .server
+                .repository
+        )
+    }
+
+    fn default_branch() -> String {
+        crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .default_branch
+            .clone()
+    }
 
     fn release(draft: bool, assets: Value) -> Value {
         json!({"id":7,"tag_name":TAG,"name":TAG,"target_commitish":SHA,"draft":draft,"prerelease":true,"assets":assets})
@@ -276,7 +295,7 @@ mod tests {
         assert!(validate_ref(&json!({"object":{"type":"commit","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}), SHA).is_err());
         assert!(validate_release(&release(true, json!([])), SHA, "wrong-tag").is_err());
         let mut moved = release(true, json!([]));
-        moved["target_commitish"] = json!("main");
+        moved["target_commitish"] = json!(default_branch());
         assert!(validate_release(&moved, SHA, TAG).is_err());
     }
 
@@ -284,8 +303,9 @@ mod tests {
     fn stale_runtime_stops_before_release_lookup_or_write() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
+        let main = path(&format!("/commits/{}", default_branch()));
         let fixture = Fixture::new(vec![Route::get(
-            MAIN,
+            main,
             json!({"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}),
         )]);
         assert!(publish(&fixture.api, SHA, archive.path()).is_err());
@@ -294,13 +314,14 @@ mod tests {
 
     #[test]
     fn non_404_lookup_failure_is_not_treated_as_absence() {
+        let reference = path(&format!("/git/ref/tags/{TAG}"));
         let fixture = Fixture::new(vec![Route::request(
             "GET",
-            REF,
+            reference.clone(),
             403,
             json!({"message":"forbidden"}),
         )]);
-        assert!(get_optional(&fixture.api, REF).is_err());
+        assert!(get_optional(&fixture.api, &reference).is_err());
         fixture.finish();
     }
 
@@ -308,16 +329,17 @@ mod tests {
     fn matching_published_release_is_an_idempotent_read_only_retry() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
+        let main = path(&format!("/commits/{}", default_branch()));
+        let reference = path(&format!("/git/ref/tags/{TAG}"));
+        let release_path = path(&format!("/releases/tags/{TAG}"));
+        let numbered_release = path("/releases/7");
         let existing = release(false, json!([asset(b"archive")]));
         let fixture = Fixture::new(vec![
-            Route::get(MAIN, json!({"sha":SHA})),
-            Route::get(REF, json!({"object":{"type":"commit","sha":SHA}})),
-            Route::get(RELEASE, existing.clone()),
-            Route::get(
-                "/repos/civitaspo/securefix-server/releases/7",
-                existing.clone(),
-            ),
-            Route::get("/repos/civitaspo/securefix-server/releases/7", existing),
+            Route::get(main, json!({"sha":SHA})),
+            Route::get(reference, json!({"object":{"type":"commit","sha":SHA}})),
+            Route::get(release_path, existing.clone()),
+            Route::get(numbered_release.clone(), existing.clone()),
+            Route::get(numbered_release, existing),
         ]);
         publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
@@ -327,22 +349,21 @@ mod tests {
     fn matching_draft_resumes_and_publishes_without_reupload() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
+        let main = path(&format!("/commits/{}", default_branch()));
+        let reference = path(&format!("/git/ref/tags/{TAG}"));
+        let release_path = path(&format!("/releases/tags/{TAG}"));
+        let numbered_release = path("/releases/7");
         let draft = release(true, json!([asset(b"archive")]));
         let published = release(false, json!([asset(b"archive")]));
         let fixture = Fixture::new(vec![
-            Route::get(MAIN, json!({"sha":SHA})),
-            Route::get(REF, json!({"object":{"type":"commit","sha":SHA}})),
-            Route::get(RELEASE, draft.clone()),
-            Route::get("/repos/civitaspo/securefix-server/releases/7", draft),
-            Route::get(MAIN, json!({"sha":SHA})),
-            Route::request(
-                "PATCH",
-                "/repos/civitaspo/securefix-server/releases/7",
-                200,
-                published.clone(),
-            )
-            .with_request_body(json!({"draft":false})),
-            Route::get("/repos/civitaspo/securefix-server/releases/7", published),
+            Route::get(main.clone(), json!({"sha":SHA})),
+            Route::get(reference, json!({"object":{"type":"commit","sha":SHA}})),
+            Route::get(release_path, draft.clone()),
+            Route::get(numbered_release.clone(), draft),
+            Route::get(main, json!({"sha":SHA})),
+            Route::request("PATCH", numbered_release.clone(), 200, published.clone())
+                .with_request_body(json!({"draft":false})),
+            Route::get(numbered_release, published),
         ]);
         publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
@@ -352,11 +373,14 @@ mod tests {
     fn asset_mismatch_fails_before_any_write() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
+        let main = path(&format!("/commits/{}", default_branch()));
+        let reference = path(&format!("/git/ref/tags/{TAG}"));
+        let release_path = path(&format!("/releases/tags/{TAG}"));
         let mismatch = release(true, json!([asset(b"different bytes")]));
         let fixture = Fixture::new(vec![
-            Route::get(MAIN, json!({"sha":SHA})),
-            Route::get(REF, json!({"object":{"type":"commit","sha":SHA}})),
-            Route::get(RELEASE, mismatch),
+            Route::get(main, json!({"sha":SHA})),
+            Route::get(reference, json!({"object":{"type":"commit","sha":SHA}})),
+            Route::get(release_path, mismatch),
         ]);
         assert!(publish(&fixture.api, SHA, archive.path()).is_err());
         fixture.finish();

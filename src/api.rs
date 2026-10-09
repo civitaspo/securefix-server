@@ -4,8 +4,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
 
-pub const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
-pub const SCRATCH_REPOSITORY_ID: u64 = 1_410_312_556;
+#[cfg(test)]
+const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
 
 #[derive(Clone)]
 enum WriteContext {
@@ -99,6 +99,7 @@ impl GitHub {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
         let mut api = Self::new("https://api.github.com", token)?;
+        let scratch = &crate::config::trusted()?.deployment.integration;
         let installation: Value = api.get("/installation/repositories?per_page=100")?;
         let repositories = installation["repositories"]
             .as_array()
@@ -106,8 +107,8 @@ impl GitHub {
         ensure!(
             installation["total_count"] == 1
                 && repositories.len() == 1
-                && repositories[0]["full_name"] == SCRATCH_REPOSITORY
-                && repositories[0]["id"].as_u64() == Some(SCRATCH_REPOSITORY_ID),
+                && repositories[0]["full_name"] == scratch.repository
+                && repositories[0]["id"].as_u64() == Some(scratch.id),
             "integration token must be installed only on the scratch repository"
         );
         api.writes = WriteContext::Scratch {
@@ -119,7 +120,10 @@ impl GitHub {
     fn require_write_target(&self, path: &str) -> Result<()> {
         if let WriteContext::Scratch { candidate_sha } = &self.writes {
             crate::policy::validate_sha(candidate_sha)?;
-            let prefix = format!("/repos/{SCRATCH_REPOSITORY}/");
+            let prefix = format!(
+                "/repos/{}/",
+                crate::config::trusted()?.deployment.integration.repository
+            );
             ensure!(
                 path.starts_with(&prefix)
                     && !path.contains(['%', '\\', '?'])
@@ -142,7 +146,7 @@ impl GitHub {
         let mut request = self
             .client
             .request(method, self.url(path)?)
-            .header("User-Agent", "civitaspo-securefix")
+            .header("User-Agent", "securefix")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
         if !self.token.is_empty() {
@@ -196,7 +200,11 @@ impl GitHub {
                 .context("missing trusted runtime revision before write")?,
         };
         crate::policy::validate_sha(expected)?;
-        let commit: Value = self.get("/repos/civitaspo/securefix-server/commits/main")?;
+        let server = &crate::config::trusted()?.deployment.server;
+        let commit: Value = self.get(&format!(
+            "/repos/{}/commits/{}",
+            server.repository, server.default_branch
+        ))?;
         ensure!(
             commit["sha"] == expected,
             "runtime is no longer current; write denied"
@@ -434,7 +442,7 @@ impl GitHub {
             .client
             .post(url)
             .bearer_auth(&self.token)
-            .header("User-Agent", "civitaspo-securefix")
+            .header("User-Agent", "securefix")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("Content-Type", content_type)
             .body(bytes)

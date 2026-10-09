@@ -3,8 +3,27 @@ use super::*;
 
 #[test]
 fn legacy_approval_rejects_changed_conditions_permissions_and_inputs() {
-    let audited: serde_yaml::Value =
-        serde_yaml::from_str(include_str!("legacy-approve.yml")).unwrap();
+    let templates = caller::legacy_approval_templates().unwrap();
+    for source in [
+        include_str!("legacy-approve.yml"),
+        include_str!("legacy-approve-infobox.yml"),
+    ] {
+        assert!(!source.contains("civitaspo"));
+        assert!(!source.contains("cursoragent"));
+        assert!(!source.contains("3872492"));
+        assert!(!source.contains("securefix-server"));
+    }
+    for template in &templates {
+        assert!(
+            validate_existing(
+                ".github/workflows/approve-request.yml",
+                template.as_bytes(),
+                "main"
+            )
+            .is_ok()
+        );
+    }
+    let audited: serde_yaml::Value = serde_yaml::from_str(&templates[0]).unwrap();
     assert!(
         validate_existing(
             ".github/workflows/approve-request.yml",
@@ -85,24 +104,62 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
 }
 
 #[test]
+fn caller_migration_requires_repository_owner_identity_not_human_owner_identity() {
+    use crate::fixtures::{Fixture, Route};
+
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let trusted = crate::config::trusted().unwrap();
+    assert_ne!(trusted.owner_id, trusted.deployment.repository_owner.id);
+    let repository = policy
+        .repositories
+        .iter()
+        .find(|entry| entry.repository != trusted.deployment.server.repository)
+        .unwrap()
+        .repository
+        .as_str();
+    let fixture = Fixture::new(vec![Route::get(
+        format!("/repos/{repository}"),
+        json!({
+            "full_name":repository,
+            "owner":{"id":trusted.owner_id},
+            "default_branch":trusted.deployment.server.default_branch
+        }),
+    )]);
+
+    assert!(caller::prepare_caller(&fixture.api, &policy, repository, &"a".repeat(40)).is_err());
+    fixture.finish();
+}
+
+#[test]
 fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() {
     use crate::fixtures::{Fixture, Route};
+    let trusted = crate::config::trusted().unwrap();
+    let server = &trusted.deployment.server.repository;
+    let branch = &trusted.deployment.server.default_branch;
+    let owner_id = trusted.owner_id;
     let sha = "a".repeat(40);
-    let publisher = json!({"id":17,"repository":{"full_name":SERVER,"id":1},"head_repository":{"full_name":SERVER,"id":1},"path":".github/workflows/publish-runtime.yml@refs/heads/main","event":"workflow_dispatch","head_branch":"main","head_sha":sha,"run_attempt":2,"status":"completed","conclusion":"success","actor":{"id":PUBLISHER_ACTOR},"triggering_actor":{"id":PUBLISHER_ACTOR}});
+    let publisher = json!({"id":17,"repository":{"full_name":server,"id":trusted.deployment.server.id},"head_repository":{"full_name":server,"id":trusted.deployment.server.id},"path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),"event":"workflow_dispatch","head_branch":branch,"head_sha":sha,"run_attempt":2,"status":"completed","conclusion":"success","actor":{"id":owner_id},"triggering_actor":{"id":owner_id}});
     let release = json!({"id":31,"tag_name":format!("securefix-runtime-{sha}"),"target_commitish":sha,"draft":false,"prerelease":true,"assets":[{"name":RUNTIME_ASSET,"state":"uploaded","size":9,"digest":"sha256:abcd"}]});
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let fixture = Fixture::new(vec![
         Route::get(
-            format!("/repos/{SERVER}/actions/runs/17"),
+            format!("/repos/{server}/actions/runs/17"),
             publisher.clone(),
         ),
         Route::get(
-            format!("/repos/{SERVER}"),
-            json!({"full_name":SERVER,"owner":{"id":policy.owner_id}}),
+            format!("/repos/{server}"),
+            json!({
+                "full_name":server,
+                "id":trusted.deployment.server.id,
+                "owner":{"id":trusted.deployment.repository_owner.id}
+            }),
         ),
-        Route::get(format!("/repos/{SERVER}/commits/main"), json!({"sha":sha})),
         Route::get(
-            format!("/repos/{SERVER}/releases/tags/securefix-runtime-{sha}"),
+            format!("/repos/{server}/commits/{branch}"),
+            json!({"sha":sha}),
+        ),
+        Route::get(
+            format!("/repos/{server}/releases/tags/securefix-runtime-{sha}"),
             release,
         ),
     ]);
@@ -114,10 +171,40 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
     );
     fixture.finish();
 
+    let fixture = Fixture::new(vec![
+        Route::get(
+            format!("/repos/{server}/actions/runs/17"),
+            json!({
+                "id":17,
+                "repository":{"full_name":server,"id":trusted.deployment.server.id},
+                "head_repository":{"full_name":server,"id":trusted.deployment.server.id},
+                "path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),
+                "event":"workflow_dispatch",
+                "head_branch":branch,
+                "head_sha":sha,
+                "run_attempt":2,
+                "status":"completed",
+                "conclusion":"success",
+                "actor":{"id":owner_id},
+                "triggering_actor":{"id":owner_id}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}"),
+            json!({
+                "full_name":server,
+                "id":trusted.deployment.server.id,
+                "owner":{"id":owner_id}
+            }),
+        ),
+    ]);
+    assert!(validate_promotion(&fixture.api, &policy, 17).is_err());
+    fixture.finish();
+
     let mut failed = publisher;
     failed["conclusion"] = json!("failure");
     let fixture = Fixture::new(vec![Route::get(
-        format!("/repos/{SERVER}/actions/runs/17"),
+        format!("/repos/{server}/actions/runs/17"),
         failed,
     )]);
     assert!(validate_promotion(&fixture.api, &policy, 17).is_err());
@@ -129,10 +216,10 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
         ("path", json!(".github/workflows/other.yml@refs/heads/main")),
         ("head_sha", json!("b".repeat(40))),
     ] {
-        let mut invalid = json!({"id":17,"repository":{"full_name":SERVER,"id":1},"head_repository":{"full_name":SERVER,"id":1},"path":".github/workflows/publish-runtime.yml@refs/heads/main","event":"workflow_dispatch","head_branch":"main","head_sha":sha,"run_attempt":2,"status":"completed","conclusion":"success","actor":{"id":PUBLISHER_ACTOR},"triggering_actor":{"id":PUBLISHER_ACTOR}});
+        let mut invalid = json!({"id":17,"repository":{"full_name":server,"id":trusted.deployment.server.id},"head_repository":{"full_name":server,"id":trusted.deployment.server.id},"path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),"event":"workflow_dispatch","head_branch":branch,"head_sha":sha,"run_attempt":2,"status":"completed","conclusion":"success","actor":{"id":owner_id},"triggering_actor":{"id":owner_id}});
         invalid[field] = value;
         let fixture = Fixture::new(vec![Route::get(
-            format!("/repos/{SERVER}/actions/runs/17"),
+            format!("/repos/{server}/actions/runs/17"),
             invalid,
         )]);
         assert!(
@@ -146,7 +233,11 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
 #[test]
 fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
     use crate::fixtures::{Fixture, Route};
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let runtime_branch = &crate::config::trusted()
+        .unwrap()
+        .deployment
+        .runtime_update_branch;
     let migration = CallerMigration {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
@@ -157,7 +248,7 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
         )]),
         default_current: false,
     };
-    let pr = json!({"state":"open","user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/nagi"},"ref":UPDATE_BRANCH},"base":{"repo":{"full_name":"civitaspo/nagi"},"ref":"main"}});
+    let pr = json!({"state":"open","user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/nagi"},"ref":runtime_branch},"base":{"repo":{"full_name":"civitaspo/nagi"},"ref":"main"}});
     let fixture = Fixture::new(vec![
         Route::get(
             "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
@@ -192,9 +283,20 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
     use crate::fixtures::{Fixture, Route};
     use base64::Engine;
 
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let server = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .server
+        .repository
+        .clone();
+    let runtime_branch = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .runtime_update_branch
+        .clone();
     let repository = "civitaspo/nagi";
-    let branch = format!("refs/heads/{UPDATE_BRANCH}");
+    let branch = format!("refs/heads/{runtime_branch}");
     let base_sha = "b".repeat(40);
     let source_sha = "a".repeat(40);
     let path = ".github/workflows/approve-request.yml";
@@ -206,19 +308,19 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
         files: BTreeMap::from([(path.into(), contents.clone())]),
         default_current: false,
     };
-    let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":repository},"ref":UPDATE_BRANCH},"base":{"repo":{"full_name":repository},"ref":"main"}});
+    let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":repository},"ref":runtime_branch},"base":{"repo":{"full_name":repository},"ref":"main"}});
     let pull_path = "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1";
     let commit_query = "mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid parents(first:2){nodes{oid}} signature{isValid state}}}}";
     let fixture = Fixture::new(vec![
         Route::request(
             "GET",
-            format!("/repos/{repository}/git/ref/heads/{UPDATE_BRANCH}"),
+            format!("/repos/{repository}/git/ref/heads/{runtime_branch}"),
             404,
             json!({}),
         ),
         Route::get(pull_path, json!([])),
         Route::get(format!("/repos/{repository}/commits/main"), json!({"sha":base_sha})),
-        Route::get(format!("/repos/{SERVER}/commits/main"), json!({"sha":source_sha})),
+        Route::get(format!("/repos/{server}/commits/main"), json!({"sha":source_sha})),
         Route::request(
             "POST",
             format!("/repos/{repository}/git/refs"),
@@ -226,7 +328,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
             json!({"ref":branch,"object":{"sha":base_sha}}),
         )
         .with_request_body(json!({"ref":branch,"sha":base_sha})),
-        Route::get(format!("/repos/{SERVER}/commits/main"), json!({"sha":source_sha})),
+        Route::get(format!("/repos/{server}/commits/main"), json!({"sha":source_sha})),
         Route::request(
             "POST",
             "/graphql",
@@ -236,14 +338,14 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
         .with_request_body(json!({
             "query":commit_query,
             "variables":{"input":{
-                "branch":{"repositoryNameWithOwner":repository,"branchName":UPDATE_BRANCH},
+                "branch":{"repositoryNameWithOwner":repository,"branchName":runtime_branch},
                 "expectedHeadOid":base_sha,
                 "message":{"headline":format!("chore: update Securefix workflows to {source_sha}"),"body":""},
                 "fileChanges":{"additions":[{"path":path,"contents":base64::engine::general_purpose::STANDARD.encode(&contents)}],"deletions":[]}
             }}
         })),
         Route::get(pull_path, json!([])),
-        Route::get(format!("/repos/{SERVER}/commits/main"), json!({"sha":source_sha})),
+        Route::get(format!("/repos/{server}/commits/main"), json!({"sha":source_sha})),
         Route::request(
             "POST",
             format!("/repos/{repository}/pulls"),
@@ -267,7 +369,11 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
 #[test]
 fn caller_pr_with_wrong_base_fails_before_reading_or_writing_files() {
     use crate::fixtures::{Fixture, Route};
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let runtime_branch = &crate::config::trusted()
+        .unwrap()
+        .deployment
+        .runtime_update_branch;
     let migration = CallerMigration {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
@@ -278,7 +384,7 @@ fn caller_pr_with_wrong_base_fails_before_reading_or_writing_files() {
         )]),
         default_current: false,
     };
-    let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/nagi"},"ref":UPDATE_BRANCH},"base":{"repo":{"full_name":"civitaspo/nagi"},"ref":"attacker-branch"}});
+    let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/nagi"},"ref":runtime_branch},"base":{"repo":{"full_name":"civitaspo/nagi"},"ref":"attacker-branch"}});
     let fixture = Fixture::new(vec![Route::get(
         "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
         json!([pr]),
@@ -291,7 +397,7 @@ fn caller_pr_with_wrong_base_fails_before_reading_or_writing_files() {
 fn canonical_bot_branch_accepts_current_or_prior_runtime_and_rejects_bad_commits_and_tree_modes() {
     use crate::fixtures::{Fixture, Route};
 
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let source_sha = "b".repeat(40);
     let desired = rendered_files(&source_sha, "main", false).unwrap();
     let prior = rendered_files(&"a".repeat(40), "main", false).unwrap();
@@ -427,7 +533,7 @@ fn canonical_bot_branch_accepts_current_or_prior_runtime_and_rejects_bad_commits
 
 #[test]
 fn already_migrated_default_branch_is_a_noop_without_pull_request_api_calls() {
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let migration = CallerMigration {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
@@ -445,7 +551,7 @@ fn already_migrated_default_branch_is_a_noop_without_pull_request_api_calls() {
 
 #[test]
 fn registry_is_exactly_the_nine_non_server_securefix_callers() {
-    let policy = Policy::load("policy.json").unwrap();
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     assert!(
         caller_names(&policy)
             .unwrap()

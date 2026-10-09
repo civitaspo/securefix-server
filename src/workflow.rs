@@ -1,6 +1,6 @@
 use crate::{
     api::GitHub,
-    policy::{Policy, SERVER, validate_sha},
+    policy::{Policy, validate_sha},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -107,7 +107,10 @@ pub fn referenced_revision(
     path: &str,
     expected: &str,
 ) -> Result<()> {
-    let prefix = format!("{SERVER}/{path}@");
+    let prefix = format!(
+        "{}/{path}@",
+        crate::config::trusted()?.deployment.server.repository
+    );
     let matching: Vec<_> = workflows
         .iter()
         .filter(|w| w.path.starts_with(&prefix))
@@ -126,7 +129,10 @@ pub fn require_reusable_pin(bytes: &[u8], path: &str, revision: &str) -> Result<
     let jobs = yaml["jobs"]
         .as_mapping()
         .context("caller workflow has no jobs")?;
-    let prefix = format!("{SERVER}/{path}@");
+    let prefix = format!(
+        "{}/{path}@",
+        crate::config::trusted()?.deployment.server.repository
+    );
     let calls: Vec<_> = jobs
         .values()
         .filter_map(|job| job["uses"].as_str())
