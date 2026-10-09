@@ -475,21 +475,28 @@ fn validate_current_policy_check(api: &GitHub, repository: &str, checks: &Checks
     let sha = reference["object"]["sha"]
         .as_str()
         .context("default branch SHA missing")?;
-    let response: Value = api.get(&format!(
-        "/repos/{repository}/commits/{sha}/check-runs?per_page=100"
-    ))?;
-    let check_runs = response["check_runs"]
-        .as_array()
-        .context("check-runs missing")?;
     for (name, app_id) in [
         ("status-check", checks.status_app_id),
         ("securefix-policy-check", checks.policy_app_id),
     ] {
+        let response: Value = api.get(&format!(
+            "/repos/{repository}/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={name}&app_id={app_id}"
+        ))?;
+        let check_runs = response["check_runs"]
+            .as_array()
+            .context("check-runs missing")?;
         ensure!(
-            check_runs.iter().any(|check| check["name"] == name
-                && check["status"] == "completed"
-                && check["conclusion"] == "success"
-                && check["app"]["id"].as_u64() == Some(app_id)),
+            response["total_count"].as_u64() == Some(check_runs.len() as u64),
+            "{repository} named check response is incomplete"
+        );
+        let latest = check_runs
+            .iter()
+            .filter(|check| check["name"] == name && check["app"]["id"].as_u64() == Some(app_id))
+            .max_by_key(|check| check["id"].as_u64().unwrap_or_default());
+        ensure!(
+            latest.is_some_and(
+                |check| check["status"] == "completed" && check["conclusion"] == "success"
+            ),
             "{repository} default-branch head lacks successful {name} from app {app_id}"
         );
     }
@@ -811,6 +818,78 @@ fn env_bool(name: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn default_readiness_uses_named_checks_and_rejects_newer_failure() {
+        let sha = "a".repeat(40);
+        let checks = Checks {
+            status_app_id: 11,
+            policy_app_id: 22,
+        };
+        for (latest_app, conclusion, accepted) in [
+            (11, "success", true),
+            (11, "failure", false),
+            (99, "success", false),
+            (11, "skipped", false),
+        ] {
+            let mut routes = vec![
+                Route::get("/repos/forge/example", json!({"default_branch":"main"})),
+                Route::get(
+                    "/repos/forge/example/git/ref/heads/main",
+                    json!({"object":{"sha":sha}}),
+                ),
+                Route::get(
+                    format!(
+                        "/repos/forge/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id=11"
+                    ),
+                    json!({"total_count":2,"check_runs":[
+                        {"id":1,"name":"status-check","status":"completed","conclusion":"success","app":{"id":latest_app}},
+                        {"id":2,"name":"status-check","status":"completed","conclusion":conclusion,"app":{"id":latest_app}}
+                    ]}),
+                ),
+            ];
+            if accepted {
+                routes.push(Route::get(format!("/repos/forge/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name=securefix-policy-check&app_id=22"),
+                    json!({"total_count":1,"check_runs":[{"id":3,"name":"securefix-policy-check","status":"completed","conclusion":"success","app":{"id":22}}]})));
+            }
+            let fixture = Fixture::new(routes);
+            assert_eq!(
+                validate_current_policy_check(&fixture.api, "forge/example", &checks).is_ok(),
+                accepted
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn default_readiness_rejects_incomplete_named_response() {
+        let sha = "a".repeat(40);
+        let fixture = Fixture::new(vec![
+            Route::get("/repos/forge/example", json!({"default_branch":"main"})),
+            Route::get(
+                "/repos/forge/example/git/ref/heads/main",
+                json!({"object":{"sha":sha}}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/forge/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id=11"
+                ),
+                json!({"total_count":101,"check_runs":[{"id":1,"name":"status-check","status":"completed","conclusion":"success","app":{"id":11}}]}),
+            ),
+        ]);
+        assert!(
+            validate_current_policy_check(
+                &fixture.api,
+                "forge/example",
+                &Checks {
+                    status_app_id: 11,
+                    policy_app_id: 22
+                }
+            )
+            .is_err()
+        );
+        fixture.finish();
+    }
 
     #[test]
     fn scheduled_runs_reconcile_without_activating() {
