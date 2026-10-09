@@ -24,7 +24,11 @@ use securefix::{
 const WORKFLOW_PATH: &str = ".github/workflows/testing-securefix-server.yml";
 const FIX_PATH_PREFIX: &str = ".securefix-integration/";
 const BRANCH_PREFIX: &str = "securefix-integration-";
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
+const OBSOLETE_SCRATCH_WORKFLOWS: [&str; 2] = [
+    ".github/workflows/verify-published-runtime.yml",
+    ".github/workflows/verify-server.yml",
+];
 
 fn trusted_config() -> Result<&'static crate::config::TrustedConfig> {
     crate::config::trusted()
@@ -86,6 +90,17 @@ pub enum Command {
         #[arg(long)]
         state_file: PathBuf,
     },
+    /// Verify the final stable client action smoke artifact and request label.
+    VerifyClient {
+        #[arg(long)]
+        artifact_name: String,
+        #[arg(long)]
+        run_id: u64,
+        #[arg(long)]
+        workflow_sha: String,
+    },
+    /// Prepare the exact scratch policy and file used by the client action smoke test.
+    PrepareClientInput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -101,6 +116,7 @@ struct Scenario {
     repository: String,
     repository_id: u64,
     candidate_sha: String,
+    published_runtime_sha: String,
     workflow_sha: String,
     default_branch: String,
     base_sha: String,
@@ -133,6 +149,21 @@ struct Verification {
     managed_files: Vec<String>,
     annotated_tag_verified: bool,
     closed_or_merged: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ClientVerification {
+    version: u32,
+    source_repository: String,
+    run_id: u64,
+    workflow_sha: String,
+    artifact_name: String,
+    destination_repository: String,
+    destination_branch: String,
+    request_label: String,
+    request_label_description: String,
+    verified: bool,
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -168,9 +199,242 @@ pub fn run(command: Command) -> Result<()> {
         } => {
             validate_sha(&candidate_sha)?;
             let workspace = std::env::current_dir()?;
-            validate_outputs(&workspace, &state_file, &candidate_sha, phase)
+            let published_runtime_sha = published_runtime_sha_from_env()?;
+            validate_outputs(
+                &workspace,
+                &state_file,
+                &candidate_sha,
+                phase,
+                &published_runtime_sha,
+            )
         }
+        Command::VerifyClient {
+            artifact_name,
+            run_id,
+            workflow_sha,
+        } => {
+            validate_sha(&workflow_sha)?;
+            verify_client(&artifact_name, run_id, &workflow_sha)
+        }
+        Command::PrepareClientInput => prepare_client_input(),
     }
+}
+
+fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result<()> {
+    ensure!(run_id > 0, "invalid client smoke workflow run ID");
+    ensure!(
+        crate::securefix_gate::artifact::valid_artifact_name_for_cli(artifact_name),
+        "invalid client smoke artifact name"
+    );
+    let trusted = crate::config::trusted()?;
+    let server = &trusted.deployment.server;
+    let scratch = &trusted.deployment.integration;
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY").is_ok_and(|repository| repository == server.repository)
+            && std::env::var("GITHUB_RUN_ID")
+                .is_ok_and(|id| id.parse::<u64>().ok() == Some(run_id))
+            && std::env::var("GITHUB_SHA").is_ok_and(|sha| sha == workflow_sha),
+        "client verification must run in the matching Securefix Server workflow context"
+    );
+    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
+    let api = GitHub::new("https://api.github.com", token)?;
+    let run: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{run_id}",
+        server.repository
+    ))?;
+    let server_repo: Value = api.get(&format!("/repos/{}", server.repository))?;
+    validate_client_source_run(
+        &run,
+        run_id,
+        workflow_sha,
+        &server.repository,
+        server.id,
+        trusted.owner_id,
+    )?;
+    ensure!(
+        server_repo["id"].as_u64() == Some(server.id),
+        "configured source repository ID does not match GitHub"
+    );
+    let artifacts: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{run_id}/artifacts",
+        server.repository
+    ))?;
+    let matching = artifacts["artifacts"]
+        .as_array()
+        .context("client smoke artifact list is malformed")?
+        .iter()
+        .filter(|artifact| artifact["name"] == artifact_name)
+        .collect::<Vec<_>>();
+    ensure!(
+        matching.len() == 1,
+        "client smoke artifact is missing or duplicated"
+    );
+    let artifact = matching[0];
+    ensure!(
+        artifact["expired"] == false
+            && artifact["size_in_bytes"]
+                .as_u64()
+                .is_some_and(|size| size > 0 && size <= 16 * 1024 * 1024),
+        "client smoke artifact is expired or oversized"
+    );
+    let artifact_id = artifact["id"]
+        .as_u64()
+        .context("client smoke artifact has no ID")?;
+    let bytes = api.download(
+        &format!(
+            "/repos/{}/actions/artifacts/{artifact_id}/zip",
+            server.repository
+        ),
+        16 * 1024 * 1024,
+    )?;
+    let source_branch = run["head_branch"]
+        .as_str()
+        .context("workflow run has no source branch")?;
+    let fix = crate::securefix_gate::artifact::parse(
+        &bytes,
+        artifact_name,
+        &server.repository,
+        run_id,
+        workflow_sha,
+        source_branch,
+    )?;
+    let branch = format!("securefix-client-smoke-{run_id}");
+    validate_client_smoke_artifact(&fix, &scratch.repository, run_id, workflow_sha)?;
+    let expected_description = format!("{}/{run_id}", server.repository);
+    let scratch_api = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", workflow_sha)?;
+    let scratch_repo: Value = scratch_api.get(&format!("/repos/{}", scratch.repository))?;
+    ensure!(
+        scratch_repo["id"].as_u64() == Some(scratch.id)
+            && scratch_repo["full_name"] == scratch.repository,
+        "client token destination repository identity changed"
+    );
+    let label: Value = scratch_api.get(&format!(
+        "/repos/{}/labels/{artifact_name}",
+        scratch.repository
+    ))?;
+    ensure!(
+        label["name"] == artifact_name && label["description"] == expected_description,
+        "client smoke request label does not match its source run and destination"
+    );
+    workflow::write_json(
+        "client-verification.json",
+        &ClientVerification {
+            version: 1,
+            source_repository: server.repository.clone(),
+            run_id,
+            workflow_sha: workflow_sha.to_owned(),
+            artifact_name: artifact_name.to_owned(),
+            destination_repository: scratch.repository.clone(),
+            destination_branch: branch,
+            request_label: artifact_name.to_owned(),
+            request_label_description: expected_description,
+            verified: true,
+        },
+    )?;
+    println!("Verified client smoke artifact and request label for workflow run {run_id}.");
+    Ok(())
+}
+
+fn prepare_client_input() -> Result<()> {
+    let trusted = crate::config::trusted()?;
+    let server = &trusted.deployment.server;
+    let workflow_sha = std::env::var("GITHUB_SHA").context("missing GITHUB_SHA")?;
+    validate_sha(&workflow_sha)?;
+    let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
+    let run_id = std::env::var("GITHUB_RUN_ID")
+        .context("missing GITHUB_RUN_ID")?
+        .parse::<u64>()
+        .context("invalid GITHUB_RUN_ID")?;
+    ensure!(
+        run_id > 0
+            && std::env::var("GITHUB_REPOSITORY")
+                .is_ok_and(|repository| repository == server.repository)
+            && std::env::var("GITHUB_EVENT_NAME").is_ok_and(|event| event == "workflow_dispatch")
+            && std::env::var("GITHUB_ACTOR_ID")
+                .is_ok_and(|actor| actor.parse::<u64>().ok() == Some(trusted.owner_id))
+            && std::env::var("GITHUB_RUN_ATTEMPT").is_ok_and(|attempt| attempt == "1"),
+        "client input must be prepared by the first owner-triggered server workflow run"
+    );
+    validate_workflow_ref(&workflow_sha, &workflow_ref)?;
+
+    let policy_bytes = scratch_client_policy(&crate::config::trusted_policy_bytes()?)?;
+    ensure!(
+        policy_bytes.len() <= 256 * 1024,
+        "scratch policy is oversized"
+    );
+    fs::write("scratch-policy.json", policy_bytes)?;
+    fs::create_dir_all(".securefix-client-smoke")?;
+    fs::write(
+        ".securefix-client-smoke/request.txt",
+        format!("Securefix client smoke {run_id}\n"),
+    )?;
+    Ok(())
+}
+
+fn validate_client_source_run(
+    run: &Value,
+    run_id: u64,
+    workflow_sha: &str,
+    server_repository: &str,
+    server_repository_id: u64,
+    owner_id: u64,
+) -> Result<()> {
+    let workflow_matches = workflow_run_matches(run, workflow_sha)?;
+    let actual_run_id = run["id"].as_u64();
+    let repo_full_name = run["repository"]["full_name"].as_str().unwrap_or_default();
+    let repo_id = run["repository"]["id"].as_u64();
+    let head_repo_id = run["head_repository"]["id"].as_u64();
+    let head_sha = run["head_sha"].as_str().unwrap_or_default();
+    let event = run["event"].as_str().unwrap_or_default();
+    let attempt = run["run_attempt"].as_u64();
+    let actor_id = run["actor"]["id"].as_u64();
+    let triggering_actor_id = run["triggering_actor"]["id"].as_u64();
+    ensure!(
+        run["id"].as_u64() == Some(run_id)
+            && run["repository"]["full_name"] == server_repository
+            && repo_id == Some(server_repository_id)
+            && head_repo_id == Some(server_repository_id)
+            && head_sha == workflow_sha
+            && event == "workflow_dispatch"
+            && attempt == Some(1)
+            && actor_id == Some(owner_id)
+            && triggering_actor_id == Some(owner_id)
+            && workflow_matches,
+        "client smoke run {run_id} provenance mismatch: actual_run_id={actual_run_id:?}, repository={repo_full_name}, repo_id={repo_id:?}, head_repo_id={head_repo_id:?}, head_sha={head_sha}, event={event}, attempt={attempt:?}, actor_id={actor_id:?}, triggering_actor_id={triggering_actor_id:?}, workflow_matches={workflow_matches}"
+    );
+    Ok(())
+}
+
+fn scratch_client_policy(trusted_policy: &[u8]) -> Result<Vec<u8>> {
+    let mut policy: Value = serde_json::from_slice(trusted_policy)?;
+    let server_deployment = policy["deployment"]["server"].clone();
+    policy["deployment"]["server"] = policy["deployment"]["integration"].clone();
+    policy["deployment"]["integration"] = server_deployment;
+    let bytes = serde_json::to_vec_pretty(&policy)?;
+    crate::policy::Policy::parse(&bytes)?;
+    Ok(bytes)
+}
+
+fn validate_client_smoke_artifact(
+    fix: &crate::securefix_gate::artifact::FixArtifact,
+    scratch_repository: &str,
+    run_id: u64,
+    workflow_sha: &str,
+) -> Result<()> {
+    let expected_contents = format!("Securefix client smoke {run_id}\n").into_bytes();
+    ensure!(
+        fix.repository == scratch_repository
+            && fix.branch == format!("securefix-client-smoke-{run_id}")
+            && fix.source_sha == workflow_sha
+            && fix.run_id == run_id
+            && fix.deletions.is_empty()
+            && fix.create_pull_request.is_none()
+            && fix.additions.len() == 1
+            && fix.additions.get(".securefix-client-smoke/request.txt") == Some(&expected_contents),
+        "client smoke artifact does not match the exact scratch fixture"
+    );
+    Ok(())
 }
 
 fn validate_producer(workflow_sha: &str) -> Result<()> {
@@ -214,7 +478,107 @@ fn validate_producer(workflow_sha: &str) -> Result<()> {
         source["sha"] == workflow_sha,
         "trusted integration workflow branch moved from its source SHA"
     );
+    let published_runtime_sha = current_published_runtime_sha(&api)?;
+    securefix::output("published_runtime_sha", &published_runtime_sha)?;
     Ok(())
+}
+
+fn current_published_runtime_sha(api: &GitHub) -> Result<String> {
+    use base64::Engine;
+
+    let trusted = crate::config::trusted()?;
+    let server = &trusted.deployment.server;
+    let repository: Value = api.get(&format!("/repos/{}", server.repository))?;
+    ensure!(
+        repository["full_name"] == server.repository
+            && repository["id"].as_u64() == Some(server.id)
+            && repository["owner"]["id"].as_u64() == Some(trusted.deployment.repository_owner.id)
+            && repository["default_branch"] == server.default_branch.as_str(),
+        "published runtime repository identity changed"
+    );
+    let main: Value = api.get(&format!(
+        "/repos/{}/commits/{}",
+        server.repository, server.default_branch
+    ))?;
+    let source_sha = main["sha"]
+        .as_str()
+        .context("server default branch SHA missing")?;
+    validate_sha(source_sha)?;
+
+    let release_tag = format!("securefix-runtime-{source_sha}");
+    let release: Value = api.get(&format!(
+        "/repos/{}/releases/tags/{release_tag}",
+        server.repository
+    ))?;
+    ensure!(
+        release["tag_name"] == release_tag
+            && release["target_commitish"] == source_sha
+            && release["draft"] == false
+            && release["prerelease"] == true,
+        "server default SHA has no exact published runtime release"
+    );
+    let assets = release["assets"]
+        .as_array()
+        .context("published runtime assets missing")?;
+    ensure!(
+        assets.len() == 1
+            && assets[0]["name"] == "securefix-runtime-linux-x86_64.tar.gz"
+            && assets[0]["state"] == "uploaded"
+            && assets[0]["size"].as_u64().is_some_and(|size| size > 0)
+            && assets[0]["digest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:")),
+        "published runtime release asset is missing or invalid"
+    );
+
+    let cargo: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={source_sha}",
+        server.repository
+    ))?;
+    ensure!(
+        cargo["type"] == "file" && cargo["encoding"] == "base64",
+        "server Cargo.toml is not a regular content file"
+    );
+    let encoded = cargo["content"]
+        .as_str()
+        .context("server Cargo.toml content missing")?;
+    ensure!(
+        encoded.len() <= 384 * 1024,
+        "server Cargo.toml base64 content is oversized"
+    );
+    let encoded = encoded
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode server Cargo.toml")?;
+    ensure!(bytes.len() <= 256 * 1024, "server Cargo.toml is oversized");
+    let text = std::str::from_utf8(&bytes).context("server Cargo.toml is not UTF-8")?;
+    let manifest: toml_edit::DocumentMut = text.parse().context("parse server Cargo.toml")?;
+    let version = manifest["package"]["version"]
+        .as_str()
+        .context("server package version missing")?;
+    semver::Version::parse(version).context("server package version is invalid")?;
+    let version_tag = format!("v{version}+{source_sha}");
+    let version_ref: Value = api.get(&format!(
+        "/repos/{}/git/ref/tags/{version_tag}",
+        server.repository
+    ))?;
+    ensure!(
+        version_ref["ref"] == format!("refs/tags/{version_tag}")
+            && version_ref["object"]["type"] == "commit"
+            && version_ref["object"]["sha"] == source_sha,
+        "published runtime version alias does not resolve to the default branch SHA"
+    );
+    Ok(source_sha.to_owned())
+}
+
+fn published_runtime_sha_from_env() -> Result<String> {
+    let sha = std::env::var("SECUREFIX_PUBLISHED_RUNTIME_SHA")
+        .context("missing SECUREFIX_PUBLISHED_RUNTIME_SHA")?;
+    validate_sha(&sha)?;
+    Ok(sha)
 }
 
 fn validate_workflow_ref(workflow_sha: &str, workflow_ref: &str) -> Result<()> {
@@ -278,7 +642,8 @@ fn fetch_state(candidate_sha: &str, run_id: u64, state_file: &Path) -> Result<()
         64 * 1024,
     )?;
     let scenario = scenario_from_zip(&bytes)?;
-    validate_scenario(&scenario, candidate_sha)?;
+    let published_runtime_sha = current_published_runtime_sha(&api)?;
+    validate_scenario(&scenario, candidate_sha, &published_runtime_sha)?;
     let server_repo: Value = api.get(&format!("/repos/{}", server_repository()?))?;
     let workflow_matches = workflow_run_matches(&run, &scenario.workflow_sha)?;
     ensure!(
@@ -357,6 +722,9 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     let workflow_sha = std::env::var("SECUREFIX_TEST_WORKFLOW_SHA")
         .context("missing SECUREFIX_TEST_WORKFLOW_SHA")?;
     validate_sha(&workflow_sha)?;
+    let published_runtime_sha = std::env::var("SECUREFIX_PUBLISHED_RUNTIME_SHA")
+        .context("missing SECUREFIX_PUBLISHED_RUNTIME_SHA")?;
+    validate_sha(&published_runtime_sha)?;
     let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
     validate_workflow_ref(&workflow_sha, &workflow_ref)?;
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
@@ -419,13 +787,13 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         )]),
     )?;
 
-    let rendered =
-        crate::distribution::caller::rendered_files(candidate_sha, &default_branch, true)?;
+    let rendered = distribution_fixture_files(&published_runtime_sha, &default_branch)?;
     ensure!(
         !rendered.is_empty(),
         "distribution renderer returned no workflows"
     );
-    let distribution = create_pr(
+    let obsolete_workflows = existing_scratch_workflows(&server, &base_sha)?;
+    let distribution = create_pr_with_changes(
         &server,
         &base_sha,
         &default_branch,
@@ -435,6 +803,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             &candidate_sha[..12]
         ),
         rendered.clone(),
+        obsolete_workflows,
     )?;
     validate_rendered_files(&rendered)?;
 
@@ -443,6 +812,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         repository: integration_repository()?.to_owned(),
         repository_id: integration_repository_id()?,
         candidate_sha: candidate_sha.to_owned(),
+        published_runtime_sha,
         workflow_sha,
         default_branch,
         base_sha,
@@ -451,11 +821,11 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         stale,
         distribution,
     };
-    validate_scenario(&state, candidate_sha)?;
+    validate_scenario(&state, candidate_sha, &state.published_runtime_sha)?;
     workflow::write_json(state_file, &state)?;
     println!("Prepared Securefix scratch integration state.");
     println!(
-        "Positive PR (post exact owner /approve and /merge; obtain a current non-author bot approval): {}",
+        "Positive PR (post exact owner /approve and /merge; add a current-head review): {}",
         state.positive.url
     );
     println!(
@@ -778,7 +1148,8 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
     let scenario: Scenario =
         serde_json::from_slice(&fs::read(state_file).context("read integration state file")?)
             .context("parse integration state file")?;
-    validate_scenario(&scenario, candidate_sha)?;
+    let published_runtime_sha = published_runtime_sha_from_env()?;
+    validate_scenario(&scenario, candidate_sha, &published_runtime_sha)?;
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
     let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
     let policy = scratch_policy(candidate_sha)?;
@@ -792,7 +1163,9 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
                 state_file.with_file_name("verification.json"),
                 &verification,
             )?;
-            println!("Verified native scratch integration; all fixtures were merged or closed.");
+            println!(
+                "Verified native scratch integration; GitHub auto-merge and pinact consumer CI passed."
+            );
             println!("{}", serde_json::to_string(&verification)?);
             Ok(())
         }
@@ -870,28 +1243,26 @@ fn verify_inner(
         scenario.positive.number,
         &scenario.positive.head_sha,
     )?;
-    policy_check::publish(
-        api,
-        integration_repository()?,
-        &scenario.positive.head_sha,
-        true,
-        "Integration fixture passed production PR authorization checks.",
-    )?;
     validate_signed_pr(api, policy, &scenario.distribution)?;
     verify_rendered_files(
         api,
         &scenario.distribution,
         &scenario.default_branch,
-        &scenario.candidate_sha,
+        &scenario.published_runtime_sha,
+    )?;
+    wait_for_actions_status_check(
+        api,
+        &scenario.distribution,
+        &scenario.default_branch,
+        deadline,
     )?;
     let files = crate::distribution::caller::rendered_files(
-        &scenario.candidate_sha,
+        &scenario.published_runtime_sha,
         &scenario.default_branch,
         true,
     )?;
     validate_rendered_files(&files)?;
 
-    wait_for_current_head_approval(api, &scenario.positive, deadline)?;
     let positive_manifest = manifest(
         scenario,
         &scenario.positive,
@@ -900,22 +1271,37 @@ fn verify_inner(
     )?;
     merge::validate_state(api, policy, &positive_manifest)?;
     ensure!(
-        merge::ready(api, &positive_manifest)?,
-        "scratch positive PR lacks required checks or approved review"
+        !policy_check_exists(api, &scenario.positive.head_sha)?,
+        "positive policy check was published before the native auto-merge probe"
     );
-    let merged: Value = api.put(
-        &format!("/repos/{}/pulls/{}/merge", integration_repository()?, scenario.positive.number),
-        &json!({"sha":scenario.positive.head_sha,"merge_method":"squash","commit_message":format!("Securefix integration test for {}", scenario.candidate_sha)}),
-    )?;
+    wait_for_merge_gates_except_policy(api, &scenario.positive, deadline)?;
     ensure!(
-        merged["merged"] == true,
-        "GitHub did not confirm the scratch squash merge"
+        !merge::ready(api, &positive_manifest)?,
+        "scratch positive PR became merge-ready without the Securefix policy check"
     );
-    let merged_sha = merged["sha"]
-        .as_str()
-        .context("merge response lacks SHA")?
-        .to_owned();
-    validate_sha(&merged_sha)?;
+    api.enable_scratch_auto_merge(
+        integration_repository()?,
+        scenario.positive.number,
+        &scenario.positive.head_sha,
+    )?;
+    wait_for_auto_merge_pending(api, &scenario.positive, deadline)?;
+    ensure!(
+        !policy_check_exists(api, &scenario.positive.head_sha)?,
+        "positive policy check appeared before it was published by the integration harness"
+    );
+    policy_check::publish(
+        api,
+        integration_repository()?,
+        &scenario.positive.head_sha,
+        true,
+        "Integration fixture passed production PR authorization checks.",
+    )?;
+    wait_for_policy_check_success(api, &scenario.positive, deadline)?;
+    ensure!(
+        merge::ready(api, &positive_manifest)?,
+        "scratch positive PR lacks required checks or approved review after policy check"
+    );
+    let merged_sha = wait_for_auto_merge(api, &scenario.positive, deadline)?;
     ensure!(
         merge::validate_state(api, policy, &positive_manifest).is_err(),
         "replayed merge manifest unexpectedly remained valid after merge"
@@ -942,6 +1328,21 @@ fn verify_inner(
         &scenario.candidate_sha,
     )?;
     merge::validate_state(api, policy, &stale_manifest)?;
+    ensure!(
+        !request::has_current_head_approval(
+            api,
+            integration_repository()?,
+            scenario.stale.number,
+            &scenario.stale.head_sha,
+        )? && !policy_check_exists(api, &scenario.stale.head_sha)?,
+        "stale-head fixture unexpectedly has current review or policy check before its probe"
+    );
+    api.enable_scratch_auto_merge(
+        integration_repository()?,
+        scenario.stale.number,
+        &scenario.stale.head_sha,
+    )?;
+    wait_for_auto_merge_pending(api, &scenario.stale, deadline)?;
     let stale_head_sha = api.create_commit(
         integration_repository()?,
         &scenario.stale.branch,
@@ -981,6 +1382,24 @@ fn verify_inner(
         merge::validate_state(api, policy, &stale_manifest).is_err(),
         "stale merge manifest unexpectedly remained valid"
     );
+    ensure!(
+        !request::has_current_head_approval(
+            api,
+            integration_repository()?,
+            scenario.stale.number,
+            &stale_head_sha,
+        )? && !policy_check_exists(api, &stale_head_sha)?,
+        "advanced stale-head fixture unexpectedly has current review or policy check"
+    );
+    ensure!(
+        api.enable_scratch_auto_merge(
+            integration_repository()?,
+            scenario.stale.number,
+            &scenario.stale.head_sha,
+        )
+        .is_err(),
+        "native auto-merge accepted the owner authorization's stale head"
+    );
     let stale_merge = api.put::<Value>(
         &format!(
             "/repos/{}/pulls/{}/merge",
@@ -996,6 +1415,15 @@ fn verify_inner(
             .and_then(|error| error.downcast_ref::<ApiError>())
             .is_some_and(|error| error.status == reqwest::StatusCode::CONFLICT),
         "GitHub did not reject the stale scratch merge head with HTTP 409"
+    );
+    let stale_pull: Value = api.get(&format!(
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
+        scenario.stale.number
+    ))?;
+    ensure!(
+        stale_pull["state"] == "open" && stale_pull["merged"] == false,
+        "queued stale-head auto-merge bypassed the new-head review or policy check"
     );
 
     verify_artifact_path_safety()?;
@@ -1109,10 +1537,9 @@ fn verify_rendered_files(
     api: &GitHub,
     fixture: &PullRequestFixture,
     default_branch: &str,
-    candidate_sha: &str,
+    published_runtime_sha: &str,
 ) -> Result<()> {
-    let expected =
-        crate::distribution::caller::rendered_files(candidate_sha, default_branch, true)?;
+    let expected = distribution_fixture_files(published_runtime_sha, default_branch)?;
     validate_rendered_files(&expected)?;
     for (path, expected_bytes) in expected {
         let actual = api.content(integration_repository()?, &path, &fixture.head_sha)?;
@@ -1127,7 +1554,62 @@ fn verify_rendered_files(
             "rendered workflow has no name at {path}"
         );
     }
+    for path in OBSOLETE_SCRATCH_WORKFLOWS {
+        ensure!(
+            optional_file(api, path, &fixture.head_sha)?.is_none(),
+            "scratch distribution PR retained obsolete test workflow {path}"
+        );
+    }
     Ok(())
+}
+
+fn existing_scratch_workflows(api: &GitHub, base_sha: &str) -> Result<Vec<String>> {
+    OBSOLETE_SCRATCH_WORKFLOWS
+        .into_iter()
+        .filter_map(|path| match optional_file(api, path, base_sha) {
+            Ok(Some(_)) => Some(Ok(path.to_owned())),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn optional_file(api: &GitHub, path: &str, revision: &str) -> Result<Option<Value>> {
+    match api.get(&format!(
+        "/repos/{}/contents/{path}?ref={revision}",
+        integration_repository()?
+    )) {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("check scratch fixture workflow {path} at {revision}")),
+    }
+}
+
+fn distribution_fixture_files(
+    published_runtime_sha: &str,
+    default_branch: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut files =
+        crate::distribution::caller::rendered_files(published_runtime_sha, default_branch, true)?;
+    ensure!(
+        files
+            .insert(
+                ".github/workflows/ci.yml".to_owned(),
+                include_str!("integration_templates/ci.yml")
+                    .as_bytes()
+                    .to_vec(),
+            )
+            .is_none(),
+        "distribution fixture unexpectedly contains the scratch CI workflow"
+    );
+    Ok(files)
 }
 
 fn validate_rendered_files(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
@@ -1202,28 +1684,229 @@ fn wait_for_owner_comment(
     }
 }
 
-fn wait_for_current_head_approval(
+fn wait_for_merge_gates_except_policy(
     api: &GitHub,
     fixture: &PullRequestFixture,
     deadline: Instant,
 ) -> Result<()> {
     loop {
-        if request::has_current_head_approval(
-            api,
-            integration_repository()?,
-            fixture.number,
-            &fixture.head_sha,
-        )? {
+        let checks = check_runs(api, &fixture.head_sha)?;
+        ensure!(
+            !policy_check_exists_in(&checks, trusted_config()?.deployment.checks.policy_app_id,),
+            "policy check exists before native auto-merge is enabled"
+        );
+        let status_ready = latest_check_success(
+            &checks,
+            "status-check",
+            trusted_config()?.deployment.checks.status_app_id,
+            true,
+        );
+        let review = api.graphql(
+            "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}",
+            json!({
+                "owner":integration_repository()?.split('/').next().unwrap_or_default(),
+                "name":integration_repository()?.split('/').nth(1).unwrap_or_default(),
+                "number":fixture.number
+            }),
+        )?;
+        let approved = review["repository"]["pullRequest"]["reviewDecision"] == "APPROVED"
+            && request::has_current_head_approval(
+                api,
+                integration_repository()?,
+                fixture.number,
+                &fixture.head_sha,
+            )?;
+        if status_ready && approved {
             return Ok(());
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         ensure!(
             !remaining.is_zero(),
-            "timed out waiting for a non-author approval on the current head of {}",
+            "timed out waiting for required status check and current-head review on {}",
             fixture.url
         );
         thread::sleep(remaining.min(Duration::from_secs(5)));
     }
+}
+
+fn wait_for_auto_merge_pending(
+    api: &GitHub,
+    fixture: &PullRequestFixture,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let pull: Value = api.get(&format!(
+            "/repos/{}/pulls/{}",
+            integration_repository()?,
+            fixture.number
+        ))?;
+        ensure!(
+            pull["number"].as_u64() == Some(fixture.number)
+                && pull["head"]["repo"]["full_name"] == integration_repository()?
+                && pull["head"]["ref"] == fixture.branch
+                && pull["head"]["sha"] == fixture.head_sha
+                && pull["base"]["repo"]["full_name"] == integration_repository()?
+                && pull["state"] == "open"
+                && pull["merged"] == false,
+            "scratch auto-merge PR changed or merged before its required gate"
+        );
+        if pull["auto_merge"].is_object() {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "GitHub did not expose queued auto-merge for {}",
+            fixture.url
+        );
+        thread::sleep(remaining.min(Duration::from_secs(5)));
+    }
+}
+
+fn wait_for_policy_check_success(
+    api: &GitHub,
+    fixture: &PullRequestFixture,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let checks = check_runs(api, &fixture.head_sha)?;
+        let matches = policy_check_runs(&checks, trusted_config()?.deployment.checks.policy_app_id);
+        ensure!(
+            matches.len() <= 1,
+            "duplicate Securefix policy checks on fixture head"
+        );
+        if let Some(check) = matches.first() {
+            ensure!(
+                check["status"] != "completed" || check["conclusion"] == "success",
+                "Securefix policy check failed on fixture head"
+            );
+            if check["status"] == "completed" && check["conclusion"] == "success" {
+                return Ok(());
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "timed out waiting for the Securefix policy check on {}",
+            fixture.url
+        );
+        thread::sleep(remaining.min(Duration::from_secs(5)));
+    }
+}
+
+fn wait_for_actions_status_check(
+    api: &GitHub,
+    fixture: &PullRequestFixture,
+    default_branch: &str,
+    deadline: Instant,
+) -> Result<()> {
+    let app_id = trusted_config()?.deployment.checks.status_app_id;
+    loop {
+        verify_pr_identity(api, fixture, default_branch, &fixture.head_sha)?;
+        let checks = check_runs(api, &fixture.head_sha)?;
+        if latest_check_success(&checks, "status-check", app_id, false) {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "timed out waiting for the real pinact consumer status-check on {}",
+            fixture.url
+        );
+        thread::sleep(remaining.min(Duration::from_secs(5)));
+    }
+}
+
+fn wait_for_auto_merge(
+    api: &GitHub,
+    fixture: &PullRequestFixture,
+    deadline: Instant,
+) -> Result<String> {
+    loop {
+        let pull: Value = api.get(&format!(
+            "/repos/{}/pulls/{}",
+            integration_repository()?,
+            fixture.number
+        ))?;
+        ensure!(
+            pull["number"].as_u64() == Some(fixture.number)
+                && pull["head"]["repo"]["full_name"] == integration_repository()?
+                && pull["head"]["ref"] == fixture.branch
+                && pull["head"]["sha"] == fixture.head_sha
+                && pull["base"]["repo"]["full_name"] == integration_repository()?,
+            "scratch auto-merge PR identity changed while waiting"
+        );
+        if pull["merged"] == true {
+            ensure!(pull["state"] == "closed", "GitHub merged PR remains open");
+            let sha = pull["merge_commit_sha"]
+                .as_str()
+                .context("merged scratch PR has no merge commit SHA")?;
+            validate_sha(sha)?;
+            return Ok(sha.to_owned());
+        }
+        ensure!(
+            pull["state"] == "open",
+            "GitHub closed the scratch auto-merge PR without merging"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "timed out waiting for GitHub native auto-merge of {}",
+            fixture.url
+        );
+        thread::sleep(remaining.min(Duration::from_secs(5)));
+    }
+}
+
+fn check_runs(api: &GitHub, sha: &str) -> Result<Vec<Value>> {
+    let mut checks = Vec::new();
+    for page in 1..=100 {
+        let response: Value = api.get(&format!(
+            "/repos/{}/commits/{sha}/check-runs?per_page=100&page={page}&filter=latest",
+            integration_repository()?
+        ))?;
+        let batch = response["check_runs"]
+            .as_array()
+            .context("check runs are malformed")?;
+        let done = batch.len() < 100;
+        checks.extend(batch.iter().cloned());
+        if done {
+            return Ok(checks);
+        }
+    }
+    anyhow::bail!("check run pagination exceeded limit")
+}
+
+fn policy_check_runs(checks: &[Value], app_id: u64) -> Vec<&Value> {
+    checks
+        .iter()
+        .filter(|check| {
+            check["name"] == "securefix-policy-check" && check["app"]["id"].as_u64() == Some(app_id)
+        })
+        .collect()
+}
+
+fn policy_check_exists_in(checks: &[Value], app_id: u64) -> bool {
+    !policy_check_runs(checks, app_id).is_empty()
+}
+
+fn policy_check_exists(api: &GitHub, sha: &str) -> Result<bool> {
+    Ok(policy_check_exists_in(
+        &check_runs(api, sha)?,
+        trusted_config()?.deployment.checks.policy_app_id,
+    ))
+}
+
+fn latest_check_success(checks: &[Value], name: &str, app_id: u64, allow_skipped: bool) -> bool {
+    checks
+        .iter()
+        .filter(|check| check["name"] == name && check["app"]["id"].as_u64() == Some(app_id))
+        .max_by_key(|check| check["id"].as_u64().unwrap_or_default())
+        .is_some_and(|check| {
+            check["status"] == "completed"
+                && (check["conclusion"] == "success"
+                    || allow_skipped && check["conclusion"] == "skipped")
+        })
 }
 
 fn manifest(
@@ -1398,7 +2081,11 @@ fn cleanup(api: &GitHub, scenario: &Scenario) -> Result<()> {
     Ok(())
 }
 
-fn validate_scenario(scenario: &Scenario, candidate_sha: &str) -> Result<()> {
+fn validate_scenario(
+    scenario: &Scenario,
+    candidate_sha: &str,
+    published_runtime_sha: &str,
+) -> Result<()> {
     ensure!(
         scenario.version == STATE_VERSION
             && scenario.repository == integration_repository()?
@@ -1407,6 +2094,11 @@ fn validate_scenario(scenario: &Scenario, candidate_sha: &str) -> Result<()> {
         "integration state identity mismatch"
     );
     validate_sha(&scenario.candidate_sha)?;
+    validate_sha(&scenario.published_runtime_sha)?;
+    ensure!(
+        scenario.published_runtime_sha == published_runtime_sha,
+        "integration state is bound to a different published runtime"
+    );
     validate_sha(&scenario.workflow_sha)?;
     validate_sha(&scenario.base_sha)?;
     ensure!(
@@ -1486,6 +2178,7 @@ fn validate_outputs(
     state_file: &Path,
     candidate_sha: &str,
     phase: Phase,
+    published_runtime_sha: &str,
 ) -> Result<()> {
     validate_state_path(state_file)?;
     ensure!(
@@ -1535,7 +2228,7 @@ fn validate_outputs(
     let state_bytes = read_output_file(&workspace, state_file)?;
     let scenario: Scenario =
         serde_json::from_slice(&state_bytes).context("parse output scenario")?;
-    validate_scenario(&scenario, candidate_sha)?;
+    validate_scenario(&scenario, candidate_sha, published_runtime_sha)?;
     if phase == Phase::Verify {
         let verification_path = directory.join("verification.json");
         let bytes = read_output_file(&workspace, &verification_path)?;
@@ -1673,6 +2366,181 @@ impl RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_smoke_artifact_must_match_the_exact_source_and_fixture() {
+        let run_id = 42;
+        let workflow_sha = "a".repeat(40);
+        let mut additions = BTreeMap::new();
+        additions.insert(
+            ".securefix-client-smoke/request.txt".into(),
+            format!("Securefix client smoke {run_id}\n").into_bytes(),
+        );
+        let fix = crate::securefix_gate::artifact::FixArtifact {
+            repository: integration_repository().unwrap().to_owned(),
+            branch: format!("securefix-client-smoke-{run_id}"),
+            run_id,
+            source_sha: workflow_sha.clone(),
+            commit_message: "test fixture".into(),
+            create_pull_request: None,
+            additions,
+            deletions: Vec::new(),
+        };
+        assert!(
+            validate_client_smoke_artifact(
+                &fix,
+                integration_repository().unwrap(),
+                run_id,
+                &workflow_sha
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_client_smoke_artifact(
+                &fix,
+                integration_repository().unwrap(),
+                run_id + 1,
+                &workflow_sha
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn client_smoke_policy_swaps_only_server_and_scratch_deployments() {
+        let original = crate::config::trusted_policy_bytes().unwrap();
+        let scratch = scratch_client_policy(&original).unwrap();
+        let original: Value = serde_json::from_slice(&original).unwrap();
+        let scratch: Value = serde_json::from_slice(&scratch).unwrap();
+        assert_eq!(
+            scratch["deployment"]["server"],
+            original["deployment"]["integration"]
+        );
+        assert_eq!(
+            scratch["deployment"]["integration"],
+            original["deployment"]["server"]
+        );
+        assert_eq!(scratch["repositories"], original["repositories"]);
+        assert_eq!(scratch["owner_id"], original["owner_id"]);
+    }
+
+    #[test]
+    fn client_source_run_accepts_nonterminal_status_but_rejects_identity_mismatches() {
+        let trusted = trusted_config().unwrap();
+        let server = &trusted.deployment.server;
+        let run_id = 42;
+        let workflow_sha = "a".repeat(40);
+        let branch = format!("integration/native-{}", &workflow_sha[..12]);
+        let run = json!({
+            "id": run_id,
+            "repository": {"full_name": server.repository, "id": server.id},
+            "head_repository": {"id": server.id},
+            "head_sha": workflow_sha,
+            "head_branch": branch,
+            "path": format!("{WORKFLOW_PATH}@refs/heads/{branch}"),
+            "event": "workflow_dispatch",
+            "run_attempt": 1,
+            "status": "queued",
+            "actor": {"id": trusted.owner_id},
+            "triggering_actor": {"id": trusted.owner_id}
+        });
+        assert!(
+            validate_client_source_run(
+                &run,
+                run_id,
+                &workflow_sha,
+                &server.repository,
+                server.id,
+                trusted.owner_id
+            )
+            .is_ok()
+        );
+
+        let mut wrong_actor = run.clone();
+        wrong_actor["actor"]["id"] = json!(trusted.owner_id + 1);
+        let mut wrong_sha = run.clone();
+        wrong_sha["head_sha"] = json!("b".repeat(40));
+        let mut wrong_repository = run.clone();
+        wrong_repository["repository"]["id"] = json!(server.id + 1);
+        let mut wrong_attempt = run.clone();
+        wrong_attempt["run_attempt"] = json!(2);
+        for wrong in [wrong_actor, wrong_sha, wrong_repository, wrong_attempt] {
+            assert!(
+                validate_client_source_run(
+                    &wrong,
+                    run_id,
+                    &workflow_sha,
+                    &server.repository,
+                    server.id,
+                    trusted.owner_id
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn auto_merge_probe_uses_the_latest_check_from_the_configured_app() {
+        let app_id = trusted_config().unwrap().deployment.checks.status_app_id;
+        let checks = vec![
+            json!({
+                "id":1,
+                "name":"status-check",
+                "app":{"id":app_id},
+                "status":"completed",
+                "conclusion":"success"
+            }),
+            json!({
+                "id":2,
+                "name":"status-check",
+                "app":{"id":app_id + 1},
+                "status":"completed",
+                "conclusion":"failure"
+            }),
+        ];
+        assert!(latest_check_success(&checks, "status-check", app_id, true));
+
+        let checks = vec![
+            json!({
+                "id":1,
+                "name":"status-check",
+                "app":{"id":app_id},
+                "status":"completed",
+                "conclusion":"success"
+            }),
+            json!({
+                "id":2,
+                "name":"status-check",
+                "app":{"id":app_id},
+                "status":"completed",
+                "conclusion":"failure"
+            }),
+        ];
+        assert!(!latest_check_success(&checks, "status-check", app_id, true));
+    }
+
+    #[test]
+    fn policy_check_probe_requires_the_configured_app_identity() {
+        let app_id = trusted_config().unwrap().deployment.checks.policy_app_id;
+        let check = json!({
+            "id":1,
+            "name":"securefix-policy-check",
+            "app":{"id":app_id + 1},
+            "status":"completed",
+            "conclusion":"success"
+        });
+        assert!(!policy_check_exists_in(&[check], app_id));
+    }
+
+    #[test]
+    fn distribution_fixture_includes_the_checked_in_pinact_consumer_workflow() {
+        let files = distribution_fixture_files(&"a".repeat(40), "main").unwrap();
+        assert_eq!(
+            files.get(".github/workflows/ci.yml").unwrap(),
+            include_str!("integration_templates/ci.yml").as_bytes()
+        );
+        validate_rendered_files(&files).unwrap();
+    }
 
     #[test]
     fn scratch_policy_is_narrowed_to_one_repository_and_candidate_revision() {
@@ -1826,6 +2694,7 @@ mod tests {
             repository: integration_repository().unwrap().into(),
             repository_id: integration_repository_id().unwrap(),
             candidate_sha: candidate_sha.clone(),
+            published_runtime_sha: "f".repeat(40),
             workflow_sha: "b".repeat(40),
             default_branch: "main".into(),
             base_sha: "c".repeat(40),
@@ -1841,7 +2710,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            validate_outputs(workspace.path(), state_file, &candidate_sha, Phase::Prepare).is_ok()
+            validate_outputs(
+                workspace.path(),
+                state_file,
+                &candidate_sha,
+                Phase::Prepare,
+                &scenario.published_runtime_sha,
+            )
+            .is_ok()
         );
 
         let verification = Verification {
@@ -1863,7 +2739,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            validate_outputs(workspace.path(), state_file, &candidate_sha, Phase::Verify).is_ok()
+            validate_outputs(
+                workspace.path(),
+                state_file,
+                &candidate_sha,
+                Phase::Verify,
+                &scenario.published_runtime_sha,
+            )
+            .is_ok()
         );
         let mut wrong = verification;
         wrong.positive_pr += 1;
@@ -1873,7 +2756,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            validate_outputs(workspace.path(), state_file, &candidate_sha, Phase::Verify).is_err()
+            validate_outputs(
+                workspace.path(),
+                state_file,
+                &candidate_sha,
+                Phase::Verify,
+                &scenario.published_runtime_sha,
+            )
+            .is_err()
         );
     }
 
@@ -1893,6 +2783,7 @@ mod tests {
                 Path::new("fixtures/state.json"),
                 &"a".repeat(40),
                 Phase::Prepare,
+                &"b".repeat(40),
             )
             .is_err()
         );
@@ -1915,6 +2806,7 @@ mod tests {
             repository: integration_repository().unwrap().into(),
             repository_id: integration_repository_id().unwrap(),
             candidate_sha: sha.clone(),
+            published_runtime_sha: "f".repeat(40),
             workflow_sha: "b".repeat(40),
             default_branch: "main".into(),
             base_sha: sha.clone(),
@@ -1929,9 +2821,10 @@ mod tests {
                 ..fixture
             },
         };
-        assert!(validate_scenario(&scenario, &sha).is_ok());
+        assert!(validate_scenario(&scenario, &sha, &scenario.published_runtime_sha).is_ok());
+        assert!(validate_scenario(&scenario, &sha, &"e".repeat(40)).is_err());
         scenario.repository = server_repository().unwrap().into();
-        assert!(validate_scenario(&scenario, &sha).is_err());
+        assert!(validate_scenario(&scenario, &sha, &scenario.published_runtime_sha).is_err());
     }
 
     #[test]
@@ -1946,6 +2839,7 @@ mod tests {
             repository: integration_repository().unwrap().into(),
             repository_id: integration_repository_id().unwrap(),
             candidate_sha: "a".repeat(40),
+            published_runtime_sha: "d".repeat(40),
             workflow_sha: "c".repeat(40),
             default_branch: "main".into(),
             base_sha: "b".repeat(40),

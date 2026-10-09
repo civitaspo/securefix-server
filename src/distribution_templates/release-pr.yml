@@ -24,7 +24,7 @@ jobs:
       contents: read
       attestations: read
       pull-requests: read
-    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr.yml@@SECUREFIX_RUNTIME_SHA@
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
     with:
       version: ${{ inputs.version }}
     secrets:

@@ -162,6 +162,13 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
             format!("/repos/{server}/releases/tags/securefix-runtime-{sha}"),
             release,
         ),
+        Route::get(
+            format!(
+                "/repos/{server}/git/ref/tags/{}",
+                crate::runtime::version_tag(&sha).unwrap()
+            ),
+            json!({"object":{"type":"commit","sha":sha}}),
+        ),
     ]);
     assert_eq!(
         validate_promotion(&fixture.api, &policy, 17)

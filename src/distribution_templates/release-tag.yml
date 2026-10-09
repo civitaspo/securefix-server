@@ -25,7 +25,7 @@ jobs:
       attestations: read
       pull-requests: read
       issues: write
-    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-tag.yml@@SECUREFIX_RUNTIME_SHA@
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-tag.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
     with:
       release_pr_number: ${{ inputs.release_pr_number }}
     secrets:

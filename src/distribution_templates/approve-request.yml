@@ -24,6 +24,6 @@ jobs:
       attestations: read
       issues: read
       pull-requests: read
-    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-approve-request.yml@@SECUREFIX_RUNTIME_SHA@
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-approve-request.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
