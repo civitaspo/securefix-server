@@ -194,8 +194,6 @@ jobs:
           private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
           owner: civitaspo
           repositories: testing-securefix-server
-          permission-actions: read
-          permission-contents: read
           permission-issues: write
       - name: Execute candidate against the isolated scratch repository
         env:
