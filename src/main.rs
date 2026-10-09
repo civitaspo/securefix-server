@@ -6,6 +6,7 @@ mod approval;
 mod distribution;
 #[cfg(test)]
 mod fixtures;
+mod integration;
 mod merge;
 mod policy_check;
 mod release;
@@ -29,6 +30,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Exercise candidate code with repository-scoped scratch credentials")]
+    Integration {
+        #[command(subcommand)]
+        command: integration::Command,
+    },
     #[command(about = "Validate repository capabilities")]
     Policy {
         #[command(subcommand)]
@@ -83,6 +89,7 @@ enum Command {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Integration { command } => integration::run(command),
         Command::Policy { command } => policy::run(command),
         Command::Request { command } => request::run(command),
         Command::Approve { command } => approval::run(command),

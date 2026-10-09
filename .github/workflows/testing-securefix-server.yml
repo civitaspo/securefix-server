@@ -1,16 +1,61 @@
-name: Test Securefix Server in Scratch Repository
+name: Test Candidate Runtime
+
 on:
-  workflow_call:
-    secrets:
-      SECUREFIX_CLIENT_PRIVATE_KEY:
-        required: true
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full reviewed candidate SHA; empty uses this workflow revision
+        type: string
+        default: ''
+      phase:
+        description: Prepare scratch fixtures or verify owner-authorized outcomes
+        type: choice
+        options: [prepare, verify]
+        default: prepare
+      fixture_run_id:
+        description: Successful prepare run whose binary and state are reused
+        type: string
+        default: ''
+
 permissions: {}
-defaults:
-  run:
-    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: candidate-integration
+  cancel-in-progress: false
+
 jobs:
+  trusted-runtime-main:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      contents: read
+      attestations: read
+
+  trusted-build:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: trusted-runtime
+          path: target/release/securefix
+          if-no-files-found: error
+          retention-days: 7
+
   build:
-    if: github.repository == 'civitaspo/testing-securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && inputs.phase == 'prepare'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -23,84 +68,147 @@ jobs:
         id: checkout
         with:
           repository: civitaspo/securefix-server
-          ref: ${{ job.workflow_sha }}
+          ref: ${{ inputs.candidate_sha || job.workflow_sha }}
           persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal
-      - name: Run secret-free Rust tests
-        run: cargo +1.99.0 test --locked
       - uses: ./.github/actions/setup-cli
-      - name: Build the read-only GitHub API probe
-        run: |
-          cargo +1.99.0 test --locked --test github_api --no-run
-          install -Dm755 "$(find target/debug/deps -maxdepth 1 -type f -name 'github_api-*' -executable | head -n 1)" runtime/github-api-tests
-      - name: Assemble same-run test artifact
-        run: |
-          install -Dm755 target/release/securefix runtime/securefix
-          cp policy.json runtime/policy.json
-          cp securefix-config.yaml runtime/securefix-config.yaml
-          cp -R repo-settings runtime/repo-settings
+      - name: Test candidate without credentials
+        run: cargo +1.99.0 test --locked
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
-          name: securefix-test-${{ github.run_id }}-${{ github.run_attempt }}
-          path: runtime/
+          name: candidate-runtime
+          path: target/release/securefix
           if-no-files-found: error
-          retention-days: 1
-  probe:
-    needs: build
-    if: github.repository == 'civitaspo/testing-securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
+          retention-days: 7
+
+  reuse:
+    needs: [trusted-build, trusted-runtime-main]
+    if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && inputs.phase == 'verify' && (needs.trusted-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 5
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ inputs.candidate_sha || job.workflow_sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
+          artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.trusted-build.outputs.artifact-id }}
+          path: trusted-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
-        id: install-cli
         with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
-      - name: Restore the read-only API probe executable mode
-        run: install -D -m 755 "$RUNNER_TEMP/securefix-runtime/github-api-tests" "$RUNNER_TEMP/securefix-test-bin/github-api-tests"
-      - name: Verify installed CLI and candidate policy
+          binary: trusted-runtime/securefix
+      - name: Validate producer and download candidate runtime
+        id: state
         env:
-          SECUREFIX_BINARY: ${{ steps.install-cli.outputs.binary }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-          EXPECTED_SOURCE_SHA: ${{ job.workflow_sha }}
-        run: |
-          test "$SECUREFIX_SOURCE_SHA" = "$EXPECTED_SOURCE_SHA"
-          test "$(command -v securefix)" = "$RUNNER_TEMP/securefix-bin/securefix"
-          test -x "$RUNNER_TEMP/securefix-bin/securefix"
-          test "$(stat -c '%a' "$SECUREFIX_BINARY")" = 755
-          securefix --help >/dev/null
-          securefix policy validate --policy "$RUNNER_TEMP/securefix-runtime/policy.json"
-          printf '{"version":2}\n' > "$RUNNER_TEMP/invalid-policy.json"
-          if securefix policy validate --policy "$RUNNER_TEMP/invalid-policy.json"; then
-            exit 1
-          fi
-      - name: Validate Securefix branch configuration with upstream action
-        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || job.workflow_sha }}
+          FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
+        run: $RUNNER_TEMP/securefix-bin/securefix integration fetch-state --candidate-sha "$CANDIDATE_SHA" --run-id "$FIXTURE_RUN_ID" --state-file fixtures/state.json
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          action: validate-config
-          config_file: ${{ runner.temp }}/securefix-runtime/securefix-config.yaml
+          artifact-ids: ${{ steps.state.outputs.candidate_artifact_id }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.fixture_run_id }}
+          github-token: ${{ github.token }}
+          path: candidate-runtime
+          merge-multiple: true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: candidate-runtime
+          path: candidate-runtime/securefix
+          if-no-files-found: error
+          retention-days: 7
+
+  scratch:
+    needs: [trusted-build, trusted-runtime-main, build, reuse]
+    if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (needs.build.result == 'success' || needs.reuse.result == 'success') && (needs.trusted-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'prepare'
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: candidate-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        if: inputs.phase == 'prepare'
+        with:
+          binary: candidate-runtime/securefix
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'verify'
+        with:
+          artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.trusted-build.outputs.artifact-id }}
+          path: trusted-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        if: inputs.phase == 'verify'
+        with:
+          binary: trusted-runtime/securefix
+      - name: Validate fixture state with trusted runtime
+        if: inputs.phase == 'verify'
+        id: state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || inputs.candidate_sha || job.workflow_sha }}
+          FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
+        run: $RUNNER_TEMP/securefix-bin/securefix integration fetch-state --candidate-sha "$CANDIDATE_SHA" --run-id "$FIXTURE_RUN_ID" --state-file fixtures/state.json
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'verify'
+        with:
+          artifact-ids: ${{ needs.reuse.outputs.artifact-id }}
+          path: candidate-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        if: inputs.phase == 'verify'
+        with:
+          binary: candidate-runtime/securefix
+      # The `main` environment must restrict access to main and the manually approved,
+      # immutable integration/native-<workflow SHA prefix> bootstrap branch only.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: client-token
+        id: server
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-checks: write
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client
         with:
           app-id: '3872492'
           private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
           owner: civitaspo
           repositories: testing-securefix-server
-          permission-metadata: read
-      - name: Confirm the Client App token is scoped to scratch
+          permission-actions: read
+          permission-contents: read
+          permission-issues: write
+      - name: Execute candidate against the isolated scratch repository
         env:
-          SECUREFIX_LIVE_TEST_REPOSITORY: civitaspo/testing-securefix-server
-          SECUREFIX_CLIENT_INSTALLATION_TOKEN: ${{ steps.client-token.outputs.token }}
-        run: >-
-          "$RUNNER_TEMP/securefix-test-bin/github-api-tests"
-          client_app_token_is_scoped_to_scratch_repository
-          --exact --ignored --nocapture
+          SECUREFIX_SERVER_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.client.outputs.token }}
+          SECUREFIX_TEST_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
+          TEST_PHASE: ${{ inputs.phase }}
+        run: securefix integration run --phase "$TEST_PHASE" --candidate-sha "$CANDIDATE_SHA" --state-file fixtures/state.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: scratch-fixtures
+          path: fixtures/
+          if-no-files-found: ignore
+          retention-days: 7

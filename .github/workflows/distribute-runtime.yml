@@ -73,16 +73,27 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
         run: securefix distribute prepare-caller "${{ matrix.repository }}" "caller-migration"
-      - uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
-        if: steps.prepare.outputs.already_current != 'true'
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: server-write-token
         with:
-          action: client
-          app_id: '3872492'
-          app_private_key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-          repository: ${{ matrix.repository }}
-          branch: automation/securefix-runtime
-          server_repository: civitaspo/securefix-server
-          files: ${{ steps.prepare.outputs.files }}
-          root_dir: caller-migration
-          use_git_ls_files: 'false'
-          custom: '{"publisher_run_id":${{ github.event.workflow_run.id || inputs.publisher_run_id }}}'
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.prepare.outputs.repository_name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Apply signed caller migration and reconcile its pull request
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.server-write-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id || inputs.publisher_run_id }}
+        run: >-
+          securefix distribute apply-caller
+          --repository "${{ matrix.repository }}"
+          --directory caller-migration
+          --publisher-run-id "$PUBLISHER_RUN_ID"

@@ -2,7 +2,17 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Method, StatusCode, blocking::Client, redirect::Policy};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{fmt, io::Read, time::Duration};
+use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
+
+pub const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
+pub const SCRATCH_REPOSITORY_ID: u64 = 1_410_312_556;
+
+#[derive(Clone)]
+enum WriteContext {
+    ReadOnly,
+    Production(Option<String>),
+    Scratch { candidate_sha: String },
+}
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -28,8 +38,7 @@ pub struct GitHub {
     client: Client,
     token: String,
     base: String,
-    guard_writes: bool,
-    source_sha: Option<String>,
+    writes: WriteContext,
 }
 
 impl GitHub {
@@ -37,8 +46,7 @@ impl GitHub {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
         let mut api = Self::new("https://api.github.com", token)?;
-        api.guard_writes = true;
-        api.source_sha = std::env::var("SECUREFIX_SOURCE_SHA").ok();
+        api.writes = WriteContext::Production(std::env::var("SECUREFIX_SOURCE_SHA").ok());
         Ok(api)
     }
 
@@ -76,16 +84,50 @@ impl GitHub {
                 .build()?,
             base,
             token,
-            guard_writes: false,
-            source_sha: None,
+            writes: WriteContext::ReadOnly,
         })
     }
 
     pub fn with_runtime_revision(mut self, revision: &str) -> Result<Self> {
         crate::policy::validate_sha(revision)?;
-        self.source_sha = Some(revision.to_owned());
-        self.guard_writes = true;
+        self.writes = WriteContext::Production(Some(revision.to_owned()));
         Ok(self)
+    }
+
+    pub fn scratch_from_env(name: &str, candidate_sha: &str) -> Result<Self> {
+        crate::policy::validate_sha(candidate_sha)?;
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let mut api = Self::new("https://api.github.com", token)?;
+        let installation: Value = api.get("/installation/repositories?per_page=100")?;
+        let repositories = installation["repositories"]
+            .as_array()
+            .context("not an installation token")?;
+        ensure!(
+            installation["total_count"] == 1
+                && repositories.len() == 1
+                && repositories[0]["full_name"] == SCRATCH_REPOSITORY
+                && repositories[0]["id"].as_u64() == Some(SCRATCH_REPOSITORY_ID),
+            "integration token must be installed only on the scratch repository"
+        );
+        api.writes = WriteContext::Scratch {
+            candidate_sha: candidate_sha.to_owned(),
+        };
+        Ok(api)
+    }
+
+    fn require_write_target(&self, path: &str) -> Result<()> {
+        if let WriteContext::Scratch { candidate_sha } = &self.writes {
+            crate::policy::validate_sha(candidate_sha)?;
+            let prefix = format!("/repos/{SCRATCH_REPOSITORY}/");
+            ensure!(
+                path.starts_with(&prefix)
+                    && !path.contains(['%', '\\', '?'])
+                    && !path.split('/').any(|part| part == "." || part == ".."),
+                "integration write target is outside the scratch repository"
+            );
+        }
+        Ok(())
     }
 
     fn url(&self, path: &str) -> Result<String> {
@@ -119,6 +161,7 @@ impl GitHub {
             ensure!(read_only_graphql, "unsupported GraphQL operation");
         }
         if method != Method::GET && method != Method::HEAD && !read_only_graphql {
+            self.require_write_target(path)?;
             self.require_current_revision()?;
         }
         let mut request = self.builder(method.clone(), path)?;
@@ -145,11 +188,13 @@ impl GitHub {
     }
 
     fn require_current_revision(&self) -> Result<()> {
-        ensure!(self.guard_writes, "read-only API connection cannot write");
-        let expected = self
-            .source_sha
-            .as_deref()
-            .context("missing trusted runtime revision before write")?;
+        let expected = match &self.writes {
+            WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
+            WriteContext::Scratch { .. } => return Ok(()),
+            WriteContext::Production(revision) => revision
+                .as_deref()
+                .context("missing trusted runtime revision before write")?,
+        };
         crate::policy::validate_sha(expected)?;
         let commit: Value = self.get("/repos/civitaspo/securefix-server/commits/main")?;
         ensure!(
@@ -204,6 +249,114 @@ impl GitHub {
             .get("data")
             .cloned()
             .context("missing GraphQL data")
+    }
+
+    pub fn create_commit(
+        &self,
+        repository: &str,
+        branch: &str,
+        expected_head: &str,
+        message: &str,
+        additions: BTreeMap<String, Vec<u8>>,
+        deletions: Vec<String>,
+    ) -> Result<String> {
+        use base64::Engine;
+        crate::policy::validate_repository(repository)?;
+        crate::policy::validate_sha(expected_head)?;
+        ensure!(
+            !branch.is_empty()
+                && branch.len() <= 255
+                && !branch.starts_with('/')
+                && !branch.ends_with('/')
+                && !branch.contains("..")
+                && !branch.contains("//")
+                && !branch.ends_with(".lock")
+                && branch
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+            "invalid commit branch"
+        );
+        ensure!(
+            !message.trim().is_empty() && message.len() <= 65536 && !message.contains('\0'),
+            "invalid commit message"
+        );
+        ensure!(
+            !additions.is_empty() || !deletions.is_empty(),
+            "commit has no file changes"
+        );
+        ensure!(
+            additions.len() + deletions.len() <= 1000,
+            "too many commit files"
+        );
+        for path in additions.keys().chain(deletions.iter()) {
+            ensure!(
+                !path.is_empty()
+                    && path.len() <= 4096
+                    && !path.starts_with('/')
+                    && !path.contains(['\\', '\0', '\r', '\n'])
+                    && path.split('/').all(|part| !part.is_empty()
+                        && part != "."
+                        && part != ".."
+                        && !part.eq_ignore_ascii_case(".git")),
+                "invalid commit file path"
+            );
+        }
+        ensure!(
+            additions.values().map(Vec::len).sum::<usize>() <= 16 * 1024 * 1024,
+            "commit contents exceed size limit"
+        );
+        ensure!(
+            deletions
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == deletions.len()
+                && deletions.iter().all(|path| !additions.contains_key(path)),
+            "duplicate commit file change"
+        );
+        self.require_write_target(&format!("/repos/{repository}/git/commits"))?;
+        self.require_current_revision()?;
+        let (headline, body) = message.split_once('\n').unwrap_or((message, ""));
+        let input = serde_json::json!({
+            "branch":{"repositoryNameWithOwner":repository,"branchName":branch},
+            "expectedHeadOid":expected_head,
+            "message":{"headline":headline,"body":body},
+            "fileChanges":{
+                "additions":additions.into_iter().map(|(path,bytes)| serde_json::json!({"path":path,"contents":base64::engine::general_purpose::STANDARD.encode(bytes)})).collect::<Vec<_>>(),
+                "deletions":deletions.into_iter().map(|path| serde_json::json!({"path":path})).collect::<Vec<_>>()
+            }
+        });
+        let response = self.builder(Method::POST, "/graphql")?.json(&serde_json::json!({
+            "query":"mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid parents(first:2){nodes{oid}} signature{isValid state}}}}",
+            "variables":{"input":input}
+        })).send().context("GitHub signed commit mutation failed")?;
+        ensure!(
+            response.status().is_success(),
+            "GitHub signed commit returned {}",
+            response.status()
+        );
+        let value: Value = serde_json::from_slice(&bounded_read(response, 1024 * 1024)?)?;
+        ensure!(
+            value.get("errors").is_none(),
+            "GitHub signed commit mutation was rejected"
+        );
+        let commit = &value["data"]["createCommitOnBranch"]["commit"];
+        let sha = commit["oid"]
+            .as_str()
+            .context("signed commit response has no SHA")?;
+        crate::policy::validate_sha(sha)?;
+        ensure!(
+            commit["signature"]["isValid"] == true && commit["signature"]["state"] == "VALID",
+            "created commit does not have a verified signature"
+        );
+        let parents = commit["parents"]["nodes"]
+            .as_array()
+            .context("commit parents missing")?;
+        ensure!(
+            parents.len() == 1 && parents[0]["oid"] == expected_head,
+            "created commit has unexpected parent"
+        );
+        Ok(sha.to_owned())
     }
 
     pub fn paginate(&self, path: &str) -> Result<Vec<Value>> {
@@ -264,6 +417,10 @@ impl GitHub {
         bounded_read(response, max)
     }
     pub fn upload(&self, path: &str, bytes: Vec<u8>, content_type: &str) -> Result<Value> {
+        ensure!(
+            !matches!(self.writes, WriteContext::Scratch { .. }),
+            "integration cannot upload release assets"
+        );
         self.require_current_revision()?;
         let url = reqwest::Url::parse(path)?;
         ensure!(
@@ -342,6 +499,106 @@ mod tests {
             "query {viewer{login}} mutation {mergePullRequest}",
         ] {
             assert!(!read_only_query(query));
+        }
+    }
+    #[test]
+    fn scratch_writes_cannot_escape_the_fixed_repository() {
+        let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        api.writes = WriteContext::Scratch {
+            candidate_sha: "a".repeat(40),
+        };
+        assert!(
+            api.require_write_target(&format!("/repos/{SCRATCH_REPOSITORY}/issues/1/comments"))
+                .is_ok()
+        );
+        for path in [
+            "/repos/civitaspo/securefix-server/issues/1/comments",
+            "/repos/civitaspo/testing-securefix-server-evil/git/refs",
+            "/repos/civitaspo/testing-securefix-server/../securefix-server/git/refs",
+            "/repos/civitaspo/testing-securefix-server/%2e%2e/git/refs",
+            "/graphql",
+            "/user/repos",
+        ] {
+            assert!(
+                api.post::<Value>(path, &serde_json::json!({})).is_err(),
+                "{path}"
+            );
+        }
+        assert!(
+            api.create_commit(
+                "civitaspo/securefix-server",
+                "main",
+                &"a".repeat(40),
+                "blocked",
+                BTreeMap::from([("fixture.txt".into(), b"test".to_vec())]),
+                vec![]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_commit_rejects_unsafe_changes_before_network_access() {
+        let api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        for path in [
+            "../outside",
+            "/absolute",
+            ".git/config",
+            "a//b",
+            "a\\b",
+            "a\nheader",
+        ] {
+            let result = api.create_commit(
+                SCRATCH_REPOSITORY,
+                "fixture",
+                &"a".repeat(40),
+                "test",
+                BTreeMap::from([(path.into(), vec![1])]),
+                vec![],
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid commit file path")
+            );
+        }
+    }
+
+    #[test]
+    fn commit_response_must_prove_the_signature_and_expected_parent() {
+        use crate::fixtures::{Fixture, Route};
+        for (signed, parent, expected_ok) in
+            [(true, 'a', true), (false, 'a', false), (true, 'c', false)]
+        {
+            let fixture = Fixture::new(vec![
+                Route::get(
+                    "/repos/civitaspo/securefix-server/commits/main",
+                    serde_json::json!({"sha":"a".repeat(40)}),
+                ),
+                Route::request(
+                    "POST",
+                    "/graphql",
+                    200,
+                    serde_json::json!({"data":{"createCommitOnBranch":{"commit":{
+                        "oid":"b".repeat(40), "parents":{"nodes":[{"oid":parent.to_string().repeat(40)}]},
+                        "signature":{"isValid":signed,"state":"VALID"}
+                    }}}}),
+                ),
+            ]);
+            let result = fixture.api.create_commit(
+                SCRATCH_REPOSITORY,
+                "fixture",
+                &"a".repeat(40),
+                "test",
+                BTreeMap::from([("file.txt".into(), b"test".to_vec())]),
+                vec![],
+            );
+            assert_eq!(result.is_ok(), expected_ok);
+            if expected_ok {
+                assert_eq!(result.unwrap(), "b".repeat(40));
+            }
+            fixture.finish();
         }
     }
     #[test]

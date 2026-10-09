@@ -1,16 +1,17 @@
 use crate::{
     api::{ApiError, GitHub},
     output,
-    policy::{Capability, Policy, SERVER, validate_repository, validate_sha},
+    policy::{Capability, Policy, SERVER, validate_sha},
     workflow,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
+use securefix::output_multiline;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
-mod caller;
-use caller::{prepare_caller, rendered_files, write_migration};
+pub(crate) mod caller;
+use caller::{prepare_caller, rendered_files, validate_migration_files, write_migration};
 
 const UPDATE_BRANCH: &str = "automation/securefix-runtime";
 const DISTRIBUTOR_WORKFLOW: &str = ".github/workflows/distribute-runtime.yml";
@@ -27,10 +28,15 @@ pub enum Command {
         repository: String,
         directory: String,
     },
-    #[command(about = "Validate a Securefix runtime-distribution request")]
-    ValidatePrepared,
-    #[command(about = "Reconcile the bot-owned runtime migration pull request")]
-    ReconcilePullRequest,
+    #[command(about = "Apply and reconcile one policy-approved caller migration")]
+    ApplyCaller {
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        directory: String,
+        #[arg(long)]
+        publisher_run_id: u64,
+    },
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -67,26 +73,22 @@ pub fn run(command: Command) -> Result<()> {
                 repository.split('/').nth(1).context("invalid repository")?,
             )
         }
-        Command::ValidatePrepared => {
-            let api = GitHub::from_env("GITHUB_TOKEN")?;
+        Command::ApplyCaller {
+            repository,
+            directory,
+            publisher_run_id,
+        } => {
+            let api = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
             let policy = active_policy(&api)?;
-            let prepared = PreparedDistribution::from_env()?;
-            let migration = validate_prepared(&api, &policy, &prepared)?;
-            output("distribution", "true")?;
-            output("push_repository", &migration.repository)?;
-            output("branch", UPDATE_BRANCH)?;
-            output("default_branch", &migration.default_branch)?;
-            output("already_current", migration.already_current.to_string())?;
-            output("source_sha", &migration.source_sha)
-        }
-        Command::ReconcilePullRequest => {
-            let api = GitHub::from_env("GITHUB_TOKEN")?;
-            let policy = active_policy(&api)?;
-            let prepared = PreparedDistribution::from_env()?;
-            let migration = validate_prepared(&api, &policy, &prepared)?;
-            workflow::successful_source_run(&api, SERVER, migration.source_run_id)?;
-            let write = GitHub::from_env("SECUREFIX_DISTRIBUTION_TOKEN")?;
-            let number = reconcile_pull_request(&write, &policy, &migration)?;
+            validate_distributor_context(publisher_run_id)?;
+            let promotion = validate_promotion(&api, &policy, publisher_run_id)?;
+            ensure!(
+                std::env::var("SECUREFIX_SOURCE_SHA")? == promotion.source_sha,
+                "runtime distributor does not match the published current main"
+            );
+            let migration = prepare_caller(&api, &policy, &repository, &promotion.source_sha)?;
+            validate_migration_files(Path::new(&directory), &migration)?;
+            let number = apply_caller_migration(&api, &policy, &migration)?;
             output("pull_request_number", number.to_string())
         }
     }
@@ -96,66 +98,15 @@ pub fn run(command: Command) -> Result<()> {
 pub(crate) struct PublishedRuntime {
     pub(crate) publisher_run_id: u64,
     pub(crate) source_sha: String,
-    release_id: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct CallerMigration {
     repository: String,
     default_branch: String,
-    publisher_run_id: u64,
-    source_run_id: u64,
     source_sha: String,
     files: BTreeMap<String, Vec<u8>>,
     default_current: bool,
-    already_current: bool,
-}
-
-struct PreparedDistribution {
-    source_repository: String,
-    source_run_id: u64,
-    source_run: Value,
-    destination: String,
-    branch: String,
-    fixed_files: Vec<String>,
-    metadata: Value,
-}
-
-impl PreparedDistribution {
-    fn from_env() -> Result<Self> {
-        let event = crate::event()?;
-        let label = event["label"]["name"]
-            .as_str()
-            .context("missing label name")?;
-        ensure!(
-            label.starts_with("securefix-") && label.len() <= 50,
-            "invalid Securefix label"
-        );
-        let (source_repository, source_run_id) = event["label"]["description"]
-            .as_str()
-            .context("missing label description")?
-            .rsplit_once('/')
-            .context("invalid Securefix label description")?;
-        validate_repository(source_repository)?;
-        let source_run_id = source_run_id.parse::<u64>()?;
-        let source_run: Value = serde_json::from_str(&std::env::var("SECUREFIX_WORKFLOW_RUN")?)?;
-        let metadata: Value = serde_json::from_str(&std::env::var("SECUREFIX_METADATA")?)?;
-        let fixed_files = std::env::var("SECUREFIX_FIXED_FILES")?
-            .lines()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .collect();
-        Ok(Self {
-            source_repository: source_repository.to_owned(),
-            source_run_id,
-            source_run,
-            destination: std::env::var("SECUREFIX_PUSH_REPOSITORY")?,
-            branch: std::env::var("SECUREFIX_BRANCH")?,
-            fixed_files,
-            metadata,
-        })
-    }
 }
 
 fn active_policy(api: &GitHub) -> Result<Policy> {
@@ -256,9 +207,6 @@ pub(crate) fn validate_promotion(
     Ok(PublishedRuntime {
         publisher_run_id,
         source_sha: source_sha.to_owned(),
-        release_id: release["id"]
-            .as_u64()
-            .context("runtime release ID missing")?,
     })
 }
 
@@ -290,111 +238,6 @@ fn workflow_path(actual: &Value, expected: &str) -> bool {
         let (path, reference) = path.split_once('@').unwrap_or((path, ""));
         path == expected
             && (reference.is_empty() || reference == "main" || reference == "refs/heads/main")
-    })
-}
-
-fn validate_prepared(
-    api: &GitHub,
-    policy: &Policy,
-    prepared: &PreparedDistribution,
-) -> Result<CallerMigration> {
-    let source = std::env::var("SECUREFIX_SOURCE_SHA")?;
-    ensure!(source == policy.revision, "runtime revision is not current");
-    ensure!(
-        prepared.source_repository == SERVER
-            && std::env::var("GITHUB_REPOSITORY")? == SERVER
-            && std::env::var("GITHUB_EVENT_NAME")? == "label"
-            && std::env::var("GITHUB_RUN_ATTEMPT")? == "1",
-        "runtime distribution must be received by a first-attempt server label workflow"
-    );
-    let event = crate::event()?;
-    ensure!(
-        event["action"] == "created"
-            && event["sender"]["id"].as_u64() == Some(policy.client_bot_id)
-            && event["sender"]["type"] == "Bot",
-        "runtime distribution label was not created by Securefix Client"
-    );
-    ensure!(
-        prepared.source_run["id"].as_u64() == Some(prepared.source_run_id)
-            && prepared.source_run["repository"]["full_name"] == SERVER
-            && prepared.source_run["head_repository"]["full_name"] == SERVER
-            && workflow_path(&prepared.source_run["path"], DISTRIBUTOR_WORKFLOW)
-            && prepared.source_run["head_branch"] == "main"
-            && matches!(
-                prepared.source_run["event"].as_str(),
-                Some("workflow_run" | "workflow_dispatch")
-            )
-            && prepared.source_run["actor"]["id"].as_u64() == Some(PUBLISHER_ACTOR)
-            && prepared.source_run["run_attempt"] == 1,
-        "Securefix request is not from the runtime distributor workflow"
-    );
-    ensure!(
-        prepared.metadata["context"]["payload"]["repository"]["full_name"] == SERVER
-            && prepared.metadata["inputs"]["repository"] == prepared.destination
-            && prepared.metadata["inputs"]["branch"] == UPDATE_BRANCH,
-        "Securefix destination metadata mismatch"
-    );
-    ensure!(
-        prepared.branch == UPDATE_BRANCH
-            && caller_names(policy)?
-                .iter()
-                .any(|repository| repository == &prepared.destination),
-        "Securefix destination is outside the fixed runtime migration registry"
-    );
-    let publisher_run_id = prepared.metadata["inputs"]["custom"]["publisher_run_id"]
-        .as_u64()
-        .context("Securefix request lacks publisher identity")?;
-    let promotion = validate_promotion(api, policy, publisher_run_id)?;
-    ensure!(
-        prepared.source_run["head_sha"] == promotion.source_sha
-            && std::env::var("SECUREFIX_SOURCE_SHA")? == promotion.source_sha,
-        "runtime distributor does not match the published current main"
-    );
-    let successful = workflow::successful_source_run(api, SERVER, prepared.source_run_id)?;
-    ensure!(
-        workflow_path(&successful["path"], DISTRIBUTOR_WORKFLOW)
-            && successful["head_sha"] == promotion.source_sha,
-        "runtime distributor run identity changed"
-    );
-    let migration = prepare_caller(api, policy, &prepared.destination, &promotion.source_sha)?;
-    let expected: Vec<_> = migration.files.keys().map(String::as_str).collect();
-    let actual: Vec<_> = prepared.fixed_files.iter().map(String::as_str).collect();
-    ensure!(
-        actual == expected,
-        "Securefix file list does not match the reviewed caller migration"
-    );
-    for (path, expected_contents) in &migration.files {
-        let file = fs::symlink_metadata(path)
-            .with_context(|| format!("missing prepared migration file {path}"))?;
-        ensure!(
-            file.is_file() && !file.file_type().is_symlink(),
-            "prepared migration is not a regular file: {path}"
-        );
-        ensure!(
-            fs::read(path).with_context(|| format!("missing prepared migration file {path}"))?
-                == *expected_contents,
-            "prepared migration content does not match the reviewed template: {path}"
-        );
-    }
-    let repo: Value = api.get(&format!("/repos/{}", migration.repository))?;
-    let default_branch = repo["default_branch"]
-        .as_str()
-        .context("caller default branch missing")?;
-    ensure!(
-        default_branch == migration.default_branch && default_branch != UPDATE_BRANCH,
-        "caller default branch changed during validation"
-    );
-    let already_current = validate_automation_branch(api, policy, &migration)?;
-    validate_existing_pull_request(api, policy, &migration)?;
-    Ok(CallerMigration {
-        repository: migration.repository,
-        default_branch: migration.default_branch,
-        publisher_run_id,
-        source_run_id: prepared.source_run_id,
-        source_sha: promotion.source_sha,
-        files: migration.files,
-        default_current: migration.default_current,
-        already_current: already_current || migration.default_current,
     })
 }
 
@@ -452,7 +295,7 @@ fn validate_automation_branch(
     api: &GitHub,
     policy: &Policy,
     migration: &CallerMigration,
-) -> Result<bool> {
+) -> Result<(bool, Option<String>)> {
     let ref_path = format!(
         "/repos/{}/git/ref/heads/{}",
         migration.repository, UPDATE_BRANCH
@@ -464,7 +307,7 @@ fn validate_automation_branch(
                 .downcast_ref::<ApiError>()
                 .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND) =>
         {
-            return Ok(false);
+            return Ok((false, None));
         }
         Err(error) => return Err(error),
     };
@@ -490,6 +333,13 @@ fn validate_automation_branch(
         ),
         "runtime branch cannot be reconciled against caller default branch"
     );
+    if head == base_sha {
+        ensure!(
+            compare["status"] == "identical",
+            "runtime branch comparison is inconsistent"
+        );
+        return Ok((false, Some(head.to_owned())));
+    }
     let files = compare["files"]
         .as_array()
         .context("automation branch diff missing")?;
@@ -597,7 +447,7 @@ fn validate_automation_branch(
             "automation branch changes unmanaged files"
         );
     }
-    Ok(desired)
+    Ok((desired, Some(head.to_owned())))
 }
 
 fn validate_existing_pull_request(
@@ -715,6 +565,100 @@ fn reconcile_pull_request(
     Ok(number)
 }
 
+fn apply_caller_migration(
+    api: &GitHub,
+    policy: &Policy,
+    migration: &CallerMigration,
+) -> Result<u64> {
+    if migration.default_current {
+        return Ok(0);
+    }
+    let (desired, validated_head) = validate_automation_branch(api, policy, migration)?;
+    validate_existing_pull_request(api, policy, migration)?;
+    if !desired {
+        let base: Value = api.get(&format!(
+            "/repos/{}/commits/{}",
+            migration.repository, migration.default_branch
+        ))?;
+        let base_sha = base["sha"]
+            .as_str()
+            .context("caller default branch SHA missing")?;
+        validate_sha(base_sha)?;
+        let expected_head = match validated_head {
+            Some(head) => head,
+            None => {
+                let response: Result<Value> = api.post(
+                    &format!("/repos/{}/git/refs", migration.repository),
+                    &json!({"ref":format!("refs/heads/{UPDATE_BRANCH}"),"sha":base_sha}),
+                );
+                match response {
+                    Ok(value) => {
+                        ensure!(
+                            value["ref"] == format!("refs/heads/{UPDATE_BRANCH}")
+                                && value["object"]["sha"] == base_sha,
+                            "created runtime migration branch has an unexpected head"
+                        );
+                        base_sha.to_owned()
+                    }
+                    Err(error)
+                        if error.downcast_ref::<ApiError>().is_some_and(|error| {
+                            matches!(
+                                error.status,
+                                reqwest::StatusCode::CONFLICT
+                                    | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                            )
+                        }) =>
+                    {
+                        let head = automation_branch_head(api, &migration.repository)?.context(
+                            "runtime migration branch creation raced but branch is missing",
+                        )?;
+                        ensure!(
+                            head == base_sha,
+                            "runtime migration branch changed during creation"
+                        );
+                        head
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        api.create_commit(
+            &migration.repository,
+            UPDATE_BRANCH,
+            &expected_head,
+            &format!(
+                "chore: update Securefix workflows to {}",
+                migration.source_sha
+            ),
+            migration.files.clone(),
+            Vec::new(),
+        )?;
+    }
+    reconcile_pull_request(api, policy, migration)
+}
+
+fn automation_branch_head(api: &GitHub, repository: &str) -> Result<Option<String>> {
+    match api.get::<Value>(&format!(
+        "/repos/{repository}/git/ref/heads/{UPDATE_BRANCH}"
+    )) {
+        Ok(value) => {
+            let head = value["object"]["sha"]
+                .as_str()
+                .context("automation branch has no commit")?;
+            validate_sha(head)?;
+            Ok(Some(head.to_owned()))
+        }
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn validate_branch(branch: &str) -> Result<()> {
     ensure!(
         !branch.is_empty()
@@ -726,23 +670,6 @@ fn validate_branch(branch: &str) -> Result<()> {
             && !branch.contains(['~', '^', ':', '?', '*', '[', '\\', '\0', ' ']),
         "invalid branch name"
     );
-    Ok(())
-}
-
-fn output_multiline(name: &str, value: &str) -> Result<()> {
-    use std::{fs::OpenOptions, io::Write};
-    ensure!(
-        !value.contains("SECUREFIX_OUTPUT_END"),
-        "invalid multiline output"
-    );
-    if let Ok(path) = std::env::var("GITHUB_OUTPUT") {
-        writeln!(
-            OpenOptions::new().append(true).open(path)?,
-            "{name}<<SECUREFIX_OUTPUT_END\n{value}\nSECUREFIX_OUTPUT_END"
-        )?;
-    } else {
-        println!("{name}={value}");
-    }
     Ok(())
 }
 

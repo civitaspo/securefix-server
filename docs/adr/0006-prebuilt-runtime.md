@@ -4,7 +4,7 @@ The previous reusable builder compiled Rust for every operation, then passed a s
 Normal operations now load a prebuilt runtime; candidate validation uses a separate scratch CI artifact and creates no Release.
 
 `publish-runtime.yml` runs only when the owner manually dispatches it on protected server `main` after staging.
-It checks out `job.workflow_sha`, builds with the locked toolchain and dependencies, and archives the executable, `policy.json`, `securefix-config.yaml`, and `repo-settings` together.
+It checks out `job.workflow_sha`, builds with the locked toolchain and dependencies, and archives the executable, `policy.json`, and `repo-settings` together.
 The build job has contents-read, OIDC, and attestation permissions, but no release-write token or custom secrets.
 The pinned official attestation action signs that exact archive.
 A separate contents-write job downloads the producer's immutable artifact ID, verifies the same archive before extraction, installs the executable, and calls Rust to publish a draft-first Release.

@@ -27,16 +27,13 @@ Sensitive changes need owner authorization for that exact head.
 The server publishes `securefix-policy-check` from the Server App; an approval for an earlier head cannot satisfy it for an updated head.
 Ordinary Renovate automerge remains possible under the same required checks and stale-review dismissal.
 
-Securefix uses pinned upstream `prepare`, `commit`, and `notify` actions for its artifact protocol and repair commits.
-Rust validates the Client App event, exact repository capabilities, source workflow provenance, and destination scope between preparation and commit.
-It accepts client `CI` and `Release PR` workflows and denies direct default-branch pushes.
-The trusted [`securefix-config.yaml`](securefix-config.yaml) permits the fixed release-capable clients on any branch name; it travels with the attested runtime outside the client artifact workspace.
-PR CI fixes its own branch, and a trusted release-PR source can target any non-default branch in the same repository.
-Securefix requests may come from a running or failed CI run because the client deliberately fails after dispatching a same-branch fix.
-The separate runtime distribution route requires a successful server distribution run for a published current-main runtime.
-It permits only generated caller workflows on `automation/securefix-runtime` and reuses one review PR per caller.
-See the [runtime rollout decision](docs/adr/0007-published-runtime-rollout.md).
-The [upstream integration decision](docs/adr/0005-upstream-securefix-protocol.md) records the accepted stale-artifact limitation and why approval remains in Rust.
+Rust owns the client artifact protocol, source validation, signed commits and pull requests.
+Repository capabilities in policy.json are the only Securefix allowlist.
+Client CI fixes its own non-default branch. A pinned release workflow can update a non-default release branch in the same repository.
+Artifact extraction rejects unsafe paths, symlinks, duplicate files and oversized content.
+Every repair uses a verified GitHub-signed commit and an expected-head comparison before updating its destination. A newer head invalidates a same-branch fix.
+Caller distribution commits the generated workflows directly and opens one review PR per caller after a successful stable runtime publication.
+The [native protocol decision](docs/adr/0008-native-securefix.md) replaces the upstream implementation decision.
 
 ## Operations
 
@@ -85,7 +82,7 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 CI also runs pinned actionlint and structural workflow tests.
-The [scratch verification CI](docs/testing.md) builds a reviewed server revision in `testing-securefix-server` and transfers its executable by immutable same-run artifact ID, without publishing a Release.
+The [candidate integration harness](docs/integration-testing.md) builds a reviewed candidate without secrets and exercises its writes only against `testing-securefix-server`, without publishing a runtime Release.
 The [Rust GitHub verification](docs/github-verification-2026-10-08.md) records PR CI, isolated live API checks, and the remaining deployment tests.
 See [migration and rollout](docs/migration.md), the [domain glossary](CONTEXT.md), and [architecture decisions](docs/adr/).
 The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence; the Rust implementation still needs deployment validation before activation.

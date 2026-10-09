@@ -983,7 +983,7 @@ fn tag_pr(release_pr_number: u64, artifact_id: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-fn create_annotated_tag(
+pub(crate) fn create_annotated_tag(
     api: &GitHub,
     repo: &Repository,
     tag: &ReleaseTag,

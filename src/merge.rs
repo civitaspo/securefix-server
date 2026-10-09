@@ -294,7 +294,11 @@ fn read_manifest() -> Result<RequestManifest> {
     Ok(manifest)
 }
 
-fn validate_state(api: &GitHub, policy: &Policy, manifest: &RequestManifest) -> Result<()> {
+pub(crate) fn validate_state(
+    api: &GitHub,
+    policy: &Policy,
+    manifest: &RequestManifest,
+) -> Result<()> {
     ensure!(
         manifest.run_attempt == 1 && manifest.kind == RequestKind::Merge,
         "invalid or replayed merge request"
@@ -371,7 +375,7 @@ fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool 
     })
 }
 
-fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
+pub(crate) fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
     let repository = &manifest.repository.full_name;
     let mut checks = Vec::new();
     for page in 1..=100 {

@@ -69,16 +69,13 @@ pub(super) fn prepare_caller(
     Ok(CallerMigration {
         repository: repository.to_owned(),
         default_branch: default_branch.to_owned(),
-        publisher_run_id: 0,
-        source_run_id: 0,
         source_sha: source_sha.to_owned(),
         files,
         default_current,
-        already_current: default_current,
     })
 }
 
-pub(super) fn rendered_files(
+pub(crate) fn rendered_files(
     source_sha: &str,
     default_branch: &str,
     releases: bool,
@@ -139,6 +136,40 @@ pub(super) fn write_migration(directory: &Path, migration: &CallerMigration) -> 
         let output_path = directory.join(path);
         fs::create_dir_all(output_path.parent().context("migration parent missing")?)?;
         fs::write(output_path, contents)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_migration_files(
+    directory: &Path,
+    migration: &CallerMigration,
+) -> Result<()> {
+    for (relative, expected) in &migration.files {
+        let path = Path::new(relative);
+        ensure!(
+            path.components().count() == 3
+                && path.starts_with(".github/workflows")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".yml")),
+            "invalid migration path"
+        );
+        let mut current = directory.to_path_buf();
+        for (index, component) in path.components().enumerate() {
+            current.push(component.as_os_str());
+            let metadata = fs::symlink_metadata(&current)
+                .with_context(|| format!("missing prepared migration file {relative}"))?;
+            ensure!(
+                !metadata.file_type().is_symlink()
+                    && (index == path.components().count() - 1 || metadata.is_dir())
+                    && (index != path.components().count() - 1 || metadata.is_file()),
+                "prepared migration path is not a regular file: {relative}"
+            );
+        }
+        ensure!(
+            fs::read(directory.join(path))? == *expected,
+            "prepared migration content does not match the reviewed template: {relative}"
+        );
     }
     Ok(())
 }
