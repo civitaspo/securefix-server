@@ -25,4 +25,10 @@ Follow the [deployment sequence](migration.md) for those privileged lifecycle ch
 
 Once staging and review succeed, manually dispatch `Publish Runtime` on the server's current main revision.
 Publishing intermediate commits is unnecessary.
-After main advances, old client pins and runtimes stop working until the stable current revision is published and pins are updated.
+Successful publication initiates caller update PRs and the server's default-head Policy Check.
+Inspect the distribution run, its Securefix receiver runs, and the signed caller PRs before merging caller changes under the [maintenance procedure](migration.md#subsequent-server-upgrades).
+To recover a failed distribution, dispatch a new `Distribute Runtime` run on server main with the successful publisher run ID.
+An existing update PR is reused, and a caller whose default branch already has the generated workflows needs no PR.
+After main advances, old client pins and runtimes stop working until the stable current revision is published and caller updates are merged.
+The Server App private key remains in the server main environment.
+That environment permits only main deployments, so candidate scratch CI cannot exercise its production write path before merge.

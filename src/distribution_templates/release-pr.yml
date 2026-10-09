@@ -1,0 +1,31 @@
+name: Release PR
+
+on:
+  push:
+    branches:
+      - @DEFAULT_BRANCH@
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Explicit release version, or empty to compute it
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    permissions:
+      contents: read
+      attestations: read
+      pull-requests: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@@SECUREFIX_RUNTIME_SHA@
+    with:
+      version: ${{ inputs.version }}
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

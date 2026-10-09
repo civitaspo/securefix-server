@@ -11,6 +11,8 @@
 | Owner authorization | An owner command accepted for one exact PR head. |
 | Sensitive change | A change to a path whose automatic approval requires owner authorization. |
 | Runtime revision | The server commit containing the CLI and the workflow that calls it. |
+| Runtime promotion | A successful owner-dispatched publication of the exact current server main revision. |
+| Caller migration | Generated workflow changes for one configured client, delivered through its fixed runtime update branch and a reviewable PR. |
 | Release identity | The repository, merged release PR, commit, tag, and version being published. |
 | Release bundle | The unsigned, canonical publication assets produced by the isolated build job. |
 | Activation | Creating or reactivating the controlled-merges ruleset after checking the full configured repository set. |

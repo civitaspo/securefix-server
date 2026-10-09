@@ -46,7 +46,9 @@ It neither publishes a Release nor bypasses production authorization for a candi
 
 Missing or unverified Releases stop operations without compiling a fallback or selecting another SHA.
 After server main advances, the previous runtime becomes stale immediately.
-Multiple changes can be staged together; manually promote the final stable main revision before updating client pins and resuming operations.
+Multiple changes can be staged together; manually promote the final stable main revision before resuming operations.
+Successful publication starts the [caller PR rollout and default-head Policy Check](0007-published-runtime-rollout.md).
+Review and merge the caller PRs through the existing upgrade maintenance procedure.
 Recover a failed publication by rerunning that dispatch while its revision remains current.
 An obsolete runtime cannot publish after main advances.
 Publication may rebuild during an explicit retry; normal operations reuse the published archive.

@@ -2,20 +2,21 @@ name: Policy Check
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [Publish Runtime]
+    types: [completed]
   label:
     types: [created]
 permissions: {}
 jobs:
   cli:
-    if: github.event_name != 'label' || startsWith(github.event.label.name, 'policy-request-')
+    if: (github.event_name != 'label' || startsWith(github.event.label.name, 'policy-request-')) && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
       attestations: read
   request:
-    if: github.event_name != 'label' && github.run_attempt == 1
+    if: github.event_name != 'label' && github.run_attempt == 1 && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     needs: cli
     runs-on: ubuntu-latest
     environment: main

@@ -1,0 +1,21 @@
+name: Release PR Sync
+
+on:
+  push:
+    branches:
+      - release/next
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-pr-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    permissions:
+      contents: read
+      attestations: read
+      pull-requests: write
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@@SECUREFIX_RUNTIME_SHA@

@@ -1,0 +1,88 @@
+name: Distribute Runtime
+on:
+  workflow_run:
+    workflows: [Publish Runtime]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      publisher_run_id:
+        description: Successful Publish Runtime run to retry
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: runtime-distribution-${{ github.event.workflow_run.id || inputs.publisher_run_id }}
+  cancel-in-progress: false
+jobs:
+  runtime:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      contents: read
+      attestations: read
+  gate:
+    needs: runtime
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      callers: ${{ steps.validate.outputs.callers }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - id: validate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id || inputs.publisher_run_id }}
+        run: securefix distribute validate-promotion "$PUBLISHER_RUN_ID"
+  caller:
+    needs: [runtime, gate]
+    strategy:
+      fail-fast: false
+      matrix:
+        repository: ${{ fromJSON(needs.gate.outputs.callers) }}
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+        run: securefix distribute prepare-caller "${{ matrix.repository }}" "$RUNNER_TEMP/caller-migration"
+      - uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
+        if: steps.prepare.outputs.already_current != 'true'
+        with:
+          action: client
+          app_id: '3872492'
+          app_private_key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          repository: ${{ matrix.repository }}
+          branch: automation/securefix-runtime
+          server_repository: civitaspo/securefix-server
+          files: ${{ steps.prepare.outputs.files }}
+          root_dir: ${{ runner.temp }}/caller-migration
+          use_git_ls_files: 'false'
+          custom: '{"publisher_run_id":${{ github.event.workflow_run.id || inputs.publisher_run_id }}}'

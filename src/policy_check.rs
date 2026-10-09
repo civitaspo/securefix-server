@@ -40,6 +40,8 @@ enum Target {
     DefaultBranch {
         head_sha: String,
         branch: String,
+        #[serde(default)]
+        publisher_run_id: Option<u64>,
     },
 }
 
@@ -65,9 +67,16 @@ impl Manifest {
                 ensure!(*number > 0 && !base_ref.is_empty(), "invalid PR target");
                 validate_sha(head_sha)?;
             }
-            Target::DefaultBranch { head_sha, branch } => {
+            Target::DefaultBranch {
+                head_sha,
+                branch,
+                publisher_run_id,
+            } => {
                 validate_sha(head_sha)?;
-                ensure!(!branch.is_empty(), "invalid default branch");
+                ensure!(
+                    !branch.is_empty() && publisher_run_id.is_none_or(|id| id > 0),
+                    "invalid default branch target"
+                );
             }
         }
         Ok(())
@@ -140,15 +149,38 @@ fn capture() -> Result<()> {
         }
         "push" => {
             ensure!(
-                payload["ref"] == format!("refs/heads/{branch}") && payload["deleted"] == false,
-                "policy push is not to the default branch"
+                repository != SERVER
+                    && payload["ref"] == format!("refs/heads/{branch}")
+                    && payload["deleted"] == false,
+                "policy push is not an allowed caller default-branch update"
             );
             Target::DefaultBranch {
                 head_sha: payload["after"]
                     .as_str()
                     .context("missing push SHA")?
-                    .into(),
+                    .to_owned(),
+                branch: branch.to_owned(),
+                publisher_run_id: None,
+            }
+        }
+        "workflow_run" => {
+            let publisher_run_id = payload["workflow_run"]["id"]
+                .as_u64()
+                .context("missing publisher run ID")?;
+            ensure!(
+                std::env::var("GITHUB_REPOSITORY")? == SERVER && branch == "main",
+                "published runtime policy check must target server main"
+            );
+            let promotion =
+                crate::distribution::validate_promotion(&api, &policy, publisher_run_id)?;
+            ensure!(
+                promotion.source_sha == payload["workflow_run"]["head_sha"],
+                "policy check publisher SHA mismatch"
+            );
+            Target::DefaultBranch {
+                head_sha: promotion.source_sha,
                 branch: branch.into(),
+                publisher_run_id: Some(publisher_run_id),
             }
         }
         _ => anyhow::bail!("unsupported policy request event"),
@@ -315,13 +347,29 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
         Target::DefaultBranch {
             head_sha,
             branch: request_branch,
-        } => ensure!(
-            run["event"] == "push"
-                && head_sha == caller_sha
-                && request_branch == branch
-                && head_sha == current_base,
-            "default branch policy head changed"
-        ),
+            publisher_run_id,
+        } => {
+            ensure!(
+                head_sha == caller_sha && head_sha == current_base && request_branch == branch,
+                "default branch policy head changed"
+            );
+            if repository == SERVER {
+                let publisher_run_id = publisher_run_id.context(
+                    "server default-branch policy check is not bound to a publisher run",
+                )?;
+                let promotion =
+                    crate::distribution::validate_promotion(api, policy, publisher_run_id)?;
+                ensure!(
+                    run["event"] == "workflow_run" && head_sha == &promotion.source_sha,
+                    "server default-branch policy check is not bound to the successful runtime publication"
+                );
+            } else {
+                ensure!(
+                    publisher_run_id.is_none() && run["event"] == "push",
+                    "caller default-branch check has invalid publisher binding"
+                );
+            }
+        }
     }
     Ok(manifest)
 }

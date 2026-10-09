@@ -14,3 +14,22 @@ entries:
       branches:
         - "**"
     pull_request: {}
+  - client:
+      repositories:
+        - civitaspo/securefix-server
+      branches:
+        - main
+    push:
+      repositories:
+        - civitaspo/dotfiles
+        - civitaspo/dbt-authorized-models
+        - civitaspo/dbt-snowflake-iceberg-sync
+        - civitaspo/dbt-snowflake-rap-enforcement
+        - civitaspo/terraform-provider-sigma
+        - civitaspo/nagi
+        - civitaspo/herdr-linear-agent
+        - civitaspo/hook-relay-client-rs
+        - civitaspo/herdr-infobox
+      branches:
+        - automation/securefix-runtime
+    pull_request: {}

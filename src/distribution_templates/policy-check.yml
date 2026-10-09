@@ -1,0 +1,29 @@
+name: Policy Check
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  push:
+    branches:
+      - @DEFAULT_BRANCH@
+
+permissions: {}
+
+concurrency:
+  group: policy-check-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+      pull-requests: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@@SECUREFIX_RUNTIME_SHA@
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
