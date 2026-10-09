@@ -735,6 +735,11 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     validate_workflow_ref(&workflow_sha, &workflow_ref)?;
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
     let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
+    crate::settings::validate_installation_scope(
+        &server,
+        &[integration_repository()?.to_owned()],
+        trusted_config()?.deployment.repository_owner.id,
+    )?;
     let repository: Value = server.get(&format!("/repos/{}", integration_repository()?))?;
     ensure!(
         repository["full_name"] == integration_repository()?
@@ -756,6 +761,8 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         .context("scratch default branch has no SHA")?
         .to_owned();
     validate_sha(&base_sha)?;
+
+    approve_owner_fixture(&server, candidate_sha, &default_branch, &base_sha)?;
 
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let positive_branch = format!("{BRANCH_PREFIX}positive-{nonce}");
@@ -1143,6 +1150,111 @@ fn prepare_positive_artifact(
         "native artifact parser changed the positive fixture contents"
     );
     Ok(fix)
+}
+
+fn approve_owner_fixture(
+    api: &GitHub,
+    candidate_sha: &str,
+    default_branch: &str,
+    base_sha: &str,
+) -> Result<()> {
+    use base64::Engine as _;
+    let number = std::env::var("SECUREFIX_APPROVAL_FIXTURE_PR").unwrap_or_default();
+    let head = std::env::var("SECUREFIX_APPROVAL_FIXTURE_HEAD").unwrap_or_default();
+    if number.is_empty() && head.is_empty() {
+        return Ok(());
+    }
+    let number: u64 = number
+        .parse()
+        .context("invalid approval fixture PR number")?;
+    ensure!(number > 0, "approval fixture PR number is zero");
+    validate_sha(&head)?;
+    let trusted = trusted_config()?;
+    let repository = integration_repository()?;
+    let branch = format!("{BRANCH_PREFIX}approval-{}", &candidate_sha[..12]);
+    let path = format!("{FIX_PATH_PREFIX}approval-{candidate_sha}.txt");
+    let fixture = PullRequestFixture {
+        number,
+        branch,
+        head_sha: head.clone(),
+        url: format!("https://github.com/{repository}/pull/{number}"),
+    };
+    let pull: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    validate_owner_approval_target(&pull, &fixture, default_branch, base_sha)?;
+    let commit: Value = api.get(&format!("/repos/{repository}/commits/{head}"))?;
+    ensure!(
+        commit["parents"]
+            .as_array()
+            .is_some_and(|parents| { parents.len() == 1 && parents[0]["sha"] == base_sha })
+            && commit["author"]["id"].as_u64() == Some(trusted.owner_id),
+        "approval fixture must be one owner-authored commit on the current scratch base"
+    );
+    let files = api.paginate(&format!("/repos/{repository}/pulls/{number}/files"))?;
+    ensure!(
+        files.len() == 1 && files[0]["filename"] == path && files[0]["status"] == "added",
+        "approval fixture changed unexpected files"
+    );
+    let content: Value = api.get(&format!("/repos/{repository}/contents/{path}?ref={head}"))?;
+    let encoded = content["content"]
+        .as_str()
+        .context("approval fixture content missing")?;
+    ensure!(
+        content["type"] == "file" && content["encoding"] == "base64" && encoded.len() <= 1024,
+        "approval fixture content is invalid or oversized"
+    );
+    let encoded: String = encoded
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    ensure!(
+        bytes == format!("candidate={candidate_sha}\nscenario=approval\n").as_bytes(),
+        "approval fixture bytes do not match the candidate"
+    );
+    let policy = scratch_policy(candidate_sha)?;
+    request::validate_pr_authorization(api, &policy, repository, number, &head, true)?;
+    let comment = wait_for_owner_comment(
+        api,
+        &fixture,
+        RequestKind::Approve,
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    let comment_id = comment["id"]
+        .as_u64()
+        .context("approval fixture comment ID missing")?;
+    request::post_owner_marker(api, repository, number, &head, comment_id)?;
+    let reviewer = crate::config::Principal {
+        login: trusted.deployment.server_bot_login.clone(),
+        id: trusted.server_bot_id,
+    };
+    crate::approval::approve_current_head(api, api, repository, number, &head, &reviewer, "Bot")?;
+    request::validate_pr_authorization(api, &policy, repository, number, &head, true)?;
+    println!("Verified the shared approval core on owner-authored scratch PR {number} at {head}.");
+    Ok(())
+}
+
+fn validate_owner_approval_target(
+    pull: &Value,
+    fixture: &PullRequestFixture,
+    default_branch: &str,
+    base_sha: &str,
+) -> Result<()> {
+    ensure!(
+        pull["number"].as_u64() == Some(fixture.number)
+            && pull["state"] == "open"
+            && pull["draft"] == false
+            && pull["user"]["id"].as_u64() == Some(owner_id()?)
+            && pull["user"]["type"] == "User"
+            && pull["head"]["repo"]["id"].as_u64() == Some(integration_repository_id()?)
+            && pull["head"]["repo"]["full_name"] == integration_repository()?
+            && pull["head"]["ref"] == fixture.branch
+            && pull["head"]["sha"] == fixture.head_sha
+            && pull["base"]["repo"]["id"].as_u64() == Some(integration_repository_id()?)
+            && pull["base"]["ref"] == default_branch
+            && pull["base"]["sha"] == base_sha,
+        "approval fixture is not the exact owner-authored scratch PR"
+    );
+    Ok(())
 }
 
 fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Result<()> {
@@ -2545,6 +2657,43 @@ impl RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_probe_rejects_other_authors_repositories_refs_and_heads() {
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let fixture = PullRequestFixture {
+            number: 7,
+            branch: "securefix-integration-approval-aaaaaaaaaaaa".into(),
+            head_sha: head.clone(),
+            url: "fixture".into(),
+        };
+        let pull = json!({
+            "number":7,"state":"open","draft":false,
+            "user":{"id":owner_id().unwrap(),"type":"User"},
+            "head":{"repo":{"id":integration_repository_id().unwrap(),"full_name":integration_repository().unwrap()},"ref":fixture.branch,"sha":head},
+            "base":{"repo":{"id":integration_repository_id().unwrap()},"ref":"main","sha":base}
+        });
+        validate_owner_approval_target(&pull, &fixture, "main", &base).unwrap();
+        for (pointer, replacement) in [
+            ("/number", json!(8)),
+            ("/state", json!("closed")),
+            ("/draft", json!(true)),
+            ("/user/id", json!(1)),
+            ("/user/type", json!("Bot")),
+            ("/head/repo/id", json!(1)),
+            ("/head/repo/full_name", json!("other/repository")),
+            ("/head/ref", json!("main")),
+            ("/head/sha", json!("c".repeat(40))),
+            ("/base/repo/id", json!(1)),
+            ("/base/ref", json!("other")),
+            ("/base/sha", json!("c".repeat(40))),
+        ] {
+            let mut changed = pull.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            assert!(validate_owner_approval_target(&changed, &fixture, "main", &base).is_err());
+        }
+    }
 
     #[test]
     fn client_smoke_artifact_must_match_the_exact_source_and_fixture() {

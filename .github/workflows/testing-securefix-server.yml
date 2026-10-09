@@ -21,6 +21,14 @@ on:
         type: choice
         options: [candidate-artifact, published-release]
         default: candidate-artifact
+      approval_fixture_pr:
+        description: Owner-authored disposable scratch PR for the approval core probe
+        type: string
+        default: ''
+      approval_fixture_head:
+        description: Exact signed head of the owner-authored approval fixture
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -288,6 +296,8 @@ jobs:
           SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
           TEST_PHASE: ${{ inputs.phase }}
+          SECUREFIX_APPROVAL_FIXTURE_PR: ${{ inputs.approval_fixture_pr }}
+          SECUREFIX_APPROVAL_FIXTURE_HEAD: ${{ inputs.approval_fixture_head }}
         run: |
           mkdir -p fixtures
           docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
@@ -298,6 +308,7 @@ jobs:
             --mount "type=bind,source=$PWD/fixtures,target=/fixtures" \
             --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
             -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e SECUREFIX_PUBLISHED_RUNTIME_SHA \
+            -e SECUREFIX_APPROVAL_FIXTURE_PR -e SECUREFIX_APPROVAL_FIXTURE_HEAD \
             -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
             ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
             securefix integration run --phase "$TEST_PHASE" --candidate-sha "$CANDIDATE_SHA" --state-file state.json

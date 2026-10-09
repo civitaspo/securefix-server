@@ -308,11 +308,7 @@ fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
     let repositories = merge_repositories(policy, &deployment.server.repository)?;
     let expected_sha = &policy.revision;
     ensure!(!expected_sha.is_empty(), "policy revision is missing");
-    validate_server_app_installation(
-        &repositories,
-        deployment.repository_owner.id,
-        deployment.server_app_id,
-    )?;
+    validate_server_app_installation(&repositories, deployment.repository_owner.id)?;
     for repository in &repositories {
         validate_repo_identity(api, repository)?;
         validate_default_branch_ruleset(api, repository, &deployment.checks)?;
@@ -558,50 +554,84 @@ fn validate_default_ruleset(ruleset: &Value, repository: &str, checks: &Checks) 
     Ok(())
 }
 
-fn validate_server_app_installation(
+fn validate_server_app_installation(repositories: &[String], owner_id: u64) -> Result<()> {
+    let api = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
+    // App identity comes from the trusted workflow minting this token. Installation
+    // tokens expose repository scope, but not the App identity that minted them.
+    validate_installation_scope(&api, repositories, owner_id)
+}
+
+pub(crate) fn validate_installation_scope(
+    api: &GitHub,
     repositories: &[String],
     owner_id: u64,
-    server_app_id: u64,
 ) -> Result<()> {
-    let api = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
-    let installation: Value = api.get("/installation")?;
+    let expected = repositories.iter().collect::<BTreeSet<_>>();
     ensure!(
-        installation["app_id"].as_u64() == Some(server_app_id),
-        "configured Securefix Server App token has the wrong App identity"
+        expected.len() == repositories.len(),
+        "configured installation repository set contains duplicates"
     );
     let mut installed = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    let mut total_count = None;
     for page in 1..=100 {
         let response: Value = api.get(&format!(
             "/installation/repositories?per_page=100&page={page}"
         ))?;
+        let page_total = response["total_count"]
+            .as_u64()
+            .context("installation repository total_count missing or malformed")?;
+        ensure!(
+            total_count.is_none_or(|count| count == page_total),
+            "installation repository total_count changed during pagination"
+        );
+        total_count = Some(page_total);
         let values = response["repositories"]
             .as_array()
             .context("installation repositories missing")?;
+        ensure!(
+            values.len() <= 100,
+            "installation repository page exceeds limit"
+        );
         for repository in values {
             ensure!(
                 repository["owner"]["id"].as_u64() == Some(owner_id),
                 "Securefix Server App installation contains a repository outside the configured owner"
             );
-            if let Some(name) = repository["full_name"].as_str() {
-                installed.insert(name.to_string());
-            }
+            let name = repository["full_name"]
+                .as_str()
+                .context("installation repository full_name missing or malformed")?;
+            let (owner, repository_name) = name
+                .split_once('/')
+                .context("installation repository full_name malformed")?;
+            ensure!(
+                !owner.is_empty() && !repository_name.is_empty() && !repository_name.contains('/'),
+                "installation repository full_name malformed"
+            );
+            let id = repository["id"]
+                .as_u64()
+                .context("installation repository id missing or malformed")?;
+            ensure!(ids.insert(id), "duplicate repository in installation scope");
+            ensure!(
+                installed.insert(name.to_string()),
+                "duplicate repository in installation scope"
+            );
         }
-        if values.len() < 100 {
+        let installed_count = u64::try_from(installed.len())?;
+        ensure!(
+            installed_count <= page_total,
+            "installation repository pages exceed total_count"
+        );
+        if installed_count == page_total {
             break;
         }
         ensure!(
-            page < 100,
+            page < 100 && !values.is_empty(),
             "Securefix Server App installation repository list exceeded limit"
         );
     }
-    for repository in repositories {
-        ensure!(
-            installed.contains(repository),
-            "Securefix Server App is not installed on {repository}"
-        );
-    }
     ensure!(
-        installed == repositories.iter().cloned().collect(),
+        installed == expected.into_iter().cloned().collect(),
         "Securefix Server App token scope differs from the full configured repository set"
     );
     Ok(())
@@ -827,6 +857,141 @@ fn env_bool(name: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    fn installation_repository(id: u64, full_name: &str, owner_id: u64) -> Value {
+        json!({"id":id,"full_name":full_name,"owner":{"id":owner_id}})
+    }
+
+    fn installation_page(total_count: u64, repositories: Vec<Value>) -> Value {
+        json!({"total_count":total_count,"repositories":repositories})
+    }
+
+    #[test]
+    fn installation_scope_accepts_exact_paginated_repository_set() {
+        let expected = vec!["forge/one".into(), "forge/two".into()];
+        let fixture = Fixture::new(vec![
+            Route::get(
+                "/installation/repositories?per_page=100&page=1",
+                installation_page(2, vec![installation_repository(1, "forge/one", 10)]),
+            ),
+            Route::get(
+                "/installation/repositories?per_page=100&page=2",
+                installation_page(2, vec![installation_repository(2, "forge/two", 10)]),
+            ),
+        ]);
+        validate_installation_scope(&fixture.api, &expected, 10).unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn installation_scope_rejects_wrong_owner_extra_missing_and_malformed_entries() {
+        let expected = vec!["forge/one".into()];
+        for (repositories, total_count) in [
+            (vec![installation_repository(1, "forge/one", 11)], 1),
+            (
+                vec![
+                    installation_repository(1, "forge/one", 10),
+                    installation_repository(2, "forge/two", 10),
+                ],
+                2,
+            ),
+            (vec![], 0),
+            (vec![json!({"id":1,"full_name":"forge/one"})], 1),
+            (vec![installation_repository(1, "malformed", 10)], 1),
+            (
+                vec![json!({"id":"1","full_name":"forge/one","owner":{"id":10}})],
+                1,
+            ),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(
+                "/installation/repositories?per_page=100&page=1",
+                installation_page(total_count, repositories),
+            )]);
+            assert!(validate_installation_scope(&fixture.api, &expected, 10).is_err());
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn installation_scope_rejects_incomplete_pagination_and_http_errors() {
+        let expected = vec!["forge/one".into(), "forge/two".into()];
+        let incomplete = Fixture::new(vec![
+            Route::get(
+                "/installation/repositories?per_page=100&page=1",
+                installation_page(2, vec![installation_repository(1, "forge/one", 10)]),
+            ),
+            Route::get(
+                "/installation/repositories?per_page=100&page=2",
+                installation_page(2, vec![]),
+            ),
+        ]);
+        assert!(validate_installation_scope(&incomplete.api, &expected, 10).is_err());
+        incomplete.finish();
+
+        let failed = Fixture::new(vec![Route::request(
+            "GET",
+            "/installation/repositories?per_page=100&page=1",
+            404,
+            json!({"message":"Not Found"}),
+        )]);
+        assert!(validate_installation_scope(&failed.api, &expected, 10).is_err());
+        failed.finish();
+    }
+
+    #[test]
+    fn activation_tokens_are_minted_from_trusted_workflow_provenance() {
+        let workflow: Value =
+            serde_yaml::from_str(include_str!("../.github/workflows/repo-settings.yml")).unwrap();
+        let deployment = &config::trusted().unwrap().deployment;
+        for (job_name, repository_expression, consumer_name) in [
+            (
+                "prepare",
+                "${{ steps.cli.outputs.repos_list }}",
+                "Attested activation preflight",
+            ),
+            (
+                "controlled-merges",
+                "${{ needs.prepare.outputs.repos_list }}",
+                "Reconcile controlled merge rulesets",
+            ),
+        ] {
+            let job = &workflow["jobs"][job_name];
+            assert_eq!(job["environment"], "main");
+            let steps = job["steps"].as_array().unwrap();
+            let mint = steps.iter().find(|step| step["id"] == "app-token").unwrap();
+            let action = mint["uses"].as_str().unwrap();
+            let (action_name, revision) = action.split_once('@').unwrap();
+            assert_eq!(action_name, "actions/create-github-app-token");
+            assert_eq!(revision.len(), 40);
+            assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(
+                mint["with"]["app-id"].as_u64(),
+                Some(deployment.server_app_id)
+            );
+            assert_eq!(
+                mint["with"]["private-key"],
+                "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+            );
+            assert_eq!(mint["with"]["owner"], deployment.repository_owner.login);
+            assert_eq!(mint["with"]["repositories"], repository_expression);
+            for (permission, level) in [
+                ("permission-actions", "read"),
+                ("permission-checks", "write"),
+                ("permission-contents", "write"),
+                ("permission-pull-requests", "write"),
+            ] {
+                assert_eq!(mint["with"][permission], level);
+            }
+            let consumer = steps
+                .iter()
+                .find(|step| step["name"] == consumer_name)
+                .unwrap();
+            assert_eq!(
+                consumer["env"]["SECUREFIX_SERVER_APP_TOKEN"],
+                "${{ steps.app-token.outputs.token }}"
+            );
+        }
+    }
 
     #[test]
     fn collaborator_readback_uses_github_effective_roles() {
