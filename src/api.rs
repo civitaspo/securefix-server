@@ -47,12 +47,34 @@ impl GitHub {
     }
 
     pub fn new(base: &str, token: String) -> Result<Self> {
+        let base = base.trim_end_matches('/').to_string();
+        let retry_host = reqwest::Url::parse(&base)?
+            .host_str()
+            .context("GitHub API base URL has no host")?
+            .to_owned();
         Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
                 .redirect(Policy::none())
+                .retry(
+                    reqwest::retry::for_host(retry_host)
+                        .max_retries_per_request(1)
+                        .classify_fn(|request| {
+                            let read_only =
+                                matches!(request.method(), &Method::GET | &Method::HEAD);
+                            let transport_error = request
+                                .error()
+                                .and_then(|error| error.downcast_ref::<reqwest::Error>())
+                                .is_some_and(|error| error.is_request() || error.is_connect());
+                            if read_only && transport_error {
+                                request.retryable()
+                            } else {
+                                request.success()
+                            }
+                        }),
+                )
                 .build()?,
-            base: base.trim_end_matches('/').to_string(),
+            base,
             token,
             guard_writes: false,
             source_sha: None,

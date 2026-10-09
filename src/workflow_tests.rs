@@ -709,6 +709,95 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
 }
 
 #[test]
+fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
+    let merge = workflow("merge.yml");
+    let job = &merge["jobs"]["merge"];
+    assert_eq!(
+        job["outputs"]["self_merged"],
+        "${{ steps.validate.outputs.repository == 'civitaspo/securefix-server' && steps.apply.outcome == 'success' }}"
+    );
+    let steps = job["steps"].as_array().unwrap();
+    let position = |id: &str| {
+        steps
+            .iter()
+            .position(|step| step["id"] == id)
+            .unwrap_or_else(|| panic!("missing merge step {id}"))
+    };
+    let wait = position("wait");
+    let merge_token = position("merge-token");
+    let token = position("self-cleanup-token");
+    let preclean = position("self-cleanup");
+    let apply = position("apply");
+    let notify_token = position("notify-token");
+    let notify = steps
+        .iter()
+        .position(|step| step["name"] == "Report the terminal result")
+        .unwrap();
+    assert!(wait < merge_token && merge_token < token && token < preclean && preclean < apply);
+    assert_eq!(steps[merge_token]["if"], "steps.wait.outcome == 'success'");
+    assert_eq!(
+        steps[token]["if"],
+        "steps.wait.outcome == 'success' && steps.validate.outputs.repository == 'civitaspo/securefix-server'"
+    );
+    assert_eq!(steps[token]["with"]["repositories"], "securefix-server");
+    assert_eq!(steps[token]["with"]["permission-issues"], "write");
+    assert!(steps[token]["with"].get("permission-contents").is_none());
+    assert!(
+        steps[token]["with"]
+            .get("permission-pull-requests")
+            .is_none()
+    );
+    assert_eq!(steps[preclean]["run"], "securefix merge cleanup");
+    assert_eq!(
+        steps[preclean]["env"]["GITHUB_TOKEN"],
+        "${{ steps.self-cleanup-token.outputs.token }}"
+    );
+    assert_eq!(
+        steps[apply]["if"],
+        "steps.wait.outcome == 'success' && (steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.self-cleanup.outcome == 'success')"
+    );
+    for index in [notify_token, notify] {
+        assert!(steps[index]["if"].as_str().unwrap().contains(
+            "(steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.apply.outcome != 'success')"
+        ));
+    }
+    assert!(
+        merge["jobs"]["cleanup"]["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.merge.outputs.self_merged != 'true'")
+    );
+}
+
+#[test]
+fn caller_migration_upload_root_matches_the_client_relative_root() {
+    let distribution = workflow("distribute-runtime.yml");
+    let job = &distribution["jobs"]["caller"];
+    let prepare = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "prepare")
+        .unwrap();
+    let action = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"] == "csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550"
+        })
+        .unwrap();
+    assert!(
+        prepare["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"caller-migration\"")
+    );
+    assert_eq!(action["with"]["root_dir"], "caller-migration");
+    assert_eq!(action["with"]["use_git_ls_files"], "false");
+}
+
+#[test]
 fn scratch_test_workflow_builds_and_probes_same_run_artifact_without_releases() {
     let workflow = workflow("testing-securefix-server.yml");
     assert!(

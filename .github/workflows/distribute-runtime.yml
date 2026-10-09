@@ -72,7 +72,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
-        run: securefix distribute prepare-caller "${{ matrix.repository }}" "$RUNNER_TEMP/caller-migration"
+        run: securefix distribute prepare-caller "${{ matrix.repository }}" "caller-migration"
       - uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
         if: steps.prepare.outputs.already_current != 'true'
         with:
@@ -83,6 +83,6 @@ jobs:
           branch: automation/securefix-runtime
           server_repository: civitaspo/securefix-server
           files: ${{ steps.prepare.outputs.files }}
-          root_dir: ${{ runner.temp }}/caller-migration
+          root_dir: caller-migration
           use_git_ls_files: 'false'
           custom: '{"publisher_run_id":${{ github.event.workflow_run.id || inputs.publisher_run_id }}}'
