@@ -50,7 +50,7 @@ jobs:
         id: cli
         env:
           GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
-          SECUREFIX_CLIENT_BOT_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
+          SECUREFIX_REVIEWER_INVITE_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
           SECUREFIX_APPROVAL_REVIEWER_TOKEN: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
           INPUT_REPOSITORY: ${{ inputs.repository }}
           INPUT_MERGE_CONTROLS_READY: ${{ inputs.merge_controls_ready }}
@@ -104,7 +104,7 @@ jobs:
       - name: Reconcile repository settings
         env:
           GH_TOKEN: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
-          SECUREFIX_CLIENT_BOT_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
+          SECUREFIX_REVIEWER_INVITE_TOKEN: ${{ secrets.CIVITASPO_BOT_REPO_INVITE_TOKEN }}
           REPOSITORY: ${{ matrix.repository }}
           INPUT_CREATE_IF_MISSING: ${{ inputs.create_if_missing }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}

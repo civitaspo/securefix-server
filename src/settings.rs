@@ -102,7 +102,7 @@ fn prepare() -> Result<()> {
     )?;
     crate::output(
         "bot_invite",
-        token_present("SECUREFIX_CLIENT_BOT_TOKEN").to_string(),
+        token_present("SECUREFIX_REVIEWER_INVITE_TOKEN").to_string(),
     )?;
     Ok(())
 }
@@ -191,8 +191,26 @@ fn reconcile_one(
             std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("workflow_dispatch"),
             "repository creation is manual-dispatch only"
         );
+        let trusted = config::trusted()?;
+        let repository_owner = &trusted.deployment.repository_owner;
+        let account: Value = api.get(&format!("/users/{}", repository_owner.login))?;
+        ensure!(
+            account["id"].as_u64() == Some(repository_owner.id),
+            "configured repository owner identity changed"
+        );
+        let maintainer = config::Principal {
+            login: trusted.deployment.owner_login.clone(),
+            id: trusted.owner_id,
+        };
+        let create_path = repository_creation_path(
+            account["type"]
+                .as_str()
+                .context("repository owner type is missing")?,
+            repository_owner,
+            &maintainer,
+        )?;
         api.post::<Value>(
-            "/user/repos",
+            &create_path,
             &json!({"name":repository_name(repository)?,"private":false}),
         )?;
     }
@@ -210,10 +228,10 @@ fn reconcile_one(
         delete_legacy_tag_rulesets(api, repository)?;
     }
     ensure_immutable_releases(api, repo_policy)?;
-    let client_bot = &config::trusted()?.deployment.client_bot_login;
-    invite_collaborator(api, repository, client_bot)?;
-    if token_present("SECUREFIX_CLIENT_BOT_TOKEN") {
-        accept_invitation(api, repository, client_bot)?;
+    let reviewer = &config::trusted()?.deployment.approval_reviewer.login;
+    invite_collaborator(api, repository, reviewer)?;
+    if token_present("SECUREFIX_REVIEWER_INVITE_TOKEN") {
+        accept_invitation(api, repository, reviewer)?;
     }
     Ok(())
 }
@@ -590,10 +608,7 @@ fn validate_approval_token_if_present(repositories: &[String]) -> Result<()> {
     );
     let api = GitHub::from_env("SECUREFIX_APPROVAL_REVIEWER_TOKEN")?;
     let user: Value = api.get("/user")?;
-    ensure!(
-        user["login"] == reviewer.login && user["id"].as_u64() == Some(reviewer.id),
-        "approval token must authenticate as the configured reviewer"
-    );
+    validate_reviewer_identity(&user, reviewer)?;
     for repository in repositories {
         validate_collaborator(&api, repository, &reviewer.login)?;
     }
@@ -612,6 +627,32 @@ fn validate_collaborator(api: &GitHub, repository: &str, reviewer: &str) -> Resu
         "configured approval reviewer lacks effective write permission on {repository}"
     );
     Ok(())
+}
+
+fn validate_reviewer_identity(identity: &Value, reviewer: &config::Principal) -> Result<()> {
+    ensure!(
+        identity["login"] == reviewer.login && identity["id"].as_u64() == Some(reviewer.id),
+        "token must authenticate as the configured approval reviewer"
+    );
+    Ok(())
+}
+
+fn repository_creation_path(
+    account_type: &str,
+    repository_owner: &config::Principal,
+    maintainer: &config::Principal,
+) -> Result<String> {
+    match account_type {
+        "Organization" => Ok(format!("/orgs/{}/repos", repository_owner.login)),
+        "User" => {
+            ensure!(
+                repository_owner.id == maintainer.id && repository_owner.login == maintainer.login,
+                "the configured human settings token cannot create a repository for a different user"
+            );
+            Ok("/user/repos".to_owned())
+        }
+        _ => anyhow::bail!("configured repository owner has an unknown account type"),
+    }
 }
 
 fn repository_rulesets(api: &GitHub, repository: &str, name: &str) -> Result<Vec<Value>> {
@@ -670,13 +711,14 @@ fn invite_collaborator(api: &GitHub, repository: &str, username: &str) -> Result
 }
 
 fn accept_invitation(_api: &GitHub, repository: &str, username: &str) -> Result<()> {
-    let api = GitHub::from_env("SECUREFIX_CLIENT_BOT_TOKEN")?;
+    let api = GitHub::from_env("SECUREFIX_REVIEWER_INVITE_TOKEN")?;
     let trusted = config::trusted()?;
-    let identity: Value = api.get("/user")?;
     ensure!(
-        identity["login"] == username && identity["id"].as_u64() == Some(trusted.client_bot_id),
-        "invitation token must authenticate as the configured Client bot"
+        username == trusted.deployment.approval_reviewer.login,
+        "invitation target differs from the configured approval reviewer"
     );
+    let identity: Value = api.get("/user")?;
+    validate_reviewer_identity(&identity, &trusted.deployment.approval_reviewer)?;
     let invitations: Vec<Value> = api.paginate("/user/repository_invitations")?;
     let full_name = repository.to_lowercase();
     if let Some(invitation) = invitations.iter().find(|item| {
@@ -795,6 +837,43 @@ mod tests {
         assert!(!reconcile_existing_controlled_merges(
             &json!({"enforcement":"evaluate"})
         ));
+    }
+
+    #[test]
+    fn repository_creation_uses_org_endpoint_and_only_creates_user_repos_for_maintainer() {
+        let org = config::Principal {
+            login: "forge-org".into(),
+            id: 200,
+        };
+        let maintainer = config::Principal {
+            login: "alice".into(),
+            id: 100,
+        };
+        assert_eq!(
+            repository_creation_path("Organization", &org, &maintainer).unwrap(),
+            "/orgs/forge-org/repos"
+        );
+        assert_eq!(
+            repository_creation_path("User", &maintainer, &maintainer).unwrap(),
+            "/user/repos"
+        );
+        assert!(repository_creation_path("User", &org, &maintainer).is_err());
+    }
+
+    #[test]
+    fn reviewer_invitation_identity_is_not_the_client_app_bot() {
+        let reviewer = config::Principal {
+            login: "approval-reviewer".into(),
+            id: 100,
+        };
+        assert!(
+            validate_reviewer_identity(&json!({"login":"approval-reviewer","id":100}), &reviewer)
+                .is_ok()
+        );
+        assert!(
+            validate_reviewer_identity(&json!({"login":"client-bot[bot]","id":200}), &reviewer)
+                .is_err()
+        );
     }
 
     #[test]
