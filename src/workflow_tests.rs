@@ -82,7 +82,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     if path == ".github/workflows/testing-securefix-server.yml" && job_id == "reuse"
                     {
                         if inputs["artifact-ids"]
-                            == "${{ needs.trusted-runtime-main.outputs.artifact-id || needs.trusted-build.outputs.artifact-id }}"
+                            == "${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}"
                         {
                             assert_eq!(inputs["path"], "trusted-runtime");
                             assert_eq!(inputs["merge-multiple"], true);
@@ -120,8 +120,10 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         assert_eq!(
                             step["with"]["ref"],
                             if path == ".github/workflows/testing-securefix-server.yml" {
-                                if job_id == "trusted-build" {
-                                    "${{ job.workflow_sha }}"
+                                if job_id == "baseline-build" {
+                                    "${{ steps.resolve.outputs.sha }}"
+                                } else if job_id == "build" {
+                                    "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 } else if job_id == "client-smoke" {
                                     "${{ needs.build.outputs.source-sha }}"
                                 } else {
@@ -196,11 +198,26 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     let download = index_of(&|step| {
         step["run"].as_str().is_some_and(|run| {
             run.contains("gh release download")
-                && run.contains("securefix-runtime-$SECUREFIX_SOURCE_SHA")
-                && run.contains("--repo civitaspo/securefix-server")
+                && run.contains("--repo \"$repo\"")
                 && run.contains("--pattern securefix-runtime-linux-x86_64.tar.gz")
         })
     });
+    let resolver = steps[download]["run"].as_str().unwrap_or("");
+    for required in [
+        "contents/Cargo.toml?ref=$SECUREFIX_SOURCE_SHA",
+        "gh release download \"$tag\" --repo \"$repo\"",
+        "version=\"$(awk",
+        "tag=\"v$version\"",
+        "git/ref/tags/$tag",
+        "releases/tags/$tag",
+        "test(\"^sha256:[0-9a-f]{64}$\")",
+    ] {
+        assert!(
+            resolver.contains(required),
+            "canonical runtime resolution lacks {required}"
+        );
+    }
+    assert!(!resolver.contains("securefix-runtime-$SECUREFIX_SOURCE_SHA"));
     let verify = index_of(&|step| {
         step["run"].as_str().is_some_and(|run| {
             run.contains("gh attestation verify download/securefix-runtime-linux-x86_64.tar.gz")
@@ -403,7 +420,11 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
                     job["steps"].as_array().and_then(|steps| {
                         steps
                             .iter()
-                            .any(|step| step["uses"] == "./.github/actions/setup-cli")
+                            .any(|step| {
+                                step["uses"].as_str().is_some_and(|uses| {
+                                    uses.ends_with("/.github/actions/setup-cli")
+                                })
+                            })
                             .then(|| path.clone())
                     })
                 })
@@ -477,18 +498,18 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
             .contains("github.ref == 'refs/heads/main'")
     );
     assert!(trusted_main.get("secrets").is_none());
-    let trusted_build = &candidate["jobs"]["trusted-build"];
+    let baseline_build = &candidate["jobs"]["baseline-build"];
     assert_eq!(
-        trusted_build["permissions"],
+        baseline_build["permissions"],
         serde_json::json!({"contents":"read"})
     );
     assert!(
-        !serde_json::to_string(trusted_build)
+        !serde_json::to_string(baseline_build)
             .unwrap()
             .contains("secrets.")
     );
     assert!(
-        trusted_build["if"]
+        baseline_build["if"]
             .as_str()
             .unwrap()
             .contains("integration/native-")
@@ -500,19 +521,32 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         assert!(guard.contains("refs/heads/main"), "{job_id}");
         assert!(guard.contains("integration/native-"), "{job_id}");
     }
-    let trusted_steps = trusted_build["steps"].as_array().unwrap();
-    assert_eq!(trusted_steps[0]["with"]["ref"], "${{ job.workflow_sha }}");
-    assert_eq!(trusted_steps[0]["with"]["persist-credentials"], false);
+    let baseline_steps = baseline_build["steps"].as_array().unwrap();
     assert!(
-        trusted_steps
-            .iter()
-            .any(|step| step["uses"] == "./.github/actions/setup-cli")
+        baseline_steps[0]["run"]
+            .as_str()
+            .unwrap()
+            .contains("commits/main")
     );
-    assert!(trusted_steps.iter().any(|step| {
-        step["with"]["name"] == "trusted-runtime"
+    let checkout = baseline_steps
+        .iter()
+        .find(|step| step["id"] == "checkout")
+        .unwrap();
+    assert_eq!(checkout["with"]["ref"], "${{ steps.resolve.outputs.sha }}");
+    assert_eq!(checkout["with"]["path"], "baseline");
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    assert!(
+        baseline_steps
+            .iter()
+            .any(|step| step["uses"] == "./baseline/.github/actions/setup-cli")
+    );
+    assert!(baseline_steps.iter().any(|step| {
+        step["with"]["name"] == "baseline-runtime"
             && step["with"]["path"].as_str().is_some_and(|path| {
-                path.lines()
-                    .eq(["target/release/securefix", "target/release/policy.json"])
+                path.lines().eq([
+                    "baseline/target/release/securefix",
+                    "baseline/target/release/policy.json",
+                ])
             })
     }));
     let build = &candidate["jobs"]["build"];
@@ -538,6 +572,10 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
                 && step["with"]["binary"] == "candidate-runtime/securefix"
         })
         .unwrap();
+    let runtime_resolution = steps
+        .iter()
+        .position(|step| step["id"] == "runtime")
+        .unwrap();
     let server_token = steps
         .iter()
         .position(|step| step["id"] == "server")
@@ -560,13 +598,13 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         steps[producer_check]["env"]["GITHUB_TOKEN"],
         "${{ github.token }}"
     );
-    assert!(candidate_install < server_token);
+    assert!(candidate_install < runtime_resolution && runtime_resolution < server_token);
     assert!(server_token < candidate_run);
     assert!(
         steps[trusted_fetch]["run"]
             .as_str()
             .unwrap()
-            .starts_with("$RUNNER_TEMP/securefix-bin/securefix integration fetch-state ")
+            .starts_with("\"$RUNNER_TEMP/securefix-bin/securefix\" integration fetch-state ")
     );
     assert!(steps[trusted_fetch]["env"].get("GITHUB_TOKEN").is_some());
     assert_eq!(scratch["environment"], "main");
@@ -607,7 +645,22 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         .iter()
         .position(|step| step["id"] == "validate-outputs")
         .unwrap();
-    assert!(candidate_run < output_validation);
+    let revalidate_runtime = steps
+        .iter()
+        .position(|step| step["id"] == "revalidate-runtime")
+        .unwrap();
+    assert!(candidate_run < revalidate_runtime && revalidate_runtime < output_validation);
+    assert!(
+        steps[revalidate_runtime]["run"]
+            .as_str()
+            .unwrap()
+            .contains("--expected-tag")
+    );
+    assert_eq!(
+        steps[output_validation]["env"]["GITHUB_TOKEN"],
+        "${{ github.token }}"
+    );
+    assert!(steps[output_validation]["env"]["SECUREFIX_PUBLISHED_RUNTIME_TAG"].is_string());
     let fixture_upload = steps
         .iter()
         .position(|step| step["with"]["name"] == "scratch-fixtures")
@@ -648,7 +701,7 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         reuse[fetch]["run"]
             .as_str()
             .unwrap()
-            .starts_with("$RUNNER_TEMP/securefix-bin/securefix integration fetch-state ")
+            .starts_with("\"$RUNNER_TEMP/securefix-bin/securefix\" integration fetch-state ")
     );
     assert_eq!(reuse[fetch]["env"]["GITHUB_TOKEN"], "${{ github.token }}");
     assert_eq!(reuse[fetch]["uses"], Value::Null);
@@ -729,13 +782,37 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     !run.contains("${{ github.event."),
                     "{path}/{job_id}: event data must enter through env or the event file"
                 );
+                let bounded_baseline_reads = path
+                    == ".github/workflows/testing-securefix-server.yml"
+                    && job_id == "baseline-build"
+                    && run.contains("gh api")
+                    && (run.contains("repo=civitaspo/securefix-server")
+                        || run.contains(
+                            "gh api repos/civitaspo/securefix-server/commits/main --jq .sha",
+                        ))
+                    && (run.contains("repos/$repo/commits/main")
+                        || run.contains("repos/civitaspo/securefix-server/commits/main"))
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method")
+                    && !run.contains("gh release")
+                    && !run.contains("jq -e")
+                    && !run.contains("jq -r '.content'");
+                let canonical_runtime_bootstrap = path == ".github/workflows/load-cli.yml"
+                    && job_id == "load"
+                    && run.contains("contents/Cargo.toml?ref=$SECUREFIX_SOURCE_SHA")
+                    && run.contains("gh release download \"$tag\"")
+                    && run.contains("expected_digest")
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
                         && !run.contains("node ")
-                        && !run.contains("jq ")
+                        && (!run.contains("jq ")
+                            || bounded_baseline_reads
+                            || canonical_runtime_bootstrap)
                         && !run.contains("curl "),
-                    "{path}/{job_id}: operation decisions must be in Rust"
+                    "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
                 assert!(
                     !run.contains("chmod") || !run.contains("securefix"),
@@ -757,7 +834,10 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                                 || step["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || (path == ".github/workflows/testing-securefix-server.yml"
                                     && (step["env"]["CANDIDATE_SHA"].is_string()
-                                        || job["env"]["CANDIDATE_SHA"].is_string())),
+                                        || job["env"]["CANDIDATE_SHA"].is_string()
+                                        || (run.starts_with("securefix integration resolve-test-runtime --published-runtime-sha ")
+                                            && step["env"]["PUBLISHED_RUNTIME_SHA"].is_string()
+                                            && step["env"]["GITHUB_TOKEN"].is_string()))),
                             "{path}/{job_id}: runtime revision required"
                         );
                     }

@@ -21,10 +21,14 @@ pub(crate) fn rendered_push_fixture(default_branch: &str) -> Result<Vec<u8>> {
     ci::migrate(template.as_bytes(), ci::Mode::Push, default_branch)
 }
 
-pub(crate) fn rendered_client_fixture_files(source_sha: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+pub(crate) fn rendered_client_fixture_files(
+    source_sha: &str,
+    runtime_tag: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let autofix = client::migrate_autofix(
         include_bytes!("../integration_templates/wc-autofix.yml"),
         source_sha,
+        runtime_tag,
     )?;
     let (outer, inner) = client::migrate_call_chain(
         include_bytes!("../integration_templates/pull_request.yml"),
@@ -81,7 +85,8 @@ pub(super) fn prepare_caller(
         .repository(repository)?
         .capabilities
         .contains(&Capability::Release);
-    let mut files = rendered_files(source_sha, default_branch, release_client)?;
+    let runtime_tag = crate::runtime::version_at_source(api, source_sha)?.tag();
+    let mut files = rendered_files(source_sha, &runtime_tag, default_branch, release_client)?;
     if let Some(push) = optional_content(api, repository, ".github/workflows/push.yml", base_sha)? {
         files.insert(
             ".github/workflows/push.yml".to_owned(),
@@ -100,7 +105,7 @@ pub(super) fn prepare_caller(
     if let Some(autofix) = optional_content(api, repository, client::AUTOFIX_PATH, base_sha)? {
         files.insert(
             client::AUTOFIX_PATH.to_owned(),
-            client::migrate_autofix(&autofix, source_sha)?,
+            client::migrate_autofix(&autofix, source_sha, &runtime_tag)?,
         );
         let pull_request = optional_content(api, repository, client::PULL_REQUEST_PATH, base_sha)?
             .context("autofix workflow has no pull request entry workflow")?;
@@ -136,8 +141,28 @@ pub(super) fn prepare_caller(
     })
 }
 
+pub(super) fn validate_runtime_annotation(tag: &str, source_sha: &str) -> Result<()> {
+    validate_sha(source_sha)?;
+    let value = tag
+        .strip_prefix('v')
+        .context("runtime annotation must start with v")?;
+    let mut version = semver::Version::parse(value).context("invalid runtime annotation")?;
+    ensure!(
+        version.to_string() == value,
+        "runtime annotation must be canonical SemVer"
+    );
+    ensure!(
+        version.build.is_empty() || version.build.as_str() == source_sha,
+        "runtime annotation build metadata must identify the exact legacy source"
+    );
+    version.build = semver::BuildMetadata::EMPTY;
+    crate::runtime::RuntimeVersion::parse(&version.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn rendered_files(
     source_sha: &str,
+    runtime_tag: &str,
     default_branch: &str,
     releases: bool,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -160,6 +185,7 @@ pub(crate) fn rendered_files(
             render(
                 template,
                 source_sha,
+                runtime_tag,
                 &branch,
                 server_repository,
                 release_branch,
@@ -179,6 +205,7 @@ pub(crate) fn rendered_files(
                 render(
                     template,
                     source_sha,
+                    runtime_tag,
                     &branch,
                     server_repository,
                     release_branch,
@@ -194,15 +221,16 @@ pub(crate) fn rendered_files(
 fn render(
     template: &str,
     source_sha: &str,
+    runtime_tag: &str,
     branch: &str,
     server_repository: &str,
     release_branch: &str,
     owner_id: &str,
 ) -> Result<String> {
-    let runtime_version = crate::runtime::version_tag(source_sha)?;
+    validate_runtime_annotation(runtime_tag, source_sha)?;
     let rendered = template
         .replace("@SECUREFIX_RUNTIME_SHA@", source_sha)
-        .replace("@RUNTIME_VERSION@", &runtime_version)
+        .replace("@RUNTIME_VERSION@", runtime_tag)
         .replace("@DEFAULT_BRANCH@", branch)
         .replace("@SERVER_REPOSITORY@", server_repository)
         .replace("@RELEASE_BRANCH@", release_branch)
@@ -283,7 +311,7 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
             return Ok(());
         }
         client::AUTOFIX_PATH => {
-            client::migrate_autofix(contents, &"0".repeat(40))?;
+            client::migrate_autofix(contents, &"0".repeat(40), "v0.0.0")?;
             return Ok(());
         }
         client::CALLER_PATH | client::PULL_REQUEST_PATH => {
@@ -378,7 +406,7 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
     );
     validate_sha(sha)?;
     let releases = path.starts_with(".github/workflows/release-");
-    let canonical = rendered_files(sha, default_branch, releases)?;
+    let canonical = rendered_files(sha, "v0.0.0", default_branch, releases)?;
     let expected_bytes = canonical
         .get(path)
         .context("managed workflow missing from canonical template set")?;
@@ -739,12 +767,12 @@ mod tests {
     #[test]
     fn generated_reusable_workflow_pins_have_exact_runtime_version_comments() {
         let sha = "20f28eeb972c8961e799fb51c8b278ac1884ba8e";
-        let expected_comment = format!("v{}+{sha}", env!("CARGO_PKG_VERSION"));
+        let expected_comment = "v0.2.0-pre.1";
         let expected_version =
             semver::Version::parse(expected_comment.trim_start_matches('v')).unwrap();
-        assert!(expected_version.pre.is_empty());
-        assert_eq!(expected_version.build.to_string(), sha);
-        let files = rendered_files(sha, "main", true).unwrap();
+        assert_eq!(expected_version.pre.as_str(), "pre.1");
+        assert!(expected_version.build.is_empty());
+        let files = rendered_files(sha, expected_comment, "main", true).unwrap();
         assert_eq!(files.len(), 6);
         for (path, bytes) in files {
             let workflow = String::from_utf8(bytes).unwrap();

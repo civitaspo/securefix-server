@@ -81,6 +81,13 @@ pub enum Command {
         #[arg(long)]
         workflow_sha: String,
     },
+    /// Resolve the exact default-branch runtime tag for the candidate integration harness.
+    ResolveTestRuntime {
+        #[arg(long)]
+        published_runtime_sha: String,
+        #[arg(long)]
+        expected_tag: Option<String>,
+    },
     /// Validate the bounded files emitted by the isolated candidate container.
     ValidateOutputs {
         #[arg(long, value_enum)]
@@ -200,13 +207,36 @@ pub fn run(command: Command) -> Result<()> {
             validate_sha(&candidate_sha)?;
             let workspace = std::env::current_dir()?;
             let published_runtime_sha = published_runtime_sha_from_env()?;
+            let api = integration_read_api()?;
+            let published_runtime_tag = validate_test_runtime_tag(
+                &api,
+                &published_runtime_sha,
+                &published_runtime_tag_from_env()?,
+            )?;
             validate_outputs(
                 &workspace,
                 &state_file,
                 &candidate_sha,
                 phase,
                 &published_runtime_sha,
+                &published_runtime_tag,
             )
+        }
+        Command::ResolveTestRuntime {
+            published_runtime_sha,
+            expected_tag,
+        } => {
+            validate_sha(&published_runtime_sha)?;
+            let api = integration_read_api()?;
+            let tag = resolve_test_runtime_tag(&api, &published_runtime_sha)?;
+            if let Some(expected_tag) = expected_tag {
+                ensure!(
+                    tag == expected_tag,
+                    "published runtime tag changed during integration test"
+                );
+            }
+            securefix::output("published_runtime_sha", &published_runtime_sha)?;
+            securefix::output("published_runtime_tag", &tag)
         }
         Command::VerifyClient {
             artifact_name,
@@ -484,13 +514,62 @@ fn validate_producer(workflow_sha: &str) -> Result<()> {
         source["sha"] == workflow_sha,
         "trusted integration workflow branch moved from its source SHA"
     );
-    let published_runtime_sha = current_published_runtime_sha(&api)?;
+    let (published_runtime_sha, published_runtime_tag) = current_published_runtime(&api)?;
     securefix::output("published_runtime_sha", &published_runtime_sha)?;
+    securefix::output("published_runtime_tag", &published_runtime_tag)?;
     Ok(())
 }
 
-fn current_published_runtime_sha(api: &GitHub) -> Result<String> {
-    use base64::Engine;
+fn integration_read_api() -> Result<GitHub> {
+    let expected_repository = server_repository()?;
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY")
+            .is_ok_and(|repository| repository == expected_repository),
+        "runtime metadata lookup must run in the Securefix Server repository"
+    );
+    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
+    GitHub::new("https://api.github.com", token)
+}
+
+fn current_published_runtime(api: &GitHub) -> Result<(String, String)> {
+    let trusted = crate::config::trusted()?;
+    let server = &trusted.deployment.server;
+    let repository: Value = api.get(&format!("/repos/{}", server.repository))?;
+    ensure!(
+        repository["full_name"] == server.repository
+            && repository["id"].as_u64() == Some(server.id)
+            && repository["owner"]["id"].as_u64() == Some(trusted.deployment.repository_owner.id)
+            && repository["default_branch"] == server.default_branch.as_str(),
+        "published runtime repository identity changed"
+    );
+    let main: Value = api.get(&format!(
+        "/repos/{}/commits/{}",
+        server.repository, server.default_branch
+    ))?;
+    let source_sha = main["sha"]
+        .as_str()
+        .context("server default branch SHA missing")?;
+    validate_sha(source_sha)?;
+    let version = crate::runtime::version_at_source(api, source_sha)?;
+    let tag = version.tag();
+    let tag_ref = optional_tag_ref(api, &tag)?.context("canonical runtime tag is missing")?;
+    ensure!(
+        tag_ref["ref"] == format!("refs/tags/{tag}")
+            && tag_ref["object"]["type"] == "commit"
+            && tag_ref["object"]["sha"] == source_sha,
+        "canonical runtime tag does not directly target the default branch source"
+    );
+    validate_runtime_release(api, source_sha, &tag, !version.as_semver().pre.is_empty())?;
+    Ok((source_sha.to_owned(), tag))
+}
+
+/// Candidate-only bridge for the first SemVer cutover. The trusted baseline CLI
+/// validates the complete published runtime before this helper is called. This
+/// helper only selects the source-derived tag format and never downloads or runs
+/// a runtime release.
+fn resolve_test_runtime_tag(api: &GitHub, expected_sha: &str) -> Result<String> {
+    validate_sha(expected_sha)?;
 
     let trusted = crate::config::trusted()?;
     let server = &trusted.deployment.server;
@@ -510,74 +589,186 @@ fn current_published_runtime_sha(api: &GitHub) -> Result<String> {
         .as_str()
         .context("server default branch SHA missing")?;
     validate_sha(source_sha)?;
-
-    let release_tag = format!("securefix-runtime-{source_sha}");
-    let release: Value = api.get(&format!(
-        "/repos/{}/releases/tags/{release_tag}",
-        server.repository
-    ))?;
     ensure!(
-        release["tag_name"] == release_tag
-            && release["target_commitish"] == source_sha
-            && release["draft"] == false
-            && release["prerelease"] == true,
-        "server default SHA has no exact published runtime release"
+        source_sha == expected_sha,
+        "server default branch moved after baseline runtime validation"
     );
+    let version = crate::runtime::version_at_source(api, expected_sha)?;
+    let canonical = version.tag();
+    let legacy = format!("{canonical}+{expected_sha}");
+    let canonical_ref = optional_tag_ref(api, &canonical)?;
+    let canonical_annotation = match canonical_ref.as_ref() {
+        Some(reference) if reference["object"]["type"] == "tag" => {
+            let tag_sha = reference["object"]["sha"]
+                .as_str()
+                .context("annotated canonical baseline tag has no object SHA")?;
+            validate_sha(tag_sha)?;
+            Some(api.get(&format!("/repos/{}/git/tags/{tag_sha}", server.repository))?)
+        }
+        _ => None,
+    };
+    let legacy_ref = optional_tag_ref(api, &legacy)?;
+    let tag = select_test_runtime_tag(
+        &version,
+        expected_sha,
+        canonical_ref,
+        canonical_annotation,
+        legacy_ref,
+    )?;
+    let (release_tag, prerelease) = if tag == canonical {
+        (canonical, !version.as_semver().pre.is_empty())
+    } else {
+        // The legacy version tag was an annotation. Its runtime release used
+        // the separate SHA-keyed release name.
+        (format!("securefix-runtime-{expected_sha}"), true)
+    };
+    validate_runtime_release(api, expected_sha, &release_tag, prerelease)?;
+    Ok(tag)
+}
+
+fn select_test_runtime_tag(
+    version: &crate::runtime::RuntimeVersion,
+    expected_sha: &str,
+    canonical_ref: Option<Value>,
+    canonical_annotation: Option<Value>,
+    legacy_ref: Option<Value>,
+) -> Result<String> {
+    validate_sha(expected_sha)?;
+    let canonical = version.tag();
+    let legacy = format!("{canonical}+{expected_sha}");
+    let mut candidates = Vec::new();
+    if let Some(reference) = canonical_ref {
+        ensure!(
+            reference["ref"] == format!("refs/tags/{canonical}"),
+            "canonical baseline version tag ref identity is invalid"
+        );
+        match reference["object"]["type"].as_str() {
+            Some("commit") => {
+                ensure!(
+                    canonical_annotation.is_none(),
+                    "unexpected canonical tag object"
+                );
+                let target_sha = reference["object"]["sha"]
+                    .as_str()
+                    .context("canonical baseline version tag has no target SHA")?;
+                validate_sha(target_sha)?;
+                if target_sha == expected_sha {
+                    candidates.push((canonical.clone(), reference));
+                }
+            }
+            Some("tag") => {
+                let tag_sha = reference["object"]["sha"]
+                    .as_str()
+                    .context("annotated canonical baseline tag has no object SHA")?;
+                validate_sha(tag_sha)?;
+                let annotation = canonical_annotation
+                    .context("annotated canonical baseline tag object is missing")?;
+                let target_sha = annotation["object"]["sha"]
+                    .as_str()
+                    .context("annotated canonical baseline tag target is missing")?;
+                ensure!(
+                    annotation["sha"] == tag_sha
+                        && annotation["tag"] == canonical
+                        && annotation["object"]["type"] == "commit",
+                    "canonical baseline tag annotation identity or target type is invalid"
+                );
+                validate_sha(target_sha)?;
+                ensure!(
+                    target_sha != expected_sha,
+                    "canonical annotated version tag cannot identify the current source"
+                );
+                // Historical canonical annotated tags are ignored only after
+                // resolving exactly one annotation to an older direct commit.
+            }
+            _ => anyhow::bail!("canonical baseline version tag object type is invalid"),
+        }
+    } else {
+        ensure!(
+            canonical_annotation.is_none(),
+            "unexpected canonical tag object"
+        );
+    }
+    if let Some(reference) = legacy_ref {
+        ensure!(
+            reference["ref"] == format!("refs/tags/{legacy}")
+                && reference["object"]["type"] == "commit"
+                && reference["object"]["sha"] == expected_sha,
+            "legacy source annotation does not directly target its exact source"
+        );
+        candidates.push((legacy.clone(), reference));
+    }
+    ensure!(
+        candidates.len() == 1,
+        "baseline source must have exactly one canonical or legacy version tag"
+    );
+    Ok(candidates.remove(0).0)
+}
+
+fn optional_tag_ref(api: &GitHub, tag: &str) -> Result<Option<Value>> {
+    let path = format!("/repos/{}/git/ref/tags/{tag}", server_repository()?);
+    match api.get(&path) {
+        Ok(reference) => Ok(Some(reference)),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error).with_context(|| format!("read baseline runtime tag {tag}")),
+    }
+}
+
+fn validate_runtime_release(
+    api: &GitHub,
+    source_sha: &str,
+    tag: &str,
+    prerelease: bool,
+) -> Result<()> {
+    let release: Value = api.get(&format!(
+        "/repos/{}/releases/tags/{tag}",
+        server_repository()?
+    ))?;
     let assets = release["assets"]
         .as_array()
         .context("published runtime assets missing")?;
     ensure!(
-        assets.len() == 1
+        release["tag_name"] == tag
+            && release["name"] == tag
+            && release["target_commitish"] == source_sha
+            && release["draft"] == false
+            && release["prerelease"] == prerelease
+            && assets.len() == 1
             && assets[0]["name"] == "securefix-runtime-linux-x86_64.tar.gz"
             && assets[0]["state"] == "uploaded"
             && assets[0]["size"].as_u64().is_some_and(|size| size > 0)
-            && assets[0]["digest"]
-                .as_str()
-                .is_some_and(|digest| digest.starts_with("sha256:")),
-        "published runtime release asset is missing or invalid"
+            && assets[0]["digest"].as_str().is_some_and(|digest| {
+                digest.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            }),
+        "published runtime release metadata or asset is invalid"
     );
+    Ok(())
+}
 
-    let cargo: Value = api.get(&format!(
-        "/repos/{}/contents/Cargo.toml?ref={source_sha}",
-        server.repository
-    ))?;
+fn published_runtime_tag_from_env() -> Result<String> {
+    let tag = std::env::var("SECUREFIX_PUBLISHED_RUNTIME_TAG")
+        .context("missing SECUREFIX_PUBLISHED_RUNTIME_TAG")?;
     ensure!(
-        cargo["type"] == "file" && cargo["encoding"] == "base64",
-        "server Cargo.toml is not a regular content file"
+        !tag.is_empty() && tag.len() <= 256,
+        "invalid published runtime tag"
     );
-    let encoded = cargo["content"]
-        .as_str()
-        .context("server Cargo.toml content missing")?;
-    ensure!(
-        encoded.len() <= 384 * 1024,
-        "server Cargo.toml base64 content is oversized"
-    );
-    let encoded = encoded
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .collect::<String>();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .context("decode server Cargo.toml")?;
-    ensure!(bytes.len() <= 256 * 1024, "server Cargo.toml is oversized");
-    let text = std::str::from_utf8(&bytes).context("server Cargo.toml is not UTF-8")?;
-    let manifest: toml_edit::DocumentMut = text.parse().context("parse server Cargo.toml")?;
-    let version = manifest["package"]["version"]
-        .as_str()
-        .context("server package version missing")?;
-    semver::Version::parse(version).context("server package version is invalid")?;
-    let version_tag = format!("v{version}+{source_sha}");
-    let version_ref: Value = api.get(&format!(
-        "/repos/{}/git/ref/tags/{version_tag}",
-        server.repository
-    ))?;
-    ensure!(
-        version_ref["ref"] == format!("refs/tags/{version_tag}")
-            && version_ref["object"]["type"] == "commit"
-            && version_ref["object"]["sha"] == source_sha,
-        "published runtime version alias does not resolve to the default branch SHA"
-    );
-    Ok(source_sha.to_owned())
+    Ok(tag)
+}
+
+fn validate_test_runtime_tag(api: &GitHub, sha: &str, tag: &str) -> Result<String> {
+    let expected = resolve_test_runtime_tag(api, sha)?;
+    ensure!(tag == expected, "published runtime tag metadata changed");
+    Ok(expected)
 }
 
 fn published_runtime_sha_from_env() -> Result<String> {
@@ -648,8 +839,10 @@ fn fetch_state(candidate_sha: &str, run_id: u64, state_file: &Path) -> Result<()
         64 * 1024,
     )?;
     let scenario = scenario_from_zip(&bytes)?;
-    let published_runtime_sha = current_published_runtime_sha(&api)?;
+    let (published_runtime_sha, published_runtime_tag) = current_published_runtime(&api)?;
     validate_scenario(&scenario, candidate_sha, &published_runtime_sha)?;
+    securefix::output("published_runtime_sha", &published_runtime_sha)?;
+    securefix::output("published_runtime_tag", &published_runtime_tag)?;
     let server_repo: Value = api.get(&format!("/repos/{}", server_repository()?))?;
     let workflow_matches = workflow_run_matches(&run, &scenario.workflow_sha)?;
     ensure!(
@@ -731,6 +924,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     let published_runtime_sha = std::env::var("SECUREFIX_PUBLISHED_RUNTIME_SHA")
         .context("missing SECUREFIX_PUBLISHED_RUNTIME_SHA")?;
     validate_sha(&published_runtime_sha)?;
+    let published_runtime_tag = published_runtime_tag_from_env()?;
     let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
     validate_workflow_ref(&workflow_sha, &workflow_ref)?;
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
@@ -800,7 +994,11 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         )]),
     )?;
 
-    let rendered = distribution_fixture_files(&published_runtime_sha, &default_branch)?;
+    let rendered = distribution_fixture_files(
+        &published_runtime_sha,
+        &published_runtime_tag,
+        &default_branch,
+    )?;
     ensure!(
         !rendered.is_empty(),
         "distribution renderer returned no workflows"
@@ -1267,13 +1465,20 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
         serde_json::from_slice(&fs::read(state_file).context("read integration state file")?)
             .context("parse integration state file")?;
     let published_runtime_sha = published_runtime_sha_from_env()?;
+    let published_runtime_tag = published_runtime_tag_from_env()?;
     validate_scenario(&scenario, candidate_sha, &published_runtime_sha)?;
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
     let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
     let policy = scratch_policy(candidate_sha)?;
     verify_remote_identity(&server, &scenario)?;
 
-    let result = verify_inner(&server, &policy, &scenario, timeout_seconds);
+    let result = verify_inner(
+        &server,
+        &policy,
+        &scenario,
+        &published_runtime_tag,
+        timeout_seconds,
+    );
     let cleanup = cleanup(&server, &scenario);
     match (result, cleanup) {
         (Ok(verification), Ok(())) => {
@@ -1303,6 +1508,7 @@ fn verify_inner(
     api: &GitHub,
     policy: &Policy,
     scenario: &Scenario,
+    published_runtime_tag: &str,
     timeout_seconds: u64,
 ) -> Result<Verification> {
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
@@ -1367,6 +1573,7 @@ fn verify_inner(
         &scenario.distribution,
         &scenario.default_branch,
         &scenario.published_runtime_sha,
+        published_runtime_tag,
     )?;
     wait_for_actions_status_check(
         api,
@@ -1382,8 +1589,11 @@ fn verify_inner(
         "scratch-push-status-check",
         deadline,
     )?;
-    let files =
-        distribution_fixture_files(&scenario.published_runtime_sha, &scenario.default_branch)?;
+    let files = distribution_fixture_files(
+        &scenario.published_runtime_sha,
+        published_runtime_tag,
+        &scenario.default_branch,
+    )?;
     validate_rendered_files(&files)?;
 
     let positive_manifest = manifest(
@@ -1661,8 +1871,10 @@ fn verify_rendered_files(
     fixture: &PullRequestFixture,
     default_branch: &str,
     published_runtime_sha: &str,
+    published_runtime_tag: &str,
 ) -> Result<()> {
-    let expected = distribution_fixture_files(published_runtime_sha, default_branch)?;
+    let expected =
+        distribution_fixture_files(published_runtime_sha, published_runtime_tag, default_branch)?;
     validate_rendered_files(&expected)?;
     for (path, expected_bytes) in expected {
         let actual = api.content(integration_repository()?, &path, &fixture.head_sha)?;
@@ -1717,13 +1929,19 @@ fn optional_file(api: &GitHub, path: &str, revision: &str) -> Result<Option<Valu
 
 fn distribution_fixture_files(
     published_runtime_sha: &str,
+    published_runtime_tag: &str,
     default_branch: &str,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
-    let mut files =
-        crate::distribution::caller::rendered_files(published_runtime_sha, default_branch, true)?;
-    for (path, bytes) in
-        crate::distribution::caller::rendered_client_fixture_files(published_runtime_sha)?
-    {
+    let mut files = crate::distribution::caller::rendered_files(
+        published_runtime_sha,
+        published_runtime_tag,
+        default_branch,
+        true,
+    )?;
+    for (path, bytes) in crate::distribution::caller::rendered_client_fixture_files(
+        published_runtime_sha,
+        published_runtime_tag,
+    )? {
         ensure!(
             files.insert(path.clone(), bytes).is_none(),
             "distribution fixture duplicates rendered caller path {path}"
@@ -2470,8 +2688,13 @@ fn validate_outputs(
     candidate_sha: &str,
     phase: Phase,
     published_runtime_sha: &str,
+    published_runtime_tag: &str,
 ) -> Result<()> {
     validate_state_path(state_file)?;
+    ensure!(
+        !published_runtime_tag.is_empty(),
+        "published runtime tag metadata is empty"
+    );
     ensure!(
         state_file.file_name().and_then(|name| name.to_str()) == Some("state.json"),
         "integration output must use state.json"
@@ -2657,6 +2880,85 @@ impl RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_cutover_ignores_only_a_historical_canonical_tag_at_another_source() {
+        let sha = "a".repeat(40);
+        let historical_sha = "b".repeat(40);
+        let annotation_sha = "c".repeat(40);
+        let version = crate::runtime::RuntimeVersion::parse("0.1.0").unwrap();
+        let direct = |tag: &str, target: &str| {
+            json!({
+                "ref": format!("refs/tags/{tag}"),
+                "object": {"type":"commit", "sha":target}
+            })
+        };
+        let selected = select_test_runtime_tag(
+            &version,
+            &sha,
+            Some(direct("v0.1.0", &historical_sha)),
+            None,
+            Some(direct(&format!("v0.1.0+{sha}"), &sha)),
+        )
+        .unwrap();
+        assert_eq!(selected, format!("v0.1.0+{sha}"));
+        assert!(
+            select_test_runtime_tag(
+                &version,
+                &sha,
+                Some(direct("v0.1.0", &sha)),
+                None,
+                Some(direct(&format!("v0.1.0+{sha}"), &sha)),
+            )
+            .is_err(),
+            "two tag forms for the current source must fail closed"
+        );
+        assert!(
+            select_test_runtime_tag(&version, &sha, None, None, None).is_err(),
+            "missing source tag must fail closed"
+        );
+        assert!(
+            select_test_runtime_tag(
+                &version,
+                &sha,
+                Some(json!({"ref":"refs/tags/v0.1.0", "object":{"type":"tag", "sha":annotation_sha}})),
+                Some(json!({"sha":annotation_sha,"tag":"v0.1.0","object":{"type":"commit","sha":historical_sha}})),
+                Some(direct(&format!("v0.1.0+{sha}"), &sha)),
+            )
+            .is_ok(),
+            "valid annotated historical canonical tag must be ignored"
+        );
+        assert!(
+            select_test_runtime_tag(
+                &version,
+                &sha,
+                Some(json!({"ref":"refs/tags/v0.1.0", "object":{"type":"tag", "sha":annotation_sha}})),
+                Some(json!({"sha":annotation_sha,"tag":"v0.1.0","object":{"type":"commit","sha":sha}})),
+                Some(direct(&format!("v0.1.0+{sha}"), &sha)),
+            ).is_err(),
+            "annotated canonical tag pointing at current source must fail closed"
+        );
+        assert!(
+            select_test_runtime_tag(
+                &version,
+                &sha,
+                Some(json!({"ref":"refs/tags/v0.1.0", "object":{"type":"tag", "sha":annotation_sha}})),
+                Some(json!({"sha":annotation_sha,"tag":"v0.1.0","object":{"type":"tag","sha":historical_sha}})),
+                Some(direct(&format!("v0.1.0+{sha}"), &sha)),
+            ).is_err(),
+            "nested annotated tags must fail closed"
+        );
+        assert!(
+            select_test_runtime_tag(
+                &version,
+                &sha,
+                Some(json!({"ref":"refs/tags/v0.1.0", "object":{"type":"tag", "sha":annotation_sha}})),
+                Some(json!({"sha":annotation_sha,"tag":"v0.1.1","object":{"type":"commit","sha":historical_sha}})),
+                Some(direct(&format!("v0.1.0+{sha}"), &sha)),
+            ).is_err(),
+            "mismatched annotated tag identity must fail closed"
+        );
+    }
 
     #[test]
     fn approval_probe_rejects_other_authors_repositories_refs_and_heads() {
@@ -2871,7 +3173,7 @@ mod tests {
     #[test]
     fn distribution_fixture_includes_the_checked_in_pinact_consumer_workflow() {
         let sha = "a".repeat(40);
-        let files = distribution_fixture_files(&sha, "main").unwrap();
+        let files = distribution_fixture_files(&sha, "v0.2.0-pre.1", "main").unwrap();
         let ci = std::str::from_utf8(files.get(".github/workflows/ci.yml").unwrap()).unwrap();
         assert!(ci.contains("      actions: read\n      contents: read\n      attestations: read\n      pull-requests: read\n"));
         let autofix = std::str::from_utf8(
@@ -3097,6 +3399,7 @@ mod tests {
                 &candidate_sha,
                 Phase::Prepare,
                 &scenario.published_runtime_sha,
+                "v0.2.0-pre.1",
             )
             .is_ok()
         );
@@ -3126,6 +3429,7 @@ mod tests {
                 &candidate_sha,
                 Phase::Verify,
                 &scenario.published_runtime_sha,
+                "v0.2.0-pre.1",
             )
             .is_ok()
         );
@@ -3143,6 +3447,7 @@ mod tests {
                 &candidate_sha,
                 Phase::Verify,
                 &scenario.published_runtime_sha,
+                "v0.2.0-pre.1",
             )
             .is_err()
         );
@@ -3165,6 +3470,7 @@ mod tests {
                 &"a".repeat(40),
                 Phase::Prepare,
                 &"b".repeat(40),
+                "v0.2.0-pre.1",
             )
             .is_err()
         );

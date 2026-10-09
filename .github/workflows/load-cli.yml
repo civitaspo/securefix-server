@@ -25,14 +25,53 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       source-sha: ${{ job.workflow_sha }}
     steps:
-      - name: Download exact runtime release
+      - name: Resolve and download exact canonical runtime release
         env:
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
-        run: >-
-          gh release download "securefix-runtime-$SECUREFIX_SOURCE_SHA"
-          --repo civitaspo/securefix-server
-          --pattern securefix-runtime-linux-x86_64.tar.gz
-          --dir download
+        run: |
+          [[ "$SECUREFIX_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'workflow source must be a full lowercase commit SHA' >&2; exit 1; }
+          repo=civitaspo/securefix-server
+          manifest_json="$(gh api "repos/$repo/contents/Cargo.toml?ref=$SECUREFIX_SOURCE_SHA")"
+          jq -e '.path == "Cargo.toml" and .encoding == "base64" and (.content | type == "string" and length > 0 and length <= 96000) and (if (.size | type) == "number" then (.size == (.size | floor) and .size >= 1 and .size <= 65536) else false end)' <<<"$manifest_json" >/dev/null || { echo 'source Cargo.toml response is invalid' >&2; exit 1; }
+          reported_size="$(jq -r '.size' <<<"$manifest_json")"
+          manifest_file="$(mktemp "$RUNNER_TEMP/securefix-manifest.XXXXXX")"
+          trap 'rm -f "$manifest_file"' EXIT
+          jq -er '.content' <<<"$manifest_json" | base64 --decode > "$manifest_file"
+          actual_size="$(wc -c < "$manifest_file" | tr -d '[:space:]')"
+          [[ "$actual_size" == "$reported_size" && "$actual_size" -le 65536 ]] || { echo 'decoded source Cargo.toml size mismatch' >&2; exit 1; }
+          version="$(awk '
+            /^\[[^]]+\]$/ { in_package = ($0 == "[package]"); if ($0 == "[package]") package_count++ }
+            in_package && /^[[:space:]]*version[[:space:]]*=/ {
+              count++
+              value = $0
+              sub(/^[[:space:]]*version[[:space:]]*=[[:space:]]*/, "", value)
+              if (value !~ /^"[^"]+"[[:space:]]*(#.*)?$/) invalid = 1
+              else { sub(/^"/, "", value); sub(/"[[:space:]]*(#.*)?$/, "", value); result = value }
+            }
+            END { if (package_count != 1 || count != 1 || invalid) exit 1; print result }
+          ' "$manifest_file")" || { echo 'source Cargo.toml must contain one literal package.version' >&2; exit 1; }
+          numeric='(0|[1-9][0-9]*)'
+          identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^${numeric}\\.${numeric}\\.${numeric}(-${identifier}(\\.${identifier})*)?$"
+          [[ ${#version} -le 128 && "$version" =~ $semver ]] || { echo 'source package version is not canonical SemVer without build metadata' >&2; exit 1; }
+          tag="v$version"
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          ref="$(gh api "repos/$repo/git/ref/tags/$tag")"
+          [[ "$(jq -r '.object.type' <<<"$ref")" == commit && "$(jq -r '.object.sha' <<<"$ref")" == "$SECUREFIX_SOURCE_SHA" ]] || { echo 'canonical runtime tag does not directly target the requested source' >&2; exit 1; }
+          release="$(gh api "repos/$repo/releases/tags/$tag")"
+          jq -e --arg tag "$tag" --arg sha "$SECUREFIX_SOURCE_SHA" --argjson prerelease "$prerelease" '
+            .tag_name == $tag and .name == $tag and .target_commitish == $sha and .draft == false and .prerelease == $prerelease and
+            (.assets | length) == 1 and .assets[0].name == "securefix-runtime-linux-x86_64.tar.gz" and
+            .assets[0].state == "uploaded" and (.assets[0].size | type == "number" and . > 0) and
+            (.assets[0].digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+          ' <<<"$release" >/dev/null || { echo 'canonical runtime release metadata is invalid' >&2; exit 1; }
+          expected_digest="$(jq -r '.assets[0].digest' <<<"$release" | cut -d: -f2)"
+          expected_size="$(jq -r '.assets[0].size' <<<"$release")"
+          mkdir download
+          gh release download "$tag" --repo "$repo" --pattern securefix-runtime-linux-x86_64.tar.gz --dir download
+          archive=download/securefix-runtime-linux-x86_64.tar.gz
+          [[ "$(stat -c %s "$archive")" == "$expected_size" && "$(sha256sum "$archive" | cut -d' ' -f1)" == "$expected_digest" ]] || { echo 'downloaded runtime archive size or digest mismatch' >&2; exit 1; }
       - name: Verify archive provenance before extraction
         env:
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
