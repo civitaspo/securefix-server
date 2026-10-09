@@ -1,0 +1,52 @@
+name: Workflow Autofix (workflow_call)
+
+on:
+  workflow_call:
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+jobs:
+  autofix:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}
+      SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Force tracked workflow fixture change
+        run: printf '\n# Scratch native client integration\n' >> .github/workflows/ci.yml
+      - name: Detect automated fixes
+        id: fixes
+        run: |
+          if git diff --quiet -- .github/workflows; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare exact scratch client input
+        env:
+          SECUREFIX_SCRATCH_POLICY_BASE64: "__SECUREFIX_SCRATCH_POLICY_BASE64__"
+        run: |
+          printf '%s' "$SECUREFIX_SCRATCH_POLICY_BASE64" | base64 --decode > scratch-policy.json
+      - name: Request Securefix commit
+        if: steps.fixes.outputs.changed == 'true' && env.SECUREFIX_CLIENT_APP_ID != '' && env.SECUREFIX_SERVER_REPOSITORY != ''
+        uses: csm-actions/securefix-action@1b770a7af0ec5e04517295b4e14c4b451359d550 # v0.6.3
+        with:
+          action: client
+          app_id: ${{ env.SECUREFIX_CLIENT_APP_ID }}
+          app_private_key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          commit_message: "ci: apply workflow security fixes"
+          server_repository: ${{ env.SECUREFIX_SERVER_REPOSITORY }}
+      - name: Require Securefix configuration
+        if: steps.fixes.outputs.changed == 'true' && (env.SECUREFIX_CLIENT_APP_ID == '' || env.SECUREFIX_SERVER_REPOSITORY == '')
+        run: |
+          echo "Configure SECUREFIX_CLIENT_APP_ID before allowing workflow autofixes." >&2
+          exit 1

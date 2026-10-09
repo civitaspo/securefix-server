@@ -1,0 +1,18 @@
+name: Pull Request Workflow
+
+on:
+  workflow_call:
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+jobs:
+  checks:
+    uses: ./.github/workflows/workflow_call_pr.yml
+    permissions:
+      contents: read
+      pull-requests: read
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

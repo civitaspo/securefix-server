@@ -1,0 +1,17 @@
+name: Pull Request Checks (workflow_call)
+
+on:
+  workflow_call:
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+jobs:
+  autofix:
+    uses: ./.github/workflows/wc-autofix.yml
+    permissions:
+      contents: read
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

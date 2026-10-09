@@ -411,6 +411,12 @@ fn scratch_client_policy(trusted_policy: &[u8]) -> Result<Vec<u8>> {
     let server_deployment = policy["deployment"]["server"].clone();
     policy["deployment"]["server"] = policy["deployment"]["integration"].clone();
     policy["deployment"]["integration"] = server_deployment;
+    policy["repositories"] = json!([{
+        "repository": policy["deployment"]["server"]["repository"],
+        "capabilities": ["securefix"],
+        "release": null,
+        "protect_tags": false
+    }]);
     let bytes = serde_json::to_vec_pretty(&policy)?;
     crate::policy::Policy::parse(&bytes)?;
     Ok(bytes)
@@ -1254,13 +1260,18 @@ fn verify_inner(
         api,
         &scenario.distribution,
         &scenario.default_branch,
+        "status-check",
         deadline,
     )?;
-    let files = crate::distribution::caller::rendered_files(
-        &scenario.published_runtime_sha,
+    wait_for_actions_status_check(
+        api,
+        &scenario.distribution,
         &scenario.default_branch,
-        true,
+        "scratch-push-status-check",
+        deadline,
     )?;
+    let files =
+        distribution_fixture_files(&scenario.published_runtime_sha, &scenario.default_branch)?;
     validate_rendered_files(&files)?;
 
     let positive_manifest = manifest(
@@ -1598,6 +1609,14 @@ fn distribution_fixture_files(
 ) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut files =
         crate::distribution::caller::rendered_files(published_runtime_sha, default_branch, true)?;
+    for (path, bytes) in
+        crate::distribution::caller::rendered_client_fixture_files(published_runtime_sha)?
+    {
+        ensure!(
+            files.insert(path.clone(), bytes).is_none(),
+            "distribution fixture duplicates rendered caller path {path}"
+        );
+    }
     ensure!(
         files
             .insert(
@@ -1609,7 +1628,166 @@ fn distribution_fixture_files(
             .is_none(),
         "distribution fixture unexpectedly contains the scratch CI workflow"
     );
+    overlay_scratch_client_fixture(&mut files)?;
+    let push = crate::distribution::caller::rendered_push_fixture(default_branch)?;
+    let push = std::str::from_utf8(&push)?;
+    let push = replace_once(
+        push,
+        "  workflow_dispatch:\n",
+        "  workflow_dispatch:\n  pull_request:\n    types: [opened, synchronize, reopened]\n",
+        ".github/workflows/push.yml",
+    )?;
+    let push = replace_once(
+        &push,
+        "    name: status-check\n",
+        "    name: scratch-push-status-check\n",
+        ".github/workflows/push.yml",
+    )?;
+    files.insert(".github/workflows/push.yml".to_owned(), push.into_bytes());
+    files.insert(
+        ".github/workflows/workflow_call_push.yml".to_owned(),
+        include_bytes!("integration_templates/workflow_call_push.yml").to_vec(),
+    );
     Ok(files)
+}
+
+fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+    let trusted = crate::config::trusted()?;
+    let scratch = &trusted.deployment.integration.repository;
+    let server = &trusted.deployment.server.repository;
+    let mut scratch_parts = scratch.split('/');
+    let scratch_owner = scratch_parts.next().context("scratch owner missing")?;
+    let scratch_name = scratch_parts.next().context("scratch name missing")?;
+    ensure!(scratch_parts.next().is_none(), "invalid scratch repository");
+    let mut server_parts = server.split('/');
+    let server_owner = server_parts.next().context("server owner missing")?;
+    let server_name = server_parts.next().context("server name missing")?;
+    ensure!(server_parts.next().is_none(), "invalid server repository");
+    let scratch_policy = scratch_client_policy(&crate::config::trusted_policy_bytes()?)?;
+    use base64::Engine as _;
+    let policy_base64 = base64::engine::general_purpose::STANDARD.encode(scratch_policy);
+
+    let ci = files
+        .get_mut(".github/workflows/ci.yml")
+        .context("scratch CI workflow is missing")?;
+    let ci = replace_once(
+        std::str::from_utf8(ci)?,
+        "      contents: read\n      attestations: read\n      pull-requests: read\n",
+        "      actions: read\n      contents: read\n      attestations: read\n      pull-requests: read\n",
+        ".github/workflows/ci.yml",
+    )?;
+    files.insert(".github/workflows/ci.yml".to_owned(), ci.into_bytes());
+
+    for path in [
+        ".github/workflows/pull_request.yml",
+        ".github/workflows/workflow_call_pr.yml",
+    ] {
+        let bytes = files
+            .get_mut(path)
+            .context("scratch caller workflow is missing")?;
+        let text = std::str::from_utf8(bytes)?;
+        let text = replace_once(
+            text,
+            "    permissions:\n      contents: read\n",
+            "    permissions:\n      actions: read\n      contents: read\n",
+            path,
+        )?;
+        *bytes = text.into_bytes();
+    }
+
+    let autofix_path = ".github/workflows/wc-autofix.yml";
+    let bytes = files
+        .get_mut(autofix_path)
+        .context("scratch autofix workflow is missing")?;
+    let text = std::str::from_utf8(bytes)?;
+    let text = replace_once(
+        text,
+        "      contents: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}\n      SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}\n",
+        &format!(
+            "      actions: read\n      contents: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: {}\n      SECUREFIX_SERVER_REPOSITORY: {}\n",
+            trusted.deployment.client_app_id, scratch
+        ),
+        autofix_path,
+    )?;
+    let text = replace_once(
+        &text,
+        "SECUREFIX_SCRATCH_POLICY_BASE64: \"__SECUREFIX_SCRATCH_POLICY_BASE64__\"",
+        &format!("SECUREFIX_SCRATCH_POLICY_BASE64: \"{policy_base64}\""),
+        autofix_path,
+    )?;
+    let text = replace_once(
+        &text,
+        &format!(
+            "          owner: \"{server_owner}\"\n          repositories: \"{server_name}\"\n"
+        ),
+        &format!(
+            "          owner: \"{scratch_owner}\"\n          repositories: \"{scratch_name}\"\n"
+        ),
+        autofix_path,
+    )?;
+    let text = replace_once(
+        &text,
+        "      - name: \"Request Securefix commit\"\n        if:",
+        "      - name: \"Request Securefix commit\"\n        id: native-client-action\n        if:",
+        autofix_path,
+    )?;
+    let text = replace_once(
+        &text,
+        &format!("          server-repository: \"{server}\"\n"),
+        &format!(
+            "          server-repository: \"{scratch}\"\n          runtime-repository: \"{server}\"\n"
+        ),
+        autofix_path,
+    )?;
+    let text = replace_once(
+        &text,
+        &format!(
+            "          runtime-default-branch: {}\n",
+            serde_json::to_string(&trusted.deployment.server.default_branch)?
+        ),
+        &format!(
+            "          runtime-default-branch: \"{}\"\n          policy-path: scratch-policy.json\n          repository: \"{scratch}\"\n          branch: securefix-client-smoke-${{{{ github.run_id }}}}\n",
+            trusted.deployment.server.default_branch
+        ),
+        autofix_path,
+    )?;
+    let text = replace_once(
+        &text,
+        "      - name: Require Securefix configuration\n",
+        &format!(
+            r#"      - name: Verify scratch client action outputs
+        env:
+          ARTIFACT_NAME: ${{{{ steps.native-client-action.outputs.artifact-name }}}}
+          SOURCE_LABEL: ${{{{ steps.native-client-action.outputs.source-label }}}}
+          RUNTIME_SOURCE: ${{{{ steps.native-client-action.outputs.runtime-source }}}}
+          CLIENT_TOKEN: ${{{{ steps.securefix-client-token.outputs.token }}}}
+          GH_TOKEN: ${{{{ github.token }}}}
+          EXPECTED_REPOSITORY: "{scratch}"
+        run: |
+          set -euo pipefail
+          test -n "$ARTIFACT_NAME"
+          test "$ARTIFACT_NAME" = "$SOURCE_LABEL"
+          test "$RUNTIME_SOURCE" = attested-release
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" | jq -e --arg name "$ARTIFACT_NAME" '.artifacts | map(select(.name == $name and .expired == false and .size_in_bytes > 0 and .size_in_bytes <= 16777216)) | length == 1' >/dev/null
+          label="$(GH_TOKEN="$CLIENT_TOKEN" gh api "/repos/$GITHUB_REPOSITORY/labels/$SOURCE_LABEL")"
+          printf '%s' "$label" | jq -e --arg name "$SOURCE_LABEL" --arg description "$GITHUB_REPOSITORY/$GITHUB_RUN_ID" '.name == $name and .description == $description' >/dev/null
+          GH_TOKEN="$CLIENT_TOKEN" gh api --method DELETE "/repos/$GITHUB_REPOSITORY/labels/$SOURCE_LABEL"
+      - name: Require Securefix configuration
+"#
+        ),
+        autofix_path,
+    )?;
+    *bytes = text.into_bytes();
+    Ok(())
+}
+
+fn replace_once(source: &str, needle: &str, replacement: &str, path: &str) -> Result<String> {
+    ensure!(
+        source.matches(needle).count() == 1,
+        "scratch fixture anchor is missing or duplicated in {path}"
+    );
+    Ok(source.replacen(needle, replacement, 1))
 }
 
 fn validate_rendered_files(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
@@ -1798,19 +1976,20 @@ fn wait_for_actions_status_check(
     api: &GitHub,
     fixture: &PullRequestFixture,
     default_branch: &str,
+    check_name: &str,
     deadline: Instant,
 ) -> Result<()> {
     let app_id = trusted_config()?.deployment.checks.status_app_id;
     loop {
         verify_pr_identity(api, fixture, default_branch, &fixture.head_sha)?;
         let checks = check_runs(api, &fixture.head_sha)?;
-        if latest_check_success(&checks, "status-check", app_id, false) {
+        if latest_check_success(&checks, check_name, app_id, false) {
             return Ok(());
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         ensure!(
             !remaining.is_zero(),
-            "timed out waiting for the real pinact consumer status-check on {}",
+            "timed out waiting for the real consumer {check_name} on {}",
             fixture.url
         );
         thread::sleep(remaining.min(Duration::from_secs(5)));
@@ -2420,7 +2599,15 @@ mod tests {
             scratch["deployment"]["integration"],
             original["deployment"]["server"]
         );
-        assert_eq!(scratch["repositories"], original["repositories"]);
+        assert_eq!(scratch["repositories"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            scratch["repositories"][0]["repository"],
+            original["deployment"]["integration"]["repository"]
+        );
+        assert_eq!(
+            scratch["repositories"][0]["capabilities"],
+            json!(["securefix"])
+        );
         assert_eq!(scratch["owner_id"], original["owner_id"]);
     }
 
@@ -2534,11 +2721,56 @@ mod tests {
 
     #[test]
     fn distribution_fixture_includes_the_checked_in_pinact_consumer_workflow() {
-        let files = distribution_fixture_files(&"a".repeat(40), "main").unwrap();
-        assert_eq!(
-            files.get(".github/workflows/ci.yml").unwrap(),
-            include_str!("integration_templates/ci.yml").as_bytes()
+        let sha = "a".repeat(40);
+        let files = distribution_fixture_files(&sha, "main").unwrap();
+        let ci = std::str::from_utf8(files.get(".github/workflows/ci.yml").unwrap()).unwrap();
+        assert!(ci.contains("      actions: read\n      contents: read\n      attestations: read\n      pull-requests: read\n"));
+        let autofix = std::str::from_utf8(
+            files
+                .get(".github/workflows/wc-autofix.yml")
+                .expect("migrated autofix workflow is present"),
+        )
+        .unwrap();
+        let workflow: serde_yaml::Value = serde_yaml::from_str(autofix).unwrap();
+        assert!(
+            workflow["jobs"]["autofix"]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .any(|step| step["uses"].as_str()
+                    == Some(&format!(
+                        "{}/.github/actions/client@{sha}",
+                        server_repository().unwrap()
+                    )))
         );
+        assert!(!autofix.contains("csm-actions/securefix-action@"));
+        assert!(!autofix.contains("__SECUREFIX_SCRATCH_POLICY_BASE64__"));
+        assert!(autofix.contains("id: native-client-action"));
+        assert!(autofix.contains("files: ${{ steps.securefix-files.outputs.files }}"));
+        assert!(autofix.contains(&format!(
+            "server-repository: \"{}\"\n          runtime-repository: \"{}\"",
+            integration_repository().unwrap(),
+            server_repository().unwrap()
+        )));
+        assert!(autofix.contains("name: Verify scratch client action outputs"));
+        assert!(autofix.contains("gh api --method DELETE"));
+        assert!(autofix.contains("actions: read\n      contents: read"));
+        for path in [
+            ".github/workflows/pull_request.yml",
+            ".github/workflows/workflow_call_pr.yml",
+        ] {
+            assert!(
+                files.contains_key(path),
+                "migrated workflow is missing: {path}"
+            );
+        }
+        for path in [
+            ".github/workflows/pull_request.yml",
+            ".github/workflows/workflow_call_pr.yml",
+        ] {
+            let workflow = std::str::from_utf8(files.get(path).unwrap()).unwrap();
+            assert!(workflow.contains("      actions: read\n      contents: read"));
+        }
         validate_rendered_files(&files).unwrap();
     }
 

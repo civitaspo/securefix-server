@@ -53,7 +53,7 @@ accepted head SHA and uses squash merge, but does not publish a runtime tag/rele
 The native repair apply core runs against GitHub with a verified signed commit,
 exact contents and an idempotent retry. Release tagging uses the production annotated-tag
 helper and verifies retries and target mismatch before deleting the disposable tag.
-Immutable release publication remains a separate protected-main operation.
+Attested stable runtime publication remains a separate protected-main operation.
 
 The candidate policy used by the harness is constructed in memory from the
 trusted runtime policy, narrowed to the scratch repository, and assigned the candidate
@@ -77,3 +77,10 @@ Action's candidate-directory override empty and exercises Release download,
 attestation verification, preparation, upload and dispatch. Completion requires this
 published-runtime client test, successful consumer pinact CI and actual scratch
 auto-merge. Fixture preparation and distribution success alone are insufficient.
+
+The distribution fixture also migrates the three-file autofix workflow call chain.
+Its scratch-only job deliberately changes a tracked workflow, requires the native
+client Action to produce an artifact and request label using the attested published
+runtime, and verifies the label before deleting it. Its token and deployment policy
+target only the scratch repository. The required `status-check` fails if this chain
+fails or is skipped, and separately verifies every generated action pin with pinact.
