@@ -1,34 +1,25 @@
-# Verify a candidate on the scratch repository
+# Candidate integration tests
 
-Use [testing-securefix-server](https://github.com/civitaspo/testing-securefix-server) to check a reviewed server revision before publishing its production runtime.
-The scratch `verify-server.yml` wrapper pins the server's reusable [testing workflow](../.github/workflows/testing-securefix-server.yml) to one full commit SHA.
-Review the revision and update that wrapper pin before testing a new candidate.
-
-Dispatch the wrapper on scratch main:
+Use `Test Candidate Runtime` on the server's trusted main workflow with a full reviewed candidate SHA. The candidate does not need a merged production revision or a Runtime Release.
 
 ```sh
-gh workflow run verify-server.yml --repo civitaspo/testing-securefix-server --ref main
+gh workflow run testing-securefix-server.yml --repo civitaspo/securefix-server --ref main -f candidate_sha="$CANDIDATE_SHA" -f phase=prepare
 ```
 
-Inspect the resulting run in the scratch repository's Actions tab.
-Only the owner can execute the test workflow, and only from scratch main.
-It builds the server at the reusable job's actual source SHA without custom secrets, runs Rust tests, and uploads the runtime and API probe as one immutable artifact.
-The next job downloads that same-run artifact ID and installs the CLI through the same composite action used by production jobs.
-It checks command discovery through `PATH`, executable mode `755`, policy acceptance and rejection, and the repository-scoped Client App metadata token.
-The existing `SECUREFIX_CLIENT_PRIVATE_KEY` is used only by the token action; the probe receives the short-lived metadata-read token.
-The run creates no Release and needs no cross-repository artifact token or additional secret.
+The prepare job builds and tests without credentials. Its execution job receives only Server and Client App installation tokens restricted to `civitaspo/testing-securefix-server`. The repository ID and token installation scope are checked in Rust before creating fixtures. No personal approval token, administration token or release signing key is passed to the candidate.
 
-Use the server PR's CI for formatting, Clippy, actionlint, and structural workflow checks.
-The [verification record](github-verification-2026-10-08.md) distinguishes those checks from live GitHub API coverage.
-The scratch CI does not exercise production approval, merge, signing, publication, or settings activation.
-Follow the [deployment sequence](migration.md) for those privileged lifecycle checks; production commands retain their exact-current-main guard.
+The prepare run records three scratch PRs in `scratch-fixtures/state.json`. An authenticated owner controller posts `/approve` and `/merge` to the positive PR, posts `/merge` to the stale-head PR, and approves the positive PR's current commit. These commands can be posted by the coding agent using its existing owner GitHub session. The test does not require the human to post them.
 
-Once staging and review succeed, manually dispatch `Publish Runtime` on the server's current main revision.
-Publishing intermediate commits is unnecessary.
-Successful publication initiates caller update PRs and the server's default-head Policy Check.
-Inspect the distribution run, its Securefix receiver runs, and the signed caller PRs before merging caller changes under the [maintenance procedure](migration.md#subsequent-server-upgrades).
-To recover a failed distribution, dispatch a new `Distribute Runtime` run on server main with the successful publisher run ID.
-An existing update PR is reused, and a caller whose default branch already has the generated workflows needs no PR.
-After main advances, old client pins and runtimes stop working until the stable current revision is published and caller updates are merged.
-The Server App private key remains in the server main environment.
-That environment permits only main deployments, so candidate scratch CI cannot exercise its production write path before merge.
+```sh
+gh workflow run testing-securefix-server.yml --repo civitaspo/securefix-server --ref main -f candidate_sha="$CANDIDATE_SHA" -f phase=verify -f fixture_run_id="$PREPARE_RUN_ID"
+```
+
+Verification reuses the prepare run's candidate binary. Before minting write credentials it checks the successful owner-triggered producer run, the defining workflow revision, the candidate SHA and the bounded immutable state artifact. It verifies actual signatures, owner authorization, current-head approval, required checks, signed workflow migration files, a successful squash merge, stale-head rejection and replay rejection. Remaining PRs and branches are cleaned up.
+
+The scratch main branch requires a non-author approving review, signed commits, `status-check` from GitHub Actions and `securefix-policy-check` from the Server App. A policy success is published only after the shared production PR validator accepts the current head.
+
+See [the harness contract](integration-testing.md) for the boundary between live functional tests and source-provenance fixtures. Stable runtime publication is a separate protected-main operation after candidate verification and review.
+
+The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
+
+The former PAT-based live merge test has been replaced by the candidate integration workflow. Live writes use only repository-scoped installation tokens and clean up their fixtures. The optional known signed-commit regression remains read-only.

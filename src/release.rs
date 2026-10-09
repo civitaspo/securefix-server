@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::api::{ApiError, GitHub};
-use crate::policy::{Capability, Policy, ReleaseStrategy, SERVER, validate_repository};
+use crate::policy::{Capability, Policy, ReleaseStrategy, validate_repository};
 use crate::workflow::{
     ReferencedWorkflow, manifest_from_zip, referenced_revision, require_current_runtime,
     successful_source_run, write_json,
@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const PROVIDER: &str = "terraform-provider-sigma";
 const MAX_PROVIDER_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PROVIDER_ARCHIVE_FILES: usize = 32;
 
@@ -234,12 +233,6 @@ impl ReleasePlanV2 {
     fn validate(&self) -> Result<()> {
         ensure!(self.schema_version == 2, "unsupported release plan schema");
         validate_repository(&self.repository)?;
-        if self.strategy == ReleaseStrategy::TerraformProvider {
-            ensure!(
-                self.repository == "civitaspo/terraform-provider-sigma",
-                "Terraform provider publishing is restricted to the Sigma provider"
-            );
-        }
         CommitSha::parse(&self.server_revision)?;
         CommitSha::parse(&self.source_revision)?;
         CommitSha::parse(&self.release_pr_sha)?;
@@ -395,6 +388,11 @@ fn authorized_release_pr(
     repo: &Repository,
     number: u64,
 ) -> Result<(PullRequest, CommitSha)> {
+    let release_branch = crate::config::trusted()?.deployment.release_branch.as_str();
+    let repository: Value = api.get(&format!("/repos/{}", repo.as_str()))?;
+    let default_branch = repository["default_branch"]
+        .as_str()
+        .context("release caller default branch missing")?;
     ensure!(number > 0, "release PR number must be positive");
     let pr: PullRequest = api.get(&format!("/repos/{}/pulls/{number}", repo.as_str()))?;
     ensure!(
@@ -406,8 +404,8 @@ fn authorized_release_pr(
         "release PR is not merged"
     );
     ensure!(
-        pr.base.name == "main" && pr.head.name == "release/next",
-        "release PR must merge release/next into main"
+        pr.base.name == default_branch && pr.head.name == release_branch,
+        "release PR must merge the configured release branch into the caller default branch"
     );
     ensure!(
         pr.head
@@ -437,9 +435,10 @@ fn authorized_release_pr(
     CommitSha::parse(&pr.head.sha)?;
     crate::request::require_owner_marker(api, policy, repo.as_str(), number, &pr.head.sha)?;
     let compare: Value = api.get(&format!(
-        "/repos/{}/compare/{}...main",
+        "/repos/{}/compare/{}...{}",
         repo.as_str(),
-        merge_sha.as_str()
+        merge_sha.as_str(),
+        default_branch
     ))?;
     ensure!(
         matches!(compare["status"].as_str(), Some("ahead" | "identical")),
@@ -732,14 +731,20 @@ fn sync_pr() -> Result<()> {
         Version::parse(&version).is_ok() && !version.contains('+'),
         "invalid .release-version"
     );
+    let release_branch = crate::config::trusted()?.deployment.release_branch.as_str();
+    let repo_info: Value = api.get(&format!("/repos/{}", repo.as_str()))?;
+    let default_branch = repo_info["default_branch"]
+        .as_str()
+        .context("caller default branch missing")?;
     let head = format!(
-        "{}:release/next",
+        "{}:{release_branch}",
         repo.as_str().split('/').next().unwrap_or_default()
     );
     let encoded_head = url_encode(&head);
     let pulls: Vec<Value> = api.get(&format!(
-        "/repos/{}/pulls?state=open&head={encoded_head}&base=main",
-        repo.as_str()
+        "/repos/{}/pulls?state=open&head={encoded_head}&base={}",
+        repo.as_str(),
+        url_encode(default_branch)
     ))?;
     let Some(pr) = pulls.first() else {
         return Ok(());
@@ -786,6 +791,7 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
         strategy_for(&api, &repo)? == ReleaseStrategy::TerraformProvider,
         "provider build is not enabled for this repository"
     );
+    let project = repo.name();
     let (_pr, merge_sha) = authorized_release_pr(&api, &policy, &repo, release_pr_number)?;
     ensure!(
         git_output(&["rev-parse", "HEAD"])? == merge_sha.as_str(),
@@ -808,7 +814,7 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
     for target in PROVIDER_TARGETS {
         let windows = target.os == "windows";
         let binary_name = format!(
-            "{PROVIDER}_v{}{}",
+            "{project}_v{}{}",
             tag.version(),
             if windows { ".exe" } else { "" }
         );
@@ -855,7 +861,7 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
             target.arch
         );
         let archive_name = format!(
-            "{PROVIDER}_{}_{}_{}.zip",
+            "{project}_{}_{}_{}.zip",
             tag.version(),
             target.os,
             target.arch
@@ -864,12 +870,12 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
         write_provider_zip(&binary_path, &binary_name, Path::new("."), &archive_path)?;
         std::fs::remove_file(binary_path)?;
     }
-    let manifest_name = format!("{PROVIDER}_{}_manifest.json", tag.version());
+    let manifest_name = format!("{project}_{}_manifest.json", tag.version());
     std::fs::copy(
         "terraform-registry-manifest.json",
         output_dir.join(manifest_name),
     )?;
-    let files = validate_asset_directory(output_dir, &tag)?;
+    let files = validate_asset_directory(output_dir, &tag, project)?;
     crate::output("tag", tag.as_str())?;
     crate::output("merge_sha", merge_sha.as_str())?;
     crate::output("asset_count", files.len().to_string())?;
@@ -983,7 +989,7 @@ fn tag_pr(release_pr_number: u64, artifact_id: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-fn create_annotated_tag(
+pub(crate) fn create_annotated_tag(
     api: &GitHub,
     repo: &Repository,
     tag: &ReleaseTag,
@@ -1067,7 +1073,8 @@ fn request_server() -> Result<()> {
         description.len() <= 100,
         "release request label description is too long"
     );
-    let path = format!("/repos/{SERVER}/labels/{}", url_encode(&label));
+    let server_repository = &crate::config::trusted()?.deployment.server.repository;
+    let path = format!("/repos/{server_repository}/labels/{}", url_encode(&label));
     match api.get::<Value>(&path) {
         Ok(existing) => ensure!(
             existing["description"] == description,
@@ -1079,7 +1086,7 @@ fn request_server() -> Result<()> {
                 .is_some_and(|api_error| api_error.status == reqwest::StatusCode::NOT_FOUND) =>
         {
             let _: Value = api.post(
-                &format!("/repos/{SERVER}/labels"),
+                &format!("/repos/{server_repository}/labels"),
                 &json!({"name":label,"color":"1f6feb","description":description}),
             )?;
         }
@@ -1089,8 +1096,9 @@ fn request_server() -> Result<()> {
 }
 
 fn request_parts(event: &Value) -> Result<(Repository, RunId)> {
+    let client_bot_id = crate::config::trusted()?.client_bot_id;
     ensure!(
-        event["sender"]["id"].as_u64() == Some(288068203) && event["sender"]["type"] == "Bot",
+        event["sender"]["id"].as_u64() == Some(client_bot_id) && event["sender"]["type"] == "Bot",
         "release request was not created by the Securefix Client App"
     );
     let label = event["label"]["name"]
@@ -1199,8 +1207,8 @@ fn preflight() -> Result<()> {
         )?;
         let assets_dir = input_dir.join("assets");
         std::fs::create_dir_all(&assets_dir)?;
-        unpack_provider_bundle(&bytes, &assets_dir, &plan.tag)?;
-        let assets = validate_asset_directory(&assets_dir, &plan.tag)?;
+        unpack_provider_bundle(&bytes, &assets_dir, &plan.tag, repo.name())?;
+        let assets = validate_asset_directory(&assets_dir, &plan.tag, repo.name())?;
         plan.assets = assets
             .iter()
             .map(|path| {
@@ -1267,14 +1275,19 @@ fn get_artifact(api: &GitHub, repo: &Repository, artifact_id: u64, run_id: RunId
     Ok(artifact)
 }
 
-fn unpack_provider_bundle(bytes: &[u8], destination: &Path, tag: &ReleaseTag) -> Result<()> {
+fn unpack_provider_bundle(
+    bytes: &[u8],
+    destination: &Path,
+    tag: &ReleaseTag,
+    project: &str,
+) -> Result<()> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(bytes)).context("read uploaded provider artifact")?;
     ensure!(
         archive.len() == PROVIDER_TARGETS.len() + 1,
         "provider artifact has an unexpected entry count"
     );
-    let expected = provider_asset_names(tag);
+    let expected = provider_asset_names(tag, project);
     let mut found = BTreeSet::new();
     for index in 0..archive.len() {
         let mut entry = archive
@@ -1515,12 +1528,13 @@ fn validated_source(
         ".github/workflows/reusable-release-tag.yml",
         &policy.revision,
     )?;
+    let server_repository = &crate::config::trusted()?.deployment.server.repository;
     let source_revision = CommitSha::parse(
         &referenced
             .iter()
             .find(|workflow| {
                 workflow.path.starts_with(&format!(
-                    "{SERVER}/.github/workflows/reusable-release-tag.yml@"
+                    "{server_repository}/.github/workflows/reusable-release-tag.yml@"
                 ))
             })
             .context("source workflow did not call pinned Release Tag reusable")?
@@ -1721,7 +1735,7 @@ fn sign() -> Result<()> {
         &plan.source_manifest,
         plan.strategy,
     )?;
-    let assets = validate_asset_directory(&assets_dir, &plan.tag)?;
+    let assets = validate_asset_directory(&assets_dir, &plan.tag, repo.name())?;
     ensure!(
         assets.len() == plan.assets.len(),
         "signing bundle asset count changed"
@@ -1738,10 +1752,13 @@ fn sign() -> Result<()> {
     for asset in &plan.assets {
         sums.push_str(&format!("{}  {}\n", asset.sha256, asset.name));
     }
-    let sums_path = assets_dir.join(format!("{PROVIDER}_{}_SHA256SUMS", plan.tag.version()));
+    let sums_path = assets_dir.join(format!("{}_{}_SHA256SUMS", repo.name(), plan.tag.version()));
     std::fs::write(&sums_path, &sums)?;
-    let signature_path =
-        assets_dir.join(format!("{PROVIDER}_{}_SHA256SUMS.sig", plan.tag.version()));
+    let signature_path = assets_dir.join(format!(
+        "{}_{}_SHA256SUMS.sig",
+        repo.name(),
+        plan.tag.version()
+    ));
     let mut gpg = ProcessCommand::new("gpg");
     gpg.args([
         "--batch",
@@ -1855,10 +1872,19 @@ fn publish() -> Result<()> {
     }
     let release = match existing {
         Some(release) => {
-            ensure!(release["draft"] == true || release["immutable"] == true, "existing published release is not immutable");
+            ensure!(
+                release["draft"] == true || release["immutable"] == true,
+                "existing published release is not immutable"
+            );
             release
         }
-        None => api.post(&format!("/repos/{}/releases", repo.as_str()), &json!({"tag_name":plan.tag.as_str(),"name":plan.tag.as_str(),"generate_release_notes":true,"prerelease":!plan.tag.version().split('-').nth(1).unwrap_or_default().is_empty(),"draft":true,"target_commitish":"main"}))?,
+        None => {
+            let repository: Value = api.get(&format!("/repos/{}", repo.as_str()))?;
+            let default_branch = repository["default_branch"]
+                .as_str()
+                .context("release repository default branch missing")?;
+            api.post(&format!("/repos/{}/releases", repo.as_str()), &json!({"tag_name":plan.tag.as_str(),"name":plan.tag.as_str(),"generate_release_notes":true,"prerelease":!plan.tag.version().split('-').nth(1).unwrap_or_default().is_empty(),"draft":true,"target_commitish":default_branch}))?
+        }
     };
     let release_id = release["id"]
         .as_u64()
@@ -1985,8 +2011,10 @@ fn validate_release_asset_state(
 }
 
 fn validate_signed_provider_assets(directory: &Path, plan: &ReleasePlanV2) -> Result<()> {
-    let mut expected = provider_asset_names(&plan.tag);
-    let sums_name = format!("{PROVIDER}_{}_SHA256SUMS", plan.tag.version());
+    let repository = Repository::parse(&plan.repository)?;
+    let project = repository.name();
+    let mut expected = provider_asset_names(&plan.tag, project);
+    let sums_name = format!("{project}_{}_SHA256SUMS", plan.tag.version());
     let signature_name = format!("{sums_name}.sig");
     expected.insert(sums_name.clone());
     expected.insert(signature_name.clone());
@@ -2010,7 +2038,7 @@ fn validate_signed_provider_assets(directory: &Path, plan: &ReleasePlanV2) -> Re
             "signed provider asset has invalid size"
         );
         if name.ends_with(".zip") {
-            validate_provider_archive(&entry.path(), &name, &plan.tag)?;
+            validate_provider_archive(&entry.path(), &name, &plan.tag, project)?;
         }
     }
     ensure!(found == expected, "signed provider asset set is incomplete");
@@ -2032,7 +2060,7 @@ fn validate_signed_provider_assets(directory: &Path, plan: &ReleasePlanV2) -> Re
         );
     }
     let mut sums = String::new();
-    for name in provider_asset_names(&plan.tag) {
+    for name in provider_asset_names(&plan.tag, project) {
         sums.push_str(&format!(
             "{}  {}\n",
             sha256_file(&directory.join(&name))?,
@@ -2056,7 +2084,8 @@ fn cleanup() -> Result<()> {
     if !label.starts_with("release-request-") {
         return Ok(());
     }
-    let path = format!("/repos/{SERVER}/labels/{}", url_encode(label));
+    let server_repository = &crate::config::trusted()?.deployment.server.repository;
+    let path = format!("/repos/{server_repository}/labels/{}", url_encode(label));
     match api.delete(&path) {
         Ok(()) => Ok(()),
         Err(error)
@@ -2070,24 +2099,28 @@ fn cleanup() -> Result<()> {
     }
 }
 
-pub fn provider_asset_names(tag: &ReleaseTag) -> BTreeSet<String> {
+pub fn provider_asset_names(tag: &ReleaseTag, project: &str) -> BTreeSet<String> {
     let mut files = PROVIDER_TARGETS
         .iter()
         .map(|target| {
             format!(
-                "{PROVIDER}_{}_{}_{}.zip",
+                "{project}_{}_{}_{}.zip",
                 tag.version(),
                 target.os,
                 target.arch
             )
         })
         .collect::<BTreeSet<_>>();
-    files.insert(format!("{PROVIDER}_{}_manifest.json", tag.version()));
+    files.insert(format!("{project}_{}_manifest.json", tag.version()));
     files
 }
 
-pub fn validate_asset_directory(directory: &Path, tag: &ReleaseTag) -> Result<Vec<PathBuf>> {
-    let expected = provider_asset_names(tag);
+pub fn validate_asset_directory(
+    directory: &Path,
+    tag: &ReleaseTag,
+    project: &str,
+) -> Result<Vec<PathBuf>> {
+    let expected = provider_asset_names(tag, project);
     let mut found = BTreeSet::new();
     for entry in std::fs::read_dir(directory).context("read provider asset directory")? {
         let entry = entry.context("read provider asset entry")?;
@@ -2113,7 +2146,7 @@ pub fn validate_asset_directory(directory: &Path, tag: &ReleaseTag) -> Result<Ve
             bail!("provider asset has an invalid size: {name}");
         }
         if name.ends_with(".zip") {
-            validate_provider_archive(&entry.path(), &name, tag)?;
+            validate_provider_archive(&entry.path(), &name, tag, project)?;
         }
     }
     if found != expected {
@@ -2126,7 +2159,12 @@ pub fn validate_asset_directory(directory: &Path, tag: &ReleaseTag) -> Result<Ve
     Ok(found.into_iter().map(|name| directory.join(name)).collect())
 }
 
-fn validate_provider_archive(path: &Path, archive_name: &str, tag: &ReleaseTag) -> Result<()> {
+fn validate_provider_archive(
+    path: &Path,
+    archive_name: &str,
+    tag: &ReleaseTag,
+    project: &str,
+) -> Result<()> {
     let file = std::fs::File::open(path).context("open provider archive")?;
     let mut zip = zip::ZipArchive::new(file).context("read provider archive")?;
     ensure!(
@@ -2134,7 +2172,7 @@ fn validate_provider_archive(path: &Path, archive_name: &str, tag: &ReleaseTag) 
         "provider archive must contain exactly four files: {archive_name}"
     );
     let expected_binary = format!(
-        "{PROVIDER}_v{}{}",
+        "{project}_v{}{}",
         tag.version(),
         if archive_name.contains("_windows_") {
             ".exe"
@@ -2283,7 +2321,10 @@ mod tests {
 
     #[test]
     fn sigma_asset_names_are_fixed_and_versioned() {
-        let names = provider_asset_names(&ReleaseTag::parse("v1.2.3").unwrap());
+        let names = provider_asset_names(
+            &ReleaseTag::parse("v1.2.3").unwrap(),
+            "terraform-provider-sigma",
+        );
         assert_eq!(PROVIDER_TARGETS.len(), 13);
         assert!(names.contains("terraform-provider-sigma_1.2.3_manifest.json"));
         assert!(names.contains("terraform-provider-sigma_1.2.3_linux_amd64.zip"));
@@ -2305,7 +2346,8 @@ mod tests {
             validate_provider_archive(
                 &archive_path,
                 "terraform-provider-sigma_1.2.3_linux_amd64.zip",
-                &tag
+                &tag,
+                "terraform-provider-sigma"
             )
             .is_err()
         );
@@ -2327,7 +2369,8 @@ mod tests {
             validate_provider_archive(
                 &archive_path,
                 "terraform-provider-sigma_1.2.3_linux_amd64.zip",
-                &tag
+                &tag,
+                "terraform-provider-sigma"
             )
             .is_err()
         );
@@ -2356,6 +2399,7 @@ mod tests {
             &archive_path,
             "terraform-provider-sigma_1.2.3_darwin_arm64.zip",
             &tag,
+            "terraform-provider-sigma",
         )
         .unwrap();
         let mut archive = zip::ZipArchive::new(std::fs::File::open(archive_path).unwrap()).unwrap();
@@ -2378,8 +2422,9 @@ mod tests {
 
     #[test]
     fn release_request_requires_client_app_bot_sender_before_parsing() {
+        let trusted = crate::config::trusted().unwrap();
         let event = json!({
-            "sender": {"id":288068203,"type":"Bot"},
+            "sender": {"id":trusted.client_bot_id,"type":"Bot"},
             "label": {
                 "name":"release-request-42",
                 "description":"civitaspo/terraform-provider-sigma/42"
@@ -2431,12 +2476,16 @@ mod tests {
     fn successful_pr_provenance_routes(version: &str) -> Vec<crate::fixtures::Route> {
         use crate::fixtures::Route;
         use base64::Engine;
+        let trusted = crate::config::trusted().unwrap();
         let repo = "civitaspo/terraform-provider-sigma";
+        let server_repository = trusted.deployment.server.repository.as_str();
+        let release_branch = trusted.deployment.release_branch.as_str();
+        let default_branch = trusted.deployment.server.default_branch.as_str();
         let head = "b".repeat(40);
         let base = "c".repeat(40);
         let merge = "d".repeat(40);
         let workflow = format!(
-            "name: Release Tag\non:\n  pull_request:\njobs:\n  tag:\n    uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@{}\n",
+            "name: Release Tag\non:\n  pull_request:\njobs:\n  tag:\n    uses: {server_repository}/.github/workflows/reusable-release-tag.yml@{}\n",
             "a".repeat(40)
         );
         let content = |path: &str, sha: &str, text: &str| {
@@ -2458,18 +2507,25 @@ mod tests {
                     "repository":{"full_name":repo},
                     "head_repository":{"full_name":repo},
                     "head_sha":head,
-                    "head_branch":"release/next",
+                    "head_branch":release_branch,
                     "run_attempt":1,
                     "path":".github/workflows/release-tag.yml",
                     "event":"pull_request",
                     "pull_requests":[{"number":115}],
                     "referenced_workflows":[{
-                        "path":"civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "path":format!("{server_repository}/.github/workflows/reusable-release-tag.yml@{}", "a".repeat(40)),
                         "sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     }]
                 }),
             ),
-            Route::get(format!("/repos/{repo}"), json!({"default_branch":"main"})),
+            Route::get(
+                format!("/repos/{repo}"),
+                json!({"default_branch":default_branch}),
+            ),
+            Route::get(
+                format!("/repos/{repo}"),
+                json!({"default_branch":default_branch}),
+            ),
             Route::get(
                 format!("/repos/{repo}/pulls/55"),
                 json!({
@@ -2477,25 +2533,29 @@ mod tests {
                     "merged":true,
                     "merged_at":"2026-01-01T00:00:00Z",
                     "merge_commit_sha":merge,
-                    "merged_by":{"id":288069019,"type":"Bot"},
-                    "head":{"ref":"release/next","sha":head,"repo":{"full_name":repo}},
-                    "base":{"ref":"main","sha":base,"repo":{"full_name":repo}}
+                    "merged_by":{"id":trusted.server_bot_id,"type":"Bot"},
+                    "head":{"ref":release_branch,"sha":head,"repo":{"full_name":repo}},
+                    "base":{"ref":default_branch,"sha":base,"repo":{"full_name":repo}}
                 }),
             ),
             Route::get(
                 format!("/repos/{repo}/issues/55/comments?per_page=100&page=1"),
                 json!([{
-                    "user":{"id":288069019,"type":"Bot"},
+                    "user":{
+                        "id":trusted.server_bot_id,
+                        "login":trusted.deployment.server_bot_login,
+                        "type":"Bot"
+                    },
                     "body":format!("<!-- securefix:v2:owner:{head}:101 -->")
                 }]),
             ),
             Route::get(
-                format!("/repos/{repo}/compare/{merge}...main"),
+                format!("/repos/{repo}/compare/{merge}...{default_branch}"),
                 json!({"status":"identical"}),
             ),
             content(".release-version", &merge, version),
             Route::get(
-                format!("/repos/{repo}/compare/{base}...main"),
+                format!("/repos/{repo}/compare/{base}...{default_branch}"),
                 json!({"status":"identical"}),
             ),
             content(".github/workflows/release-tag.yml", &base, &workflow),

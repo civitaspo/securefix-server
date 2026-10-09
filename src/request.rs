@@ -5,16 +5,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashSet, fs};
 
+use crate::config;
+
 use securefix::{
     api::GitHub,
     event, output,
-    policy::{Capability, Policy, SERVER, validate_repository, validate_sha},
+    policy::{Capability, Policy, validate_repository, validate_sha},
     workflow::{self, ReferencedWorkflow, successful_source_run, write_json},
 };
 
-const OWNER_ID: u64 = 4_525_500;
-const CLIENT_BOT_ID: u64 = 288_068_203;
-const SERVER_BOT_ID: u64 = 288_069_019;
 const ARTIFACT_PREFIX: &str = "securefix-request-";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +36,18 @@ pub struct RequestManifest {
 pub enum RequestKind {
     Approve,
     Merge,
+}
+
+impl RequestKind {
+    pub fn matches_comment_body(self, body: &Value) -> bool {
+        body.as_str().is_some_and(|body| {
+            body.trim_ascii()
+                == match self {
+                    Self::Approve => "/approve",
+                    Self::Merge => "/merge",
+                }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +76,14 @@ pub struct PullRequestRef {
     pub number: u64,
     pub head_sha: String,
     pub base_ref: String,
+}
+
+pub(crate) fn matches_principal(user: &Value, id: u64, login: &str, kind: &str) -> bool {
+    user["id"].as_u64() == Some(id)
+        && user["login"]
+            .as_str()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(login))
+        && user["type"] == kind
 }
 
 impl RequestManifest {
@@ -130,15 +149,16 @@ fn capture(kind: RequestKind) -> Result<()> {
     validate_repository(&repo)?;
     let policy_api = GitHub::from_env("GITHUB_TOKEN")?;
     let policy = Policy::active(&policy_api)?;
+    let trusted = config::trusted()?;
     let repo_policy = policy.repository(&repo)?;
     repo_policy.require(match kind {
         RequestKind::Approve => Capability::Approve,
         RequestKind::Merge => Capability::Merge,
     })?;
     ensure!(
-        policy.owner_id == OWNER_ID
-            && policy.client_bot_id == CLIENT_BOT_ID
-            && policy.server_bot_id == SERVER_BOT_ID,
+        policy.owner_id == trusted.owner_id
+            && policy.client_bot_id == trusted.client_bot_id
+            && policy.server_bot_id == trusted.server_bot_id,
         "unexpected principals"
     );
     let source_sha = std::env::var("SECUREFIX_SOURCE_SHA")?;
@@ -158,23 +178,27 @@ fn capture(kind: RequestKind) -> Result<()> {
             "unsupported owner request"
         );
         let comment = &payload["comment"];
-        let expected = match kind {
-            RequestKind::Approve => "/approve",
-            RequestKind::Merge => "/merge",
-        };
         ensure!(
-            comment["body"] == expected
-                && comment["user"]["id"] == OWNER_ID
-                && comment["user"]["type"] == "User",
+            kind.matches_comment_body(&comment["body"])
+                && matches_principal(
+                    &comment["user"],
+                    trusted.owner_id,
+                    &trusted.deployment.owner_login,
+                    "User",
+                ),
             "request comment is unauthorized"
         );
         let comment_id = comment["id"].as_u64().context("missing comment ID")?;
         let current_comment: Value =
             token.get(&format!("/repos/{repo}/issues/comments/{comment_id}"))?;
         ensure!(
-            current_comment["body"] == expected
-                && current_comment["user"]["id"] == OWNER_ID
-                && current_comment["user"]["type"] == "User",
+            kind.matches_comment_body(&current_comment["body"])
+                && matches_principal(
+                    &current_comment["user"],
+                    trusted.owner_id,
+                    &trusted.deployment.owner_login,
+                    "User",
+                ),
             "request comment changed during capture"
         );
         Authorization::OwnerComment {
@@ -314,7 +338,10 @@ fn dispatch() -> Result<()> {
         "request label exceeds GitHub limits"
     );
     let _: Value = app.post(
-        &format!("/repos/{SERVER}/labels"),
+        &format!(
+            "/repos/{}/labels",
+            config::trusted()?.deployment.server.repository
+        ),
         &json!({"name":label,"color":"1f6feb","description":description}),
     )?;
     output("label", label)?;
@@ -331,6 +358,8 @@ pub fn load_source_request(
     validate_repository(repository)?;
     ensure!(run_id > 0, "invalid source run ID");
     let current = Policy::latest_revision(api, ".github/workflows/ci.yml")?;
+    let trusted = config::trusted()?;
+    let server = trusted.deployment.server.repository.as_str();
     ensure!(
         policy.revision == current,
         "policy/runtime revision is stale"
@@ -443,7 +472,13 @@ pub fn load_source_request(
         "caller workflow SHA is not on default-branch history"
     );
     let wrapper = api.content(repository, caller_path, &manifest.caller_workflow_sha)?;
-    require_exact_reusable_pin(&wrapper, kind, &policy.revision, repository == SERVER)?;
+    require_exact_reusable_pin(
+        &wrapper,
+        kind,
+        &policy.revision,
+        repository == server,
+        server,
+    )?;
     let authorization_matches = match (
         &manifest.authorization,
         run["event"].as_str().unwrap_or_default(),
@@ -457,17 +492,14 @@ pub fn load_source_request(
         ) => {
             let comment: Value =
                 api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
-            comment["user"]["id"] == OWNER_ID
-                && comment["user"]["type"] == "User"
-                && comment["issue_url"].as_str().is_some_and(|url| {
-                    url.ends_with(&format!("/issues/{}", manifest.pull_request.number))
-                })
-                && comment["body"]
-                    == if kind == RequestKind::Approve {
-                        "/approve"
-                    } else {
-                        "/merge"
-                    }
+            matches_principal(
+                &comment["user"],
+                trusted.owner_id,
+                &trusted.deployment.owner_login,
+                "User",
+            ) && comment["issue_url"].as_str().is_some_and(|url| {
+                url.ends_with(&format!("/issues/{}", manifest.pull_request.number))
+            }) && kind.matches_comment_body(&comment["body"])
                 && comment["updated_at"]
                     .as_str()
                     .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
@@ -501,12 +533,14 @@ pub fn load_source_request(
         ))?;
         let receipt = format!("<!-- securefix-merge-request:{run_id} -->");
         ensure!(
-            !comments.iter().any(|comment| comment["user"]["id"].as_u64()
-                == Some(policy.server_bot_id)
-                && comment["user"]["type"] == "Bot"
-                && comment["body"]
-                    .as_str()
-                    .is_some_and(|body| body.lines().any(|line| line == receipt))),
+            !comments.iter().any(|comment| matches_principal(
+                &comment["user"],
+                policy.server_bot_id,
+                &trusted.deployment.server_bot_login,
+                "Bot",
+            ) && comment["body"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line == receipt))),
             "source merge request already has a terminal receipt"
         );
     }
@@ -518,6 +552,7 @@ fn require_exact_reusable_pin(
     kind: RequestKind,
     revision: &str,
     local: bool,
+    server: &str,
 ) -> Result<()> {
     let yaml: serde_yaml::Value =
         serde_yaml::from_slice(bytes).context("caller workflow YAML is invalid")?;
@@ -528,7 +563,7 @@ fn require_exact_reusable_pin(
     let expected = if local {
         format!("./{reusable}")
     } else {
-        format!("{SERVER}/{reusable}@{revision}")
+        format!("{server}/{reusable}@{revision}")
     };
     fn collect(value: &serde_yaml::Value, uses: &mut Vec<String>) {
         match value {
@@ -555,7 +590,7 @@ fn require_exact_reusable_pin(
     let prefix = if local {
         format!("./{reusable}")
     } else {
-        format!("{SERVER}/{reusable}@")
+        format!("{server}/{reusable}@")
     };
     let calls: Vec<_> = uses
         .iter()
@@ -780,23 +815,27 @@ pub fn require_owner_marker(
     number: u64,
     head_sha: &str,
 ) -> Result<()> {
+    let server_bot_login = &config::trusted()?.deployment.server_bot_login;
     validate_repository(repository)?;
     validate_sha(head_sha)?;
     let comments = api.paginate(&format!("/repos/{repository}/issues/{number}/comments"))?;
     let prefix = format!("<!-- securefix:v2:owner:{head_sha}:");
     ensure!(
         comments.iter().any(|comment| {
-            comment["user"]["id"].as_u64() == Some(policy.server_bot_id)
-                && comment["user"]["type"] == "Bot"
-                && comment["body"].as_str().is_some_and(|body| {
-                    body.lines().any(|line| {
-                        line.starts_with(&prefix)
-                            && line.ends_with(" -->")
-                            && line[prefix.len()..line.len() - 4]
-                                .bytes()
-                                .all(|b| b.is_ascii_digit())
-                    })
+            matches_principal(
+                &comment["user"],
+                policy.server_bot_id,
+                server_bot_login,
+                "Bot",
+            ) && comment["body"].as_str().is_some_and(|body| {
+                body.lines().any(|line| {
+                    line.starts_with(&prefix)
+                        && line.ends_with(" -->")
+                        && line[prefix.len()..line.len() - 4]
+                            .bytes()
+                            .all(|b| b.is_ascii_digit())
                 })
+            })
         }),
         "owner authorization for this exact pull request head is missing"
     );
@@ -846,8 +885,9 @@ fn render_owner_marker(
         "invalid workflow run identity"
     );
     Ok(format!(
-        "Owner authorization verified for this commit.\n\n<!-- securefix:v2:owner:{head_sha}:{comment_id} -->\n\n<sub><a href=\"https://github.com/{repository}/pull/{number}#issuecomment-{comment_id}\">Owner request</a> · <a href=\"https://github.com/{repository}/commit/{head_sha}\">Commit {}</a> · <a href=\"https://github.com/{SERVER}/actions/runs/{run_id}/attempts/{run_attempt}\">Server CI run {run_id}, attempt {run_attempt}</a></sub>",
-        &head_sha[..7]
+        "Owner authorization verified for this commit.\n\n<!-- securefix:v2:owner:{head_sha}:{comment_id} -->\n\n<sub><a href=\"https://github.com/{repository}/pull/{number}#issuecomment-{comment_id}\">Owner request</a> · <a href=\"https://github.com/{repository}/commit/{head_sha}\">Commit {}</a> · <a href=\"https://github.com/{}/actions/runs/{run_id}/attempts/{run_attempt}\">Server CI run {run_id}, attempt {run_attempt}</a></sub>",
+        &head_sha[..7],
+        config::trusted()?.deployment.server.repository
     ))
 }
 
@@ -855,6 +895,46 @@ fn render_owner_marker(
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn request_kind_matches_only_ascii_whitespace_trimmed_commands() {
+        for (kind, exact, padded, wrong) in [
+            (
+                RequestKind::Approve,
+                "/approve",
+                " \t/approve\r\n",
+                "/merge",
+            ),
+            (RequestKind::Merge, "/merge", " \t/merge\r\n", "/approve"),
+        ] {
+            assert!(kind.matches_comment_body(&json!(exact)));
+            assert!(kind.matches_comment_body(&json!(padded)));
+            let invalid = [
+                wrong.to_owned(),
+                exact.to_ascii_uppercase(),
+                format!("{exact} please"),
+                format!("please {exact}"),
+                format!("{exact}\n{exact}"),
+                format!("\u{00a0}{exact}"),
+            ];
+            for body in invalid {
+                assert!(!kind.matches_comment_body(&json!(body)), "{body:?}");
+            }
+            assert!(!kind.matches_comment_body(&json!(17)));
+            assert!(!kind.matches_comment_body(&json!({"other":"/approve"})["body"]));
+        }
+        assert!(!RequestKind::Approve.matches_comment_body(&json!("\u{00a0}/approve")));
+        assert!(!RequestKind::Merge.matches_comment_body(&json!("/merge\u{00a0}")));
+    }
+
+    #[test]
+    fn configured_principal_check_accepts_a_different_deployment_identity() {
+        let user = json!({"id":71,"login":"Example-App[bot]","type":"Bot"});
+        assert!(matches_principal(&user, 71, "example-app[bot]", "Bot"));
+        assert!(!matches_principal(&user, 72, "example-app[bot]", "Bot"));
+        assert!(!matches_principal(&user, 71, "another-app[bot]", "Bot"));
+    }
+
     fn manifest() -> RequestManifest {
         RequestManifest {
             version: 1,
@@ -881,16 +961,20 @@ mod tests {
     }
 
     fn source_run_fixture(run: Value) -> (Fixture, Policy) {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let revision = "b".repeat(40);
-        let mut policy = Policy::load("policy.json").unwrap();
+        let server = &policy.deployment.server;
         policy.revision = revision.clone();
         let fixture = Fixture::new(vec![
             Route::get(
-                "/repos/civitaspo/securefix-server",
-                json!({"default_branch":"main"}),
+                format!("/repos/{}", server.repository),
+                json!({"id":server.id,"default_branch":server.default_branch}),
             ),
             Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
+                format!(
+                    "/repos/{}/commits/{}",
+                    server.repository, server.default_branch
+                ),
                 json!({"sha":revision}),
             ),
             Route::get("/repos/civitaspo/example/actions/runs/4", run),
@@ -935,16 +1019,20 @@ mod tests {
         running["status"] = json!("in_progress");
         let mut failed = run_metadata();
         failed["conclusion"] = json!("failure");
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let revision = "b".repeat(40);
-        let mut policy = Policy::load("policy.json").unwrap();
+        let server = &policy.deployment.server;
         policy.revision = revision.clone();
         let fixture = Fixture::new(vec![
             Route::get(
-                "/repos/civitaspo/securefix-server",
-                json!({"default_branch":"main"}),
+                format!("/repos/{}", server.repository),
+                json!({"id":server.id,"default_branch":server.default_branch}),
             ),
             Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
+                format!(
+                    "/repos/{}/commits/{}",
+                    server.repository, server.default_branch
+                ),
                 json!({"sha":revision}),
             ),
             Route::get("/repos/civitaspo/example/actions/runs/4", running),
@@ -970,7 +1058,7 @@ mod tests {
         assert!(stale.validate().is_err());
         let mut automatic = manifest();
         automatic.authorization = Authorization::Automatic {
-            actor_id: CLIENT_BOT_ID,
+            actor_id: crate::config::trusted().unwrap().client_bot_id,
             actor_login: "civitaspo-securefix-server[bot]".into(),
         };
         assert!(automatic.validate().is_ok());
@@ -981,7 +1069,7 @@ mod tests {
 
     #[test]
     fn authorization_rejects_untrusted_committer_even_when_author_is_trusted() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let sha = "a".repeat(40);
         for committer in [json!({"login":"attacker"}), Value::Null, json!({})] {
             let commit = json!({"sha":sha,"commit":{"verification":{"verified":true}},
@@ -1024,7 +1112,7 @@ mod tests {
 
     #[test]
     fn authorization_rejects_a_head_that_changed_after_capture() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let accepted = "a".repeat(40);
         let current = "b".repeat(40);
         let fixture = Fixture::new(vec![Route::get(
@@ -1047,7 +1135,7 @@ mod tests {
 
     #[test]
     fn authorization_rejects_an_unsigned_parent_commit() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let sha = "a".repeat(40);
         let mut parent = valid_commit(&"b".repeat(40));
         parent["commit"]["verification"]["verified"] = json!(false);
@@ -1074,7 +1162,7 @@ mod tests {
 
     #[test]
     fn authorization_rejects_an_empty_commit_list() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let sha = "a".repeat(40);
         let fixture = Fixture::new(vec![
             authorization_route(&sha),
@@ -1099,7 +1187,7 @@ mod tests {
 
     #[test]
     fn rename_out_of_sensitive_path_still_requires_owner_marker() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let sha = "a".repeat(40);
         let fixture = Fixture::new(vec![
             authorization_route(&sha),
@@ -1132,14 +1220,14 @@ mod tests {
 
     #[test]
     fn owner_marker_must_be_from_server_bot_and_match_the_exact_head() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let head = "a".repeat(40);
         let wrong_head = "b".repeat(40);
         let human_text = "Owner authorization verified for this commit.\n\n";
         let cases = [
-            json!({"user":{"id":SERVER_BOT_ID,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{wrong_head}:12 -->")}),
-            json!({"user":{"id":CLIENT_BOT_ID,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
-            json!({"user":{"id":SERVER_BOT_ID,"type":"User"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
+            json!({"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{wrong_head}:12 -->")}),
+            json!({"user":{"id":crate::config::trusted().unwrap().client_bot_id,"login":crate::config::trusted().unwrap().deployment.client_bot_login,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
+            json!({"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"User"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
         ];
         for comment in cases {
             let fixture = Fixture::new(vec![Route::get(
@@ -1164,10 +1252,10 @@ mod tests {
             )
         );
 
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let fixture = Fixture::new(vec![Route::get(
             "/repos/civitaspo/example/issues/7/comments?per_page=100&page=1",
-            json!([{"user":{"id":SERVER_BOT_ID,"type":"Bot"},"body":body}]),
+            json!([{"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"Bot"},"body":body}]),
         )]);
         require_owner_marker(&fixture.api, &policy, "civitaspo/example", 7, &head).unwrap();
         fixture.finish();
@@ -1290,7 +1378,7 @@ mod tests {
 
     #[test]
     fn verified_github_signed_web_flow_commit_authorizes_full_pr_validation() {
-        let policy = Policy::load("policy.json").unwrap();
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let sha = "a".repeat(40);
         let commit = json!({
             "sha":sha,
@@ -1340,7 +1428,7 @@ mod tests {
         let token = std::env::var("SECUREFIX_LIVE_TEST_TOKEN")?;
         ensure!(!token.is_empty(), "SECUREFIX_LIVE_TEST_TOKEN is empty");
         let api = GitHub::new("https://api.github.com", token)?;
-        let policy = Policy::load("policy.json")?;
+        let policy = Policy::load("tests/fixtures/policy.json")?;
         let cases = [
             (
                 "civitaspo/testing-securefix-server",

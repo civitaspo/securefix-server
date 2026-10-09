@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_pr_number:
-        description: Merged release/next PR to retry
+        description: Merged @RELEASE_BRANCH@ PR to retry
         required: true
         type: number
 
@@ -19,13 +19,13 @@ concurrency:
 
 jobs:
   tag:
-    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.event.pull_request.head.ref == 'release/next' && github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.event.pull_request.head.ref == '@RELEASE_BRANCH@' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: write
       attestations: read
       pull-requests: read
       issues: write
-    uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@@SECUREFIX_RUNTIME_SHA@
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-tag.yml@@SECUREFIX_RUNTIME_SHA@
     with:
       release_pr_number: ${{ inputs.release_pr_number }}
     secrets:

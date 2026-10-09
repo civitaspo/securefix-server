@@ -1,10 +1,11 @@
+use crate::config;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use securefix::{
     api::GitHub,
     event, output,
-    policy::{Capability, Policy, SERVER, validate_repository, validate_sha},
+    policy::{Capability, Policy, validate_repository, validate_sha},
     workflow,
 };
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,6 @@ use std::fs;
 const WRAPPER: &str = ".github/workflows/policy-check.yml";
 const REUSABLE: &str = ".github/workflows/reusable-policy-check.yml";
 const CHECK: &str = "securefix-policy-check";
-const APP_ID: u64 = 3872533;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +112,8 @@ pub fn run(command: Command) -> Result<()> {
 }
 
 fn capture() -> Result<()> {
+    let deployment = &config::trusted()?.deployment;
+    let server = deployment.server.repository.as_str();
     let api = GitHub::from_env("GITHUB_TOKEN")?;
     let payload = event()?;
     let repository = std::env::var("GITHUB_REPOSITORY")?;
@@ -120,9 +122,19 @@ fn capture() -> Result<()> {
     let source_sha = workflow::require_current_runtime(&api, REUSABLE)?;
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     ensure!(
-        repo["id"] == payload["repository"]["id"] && repo["owner"]["id"] == policy.owner_id,
+        repo["id"] == payload["repository"]["id"]
+            && repo["owner"]["id"] == deployment.repository_owner.id
+            && repo["owner"]["login"].as_str().is_some_and(|login| {
+                login.eq_ignore_ascii_case(&deployment.repository_owner.login)
+            }),
         "policy request repository mismatch"
     );
+    if repository == server {
+        ensure!(
+            repo["id"].as_u64() == Some(deployment.server.id),
+            "server repository identity differs from trusted deployment config"
+        );
+    }
     let branch = repo["default_branch"]
         .as_str()
         .context("missing default branch")?;
@@ -149,7 +161,7 @@ fn capture() -> Result<()> {
         }
         "push" => {
             ensure!(
-                repository != SERVER
+                repository != server
                     && payload["ref"] == format!("refs/heads/{branch}")
                     && payload["deleted"] == false,
                 "policy push is not an allowed caller default-branch update"
@@ -168,8 +180,9 @@ fn capture() -> Result<()> {
                 .as_u64()
                 .context("missing publisher run ID")?;
             ensure!(
-                std::env::var("GITHUB_REPOSITORY")? == SERVER && branch == "main",
-                "published runtime policy check must target server main"
+                std::env::var("GITHUB_REPOSITORY")? == server
+                    && branch == deployment.server.default_branch,
+                "published runtime policy check must target the server default branch"
             );
             let promotion =
                 crate::distribution::validate_promotion(&api, &policy, publisher_run_id)?;
@@ -204,6 +217,7 @@ fn capture() -> Result<()> {
 }
 
 fn dispatch() -> Result<()> {
+    let server = config::trusted()?.deployment.server.repository.clone();
     let manifest: Manifest = serde_json::from_slice(&fs::read("policy-request/manifest.json")?)?;
     manifest.validate()?;
     let read = GitHub::from_env("GITHUB_TOKEN")?;
@@ -216,22 +230,29 @@ fn dispatch() -> Result<()> {
         .repository(&manifest.repository)?
         .require(Capability::Merge)?;
     let api = GitHub::from_env("SECUREFIX_APP_TOKEN")?;
-    let _: Value = api.post(&format!("/repos/{SERVER}/labels"), &json!({"name":format!("policy-request-{}",manifest.run_id),"description":format!("{}/{}",manifest.repository,manifest.run_id),"color":"1f6feb"}))?;
+    let _: Value = api.post(&format!("/repos/{server}/labels"), &json!({"name":format!("policy-request-{}",manifest.run_id),"description":format!("{}/{}",manifest.repository,manifest.run_id),"color":"1f6feb"}))?;
     Ok(())
 }
 
 fn label(policy: &Policy) -> Result<(String, u64)> {
-    ensure!(
-        std::env::var("GITHUB_REPOSITORY")? == SERVER
-            && std::env::var("GITHUB_EVENT_NAME")? == "label"
-            && std::env::var("GITHUB_RUN_ATTEMPT")? == "1",
-        "policy processor must be a first-attempt server label run"
-    );
+    let deployment = &config::trusted()?.deployment;
+    let server = deployment.server.repository.as_str();
     let payload = event()?;
     ensure!(
+        std::env::var("GITHUB_REPOSITORY")? == server
+            && std::env::var("GITHUB_EVENT_NAME")? == "label"
+            && std::env::var("GITHUB_RUN_ATTEMPT")? == "1"
+            && payload["repository"]["id"].as_u64() == Some(deployment.server.id),
+        "policy processor must be a first-attempt server label run"
+    );
+    ensure!(
         payload["action"] == "created"
-            && payload["sender"]["id"] == policy.client_bot_id
-            && payload["sender"]["type"] == "Bot",
+            && crate::request::matches_principal(
+                &payload["sender"],
+                config::trusted()?.client_bot_id,
+                &deployment.client_bot_login,
+                "Bot",
+            ),
         "unauthorized policy request sender"
     );
     let id: u64 = payload["label"]["name"]
@@ -266,6 +287,8 @@ fn locate() -> Result<()> {
 }
 
 fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
+    let deployment = &config::trusted()?.deployment;
+    let server = deployment.server.repository.as_str();
     let (repository, run_id) = label(policy)?;
     let run = workflow::successful_source_run(api, &repository, run_id)?;
     ensure!(
@@ -274,11 +297,20 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
     );
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     ensure!(
-        repo["owner"]["id"] == policy.owner_id
+        repo["owner"]["id"] == deployment.repository_owner.id
+            && repo["owner"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(&deployment.repository_owner.login))
             && run["repository"]["id"] == repo["id"]
             && run["head_repository"]["id"] == repo["id"],
         "policy source repository changed"
     );
+    if repository == server {
+        ensure!(
+            repo["id"].as_u64() == Some(deployment.server.id),
+            "server repository identity differs from trusted deployment config"
+        );
+    }
     let branch = repo["default_branch"]
         .as_str()
         .context("missing default branch")?;
@@ -327,7 +359,7 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
         "policy caller is not from default branch history"
     );
     let wrapper = api.content(&repository, WRAPPER, caller_sha)?;
-    if repository != SERVER {
+    if repository != server {
         workflow::require_reusable_pin(&wrapper, REUSABLE, &policy.revision)?;
         let referenced: Vec<workflow::ReferencedWorkflow> =
             serde_json::from_value(run["referenced_workflows"].clone())?;
@@ -359,7 +391,7 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
                 head_sha == caller_sha && head_sha == current_base && request_branch == branch,
                 "default branch policy head changed"
             );
-            if repository == SERVER {
+            if repository == server {
                 let publisher_run_id = publisher_run_id.context(
                     "server default-branch policy check is not bound to a publisher run",
                 )?;
@@ -498,6 +530,7 @@ pub fn publish(
     success: bool,
     summary: &str,
 ) -> Result<()> {
+    let policy_app_id = config::trusted()?.deployment.checks.policy_app_id;
     validate_repository(repository)?;
     validate_sha(sha)?;
     let value: Value = api.get(&format!(
@@ -507,7 +540,7 @@ pub fn publish(
         .as_array()
         .context("missing check runs")?
         .iter()
-        .filter(|c| c["name"] == CHECK && c["app"]["id"] == APP_ID)
+        .filter(|c| c["name"] == CHECK && c["app"]["id"] == policy_app_id)
         .collect();
     ensure!(matches.len() <= 1, "duplicate policy check source");
     let body = json!({"name":CHECK,"head_sha":sha,"status":"completed","conclusion":if success {"success"} else {"failure"},"output":{"title":if success {"Policy accepted"} else {"Policy rejected"},"summary":summary}});
@@ -526,10 +559,11 @@ pub fn publish(
 }
 
 fn cleanup() -> Result<()> {
+    let server = config::trusted()?.deployment.server.repository.clone();
     let api = GitHub::from_env("GITHUB_TOKEN")?;
     let policy = Policy::active(&api)?;
     let (_, id) = label(&policy)?;
-    if let Err(error) = api.delete(&format!("/repos/{SERVER}/labels/policy-request-{id}")) {
+    if let Err(error) = api.delete(&format!("/repos/{server}/labels/policy-request-{id}")) {
         ensure!(
             error
                 .downcast_ref::<securefix::api::ApiError>()
@@ -689,7 +723,7 @@ mod tests {
         let fixture = Fixture::new(vec![
             Route::get(
                 check_path,
-                json!({"check_runs":[{"id":17,"name":CHECK,"app":{"id":APP_ID}},{"id":18,"name":CHECK,"app":{"id":99}}]}),
+                json!({"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":99}}]}),
             ),
             Route::get(
                 "/repos/civitaspo/securefix-server/commits/main",
@@ -719,7 +753,7 @@ mod tests {
         let sha = "a".repeat(40);
         let fixture = Fixture::new(vec![Route::get(
             format!("/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest"),
-            json!({"check_runs":[{"id":17,"name":CHECK,"app":{"id":APP_ID}},{"id":18,"name":CHECK,"app":{"id":APP_ID}}]}),
+            json!({"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}}]}),
         )]);
         assert!(publish(&fixture.api, "civitaspo/example", &sha, true, "Accepted").is_err());
         fixture.finish();

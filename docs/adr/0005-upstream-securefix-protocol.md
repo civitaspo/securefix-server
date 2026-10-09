@@ -1,6 +1,8 @@
 # Reuse the upstream Securefix protocol
 
-The server uses `csm-actions/securefix-action` v0.6.3 at commit `1b770a7af0ec5e04517295b4e14c4b451359d550` for preparation, commits, notifications, and its post-action cleanup.
+Status: superseded by [ADR 0008](0008-native-securefix.md). The following describes the historical upstream implementation.
+
+The server used `csm-actions/securefix-action` v0.6.3 at commit `1b770a7af0ec5e04517295b4e14c4b451359d550` for preparation, commits, notifications, and its post-action cleanup.
 Rust owns this server's repository capabilities, source workflow provenance, and allowed destination checks.
 The workflow runs those checks between upstream `prepare` and `commit`.
 This keeps client protocol changes with their upstream implementation instead of maintaining another artifact parser and commit engine.

@@ -33,7 +33,6 @@ jobs:
           install -Dm755 target/release/securefix runtime/securefix
           cp policy.json runtime/policy.json
           cp -R repo-settings runtime/repo-settings
-          cp securefix-config.yaml runtime/securefix-config.yaml
           mkdir distribution
           tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf distribution/securefix-runtime-linux-x86_64.tar.gz -C runtime .
       - name: Attest exact runtime archive

@@ -4,11 +4,12 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 use std::{thread, time::Duration};
 
+use crate::config;
 use crate::request::{self, Authorization, RequestKind, RequestManifest};
 use securefix::{
     api::GitHub,
     event, output,
-    policy::{Capability, Policy, SERVER, validate_repository},
+    policy::{Capability, Policy, validate_repository},
     workflow,
 };
 
@@ -25,8 +26,6 @@ const INVALIDATING_EVENTS: &[&str] = &[
     "ready_for_review",
 ];
 const MAX_WAIT_SECONDS: i64 = 60 * 60;
-const STATUS_CHECK_APP: u64 = 15_368;
-const POLICY_CHECK_APP: u64 = 3_872_533;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -50,16 +49,19 @@ pub fn run(command: Command) -> Result<()> {
 }
 
 fn validate() -> Result<()> {
+    let deployment = &config::trusted()?.deployment;
+    let server = deployment.server.repository.as_str();
     let api = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&api)?;
     let source_sha = workflow::require_current_runtime(&api, ".github/workflows/merge.yml")?;
     ensure!(
-        std::env::var("GITHUB_REPOSITORY")? == SERVER,
+        std::env::var("GITHUB_REPOSITORY")? == server,
         "merge processor must run in the server repository"
     );
     let payload = event()?;
     ensure!(
-        payload["action"] == "created",
+        payload["action"] == "created"
+            && payload["repository"]["id"].as_u64() == Some(deployment.server.id),
         "event is not a label creation"
     );
     let label = payload["label"]["name"]
@@ -70,8 +72,12 @@ fn validate() -> Result<()> {
         .context("unexpected merge request label")?
         .parse()?;
     ensure!(
-        payload["sender"]["id"].as_u64() == Some(policy.client_bot_id)
-            && payload["sender"]["type"] == "Bot",
+        request::matches_principal(
+            &payload["sender"],
+            config::trusted()?.client_bot_id,
+            &deployment.client_bot_login,
+            "Bot",
+        ),
         "merge request label was not created by the Client App"
     );
     let description = payload["label"]["description"]
@@ -294,7 +300,11 @@ fn read_manifest() -> Result<RequestManifest> {
     Ok(manifest)
 }
 
-fn validate_state(api: &GitHub, policy: &Policy, manifest: &RequestManifest) -> Result<()> {
+pub(crate) fn validate_state(
+    api: &GitHub,
+    policy: &Policy,
+    manifest: &RequestManifest,
+) -> Result<()> {
     ensure!(
         manifest.run_attempt == 1 && manifest.kind == RequestKind::Merge,
         "invalid or replayed merge request"
@@ -328,14 +338,19 @@ fn validate_state(api: &GitHub, policy: &Policy, manifest: &RequestManifest) -> 
     else {
         anyhow::bail!("merge request lacks owner authorization")
     };
+    let trusted = config::trusted()?;
     let comment: Value = api.get(&format!(
         "/repos/{}/issues/comments/{comment_id}",
         manifest.repository.full_name
     ))?;
     ensure!(
-        comment["body"] == "/merge"
-            && comment["user"]["id"].as_u64() == Some(policy.owner_id)
-            && comment["user"]["type"] == "User"
+        RequestKind::Merge.matches_comment_body(&comment["body"])
+            && request::matches_principal(
+                &comment["user"],
+                trusted.owner_id,
+                &trusted.deployment.owner_login,
+                "User",
+            )
             && comment["issue_url"].as_str().is_some_and(
                 |url| url.ends_with(&format!("/issues/{}", manifest.pull_request.number))
             )
@@ -371,7 +386,8 @@ fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool 
     })
 }
 
-fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
+pub(crate) fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
+    let deployment_checks = &config::trusted()?.deployment.checks;
     let repository = &manifest.repository.full_name;
     let mut checks = Vec::new();
     for page in 1..=100 {
@@ -389,11 +405,17 @@ fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
         }
         ensure!(page < 100, "check run pagination exceeded limit");
     }
-    let check_ok = exact_latest_check(&checks, "status-check", STATUS_CHECK_APP, true);
+    let check_ok = exact_latest_check(
+        &checks,
+        "status-check",
+        deployment_checks.status_app_id,
+        true,
+    );
     let policy_checks: Vec<_> = checks
         .iter()
         .filter(|check| {
-            check["name"] == "securefix-policy-check" && check["app"]["id"] == POLICY_CHECK_APP
+            check["name"] == "securefix-policy-check"
+                && check["app"]["id"] == deployment_checks.policy_app_id
         })
         .collect();
     ensure!(
@@ -477,6 +499,8 @@ fn merge_commit_message(body: &str, commit_messages: &[&str]) -> String {
 }
 
 fn notify() -> Result<()> {
+    let trusted = config::trusted()?;
+    let server = trusted.deployment.server.repository.as_str();
     let manifest = read_manifest()?;
     let token = GitHub::from_env("SECUREFIX_NOTIFY_TOKEN")?;
     let marker = format!("<!-- securefix-merge-request:{} -->", manifest.run_id);
@@ -485,13 +509,14 @@ fn notify() -> Result<()> {
         manifest.repository.full_name, manifest.pull_request.number
     ))?;
     ensure!(
-        !comments.iter().any(
-            |comment| comment["user"]["id"].as_u64() == Some(288_069_019)
-                && comment["user"]["type"] == "Bot"
-                && comment["body"]
-                    .as_str()
-                    .is_some_and(|body| body.lines().any(|line| line == marker))
-        ),
+        !comments.iter().any(|comment| request::matches_principal(
+            &comment["user"],
+            trusted.server_bot_id,
+            &trusted.deployment.server_bot_login,
+            "Bot",
+        ) && comment["body"]
+            .as_str()
+            .is_some_and(|body| body.lines().any(|line| line == marker))),
         "terminal result was already recorded"
     );
     let result = std::env::var("SECUREFIX_MERGE_RESULT").unwrap_or_else(|_| "failure".into());
@@ -515,7 +540,7 @@ fn notify() -> Result<()> {
         std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".into());
     let run_id = std::env::var("GITHUB_RUN_ID")?;
     let body =
-        format!("{marker}\n{message}\n\nServer run: {server_url}/{SERVER}/actions/runs/{run_id}");
+        format!("{marker}\n{message}\n\nServer run: {server_url}/{server}/actions/runs/{run_id}");
     let _: Value = token.post(
         &format!(
             "/repos/{}/issues/{}/comments",
@@ -532,6 +557,7 @@ fn notify() -> Result<()> {
 }
 
 fn cleanup() -> Result<()> {
+    let server = config::trusted()?.deployment.server.repository.clone();
     let payload = event()?;
     let Some(label) = payload["label"]["name"].as_str() else {
         return Ok(());
@@ -542,7 +568,7 @@ fn cleanup() -> Result<()> {
     ensure!(suffix.parse::<u64>().is_ok(), "invalid merge request label");
     let api = GitHub::from_env("GITHUB_TOKEN")?;
     workflow::require_current_runtime(&api, ".github/workflows/merge.yml")?;
-    match api.delete(&format!("/repos/{SERVER}/labels/{label}")) {
+    match api.delete(&format!("/repos/{server}/labels/{label}")) {
         Ok(()) => Ok(()),
         Err(error) if error.to_string().contains("returned 404") => Ok(()),
         Err(error) => Err(error),
@@ -603,7 +629,7 @@ mod tests {
 
     fn validate_state_with(api_routes: Vec<Route>) -> Result<()> {
         let fixture = Fixture::new(api_routes);
-        let policy = Policy::load("policy.json")?;
+        let policy = Policy::load("tests/fixtures/policy.json")?;
         let result = validate_state(&fixture.api, &policy, &state_manifest());
         fixture.finish();
         result
@@ -639,21 +665,47 @@ mod tests {
     }
 
     fn valid_owner_comment() -> Value {
-        json!({"body":"/merge","user":{"id":4525500,"type":"User"},
+        let owner = &crate::config::trusted().unwrap().deployment.owner_login;
+        json!({"body":"/merge","user":{"id":crate::config::trusted().unwrap().owner_id,"login":owner,"type":"User"},
             "issue_url":"https://api.github.com/repos/civitaspo/dbt-authorized-models/issues/7",
             "updated_at":"2026-01-01T00:00:00Z"})
     }
 
     #[test]
-    fn validate_state_rejects_changed_owner_comment_identity_body_and_edit_time() {
+    fn validate_state_rejects_changed_owner_comment_identity_body_url_and_edit_time() {
         let mut wrong_actor = valid_owner_comment();
         wrong_actor["user"]["id"] = json!(999);
+        let mut wrong_type = valid_owner_comment();
+        wrong_type["user"]["type"] = json!("Bot");
+        let mut wrong_url = valid_owner_comment();
+        wrong_url["issue_url"] =
+            json!("https://api.github.com/repos/civitaspo/dbt-authorized-models/issues/8");
         let mut wrong_body = valid_owner_comment();
         wrong_body["body"] = json!("/approve");
         let mut edited = valid_owner_comment();
         edited["updated_at"] = json!("2026-01-01T00:00:01Z");
-        for comment in [wrong_actor, wrong_body, edited] {
+        for comment in [wrong_actor, wrong_type, wrong_url, wrong_body, edited] {
             assert!(validate_state_with(comment_routes(comment)).is_err());
+        }
+    }
+
+    #[test]
+    fn validate_state_accepts_ascii_whitespace_around_the_owner_command() {
+        for body in ["/merge", " \t/merge\r\n"] {
+            let mut comment = valid_owner_comment();
+            comment["body"] = json!(body);
+            let mut routes = comment_routes(comment);
+            let timeline =
+                "/repos/civitaspo/dbt-authorized-models/issues/7/timeline?per_page=100&page=1";
+            routes.push(Route::get(timeline, json!([])));
+            let fixture = Fixture::new(routes);
+            let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+            let result = validate_state(&fixture.api, &policy, &state_manifest());
+            if result.is_err() {
+                let _: Value = fixture.api.get(timeline).unwrap();
+            }
+            fixture.finish();
+            assert!(result.is_ok());
         }
     }
 
@@ -706,14 +758,18 @@ mod tests {
     #[test]
     fn only_the_latest_status_check_from_the_required_app_counts() {
         let checks = vec![
-            json!({"id":1,"name":"status-check","app":{"id":STATUS_CHECK_APP},"status":"completed","conclusion":"success"}),
-            json!({"id":2,"name":"status-check","app":{"id":STATUS_CHECK_APP},"status":"completed","conclusion":"failure"}),
+            json!({"id":1,"name":"status-check","app":{"id":crate::config::trusted().unwrap().deployment.checks.status_app_id},"status":"completed","conclusion":"success"}),
+            json!({"id":2,"name":"status-check","app":{"id":crate::config::trusted().unwrap().deployment.checks.status_app_id},"status":"completed","conclusion":"failure"}),
             json!({"id":3,"name":"status-check","app":{"id":99},"status":"completed","conclusion":"success"}),
         ];
         assert!(!exact_latest_check(
             &checks,
             "status-check",
-            STATUS_CHECK_APP,
+            crate::config::trusted()
+                .unwrap()
+                .deployment
+                .checks
+                .status_app_id,
             true
         ));
         assert!(exact_latest_check(&checks, "status-check", 99, true));
