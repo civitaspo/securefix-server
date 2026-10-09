@@ -25,4 +25,5 @@ jobs:
       attestations: read
       issues: read
       pull-requests: read
-    secrets: inherit
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

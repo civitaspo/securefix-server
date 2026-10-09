@@ -71,6 +71,8 @@ The existing `main` environment holds these secrets:
 
 The Server App ID is `3872533`; the Client App ID is `3872492`.
 Clients provide only `SECUREFIX_CLIENT_PRIVATE_KEY` to the reusables.
+The server's approve and merge callers also pass that secret by name.
+The capture job receives its value from the protected `main` environment; the explicit mapping satisfies the reusable workflow's required-secret contract before that job starts.
 `civitaspo-bot` must retain write collaborator access for its reviews to count.
 The operation documents list the required App permissions.
 

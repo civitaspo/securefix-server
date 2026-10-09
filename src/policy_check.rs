@@ -279,32 +279,11 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
             && run["head_repository"]["id"] == repo["id"],
         "policy source repository changed"
     );
-    let caller_sha = run["head_sha"].as_str().context("missing caller SHA")?;
-    validate_sha(caller_sha)?;
     let branch = repo["default_branch"]
         .as_str()
         .context("missing default branch")?;
     let base: Value = api.get(&format!("/repos/{repository}/commits/{branch}"))?;
     let current_base = base["sha"].as_str().context("missing default SHA")?;
-    let compare: Value = api.get(&format!(
-        "/repos/{repository}/compare/{caller_sha}...{current_base}"
-    ))?;
-    ensure!(
-        matches!(compare["status"].as_str(), Some("ahead" | "identical")),
-        "policy caller is not from default branch history"
-    );
-    let wrapper = api.content(&repository, WRAPPER, caller_sha)?;
-    if repository != SERVER {
-        workflow::require_reusable_pin(&wrapper, REUSABLE, &policy.revision)?;
-        let referenced: Vec<workflow::ReferencedWorkflow> =
-            serde_json::from_value(run["referenced_workflows"].clone())?;
-        workflow::referenced_revision(&referenced, REUSABLE, &policy.revision)?;
-    } else {
-        ensure!(
-            caller_sha == policy.revision,
-            "server policy workflow source is stale"
-        );
-    }
     let artifacts: Value = api.get(&format!(
         "/repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100"
     ))?;
@@ -339,6 +318,33 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
             && manifest.source_sha == policy.revision,
         "policy manifest is not bound to its source"
     );
+    let caller_sha = caller_revision(&run, manifest.repository_id, branch, &manifest.target)?;
+    let compare: Value = api.get(&format!(
+        "/repos/{repository}/compare/{caller_sha}...{current_base}"
+    ))?;
+    ensure!(
+        matches!(compare["status"].as_str(), Some("ahead" | "identical")),
+        "policy caller is not from default branch history"
+    );
+    let wrapper = api.content(&repository, WRAPPER, caller_sha)?;
+    if repository != SERVER {
+        workflow::require_reusable_pin(&wrapper, REUSABLE, &policy.revision)?;
+        let referenced: Vec<workflow::ReferencedWorkflow> =
+            serde_json::from_value(run["referenced_workflows"].clone())?;
+        workflow::referenced_revision(&referenced, REUSABLE, &policy.revision)?;
+    } else {
+        ensure!(
+            caller_sha == policy.revision,
+            "server policy workflow source is stale"
+        );
+        let referenced: Vec<workflow::ReferencedWorkflow> =
+            serde_json::from_value(run["referenced_workflows"].clone())?;
+        workflow::referenced_revision(
+            &referenced,
+            ".github/workflows/load-cli.yml",
+            &policy.revision,
+        )?;
+    }
     match &manifest.target {
         Target::PullRequest { base_ref, .. } => ensure!(
             run["event"] == "pull_request_target" && base_ref == branch,
@@ -372,6 +378,52 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
         }
     }
     Ok(manifest)
+}
+
+fn caller_revision<'a>(
+    run: &'a Value,
+    repository_id: u64,
+    branch: &str,
+    target: &Target,
+) -> Result<&'a str> {
+    let sha = match target {
+        Target::PullRequest {
+            number,
+            head_sha,
+            base_ref,
+        } => {
+            let pulls = run["pull_requests"]
+                .as_array()
+                .context("missing source run PR association")?;
+            ensure!(pulls.len() == 1, "ambiguous source run PR association");
+            let pr = &pulls[0];
+            ensure!(
+                run["event"] == "pull_request_target"
+                    && pr["number"] == *number
+                    && pr["base"]["ref"] == branch
+                    && base_ref == branch
+                    && pr["base"]["repo"]["id"] == repository_id
+                    && pr["head"]["repo"]["id"] == repository_id
+                    && pr["head"]["sha"] == *head_sha
+                    && run["head_sha"] == *head_sha,
+                "policy target is not bound to its source run PR"
+            );
+            pr["base"]["sha"]
+                .as_str()
+                .context("missing caller base SHA")?
+        }
+        Target::DefaultBranch { head_sha, .. } => {
+            ensure!(
+                run["event"] != "pull_request_target"
+                    && run["head_branch"] == branch
+                    && run["head_sha"] == *head_sha,
+                "policy source is not bound to its default-branch target"
+            );
+            run["head_sha"].as_str().context("missing caller SHA")?
+        }
+    };
+    validate_sha(sha)?;
+    Ok(sha)
 }
 
 fn validate() -> Result<()> {
@@ -512,6 +564,91 @@ fn require_current_target(
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    fn pr_source() -> (Value, Target) {
+        (
+            serde_json::from_str(include_str!("../tests/fixtures/policy-pr-target-run.json"))
+                .unwrap(),
+            Target::PullRequest {
+                number: 63,
+                head_sha: "c234f933b830e801436647725028f4945d7618e7".into(),
+                base_ref: "main".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn pr_target_source_uses_actual_base_revision_and_binds_the_target_head() {
+        let (run, target) = pr_source();
+        let source = caller_revision(&run, 1250079425, "main", &target).unwrap();
+        assert_eq!(source, "7819d4abb70af791715492ec21b20563df4815df");
+        assert_ne!(source, run["head_sha"].as_str().unwrap());
+        for (number, head, base) in [
+            (64, "c234f933b830e801436647725028f4945d7618e7", "main"),
+            (63, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "main"),
+            (
+                63,
+                "c234f933b830e801436647725028f4945d7618e7",
+                "release/next",
+            ),
+        ] {
+            let mismatched = Target::PullRequest {
+                number,
+                head_sha: head.into(),
+                base_ref: base.into(),
+            };
+            assert!(caller_revision(&run, 1250079425, "main", &mismatched).is_err());
+        }
+    }
+
+    #[test]
+    fn pr_source_rejects_ambiguous_associations_wrong_repositories_and_retargeting() {
+        let (original, target) = pr_source();
+        for (pointer, replacement) in [
+            ("/event", json!("pull_request")),
+            ("/pull_requests", Value::Null),
+            ("/pull_requests", json!([])),
+            (
+                "/pull_requests",
+                json!([original["pull_requests"][0], original["pull_requests"][0]]),
+            ),
+            ("/pull_requests/0/number", json!(64)),
+            ("/pull_requests/0/base/ref", json!("release/next")),
+            ("/pull_requests/0/base/repo/id", json!(999)),
+            ("/pull_requests/0/head/repo/id", json!(999)),
+            ("/pull_requests/0/head/sha", json!("a".repeat(40))),
+            ("/head_sha", json!("a".repeat(40))),
+            ("/pull_requests/0/base/sha", json!("main")),
+        ] {
+            let mut run = original.clone();
+            *run.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                caller_revision(&run, 1250079425, "main", &target).is_err(),
+                "accepted altered source field {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_branch_source_keeps_its_own_head_revision() {
+        let sha = "a".repeat(40);
+        let target = Target::DefaultBranch {
+            head_sha: sha.clone(),
+            branch: "main".into(),
+            publisher_run_id: None,
+        };
+        for event in ["push", "workflow_run"] {
+            let mut run = json!({"event":event,"head_sha":sha,"head_branch":"main"});
+            assert_eq!(caller_revision(&run, 1, "main", &target).unwrap(), sha);
+            run["head_sha"] = json!("b".repeat(40));
+            assert!(caller_revision(&run, 1, "main", &target).is_err());
+            run["head_sha"] = json!(sha);
+            run["head_branch"] = json!("release/next");
+            assert!(caller_revision(&run, 1, "main", &target).is_err());
+        }
+        let run = json!({"event":"pull_request_target","head_sha":sha,"head_branch":"main"});
+        assert!(caller_revision(&run, 1, "main", &target).is_err());
+    }
 
     #[test]
     fn policy_target_rejects_same_head_retargeting_and_head_changes() {

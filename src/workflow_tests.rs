@@ -670,6 +670,45 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
 }
 
 #[test]
+fn server_request_callers_pass_the_required_environment_secret_by_name() {
+    for operation in ["approve", "merge"] {
+        let caller = workflow(&format!("{operation}-request.yml"));
+        assert_eq!(
+            caller["jobs"]["request"]["secrets"],
+            serde_json::json!({
+                "SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+            }),
+            "environment-only secrets must be declared explicitly at call time"
+        );
+        let reusable = workflow(&format!("reusable-{operation}-request.yml"));
+        assert_eq!(
+            reusable["on"]["workflow_call"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"]["required"],
+            true
+        );
+        let build = &reusable["jobs"]["build"];
+        assert!(build.get("secrets").is_none());
+        let capture = &reusable["jobs"]["capture"];
+        assert_eq!(
+            capture["environment"],
+            "${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}"
+        );
+        let token = capture["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == "client-token")
+            .unwrap();
+        assert_eq!(
+            token["with"]["private-key"],
+            "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+        );
+        assert_eq!(token["with"]["owner"], "civitaspo");
+        assert_eq!(token["with"]["repositories"], "securefix-server");
+        assert_eq!(token["with"]["permission-issues"], "write");
+    }
+}
+
+#[test]
 fn scratch_test_workflow_builds_and_probes_same_run_artifact_without_releases() {
     let workflow = workflow("testing-securefix-server.yml");
     assert!(

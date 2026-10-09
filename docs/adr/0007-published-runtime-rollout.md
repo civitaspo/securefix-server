@@ -11,6 +11,13 @@ Policy Check captures the server's current default head and sends the existing A
 Distribute Runtime prepares caller workflow changes and sends one Securefix request for each configured caller.
 Failed publication and stale publication events authorize neither operation.
 
+The PR source check also distinguishes the workflow's base revision from the PR head.
+The Actions REST response for [run 37874975712](https://github.com/civitaspo/securefix-server/actions/runs/37874975712) reports its PR head in `head_sha`, although its reusable loader ran at the default-branch revision.
+Using that head as the caller workflow source caused [the receiver](https://github.com/civitaspo/securefix-server/actions/runs/37875015547) to reject a valid PR-target request.
+The receiver now verifies the single REST PR association, reads the wrapper at its base SHA, and binds the manifest's PR number, head SHA, and base branch to the same record.
+The server's caller source and referenced runtime loader must both equal the active server revision.
+Caller default-push checks continue to use their own push head.
+
 `policy.json` defines the exact caller set, excluding the server itself.
 The Securefix configuration permits the server's protected main source to write only those repositories' `automation/securefix-runtime` branch.
 Rust treats this as a separate promotion source and checks the publisher, current runtime, destination, branch, and exact generated workflow files.
