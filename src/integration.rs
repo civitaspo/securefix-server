@@ -957,6 +957,14 @@ fn verify_inner(
         stale_head_sha != scenario.stale.head_sha,
         "stale test did not advance the head"
     );
+    wait_for_pr_head_transition(
+        api,
+        &scenario.stale,
+        &scenario.default_branch,
+        &scenario.stale.head_sha,
+        &stale_head_sha,
+        deadline,
+    )?;
     ensure!(
         request::validate_pr_authorization(
             api,
@@ -1291,6 +1299,57 @@ fn verify_pr_identity(
         "scratch pull request changed after preparation"
     );
     Ok(())
+}
+
+fn pr_head_observation_is_advanced(
+    pull: &Value,
+    repository: &str,
+    fixture: &PullRequestFixture,
+    base: &str,
+    old_head: &str,
+    new_head: &str,
+) -> Result<bool> {
+    ensure!(
+        pull["number"].as_u64() == Some(fixture.number)
+            && pull["state"] == "open"
+            && pull["base"]["repo"]["full_name"] == repository
+            && pull["base"]["ref"] == base
+            && pull["head"]["repo"]["full_name"] == repository
+            && pull["head"]["ref"] == fixture.branch,
+        "stale-head PR identity changed during head visibility wait"
+    );
+    let observed_head = pull["head"]["sha"]
+        .as_str()
+        .context("stale-head PR response has no head SHA")?;
+    ensure!(
+        observed_head == old_head || observed_head == new_head,
+        "stale-head PR observed an unexpected commit"
+    );
+    Ok(observed_head == new_head)
+}
+
+fn wait_for_pr_head_transition(
+    api: &GitHub,
+    fixture: &PullRequestFixture,
+    base: &str,
+    old_head: &str,
+    new_head: &str,
+    deadline: Instant,
+) -> Result<()> {
+    let repository = integration_repository()?;
+    loop {
+        let pull: Value = api.get(&format!("/repos/{repository}/pulls/{}", fixture.number))?;
+        if pr_head_observation_is_advanced(&pull, repository, fixture, base, old_head, new_head)? {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "timed out waiting for scratch PR {} to expose its new head",
+            fixture.number
+        );
+        thread::sleep(remaining.min(Duration::from_secs(5)));
+    }
 }
 
 fn verify_remote_identity(api: &GitHub, scenario: &Scenario) -> Result<()> {
@@ -1680,6 +1739,73 @@ mod tests {
             &sha,
             alternate_default
         ));
+    }
+
+    #[test]
+    fn stale_pr_head_observation_waits_for_expected_transition_and_rejects_invalid_identity() {
+        let fixture = fixture(17);
+        let repository = integration_repository().unwrap();
+        let old_head = "c".repeat(40);
+        let new_head = "d".repeat(40);
+        let mut pull = json!({
+            "number":fixture.number,
+            "state":"open",
+            "base":{"repo":{"full_name":repository},"ref":"main"},
+            "head":{"repo":{"full_name":repository},"ref":fixture.branch,"sha":old_head}
+        });
+        assert!(
+            !pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .unwrap()
+        );
+        pull["head"]["sha"] = json!(new_head);
+        assert!(
+            pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .unwrap()
+        );
+
+        pull["head"]["sha"] = json!("e".repeat(40));
+        assert!(
+            pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .is_err()
+        );
+        pull["head"]["sha"] = json!(new_head);
+        pull["base"]["repo"]["full_name"] = json!("other/repo");
+        assert!(
+            pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .is_err()
+        );
+        pull["base"]["repo"]["full_name"] = json!(repository);
+        pull["head"]["repo"]["full_name"] = json!("other/repo");
+        assert!(
+            pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .is_err()
+        );
+        pull["head"]["repo"]["full_name"] = json!(repository);
+        pull["base"]["ref"] = json!("other-base");
+        assert!(
+            pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .is_err()
+        );
+        pull["base"]["ref"] = json!("main");
+        pull["state"] = json!("closed");
+        assert!(
+            pr_head_observation_is_advanced(
+                &pull, repository, &fixture, "main", &old_head, &new_head,
+            )
+            .is_err()
+        );
     }
 
     #[test]
