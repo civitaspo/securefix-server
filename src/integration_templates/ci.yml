@@ -4,12 +4,26 @@ on:
     types: [opened, synchronize, reopened]
 permissions: {}
 jobs:
+  native-client:
+    uses: ./.github/workflows/pull_request.yml
+    permissions:
+      contents: read
+      attestations: read
+      pull-requests: read
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
   status-check:
+    needs: [native-client]
+    if: always()
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 10
     steps:
+      - name: Require the native client workflow chain to pass
+        env:
+          NATIVE_CLIENT_RESULT: ${{ needs.native-client.result }}
+        run: test "$NATIVE_CLIENT_RESULT" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

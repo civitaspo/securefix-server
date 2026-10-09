@@ -308,6 +308,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
     }
+    caller::validate_previous_client_generation(files, sha, branch)?;
     Ok(())
 }
 

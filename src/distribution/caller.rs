@@ -7,6 +7,36 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{collections::BTreeMap, fs, path::Path};
 
+#[path = "client.rs"]
+mod client;
+
+#[path = "ci.rs"]
+mod ci;
+
+pub(crate) fn rendered_push_fixture(default_branch: &str) -> Result<Vec<u8>> {
+    let template = include_str!("../integration_templates/push.yml").replace(
+        "branches: [main]",
+        &format!("branches: [{}]", serde_json::to_string(default_branch)?),
+    );
+    ci::migrate(template.as_bytes(), ci::Mode::Push, default_branch)
+}
+
+pub(crate) fn rendered_client_fixture_files(source_sha: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+    let autofix = client::migrate_autofix(
+        include_bytes!("../integration_templates/wc-autofix.yml"),
+        source_sha,
+    )?;
+    let (outer, inner) = client::migrate_call_chain(
+        include_bytes!("../integration_templates/pull_request.yml"),
+        include_bytes!("../integration_templates/workflow_call_pr.yml"),
+    )?;
+    Ok(BTreeMap::from([
+        (client::AUTOFIX_PATH.to_owned(), autofix),
+        (client::PULL_REQUEST_PATH.to_owned(), outer),
+        (client::CALLER_PATH.to_owned(), inner),
+    ]))
+}
+
 const APPROVE: &str = include_str!("../distribution_templates/approve-request.yml");
 const MERGE: &str = include_str!("../distribution_templates/merge-request.yml");
 const POLICY_CHECK: &str = include_str!("../distribution_templates/policy-check.yml");
@@ -51,7 +81,36 @@ pub(super) fn prepare_caller(
         .repository(repository)?
         .capabilities
         .contains(&Capability::Release);
-    let files = rendered_files(source_sha, default_branch, release_client)?;
+    let mut files = rendered_files(source_sha, default_branch, release_client)?;
+    if let Some(push) = optional_content(api, repository, ".github/workflows/push.yml", base_sha)? {
+        files.insert(
+            ".github/workflows/push.yml".to_owned(),
+            ci::migrate(&push, ci::Mode::Push, default_branch)?,
+        );
+    } else if let Some(minimal) =
+        optional_content(api, repository, ".github/workflows/ci.yml", base_sha)?
+    {
+        files.insert(
+            ".github/workflows/ci.yml".to_owned(),
+            ci::migrate(&minimal, ci::Mode::MinimalCi, default_branch)?,
+        );
+    } else {
+        anyhow::bail!("caller has no supported default-head CI workflow");
+    }
+    if let Some(autofix) = optional_content(api, repository, client::AUTOFIX_PATH, base_sha)? {
+        files.insert(
+            client::AUTOFIX_PATH.to_owned(),
+            client::migrate_autofix(&autofix, source_sha)?,
+        );
+        let pull_request = optional_content(api, repository, client::PULL_REQUEST_PATH, base_sha)?
+            .context("autofix workflow has no pull request entry workflow")?;
+        let workflow_call = optional_content(api, repository, client::CALLER_PATH, base_sha)?
+            .context("autofix workflow has no workflow-call PR workflow")?;
+        let (pull_request, workflow_call) =
+            client::migrate_call_chain(&pull_request, &workflow_call)?;
+        files.insert(client::PULL_REQUEST_PATH.to_owned(), pull_request);
+        files.insert(client::CALLER_PATH.to_owned(), workflow_call);
+    }
     let mut default_current = true;
     for (path, expected) in &files {
         match optional_content(api, repository, path, base_sha)? {
@@ -214,6 +273,25 @@ pub(super) fn validate_migration_files(
 }
 
 pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &str) -> Result<()> {
+    match path {
+        ".github/workflows/push.yml" => {
+            ci::migrate(contents, ci::Mode::Push, default_branch)?;
+            return Ok(());
+        }
+        ".github/workflows/ci.yml" => {
+            ci::migrate(contents, ci::Mode::MinimalCi, default_branch)?;
+            return Ok(());
+        }
+        client::AUTOFIX_PATH => {
+            client::migrate_autofix(contents, &"0".repeat(40))?;
+            return Ok(());
+        }
+        client::CALLER_PATH | client::PULL_REQUEST_PATH => {
+            client::validate_call_file(contents, path)?;
+            return Ok(());
+        }
+        _ => {}
+    }
     let value: serde_yaml::Value = serde_yaml::from_slice(contents)
         .with_context(|| format!("unsupported existing workflow {path}"))?;
     let workflow_name = value["name"].as_str().context("workflow name missing")?;
@@ -358,6 +436,22 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
         "managed reusable job has local execution steps"
     );
     Ok(())
+}
+
+pub(super) fn validate_previous_client_generation(
+    files: &BTreeMap<String, Vec<u8>>,
+    runtime_sha: &str,
+    default_branch: &str,
+) -> Result<()> {
+    for (path, mode) in [
+        (".github/workflows/push.yml", ci::Mode::Push),
+        (".github/workflows/ci.yml", ci::Mode::MinimalCi),
+    ] {
+        if let Some(contents) = files.get(path) {
+            ci::migrate(contents, mode, default_branch)?;
+        }
+    }
+    client::validate_previous_generation(files, runtime_sha)
 }
 
 fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut serde_yaml::Value) {
