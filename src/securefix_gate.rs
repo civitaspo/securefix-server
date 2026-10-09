@@ -445,7 +445,7 @@ fn client_dispatch(artifact_name: &str, server_repository: &str) -> Result<()> {
         run_id.bytes().all(|b| b.is_ascii_digit()) && !run_id.is_empty(),
         "invalid GITHUB_RUN_ID"
     );
-    let api = GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
+    let api = GitHub::client_from_env("SECUREFIX_CLIENT_TOKEN")?;
     let _: Value = api.post(
         &format!("/repos/{}/labels", trusted.deployment.server.repository),
         &json!({

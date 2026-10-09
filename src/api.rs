@@ -10,6 +10,7 @@ const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
 #[derive(Clone)]
 enum WriteContext {
     ReadOnly,
+    ClientLabel { server: String },
     Production(Option<String>),
     Scratch { candidate_sha: String },
 }
@@ -42,6 +43,19 @@ pub struct GitHub {
 }
 
 impl GitHub {
+    pub fn client_from_env(name: &str) -> Result<Self> {
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let mut api = Self::new("https://api.github.com", token)?;
+        api.writes = WriteContext::ClientLabel {
+            server: crate::config::trusted()?
+                .deployment
+                .server
+                .repository
+                .clone(),
+        };
+        Ok(api)
+    }
     pub fn from_env(name: &str) -> Result<Self> {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
@@ -118,6 +132,12 @@ impl GitHub {
     }
 
     fn require_write_target(&self, path: &str) -> Result<()> {
+        if let WriteContext::ClientLabel { server } = &self.writes {
+            ensure!(
+                path == format!("/repos/{server}/labels"),
+                "client write target is not the configured request-label endpoint"
+            );
+        }
         if let WriteContext::Scratch { candidate_sha } = &self.writes {
             crate::policy::validate_sha(candidate_sha)?;
             let prefix = format!(
@@ -156,6 +176,12 @@ impl GitHub {
     }
 
     pub fn request(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+        if let WriteContext::ClientLabel { server } = &self.writes {
+            ensure!(
+                method == Method::POST && path == format!("/repos/{server}/labels"),
+                "client may only create configured server request labels"
+            );
+        }
         let read_only_graphql = path == "/graphql"
             && method == Method::POST
             && body
@@ -194,6 +220,7 @@ impl GitHub {
     fn require_current_revision(&self) -> Result<()> {
         let expected = match &self.writes {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
+            WriteContext::ClientLabel { .. } => return Ok(()),
             WriteContext::Scratch { .. } => return Ok(()),
             WriteContext::Production(revision) => revision
                 .as_deref()
@@ -367,6 +394,56 @@ impl GitHub {
         Ok(sha.to_owned())
     }
 
+    pub fn enable_scratch_auto_merge(
+        &self,
+        repository: &str,
+        number: u64,
+        expected_head: &str,
+    ) -> Result<()> {
+        ensure!(
+            matches!(self.writes, WriteContext::Scratch { .. }),
+            "auto-merge probe requires scratch context"
+        );
+        crate::policy::validate_repository(repository)?;
+        crate::policy::validate_sha(expected_head)?;
+        ensure!(number > 0, "invalid auto-merge PR number");
+        let path = format!("/repos/{repository}/pulls/{number}");
+        self.require_write_target(&path)?;
+        let pull: Value = self.get(&path)?;
+        ensure!(
+            pull["number"] == number
+                && pull["state"] == "open"
+                && pull["base"]["repo"]["full_name"] == repository
+                && pull["head"]["repo"]["full_name"] == repository
+                && pull["head"]["sha"] == expected_head,
+            "auto-merge PR no longer matches the accepted scratch head"
+        );
+        let node = pull["node_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .context("PR node ID missing")?;
+        let response = self.builder(Method::POST, "/graphql")?.json(&serde_json::json!({
+            "query":"mutation($input:EnablePullRequestAutoMergeInput!){enablePullRequestAutoMerge(input:$input){pullRequest{id autoMergeRequest{mergeMethod}}}}",
+            "variables":{"input":{"pullRequestId":node,"expectedHeadOid":expected_head,"mergeMethod":"SQUASH"}}
+        })).send().context("scratch auto-merge mutation failed")?;
+        ensure!(
+            response.status().is_success(),
+            "scratch auto-merge returned {}",
+            response.status()
+        );
+        let value: Value = serde_json::from_slice(&bounded_read(response, 1024 * 1024)?)?;
+        ensure!(
+            value.get("errors").is_none(),
+            "scratch auto-merge was rejected"
+        );
+        let result = &value["data"]["enablePullRequestAutoMerge"]["pullRequest"];
+        ensure!(
+            result["id"] == node && result["autoMergeRequest"]["mergeMethod"] == "SQUASH",
+            "scratch auto-merge was not enabled for the expected PR"
+        );
+        Ok(())
+    }
+
     pub fn paginate(&self, path: &str) -> Result<Vec<Value>> {
         let delimiter = if path.contains('?') { '&' } else { '?' };
         let mut result = Vec::new();
@@ -508,6 +585,119 @@ mod tests {
         ] {
             assert!(!read_only_query(query));
         }
+    }
+    #[test]
+    fn scratch_auto_merge_binds_the_graphql_mutation_to_the_accepted_head() {
+        use crate::fixtures::{Fixture, Route};
+        let head = "b".repeat(40);
+        let query = "mutation($input:EnablePullRequestAutoMergeInput!){enablePullRequestAutoMerge(input:$input){pullRequest{id autoMergeRequest{mergeMethod}}}}";
+        let mut fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{SCRATCH_REPOSITORY}/pulls/7"),
+                serde_json::json!({
+                    "number":7,"state":"open","node_id":"PR_fixture",
+                    "base":{"repo":{"full_name":SCRATCH_REPOSITORY}},
+                    "head":{"repo":{"full_name":SCRATCH_REPOSITORY},"sha":head}
+                }),
+            ),
+            Route::request(
+                "POST",
+                "/graphql",
+                200,
+                serde_json::json!({
+                    "data":{"enablePullRequestAutoMerge":{"pullRequest":{
+                        "id":"PR_fixture","autoMergeRequest":{"mergeMethod":"SQUASH"}
+                    }}}
+                }),
+            )
+            .with_request_body(serde_json::json!({
+                "query":query,"variables":{"input":{
+                    "pullRequestId":"PR_fixture","expectedHeadOid":head,"mergeMethod":"SQUASH"
+                }}
+            })),
+        ]);
+        fixture.api.writes = WriteContext::Scratch {
+            candidate_sha: "a".repeat(40),
+        };
+        fixture
+            .api
+            .enable_scratch_auto_merge(SCRATCH_REPOSITORY, 7, &head)
+            .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn scratch_auto_merge_rejects_changed_heads_and_other_write_contexts() {
+        use crate::fixtures::{Fixture, Route};
+        let mut fixture = Fixture::new(vec![Route::get(
+            format!("/repos/{SCRATCH_REPOSITORY}/pulls/7"),
+            serde_json::json!({
+                "number":7,"state":"open","node_id":"PR_fixture",
+                "base":{"repo":{"full_name":SCRATCH_REPOSITORY}},
+                "head":{"repo":{"full_name":SCRATCH_REPOSITORY},"sha":"c".repeat(40)}
+            }),
+        )]);
+        fixture.api.writes = WriteContext::Scratch {
+            candidate_sha: "a".repeat(40),
+        };
+        assert!(
+            fixture
+                .api
+                .enable_scratch_auto_merge(SCRATCH_REPOSITORY, 7, &"b".repeat(40))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .api
+                .enable_scratch_auto_merge("civitaspo/securefix-server", 7, &"b".repeat(40))
+                .is_err()
+        );
+        fixture.finish();
+        let api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        assert!(
+            api.enable_scratch_auto_merge(SCRATCH_REPOSITORY, 7, &"b".repeat(40))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn client_can_only_create_request_labels_without_a_server_runtime_epoch() {
+        use crate::fixtures::{Fixture, Route};
+        let server = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let path = format!("/repos/{server}/labels");
+        let body = serde_json::json!({"name":"securefix-fixture","description":"owner/source/123"});
+        let mut fixture = Fixture::new(vec![
+            Route::request("POST", &path, 201, body.clone()).with_request_body(body.clone()),
+        ]);
+        fixture.api.writes = WriteContext::ClientLabel {
+            server: server.clone(),
+        };
+        assert_eq!(fixture.api.post::<Value>(&path, &body).unwrap(), body);
+        for target in [
+            "/graphql",
+            "/repos/other/server/labels",
+            "/repos/owner/source/pulls",
+            "/repos/owner/source/git/refs",
+        ] {
+            assert!(fixture.api.post::<Value>(target, &body).is_err());
+        }
+        assert!(fixture.api.patch::<Value>(&path, &body).is_err());
+        assert!(fixture.api.delete(&path).is_err());
+        assert!(fixture.api.get::<Value>("/user").is_err());
+        assert!(
+            fixture
+                .api
+                .post::<Value>(
+                    "/graphql",
+                    &serde_json::json!({"query":"query { viewer { login } }"})
+                )
+                .is_err()
+        );
+        fixture.finish();
     }
     #[test]
     fn scratch_writes_cannot_escape_the_fixed_repository() {

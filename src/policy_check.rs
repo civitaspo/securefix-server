@@ -229,7 +229,7 @@ fn dispatch() -> Result<()> {
     policy
         .repository(&manifest.repository)?
         .require(Capability::Merge)?;
-    let api = GitHub::from_env("SECUREFIX_APP_TOKEN")?;
+    let api = GitHub::client_from_env("SECUREFIX_APP_TOKEN")?;
     let _: Value = api.post(&format!("/repos/{server}/labels"), &json!({"name":format!("policy-request-{}",manifest.run_id),"description":format!("{}/{}",manifest.repository,manifest.run_id),"color":"1f6feb"}))?;
     Ok(())
 }

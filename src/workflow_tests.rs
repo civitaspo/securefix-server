@@ -122,6 +122,8 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                             if path == ".github/workflows/testing-securefix-server.yml" {
                                 if job_id == "trusted-build" {
                                     "${{ job.workflow_sha }}"
+                                } else if job_id == "client-smoke" {
+                                    "${{ needs.build.outputs.source-sha }}"
                                 } else {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 }
@@ -754,7 +756,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             job["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || step["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || (path == ".github/workflows/testing-securefix-server.yml"
-                                    && step["env"]["CANDIDATE_SHA"].is_string()),
+                                    && (step["env"]["CANDIDATE_SHA"].is_string()
+                                        || job["env"]["CANDIDATE_SHA"].is_string())),
                             "{path}/{job_id}: runtime revision required"
                         );
                     }

@@ -121,7 +121,27 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
         validate_assets(assets, &digest, archive_size, false)? == AssetState::Matching,
         "published runtime asset does not match the local archive"
     );
-    Ok(())
+    ensure_version_tag(api, source_sha)
+}
+
+pub(crate) fn version_tag(source_sha: &str) -> Result<String> {
+    crate::policy::validate_sha(source_sha)?;
+    Ok(format!("v{}+{source_sha}", env!("CARGO_PKG_VERSION")))
+}
+
+fn ensure_version_tag(api: &GitHub, source_sha: &str) -> Result<()> {
+    let repository = &crate::config::trusted()?.deployment.server.repository;
+    let tag = version_tag(source_sha)?;
+    match get_optional(api, &format!("/repos/{repository}/git/ref/tags/{tag}"))? {
+        Some(reference) => validate_ref(&reference, source_sha),
+        None => {
+            let reference: Value = api.post(
+                &format!("/repos/{repository}/git/refs"),
+                &json!({"ref":format!("refs/tags/{tag}"),"sha":source_sha}),
+            )?;
+            validate_ref(&reference, source_sha)
+        }
+    }
 }
 
 fn read_archive(path: &Path) -> Result<(Vec<u8>, String)> {
@@ -340,6 +360,10 @@ mod tests {
             Route::get(release_path, existing.clone()),
             Route::get(numbered_release.clone(), existing.clone()),
             Route::get(numbered_release, existing),
+            Route::get(
+                path(&format!("/git/ref/tags/{}", version_tag(SHA).unwrap())),
+                json!({"object":{"type":"commit","sha":SHA}}),
+            ),
         ]);
         publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
@@ -364,6 +388,10 @@ mod tests {
             Route::request("PATCH", numbered_release.clone(), 200, published.clone())
                 .with_request_body(json!({"draft":false})),
             Route::get(numbered_release, published),
+            Route::get(
+                path(&format!("/git/ref/tags/{}", version_tag(SHA).unwrap())),
+                json!({"object":{"type":"commit","sha":SHA}}),
+            ),
         ]);
         publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
@@ -383,6 +411,46 @@ mod tests {
             Route::get(release_path, mismatch),
         ]);
         assert!(publish(&fixture.api, SHA, archive.path()).is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn version_annotation_tag_is_created_once_and_never_retargeted() {
+        let tag = version_tag(SHA).unwrap();
+        assert_eq!(
+            semver::Version::parse(tag.trim_start_matches('v'))
+                .unwrap()
+                .build
+                .as_str(),
+            SHA
+        );
+        let reference = path(&format!("/git/ref/tags/{tag}"));
+        let fixture = Fixture::new(vec![
+            Route::request(
+                "GET",
+                reference.clone(),
+                404,
+                json!({"message":"Not Found"}),
+            ),
+            Route::get(
+                path(&format!("/commits/{}", default_branch())),
+                json!({"sha":SHA}),
+            ),
+            Route::request(
+                "POST",
+                path("/git/refs"),
+                201,
+                json!({"object":{"type":"commit","sha":SHA}}),
+            )
+            .with_request_body(json!({"ref":format!("refs/tags/{tag}"),"sha":SHA})),
+        ]);
+        ensure_version_tag(&fixture.api, SHA).unwrap();
+        fixture.finish();
+        let fixture = Fixture::new(vec![Route::get(
+            reference,
+            json!({"object":{"type":"commit","sha":"b".repeat(40)}}),
+        )]);
+        assert!(ensure_version_tag(&fixture.api, SHA).is_err());
         fixture.finish();
     }
 }

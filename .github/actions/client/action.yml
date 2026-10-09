@@ -1,0 +1,220 @@
+name: Securefix Client
+description: Prepare, upload, and dispatch a Securefix client artifact with the attested Rust runtime
+inputs:
+  runtime-sha:
+    description: Full runtime source commit SHA whose release or candidate artifact to use
+    required: true
+  runtime-repository:
+    description: Repository publishing the verified runtime; defaults to server-repository
+    required: false
+    default: ''
+  runtime-token:
+    description: Optional read-only token for downloading a private runtime repository
+    required: false
+    default: ''
+  server-repository:
+    description: Trusted Securefix server repository (owner/name)
+    required: true
+  runtime-default-branch:
+    description: Runtime publisher default branch used by the attestation
+    required: true
+  runtime-directory:
+    description: Optional workspace-relative candidate runtime directory from a trusted workflow
+    required: false
+    default: ''
+  policy-path:
+    description: Optional workspace-relative trusted deployment policy file
+    required: false
+    default: ''
+  client-token:
+    description: Short-lived installation token scoped to server issues:write
+    required: true
+  files:
+    description: Newline-separated workspace-relative files to include
+    required: true
+  root-dir:
+    description: Workspace-relative root directory for files
+    required: false
+    default: .
+  repository:
+    description: Destination repository, empty to use the source repository
+    required: false
+    default: ''
+  branch:
+    description: Destination branch
+    required: false
+    default: ''
+  commit-message:
+    description: Commit message
+    required: false
+    default: ''
+  pull-request-title:
+    description: Optional pull request title
+    required: false
+    default: ''
+  pull-request-body:
+    description: Optional pull request body
+    required: false
+    default: ''
+  pull-request-base:
+    description: Required when pull-request-title is set
+    required: false
+    default: ''
+  custom-json:
+    description: Custom metadata JSON object
+    required: false
+    default: '{}'
+outputs:
+  runtime-source:
+    description: Runtime installation source (attested-release or prebuilt-candidate)
+    value: ${{ steps.runtime.outputs.source }}
+  artifact-name:
+    description: Uploaded Securefix artifact name, empty when there were no files
+    value: ${{ steps.prepare.outputs.artifact_name }}
+  source-label:
+    description: Securefix request label created on the server
+    value: ${{ steps.dispatch.outputs.source_label }}
+  changed-files:
+    description: Newline-separated changed paths relative to the workspace
+    value: ${{ steps.prepare.outputs.changed_files }}
+runs:
+  using: composite
+  steps:
+    - name: Verify runtime revision input
+      shell: bash
+      env:
+        SECUREFIX_RUNTIME_SHA: ${{ inputs.runtime-sha }}
+      run: |
+        [[ "$SECUREFIX_RUNTIME_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'runtime-sha must be a full lowercase commit SHA' >&2; exit 1; }
+    - name: Download and verify published runtime
+      id: runtime
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.runtime-token || github.token }}
+        SECUREFIX_RUNTIME_SHA: ${{ inputs.runtime-sha }}
+        SECUREFIX_RUNTIME_REPOSITORY_INPUT: ${{ inputs.runtime-repository }}
+        SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server-repository }}
+        SECUREFIX_RUNTIME_DEFAULT_BRANCH: ${{ inputs.runtime-default-branch }}
+        INPUT_RUNTIME_DIRECTORY: ${{ inputs.runtime-directory }}
+      run: |
+        if [[ -n "$INPUT_RUNTIME_DIRECTORY" ]]; then
+          [[ "$INPUT_RUNTIME_DIRECTORY" =~ ^[A-Za-z0-9._/-]+$ && "$INPUT_RUNTIME_DIRECTORY" != /* ]] || { echo 'runtime-directory must be workspace-relative' >&2; exit 1; }
+          current="$GITHUB_WORKSPACE"
+          IFS='/' read -ra components <<< "$INPUT_RUNTIME_DIRECTORY"
+          for component in "${components[@]}"; do
+            [[ -n "$component" && "$component" != '..' ]] || { echo 'runtime-directory has an unsafe component' >&2; exit 1; }
+            current="$current/$component"
+            [[ ! -L "$current" ]] || { echo 'runtime-directory cannot contain symlinks' >&2; exit 1; }
+          done
+          runtime_dir="$(realpath -e "$GITHUB_WORKSPACE/$INPUT_RUNTIME_DIRECTORY")"
+          [[ -d "$runtime_dir" && "$runtime_dir" == "$GITHUB_WORKSPACE"/* ]] || { echo 'runtime-directory must resolve to a workspace directory' >&2; exit 1; }
+          for file in securefix policy.json; do
+            [[ -f "$runtime_dir/$file" && ! -L "$runtime_dir/$file" ]] || { echo "runtime-directory must contain a regular, non-symlink $file" >&2; exit 1; }
+          done
+          runtime_source=prebuilt-candidate
+        else
+          runtime_repository="$SECUREFIX_RUNTIME_REPOSITORY_INPUT"
+          if [[ -z "$runtime_repository" ]]; then
+            runtime_repository="$SECUREFIX_SERVER_REPOSITORY"
+          fi
+          [[ "$runtime_repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'runtime-repository must be owner/name' >&2; exit 1; }
+          [[ "$SECUREFIX_SERVER_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'server-repository must be owner/name' >&2; exit 1; }
+          [[ "$SECUREFIX_RUNTIME_DEFAULT_BRANCH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || { echo 'runtime-default-branch is invalid' >&2; exit 1; }
+          download_dir="$(mktemp -d "$RUNNER_TEMP/securefix-download.XXXXXX")"
+          gh release download "securefix-runtime-$SECUREFIX_RUNTIME_SHA" \
+            --repo "$runtime_repository" \
+            --pattern securefix-runtime-linux-x86_64.tar.gz \
+            --dir "$download_dir"
+          archive="$download_dir/securefix-runtime-linux-x86_64.tar.gz"
+          gh attestation verify "$archive" \
+            --repo "$runtime_repository" \
+            --source-digest "$SECUREFIX_RUNTIME_SHA" \
+            --source-ref "refs/heads/$SECUREFIX_RUNTIME_DEFAULT_BRANCH" \
+            --signer-workflow "$runtime_repository/.github/workflows/publish-runtime.yml" \
+            --signer-digest "$SECUREFIX_RUNTIME_SHA" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --deny-self-hosted-runners
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/securefix-runtime.XXXXXX")"
+          tar -xzf "$archive" -C "$runtime_dir" --no-same-owner
+          runtime_source=attested-release
+        fi
+        bin_dir="$(mktemp -d "$RUNNER_TEMP/securefix-bin.XXXXXX")"
+        install -m 755 "$runtime_dir/securefix" "$bin_dir/securefix"
+        install -m 644 "$runtime_dir/policy.json" "$bin_dir/policy.json"
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        echo "bin=$bin_dir" >> "$GITHUB_OUTPUT"
+        echo "source=$runtime_source" >> "$GITHUB_OUTPUT"
+    - name: Validate trusted policy path
+      id: policy
+      shell: bash
+      env:
+        INPUT_POLICY_PATH: ${{ inputs.policy-path }}
+      run: |
+        if [[ -z "$INPUT_POLICY_PATH" ]]; then
+          echo 'path=' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        [[ "$INPUT_POLICY_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$INPUT_POLICY_PATH" != /* ]] || { echo 'policy-path must be a simple workspace-relative path' >&2; exit 1; }
+        policy_path="$(realpath -e "$GITHUB_WORKSPACE/$INPUT_POLICY_PATH")"
+        [[ -f "$policy_path" && "$policy_path" == "$GITHUB_WORKSPACE"/* ]] || { echo 'policy-path must resolve to a file inside the workspace' >&2; exit 1; }
+        echo "path=$policy_path" >> "$GITHUB_OUTPUT"
+    - name: Prepare Securefix artifact
+      id: prepare
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        INPUT_ROOT_DIR: ${{ inputs.root-dir }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        INPUT_PR_TITLE: ${{ inputs.pull-request-title }}
+        INPUT_PR_BODY: ${{ inputs.pull-request-body }}
+        INPUT_PR_BASE: ${{ inputs.pull-request-base }}
+        INPUT_CUSTOM_JSON: ${{ inputs.custom-json }}
+        SECUREFIX_POLICY_PATH_INPUT: ${{ steps.policy.outputs.path }}
+      run: |
+        if [[ -n "$SECUREFIX_POLICY_PATH_INPUT" ]]; then
+          export SECUREFIX_POLICY_PATH="$SECUREFIX_POLICY_PATH_INPUT"
+        else
+          unset SECUREFIX_POLICY_PATH
+        fi
+        artifact_dir="$(mktemp -d "$GITHUB_WORKSPACE/.securefix-artifacts.XXXXXX")"
+        artifact_dir="${artifact_dir#"$GITHUB_WORKSPACE"/}"
+        securefix securefix client-prepare \
+          --root-dir "$INPUT_ROOT_DIR" \
+          --files "$INPUT_FILES" \
+          --repository "$INPUT_REPOSITORY" \
+          --branch "$INPUT_BRANCH" \
+          --commit-message "$INPUT_COMMIT_MESSAGE" \
+          --pull-request-title "$INPUT_PR_TITLE" \
+          --pull-request-body "$INPUT_PR_BODY" \
+          --pull-request-base "$INPUT_PR_BASE" \
+          --custom-json "$INPUT_CUSTOM_JSON" \
+          --output-dir "$artifact_dir"
+    - name: Upload Securefix artifact
+      if: steps.prepare.outputs.artifact_name != ''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ steps.prepare.outputs.artifact_name }}
+        path: ${{ steps.prepare.outputs.artifact_path }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 1
+    - name: Dispatch Securefix request
+      id: dispatch
+      if: steps.prepare.outputs.artifact_name != ''
+      shell: bash
+      env:
+        SECUREFIX_CLIENT_TOKEN: ${{ inputs.client-token }}
+        SECUREFIX_ARTIFACT_NAME: ${{ steps.prepare.outputs.artifact_name }}
+        SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server-repository }}
+        SECUREFIX_POLICY_PATH_INPUT: ${{ steps.policy.outputs.path }}
+      run: |
+        if [[ -n "$SECUREFIX_POLICY_PATH_INPUT" ]]; then
+          export SECUREFIX_POLICY_PATH="$SECUREFIX_POLICY_PATH_INPUT"
+        else
+          unset SECUREFIX_POLICY_PATH
+        fi
+        securefix securefix client-dispatch --artifact-name "$SECUREFIX_ARTIFACT_NAME" --server-repository "$SECUREFIX_SERVER_REPOSITORY"

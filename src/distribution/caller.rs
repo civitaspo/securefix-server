@@ -140,14 +140,17 @@ fn render(
     release_branch: &str,
     owner_id: &str,
 ) -> Result<String> {
+    let runtime_version = crate::runtime::version_tag(source_sha)?;
     let rendered = template
         .replace("@SECUREFIX_RUNTIME_SHA@", source_sha)
+        .replace("@RUNTIME_VERSION@", &runtime_version)
         .replace("@DEFAULT_BRANCH@", branch)
         .replace("@SERVER_REPOSITORY@", server_repository)
         .replace("@RELEASE_BRANCH@", release_branch)
         .replace("@OWNER_ID@", owner_id);
     ensure!(
         !rendered.contains("@SECUREFIX_RUNTIME_SHA@")
+            && !rendered.contains("@RUNTIME_VERSION@")
             && !rendered.contains("@DEFAULT_BRANCH@")
             && !rendered.contains("@SERVER_REPOSITORY@")
             && !rendered.contains("@RELEASE_BRANCH@")
@@ -632,5 +635,33 @@ fn optional_content(
             Ok(None)
         }
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rendered_files;
+
+    #[test]
+    fn generated_reusable_workflow_pins_have_exact_runtime_version_comments() {
+        let sha = "20f28eeb972c8961e799fb51c8b278ac1884ba8e";
+        let expected_comment = format!("v{}+{sha}", env!("CARGO_PKG_VERSION"));
+        let expected_version =
+            semver::Version::parse(expected_comment.trim_start_matches('v')).unwrap();
+        assert!(expected_version.pre.is_empty());
+        assert_eq!(expected_version.build.to_string(), sha);
+        let files = rendered_files(sha, "main", true).unwrap();
+        assert_eq!(files.len(), 6);
+        for (path, bytes) in files {
+            let workflow = String::from_utf8(bytes).unwrap();
+            let uses = workflow
+                .lines()
+                .find(|line| line.trim_start().starts_with("uses:"))
+                .unwrap_or_else(|| panic!("{path} has no reusable workflow pin"));
+            assert!(
+                uses.contains(&format!("@{sha} # {expected_comment}")),
+                "{path} does not annotate the pinned runtime with its exact published version: {uses}"
+            );
+        }
     }
 }

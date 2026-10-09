@@ -16,6 +16,11 @@ on:
         description: Successful prepare run whose binary and state are reused
         type: string
         default: ''
+      client_runtime:
+        description: Test the client Action with a candidate artifact or published runtime
+        type: choice
+        options: [candidate-artifact, published-release]
+        default: candidate-artifact
 
 permissions: {}
 
@@ -130,6 +135,86 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  client-smoke:
+    needs: [trusted-build, trusted-runtime-main, build]
+    if: always() && inputs.phase == 'prepare' && needs.build.result == 'success' && (needs.trusted-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    timeout-minutes: 10
+    env:
+      CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.trusted-build.outputs.artifact-id }}
+          path: trusted-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: trusted-runtime/securefix
+      - name: Validate the defining workflow before minting client credentials
+        id: producer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: securefix integration validate-producer --workflow-sha "$WORKFLOW_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ needs.build.outputs.source-sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.client_runtime == 'candidate-artifact'
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: candidate-runtime
+          merge-multiple: true
+      - name: Prepare the trusted scratch deployment and client input
+        run: securefix integration prepare-client-input
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client
+        with:
+          app-id: '3872492'
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-issues: write
+      - uses: ./candidate/.github/actions/client
+        id: request
+        with:
+          runtime-sha: ${{ inputs.client_runtime == 'candidate-artifact' && needs.build.outputs.source-sha || steps.producer.outputs.published_runtime_sha }}
+          runtime-directory: ${{ inputs.client_runtime == 'candidate-artifact' && 'candidate-runtime' || '' }}
+          runtime-repository: civitaspo/securefix-server
+          runtime-default-branch: main
+          server-repository: civitaspo/testing-securefix-server
+          client-token: ${{ steps.client.outputs.token }}
+          policy-path: scratch-policy.json
+          files: .securefix-client-smoke/request.txt
+          repository: civitaspo/testing-securefix-server
+          branch: securefix-client-smoke-${{ github.run_id }}
+          commit-message: 'test: Securefix client Action'
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: trusted-runtime/securefix
+      - name: Verify the real client artifact and scratch request label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
+          ARTIFACT_NAME: ${{ steps.request.outputs.artifact-name }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: securefix integration verify-client --artifact-name "$ARTIFACT_NAME" --run-id "$GITHUB_RUN_ID" --workflow-sha "$WORKFLOW_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: client-verification
+          path: client-verification.json
+          if-no-files-found: error
+          retention-days: 7
+
   scratch:
     needs: [trusted-build, trusted-runtime-main, build, reuse]
     if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (needs.build.result == 'success' || needs.reuse.result == 'success') && (needs.trusted-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
@@ -149,6 +234,7 @@ jobs:
         with:
           binary: trusted-runtime/securefix
       - name: Validate the defining workflow before minting credentials
+        id: producer
         env:
           GITHUB_TOKEN: ${{ github.token }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
@@ -160,6 +246,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || inputs.candidate_sha || job.workflow_sha }}
           FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
+          SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
         run: $RUNNER_TEMP/securefix-bin/securefix integration fetch-state --candidate-sha "$CANDIDATE_SHA" --run-id "$FIXTURE_RUN_ID" --state-file fixtures/state.json
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -198,6 +285,7 @@ jobs:
           SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
           SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
           SECUREFIX_TEST_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
           TEST_PHASE: ${{ inputs.phase }}
         run: |
@@ -209,7 +297,7 @@ jobs:
             --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/policy.json,target=/usr/local/bin/policy.json,readonly" \
             --mount "type=bind,source=$PWD/fixtures,target=/fixtures" \
             --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
-            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA \
+            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e SECUREFIX_PUBLISHED_RUNTIME_SHA \
             -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
             ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
             securefix integration run --phase "$TEST_PHASE" --candidate-sha "$CANDIDATE_SHA" --state-file state.json
@@ -223,6 +311,7 @@ jobs:
         env:
           CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
           TEST_PHASE: ${{ inputs.phase }}
+          SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
         run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase "$TEST_PHASE" --state-file fixtures/state.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && steps.validate-outputs.outcome == 'success'

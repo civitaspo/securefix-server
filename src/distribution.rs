@@ -211,6 +211,14 @@ pub(crate) fn validate_promotion(
                 .is_some_and(|digest| digest.starts_with("sha256:")),
         "published runtime asset is invalid"
     );
+    let version_tag = crate::runtime::version_tag(source_sha)?;
+    let version_ref: Value = api.get(&format!(
+        "/repos/{server_repository}/git/ref/tags/{version_tag}"
+    ))?;
+    ensure!(
+        version_ref["object"]["type"] == "commit" && version_ref["object"]["sha"] == source_sha,
+        "runtime version annotation does not resolve to the published source"
+    );
     Ok(PublishedRuntime {
         publisher_run_id,
         source_sha: source_sha.to_owned(),

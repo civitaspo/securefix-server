@@ -18,4 +18,4 @@ jobs:
       contents: read
       attestations: read
       pull-requests: write
-    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr-sync.yml@@SECUREFIX_RUNTIME_SHA@
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr-sync.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@

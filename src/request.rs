@@ -310,7 +310,7 @@ fn capture(kind: RequestKind) -> Result<()> {
 }
 
 fn dispatch() -> Result<()> {
-    let app = GitHub::from_env("SECUREFIX_APP_TOKEN")?;
+    let app = GitHub::client_from_env("SECUREFIX_APP_TOKEN")?;
     let read = GitHub::from_env("GITHUB_TOKEN")?;
     let policy = Policy::active(&read)?;
     let manifest: RequestManifest = serde_json::from_slice(&fs::read("request/manifest.json")?)?;
