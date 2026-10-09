@@ -323,6 +323,77 @@ mod tests {
         }
     }
     #[test]
+    fn get_retries_one_connection_drop_and_returns_the_second_response() {
+        use crate::fixtures::{Fixture, Route};
+        let fixture = Fixture::new(vec![
+            Route::disconnect("GET", "/repos/civitaspo/example"),
+            Route::get("/repos/civitaspo/example", serde_json::json!({"ok":true})),
+        ]);
+
+        let result: Value = fixture.api.get("/repos/civitaspo/example").unwrap();
+
+        assert_eq!(result, serde_json::json!({"ok":true}));
+        fixture.finish();
+    }
+    #[test]
+    fn get_retries_a_repeated_connection_drop_only_once() {
+        use crate::fixtures::{Fixture, Route};
+        let fixture = Fixture::new(vec![
+            Route::disconnect("GET", "/repos/civitaspo/example"),
+            Route::disconnect("GET", "/repos/civitaspo/example"),
+        ]);
+
+        assert!(
+            fixture
+                .api
+                .get::<Value>("/repos/civitaspo/example")
+                .is_err()
+        );
+        fixture.finish();
+    }
+    #[test]
+    fn mutation_connection_drop_is_never_retried() {
+        use crate::fixtures::{Fixture, Route};
+        let path = "/repos/civitaspo/example/issues/7/comments";
+        for (method, method_name) in [
+            (Method::POST, "POST"),
+            (Method::PATCH, "PATCH"),
+            (Method::PUT, "PUT"),
+            (Method::DELETE, "DELETE"),
+        ] {
+            let fixture = Fixture::new(vec![
+                Route::get(
+                    "/repos/civitaspo/securefix-server/commits/main",
+                    serde_json::json!({"sha":"a".repeat(40)}),
+                ),
+                Route::disconnect(method_name, path),
+            ]);
+
+            let empty_body = serde_json::json!({});
+            let body = (method != Method::DELETE).then_some(&empty_body);
+            assert!(fixture.api.request(method, path, body).is_err());
+            fixture.finish();
+        }
+    }
+    #[test]
+    fn invalid_json_response_is_not_retried() {
+        use crate::fixtures::{Fixture, Route};
+        let fixture = Fixture::new(vec![Route::raw(
+            "GET",
+            "/repos/civitaspo/example",
+            200,
+            b"{".to_vec(),
+        )]);
+
+        assert!(
+            fixture
+                .api
+                .get::<Value>("/repos/civitaspo/example")
+                .is_err()
+        );
+        fixture.finish();
+    }
+    #[test]
     fn every_write_rejects_a_stale_runtime_before_sending_the_mutation() {
         use crate::fixtures::{Fixture, Route};
         for method in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {

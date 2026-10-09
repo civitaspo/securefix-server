@@ -11,16 +11,24 @@ pub struct Route {
     method: &'static str,
     path: String,
     status: u16,
-    body: Value,
+    response: Response,
     request_body: Option<Value>,
 }
+
+#[allow(dead_code)]
+enum Response {
+    Json(Value),
+    Raw(Vec<u8>),
+    Disconnect,
+}
+
 impl Route {
     pub fn get(path: impl Into<String>, body: Value) -> Self {
         Self {
             method: "GET",
             path: path.into(),
             status: 200,
-            body,
+            response: Response::Json(body),
             request_body: None,
         }
     }
@@ -34,7 +42,27 @@ impl Route {
             method,
             path: path.into(),
             status,
-            body,
+            response: Response::Json(body),
+            request_body: None,
+        }
+    }
+    #[allow(dead_code)]
+    pub fn raw(method: &'static str, path: impl Into<String>, status: u16, body: Vec<u8>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            status,
+            response: Response::Raw(body),
+            request_body: None,
+        }
+    }
+    #[allow(dead_code)]
+    pub fn disconnect(method: &'static str, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            status: 200,
+            response: Response::Disconnect,
             request_body: None,
         }
     }
@@ -50,6 +78,9 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new(routes: Vec<Route>) -> Self {
+        let monitor_extra_requests = routes
+            .iter()
+            .any(|route| matches!(route.response, Response::Disconnect));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let api = GitHub::new(
@@ -116,9 +147,25 @@ impl Fixture {
                         route.method, route.path
                     );
                 }
-                let body = serde_json::to_vec(&route.body).unwrap();
+                let body = match route.response {
+                    Response::Json(body) => serde_json::to_vec(&body).unwrap(),
+                    Response::Raw(body) => body,
+                    Response::Disconnect => continue,
+                };
                 write!(stream,"HTTP/1.1 {} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",route.status,body.len()).unwrap();
                 stream.write_all(&body).unwrap();
+            }
+            if monitor_extra_requests {
+                let deadline = Instant::now() + Duration::from_millis(25);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(_) => panic!("unexpected extra API request"),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                }
             }
         });
         Self { api, thread }
