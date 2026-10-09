@@ -85,7 +85,7 @@ fn prepare() -> Result<()> {
         vec![input_repo]
     };
     if activation == ActivationMode::AttestedFullRollout {
-        validate_approval_token_if_present(&repositories)?;
+        validate_approval_token_if_present(&api, &repositories)?;
     }
     crate::output("repositories", serde_json::to_string(&repositories)?)?;
     crate::output(
@@ -607,17 +607,26 @@ fn validate_server_app_installation(
     Ok(())
 }
 
-fn validate_approval_token_if_present(repositories: &[String]) -> Result<()> {
+fn validate_approval_token_if_present(owner_api: &GitHub, repositories: &[String]) -> Result<()> {
     let reviewer = &config::trusted()?.deployment.approval_reviewer;
     ensure!(
         token_present("SECUREFIX_APPROVAL_REVIEWER_TOKEN"),
         "SECUREFIX_APPROVAL_REVIEWER_TOKEN is required for full activation readiness"
     );
     let api = GitHub::from_env("SECUREFIX_APPROVAL_REVIEWER_TOKEN")?;
-    let user: Value = api.get("/user")?;
+    validate_reviewer_access(owner_api, &api, repositories, reviewer)
+}
+
+fn validate_reviewer_access(
+    owner_api: &GitHub,
+    reviewer_api: &GitHub,
+    repositories: &[String],
+    reviewer: &config::Principal,
+) -> Result<()> {
+    let user: Value = reviewer_api.get("/user")?;
     validate_reviewer_identity(&user, reviewer)?;
     for repository in repositories {
-        validate_collaborator(&api, repository, &reviewer.login)?;
+        validate_collaborator(owner_api, repository, &reviewer.login)?;
     }
     Ok(())
 }
@@ -627,10 +636,7 @@ fn validate_collaborator(api: &GitHub, repository: &str, reviewer: &str) -> Resu
         "/repos/{repository}/collaborators/{reviewer}/permission"
     ))?;
     ensure!(
-        matches!(
-            collaborator["permission"].as_str(),
-            Some("push" | "maintain" | "admin")
-        ),
+        matches!(collaborator["permission"].as_str(), Some("write" | "admin")),
         "configured approval reviewer lacks effective write permission on {repository}"
     );
     Ok(())
@@ -717,16 +723,30 @@ fn invite_collaborator(api: &GitHub, repository: &str, username: &str) -> Result
     Ok(())
 }
 
-fn accept_invitation(_api: &GitHub, repository: &str, username: &str) -> Result<()> {
+fn accept_invitation(owner_api: &GitHub, repository: &str, username: &str) -> Result<()> {
     let api = GitHub::from_env("SECUREFIX_REVIEWER_INVITE_TOKEN")?;
     let trusted = config::trusted()?;
     ensure!(
         username == trusted.deployment.approval_reviewer.login,
         "invitation target differs from the configured approval reviewer"
     );
-    let identity: Value = api.get("/user")?;
-    validate_reviewer_identity(&identity, &trusted.deployment.approval_reviewer)?;
-    let invitations: Vec<Value> = api.paginate("/user/repository_invitations")?;
+    accept_reviewer_invitation(
+        owner_api,
+        &api,
+        repository,
+        &trusted.deployment.approval_reviewer,
+    )
+}
+
+fn accept_reviewer_invitation(
+    owner_api: &GitHub,
+    invitation_api: &GitHub,
+    repository: &str,
+    reviewer: &config::Principal,
+) -> Result<()> {
+    let identity: Value = invitation_api.get("/user")?;
+    validate_reviewer_identity(&identity, reviewer)?;
+    let invitations: Vec<Value> = invitation_api.paginate("/user/repository_invitations")?;
     let full_name = repository.to_lowercase();
     if let Some(invitation) = invitations.iter().find(|item| {
         item["repository"]["full_name"]
@@ -734,20 +754,9 @@ fn accept_invitation(_api: &GitHub, repository: &str, username: &str) -> Result<
             .is_some_and(|name| name.eq_ignore_ascii_case(&full_name))
     }) {
         let id = invitation["id"].as_u64().context("invitation ID missing")?;
-        api.patch::<Value>(&format!("/user/repository_invitations/{id}"), &json!({}))?;
-        return Ok(());
+        invitation_api.patch::<Value>(&format!("/user/repository_invitations/{id}"), &json!({}))?;
     }
-    let status: Value = api.get(&format!(
-        "/repos/{repository}/collaborators/{username}/permission"
-    ))?;
-    ensure!(
-        matches!(
-            status["permission"].as_str(),
-            Some("push" | "maintain" | "admin")
-        ),
-        "no pending invitation or effective permission for {username} on {repository}"
-    );
-    Ok(())
+    validate_collaborator(owner_api, repository, &reviewer.login)
 }
 
 fn validate_desired_settings() -> Result<()> {
@@ -818,6 +827,110 @@ fn env_bool(name: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn collaborator_readback_uses_github_effective_roles() {
+        for (permission, accepted) in [
+            ("write", true),
+            ("admin", true),
+            ("read", false),
+            ("none", false),
+            ("push", false),
+            ("maintain", false),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(
+                "/repos/forge/example/collaborators/reviewer/permission",
+                json!({"permission":permission}),
+            )]);
+            assert_eq!(
+                validate_collaborator(&fixture.api, "forge/example", "reviewer").is_ok(),
+                accepted
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn reviewer_token_authenticates_identity_and_owner_checks_access() {
+        let reviewer = config::Principal {
+            login: "reviewer".into(),
+            id: 100,
+        };
+        let owner = Fixture::new(vec![Route::get(
+            "/repos/forge/example/collaborators/reviewer/permission",
+            json!({"permission":"write"}),
+        )]);
+        let token = Fixture::new(vec![Route::get(
+            "/user",
+            json!({"login":"reviewer","id":100}),
+        )]);
+        validate_reviewer_access(&owner.api, &token.api, &["forge/example".into()], &reviewer)
+            .unwrap();
+        token.finish();
+        owner.finish();
+    }
+
+    #[test]
+    fn invitation_only_token_does_not_query_repository_permissions() {
+        let reviewer = config::Principal {
+            login: "reviewer".into(),
+            id: 100,
+        };
+        for (permission, accepted) in [("write", true), ("read", false)] {
+            let owner = Fixture::new(vec![Route::get(
+                "/repos/forge/example/collaborators/reviewer/permission",
+                json!({"permission":permission}),
+            )]);
+            let token = Fixture::new(vec![
+                Route::get("/user", json!({"login":"reviewer","id":100})),
+                Route::get(
+                    "/user/repository_invitations?per_page=100&page=1",
+                    json!([]),
+                ),
+            ]);
+            assert_eq!(
+                accept_reviewer_invitation(&owner.api, &token.api, "forge/example", &reviewer)
+                    .is_ok(),
+                accepted
+            );
+            token.finish();
+            owner.finish();
+        }
+    }
+
+    #[test]
+    fn matching_invitation_is_accepted_before_owner_access_readback() {
+        let reviewer = config::Principal {
+            login: "reviewer".into(),
+            id: 100,
+        };
+        let server = &config::trusted().unwrap().deployment.server;
+        let owner = Fixture::new(vec![Route::get(
+            "/repos/forge/example/collaborators/reviewer/permission",
+            json!({"permission":"write"}),
+        )]);
+        let token = Fixture::new(vec![
+            Route::get("/user", json!({"login":"reviewer","id":100})),
+            Route::get(
+                "/user/repository_invitations?per_page=100&page=1",
+                json!([
+                    {"id":1,"repository":{"full_name":"forge/other"}},
+                    {"id":2,"repository":{"full_name":"forge/example"}}
+                ]),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/commits/{}",
+                    server.repository, server.default_branch
+                ),
+                json!({"sha":"a".repeat(40)}),
+            ),
+            Route::request("PATCH", "/user/repository_invitations/2", 204, Value::Null),
+        ]);
+        accept_reviewer_invitation(&owner.api, &token.api, "forge/example", &reviewer).unwrap();
+        token.finish();
+        owner.finish();
+    }
 
     #[test]
     fn default_readiness_uses_named_checks_and_rejects_newer_failure() {
