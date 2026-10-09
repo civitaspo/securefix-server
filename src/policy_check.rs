@@ -534,11 +534,16 @@ pub fn publish(
     validate_repository(repository)?;
     validate_sha(sha)?;
     let value: Value = api.get(&format!(
-        "/repos/{repository}/commits/{sha}/check-runs?per_page=100&filter=latest"
+        "/repos/{repository}/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={CHECK}&app_id={policy_app_id}"
     ))?;
-    let matches: Vec<_> = value["check_runs"]
+    let check_runs = value["check_runs"]
         .as_array()
-        .context("missing check runs")?
+        .context("missing check runs")?;
+    ensure!(
+        value["total_count"].as_u64() == Some(check_runs.len() as u64),
+        "named policy check response is incomplete"
+    );
+    let matches: Vec<_> = check_runs
         .iter()
         .filter(|c| c["name"] == CHECK && c["app"]["id"] == policy_app_id)
         .collect();
@@ -717,13 +722,19 @@ mod tests {
     #[test]
     fn policy_check_updates_its_own_app_check_and_ignores_other_apps() {
         let sha = "a".repeat(40);
-        let check_path =
-            format!("/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest");
+        let policy_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .policy_app_id;
+        let check_path = format!(
+            "/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={CHECK}&app_id={policy_app_id}"
+        );
         let body = json!({"name":CHECK,"status":"completed","conclusion":"failure","output":{"title":"Policy rejected","summary":"Changed head"}});
         let fixture = Fixture::new(vec![
             Route::get(
                 check_path,
-                json!({"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":99}}]}),
+                json!({"total_count":2,"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":99}}]}),
             ),
             Route::get(
                 "/repos/civitaspo/securefix-server/commits/main",
@@ -751,11 +762,36 @@ mod tests {
     #[test]
     fn duplicate_policy_checks_are_rejected_without_writing() {
         let sha = "a".repeat(40);
+        let policy_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .policy_app_id;
         let fixture = Fixture::new(vec![Route::get(
-            format!("/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest"),
-            json!({"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}}]}),
+            format!(
+                "/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={CHECK}&app_id={policy_app_id}"
+            ),
+            json!({"total_count":2,"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}}]}),
         )]);
         assert!(publish(&fixture.api, "civitaspo/example", &sha, true, "Accepted").is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn incomplete_policy_check_listing_never_creates_a_duplicate() {
+        let sha = "a".repeat(40);
+        let policy_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .policy_app_id;
+        let fixture = Fixture::new(vec![Route::get(
+            format!(
+                "/repos/forge/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={CHECK}&app_id={policy_app_id}"
+            ),
+            json!({"total_count":101,"check_runs":[]}),
+        )]);
+        assert!(publish(&fixture.api, "forge/example", &sha, true, "Accepted").is_err());
         fixture.finish();
     }
     #[test]
