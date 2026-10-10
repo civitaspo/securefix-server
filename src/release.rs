@@ -1547,6 +1547,96 @@ fn ensure_valid_caller_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+struct SourcePrAssociation<'a> {
+    run: &'a Value,
+    source_run_sha: &'a CommitSha,
+    release_pr_number: u64,
+    pr: &'a PullRequest,
+    merge_sha: &'a CommitSha,
+}
+
+fn validate_source_pr_association(
+    api: &GitHub,
+    policy: &Policy,
+    repo: &Repository,
+    source: SourcePrAssociation<'_>,
+) -> Result<()> {
+    let SourcePrAssociation {
+        run,
+        source_run_sha,
+        release_pr_number,
+        pr,
+        merge_sha,
+    } = source;
+    let associated = run["pull_requests"]
+        .as_array()
+        .context("source run pull request associations are missing or invalid")?;
+    ensure!(
+        source_run_sha.as_str() == pr.head.sha,
+        "source pull request run head does not match the release PR head"
+    );
+    if !associated.is_empty() {
+        ensure!(
+            associated
+                .iter()
+                .any(|candidate| candidate["number"].as_u64() == Some(release_pr_number)),
+            "source run is not associated with the release PR"
+        );
+        return Ok(());
+    }
+
+    let trusted = crate::config::trusted()?;
+    ensure!(
+        run["head_branch"] == pr.head.name,
+        "empty source PR associations do not match the release branch"
+    );
+    ensure!(
+        run["actor"]["id"].as_u64() == Some(policy.server_bot_id) && run["actor"]["type"] == "Bot",
+        "empty source PR associations are only accepted for a Server App run"
+    );
+    ensure!(
+        pr.number == release_pr_number
+            && pr.merged == Some(true)
+            && pr.merged_at.is_some()
+            && pr.merge_commit_sha.as_deref() == Some(merge_sha.as_str())
+            && pr.head.name == trusted.deployment.release_branch,
+        "fallback release PR is not the authorized merged release"
+    );
+    let associated_prs = api.paginate(&format!(
+        "/repos/{}/commits/{}/pulls",
+        repo.as_str(),
+        source_run_sha.as_str()
+    ))?;
+    let matching: Vec<_> = associated_prs
+        .iter()
+        .filter(|candidate| candidate["number"].as_u64() == Some(release_pr_number))
+        .collect();
+    ensure!(
+        matching.len() == 1,
+        "source commit does not identify exactly one release PR"
+    );
+    let candidate = matching[0];
+    let candidate_merged_at: DateTime<Utc> = serde_json::from_value(
+        candidate
+            .get("merged_at")
+            .cloned()
+            .context("associated release PR has no merge timestamp")?,
+    )
+    .context("associated release PR merge timestamp is invalid")?;
+    ensure!(
+        candidate["state"] == "closed"
+            && pr.merged_at.as_ref() == Some(&candidate_merged_at)
+            && candidate["merge_commit_sha"] == merge_sha.as_str()
+            && candidate["head"]["sha"] == pr.head.sha
+            && candidate["head"]["ref"] == trusted.deployment.release_branch
+            && candidate["head"]["repo"]["full_name"] == repo.as_str()
+            && candidate["base"]["ref"] == pr.base.name
+            && candidate["base"]["repo"]["full_name"] == repo.as_str(),
+        "source commit association does not match the authorized merged release PR"
+    );
+    Ok(())
+}
+
 fn validated_source(
     api: &GitHub,
     policy: &Policy,
@@ -1682,17 +1772,18 @@ fn validated_source(
         );
     }
     if run["event"] == "pull_request" {
-        ensure!(
-            run["pull_requests"]
-                .as_array()
-                .is_some_and(|prs| prs.iter().any(|pr| pr["number"] == release_pr_number)),
-            "source run is not associated with the release PR"
-        );
-        let pr_head = CommitSha::parse(&pr.head.sha)?;
-        ensure!(
-            source_run_sha == pr_head,
-            "source pull request run head does not match the release PR head"
-        );
+        validate_source_pr_association(
+            api,
+            policy,
+            repo,
+            SourcePrAssociation {
+                run: &run,
+                source_run_sha: &source_run_sha,
+                release_pr_number,
+                pr: &pr,
+                merge_sha: &merge_sha,
+            },
+        )?;
     } else if run["event"] == "workflow_dispatch" {
         ensure!(
             run["triggering_actor"]["id"].as_u64() == Some(policy.owner_id),
@@ -2145,7 +2236,6 @@ fn publish() -> Result<()> {
             && manifest.tag == plan.tag,
         "publish plan no longer matches authorized source"
     );
-    ensure_immutable_releases_enabled(&api, &repo)?;
     let tag_ref: Value = api.get(&format!(
         "/repos/{}/git/ref/tags/{}",
         repo.as_str(),
@@ -2246,16 +2336,6 @@ fn publish() -> Result<()> {
     }
     let published: Value = api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
     ensure_published_immutable_release(&published, release_id, &plan.tag)?;
-    Ok(())
-}
-
-fn ensure_immutable_releases_enabled(api: &GitHub, repo: &Repository) -> Result<()> {
-    let setting: Value = api.get(&format!("/repos/{}/immutable-releases", repo.as_str()))?;
-    ensure!(
-        setting["enabled"] == true,
-        "immutable releases are disabled for {}",
-        repo.as_str()
-    );
     Ok(())
 }
 
@@ -3924,6 +4004,216 @@ mod tests {
         }
     }
 
+    fn associated_release_pr() -> PullRequest {
+        serde_json::from_value(json!({
+            "number":87,
+            "merged":true,
+            "merged_at":"2026-10-10T12:40:48Z",
+            "merge_commit_sha":"c".repeat(40),
+            "merged_by":{"id":crate::config::trusted().unwrap().server_bot_id,"type":"Bot"},
+            "head":{"ref":"release/next","sha":"a".repeat(40),"repo":{"full_name":"civitaspo/terraform-provider-sigma"}},
+            "base":{"ref":"main","sha":"c".repeat(40),"repo":{"full_name":"civitaspo/terraform-provider-sigma"}}
+        })).unwrap()
+    }
+
+    fn associated_release_pr_response() -> Value {
+        json!({
+            "number":87,
+            "state":"closed",
+            "merged_at":"2026-10-10T12:40:48Z",
+            "merge_commit_sha":"c".repeat(40),
+            "head":{"ref":"release/next","sha":"a".repeat(40),"repo":{"full_name":"civitaspo/terraform-provider-sigma"}},
+            "base":{"ref":"main","repo":{"full_name":"civitaspo/terraform-provider-sigma"}}
+        })
+    }
+
+    fn empty_association_run() -> Value {
+        json!({
+            "head_branch":"release/next",
+            "pull_requests":[],
+            "actor":{"id":crate::config::trusted().unwrap().server_bot_id,"type":"Bot"}
+        })
+    }
+
+    #[test]
+    fn empty_source_run_associations_accept_only_the_exact_merged_release_pr() {
+        use crate::fixtures::{Fixture, Route};
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let pr = associated_release_pr();
+        let head = CommitSha::parse(&"a".repeat(40)).unwrap();
+        let merge = CommitSha::parse(&"c".repeat(40)).unwrap();
+        let fixture = Fixture::new(vec![Route::get(
+            format!(
+                "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                repo.as_str(),
+                head.as_str()
+            ),
+            json!([associated_release_pr_response()]),
+        )]);
+        validate_source_pr_association(
+            &fixture.api,
+            &policy,
+            &repo,
+            SourcePrAssociation {
+                run: &empty_association_run(),
+                source_run_sha: &head,
+                release_pr_number: 87,
+                pr: &pr,
+                merge_sha: &merge,
+            },
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn empty_source_run_associations_reject_unrelated_or_changed_pull_requests() {
+        use crate::fixtures::{Fixture, Route};
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let pr = associated_release_pr();
+        let head = CommitSha::parse(&"a".repeat(40)).unwrap();
+        let merge = CommitSha::parse(&"c".repeat(40)).unwrap();
+        let mut variants = Vec::new();
+        for (pointer, replacement) in [
+            ("/number", json!(88)),
+            ("/head/sha", json!("d".repeat(40))),
+            ("/head/ref", json!("feature")),
+            ("/head/repo/full_name", json!("attacker/repo")),
+            ("/base/ref", json!("release/next")),
+            ("/base/repo/full_name", json!("attacker/repo")),
+            ("/state", json!("open")),
+            ("/merged_at", json!("2026-10-10T12:41:00Z")),
+            ("/merge_commit_sha", json!("d".repeat(40))),
+        ] {
+            let mut candidate = associated_release_pr_response();
+            *candidate.pointer_mut(pointer).unwrap() = replacement;
+            variants.push(candidate);
+        }
+        for candidate in variants {
+            let fixture = Fixture::new(vec![Route::get(
+                format!(
+                    "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                    repo.as_str(),
+                    head.as_str()
+                ),
+                json!([candidate]),
+            )]);
+            assert!(
+                validate_source_pr_association(
+                    &fixture.api,
+                    &policy,
+                    &repo,
+                    SourcePrAssociation {
+                        run: &empty_association_run(),
+                        source_run_sha: &head,
+                        release_pr_number: 87,
+                        pr: &pr,
+                        merge_sha: &merge,
+                    },
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn source_run_pr_associations_retain_nonempty_match_and_reject_missing_values() {
+        use crate::fixtures::Fixture;
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let pr = associated_release_pr();
+        let head = CommitSha::parse(&"a".repeat(40)).unwrap();
+        let merge = CommitSha::parse(&"c".repeat(40)).unwrap();
+        let fixture = Fixture::new(vec![]);
+        let mut run = empty_association_run();
+        run["pull_requests"] = json!([{"number":87}]);
+        validate_source_pr_association(
+            &fixture.api,
+            &policy,
+            &repo,
+            SourcePrAssociation {
+                run: &run,
+                source_run_sha: &head,
+                release_pr_number: 87,
+                pr: &pr,
+                merge_sha: &merge,
+            },
+        )
+        .unwrap();
+        let mut missing = run.clone();
+        missing.as_object_mut().unwrap().remove("pull_requests");
+        assert!(
+            validate_source_pr_association(
+                &fixture.api,
+                &policy,
+                &repo,
+                SourcePrAssociation {
+                    run: &missing,
+                    source_run_sha: &head,
+                    release_pr_number: 87,
+                    pr: &pr,
+                    merge_sha: &merge,
+                },
+            )
+            .is_err()
+        );
+        for invalid in [json!(null), json!({"number":87})] {
+            run["pull_requests"] = invalid;
+            assert!(
+                validate_source_pr_association(
+                    &fixture.api,
+                    &policy,
+                    &repo,
+                    SourcePrAssociation {
+                        run: &run,
+                        source_run_sha: &head,
+                        release_pr_number: 87,
+                        pr: &pr,
+                        merge_sha: &merge,
+                    },
+                )
+                .is_err()
+            );
+        }
+        run["pull_requests"] = json!([{"number":99}]);
+        assert!(
+            validate_source_pr_association(
+                &fixture.api,
+                &policy,
+                &repo,
+                SourcePrAssociation {
+                    run: &run,
+                    source_run_sha: &head,
+                    release_pr_number: 87,
+                    pr: &pr,
+                    merge_sha: &merge,
+                },
+            )
+            .is_err()
+        );
+        let mut wrong_actor = empty_association_run();
+        wrong_actor["actor"]["id"] = json!(policy.owner_id);
+        assert!(
+            validate_source_pr_association(
+                &fixture.api,
+                &policy,
+                &repo,
+                SourcePrAssociation {
+                    run: &wrong_actor,
+                    source_run_sha: &head,
+                    release_pr_number: 87,
+                    pr: &pr,
+                    merge_sha: &merge,
+                },
+            )
+            .is_err()
+        );
+        fixture.finish();
+    }
+
     fn successful_pr_provenance_routes(version: &str) -> Vec<crate::fixtures::Route> {
         use crate::fixtures::Route;
         use base64::Engine;
@@ -4107,47 +4397,6 @@ mod tests {
         let unexpected =
             vec![json!({"name":"extra.zip","digest":format!("sha256:{}", "a".repeat(64))})];
         assert!(validate_release_asset_state(&expected, &unexpected, false).is_err());
-    }
-
-    #[test]
-    fn immutable_release_preflight_fails_closed_before_release_writes() {
-        use crate::fixtures::{Fixture, Route};
-
-        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
-        let api = Fixture::new(vec![Route::get(
-            "/repos/civitaspo/terraform-provider-sigma/immutable-releases",
-            json!({"enabled":false}),
-        )]);
-        assert!(ensure_immutable_releases_enabled(&api.api, &repo).is_err());
-        api.finish();
-    }
-
-    #[test]
-    fn immutable_release_preflight_fails_closed_on_github_disabled_response() {
-        use crate::fixtures::{Fixture, Route};
-
-        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
-        let api = Fixture::new(vec![Route::request(
-            "GET",
-            "/repos/civitaspo/terraform-provider-sigma/immutable-releases",
-            404,
-            json!({"message":"Not Found"}),
-        )]);
-        assert!(ensure_immutable_releases_enabled(&api.api, &repo).is_err());
-        api.finish();
-    }
-
-    #[test]
-    fn immutable_release_preflight_accepts_enabled_setting() {
-        use crate::fixtures::{Fixture, Route};
-
-        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
-        let api = Fixture::new(vec![Route::get(
-            "/repos/civitaspo/terraform-provider-sigma/immutable-releases",
-            json!({"enabled":true,"enforced_by_owner":false}),
-        )]);
-        ensure_immutable_releases_enabled(&api.api, &repo).unwrap();
-        api.finish();
     }
 
     #[test]

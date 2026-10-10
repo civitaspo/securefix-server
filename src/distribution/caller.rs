@@ -491,6 +491,13 @@ fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut 
     {
         expected["concurrency"]["group"] = actual["concurrency"]["group"].clone();
     }
+    if path == ".github/workflows/release-tag.yml"
+        && actual["jobs"]["tag"]["with"]["release_pr_number"].as_str()
+            == Some("${{ inputs.release_pr_number }}")
+    {
+        expected["jobs"]["tag"]["with"]["release_pr_number"] =
+            actual["jobs"]["tag"]["with"]["release_pr_number"].clone();
+    }
     if path == ".github/workflows/merge-request.yml"
         && let Some(condition) = expected["jobs"]["request"]["if"].as_str()
     {

@@ -121,7 +121,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: matrix.kind == 'target'
         with:
-          go-version: 1.26.5
+          go-version-file: sigma/go.mod
           cache: false
       - name: Build one fixed provider target or copy the registry manifest
         env:
