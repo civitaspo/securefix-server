@@ -536,6 +536,29 @@ fn caller_validator_accepts_only_the_exact_legacy_approve_concurrency_group() {
 }
 
 #[test]
+fn release_tag_validator_accepts_exact_previous_empty_event_input_fallback() {
+    let sha = "a".repeat(40);
+    let mut files = caller::rendered_files(&sha, "v0.2.2", "main", true).unwrap();
+    let path = ".github/workflows/release-tag.yml";
+    let canonical = String::from_utf8(files[path].clone()).unwrap();
+    let new_value = "${{ inputs.release_pr_number || github.event.pull_request.number || 0 }}";
+    assert!(canonical.contains(new_value));
+    let previous = canonical.replace(new_value, "${{ inputs.release_pr_number }}");
+    files.insert(path.to_owned(), previous.as_bytes().to_vec());
+
+    assert!(validate_previous_generation(&files, true).is_ok());
+    assert!(caller::validate_existing(path, previous.as_bytes(), "main").is_ok());
+
+    let unsupported = previous.replace(
+        "${{ inputs.release_pr_number }}",
+        "${{ inputs.release_pr_number || 0 }}",
+    );
+    files.insert(path.to_owned(), unsupported.as_bytes().to_vec());
+    assert!(validate_previous_generation(&files, true).is_err());
+    assert!(caller::validate_existing(path, unsupported.as_bytes(), "main").is_err());
+}
+
+#[test]
 fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
     use crate::fixtures::{Fixture, Route};
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();

@@ -27,6 +27,6 @@ jobs:
       issues: write
     uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-tag.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
     with:
-      release_pr_number: ${{ inputs.release_pr_number }}
+      release_pr_number: ${{ inputs.release_pr_number || github.event.pull_request.number || 0 }}
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
