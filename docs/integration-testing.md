@@ -146,3 +146,5 @@ branch during the rehearsal and is removed afterward. The ignored Rust probe is
 compiled only for tests; the installed runtime retains its normal authorization
 and provenance requirements. This verifies build, signing, and draft recovery;
 Terraform Registry ingestion still requires a published release.
+
+The candidate verify phase also exercises receipt reactions on both owner commands and the policy feedback lifecycle with scratch-scoped Server App credentials. It publishes two failure results, verifies only the latest failure comment is visible, then publishes success and verifies both failure comments are hidden. The comment bodies identify the server CI and target commit. No production PR is used for this probe.

@@ -21,7 +21,7 @@ jobs:
     environment: ${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}
     permissions:
       contents: read
-      issues: read
+      issues: write
       pull-requests: read
     timeout-minutes: 10
     env:

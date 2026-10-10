@@ -242,6 +242,9 @@ fn capture(kind: RequestKind) -> Result<()> {
             .as_u64()
             .context("missing issue number")?
     };
+    if let Authorization::OwnerComment { comment_id, .. } = &authorization {
+        acknowledge_request(&token, &repo, number, *comment_id, kind)?;
+    }
     let repository: Value = token.get(&format!("/repos/{repo}"))?;
     let pr: Value = token.get(&format!("/repos/{repo}/pulls/{number}"))?;
     ensure!(
@@ -306,6 +309,37 @@ fn capture(kind: RequestKind) -> Result<()> {
             .unwrap_or_default(),
     )?;
     output("pull_number", manifest.pull_request.number.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn acknowledge_request(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    comment_id: u64,
+    kind: RequestKind,
+) -> Result<()> {
+    validate_repository(repository)?;
+    ensure!(number > 0 && comment_id > 0, "invalid request identity");
+    let trusted = config::trusted()?;
+    let comment: Value = api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
+    ensure!(
+        kind.matches_comment_body(&comment["body"])
+            && matches_principal(
+                &comment["user"],
+                trusted.owner_id,
+                &trusted.deployment.owner_login,
+                "User",
+            )
+            && comment["issue_url"].as_str().is_some_and(|url| {
+                url.ends_with(&format!("/repos/{repository}/issues/{number}"))
+            }),
+        "request comment changed or no longer matches this pull request"
+    );
+    let _: Value = api.post(
+        &format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
+        &json!({"content":"eyes"}),
+    )?;
     Ok(())
 }
 
@@ -943,6 +977,95 @@ fn render_owner_marker(
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn acknowledge_rechecks_owner_command_and_pr_before_reacting() {
+        let repository = "civitaspo/dbt-authorized-models";
+        let number = 7;
+        let comment_id = 19;
+        let server = &config::trusted().unwrap().deployment.server;
+        let reaction = json!({"id":91,"content":"eyes"});
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/issues/comments/{comment_id}"),
+                json!({
+                    "body":" /approve ",
+                    "user":{"id":4525500,"login":"civitaspo","type":"User"},
+                    "issue_url":format!("https://api.github.com/repos/{repository}/issues/{number}")
+                }),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/commits/{}",
+                    server.repository, server.default_branch
+                ),
+                json!({"sha":"a".repeat(40)}),
+            ),
+            Route::request(
+                "POST",
+                format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
+                201,
+                reaction.clone(),
+            )
+            .with_request_body(json!({"content":"eyes"})),
+        ]);
+
+        acknowledge_request(
+            &fixture.api,
+            repository,
+            number,
+            comment_id,
+            RequestKind::Approve,
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn acknowledge_does_not_react_to_edited_or_misbound_comments() {
+        let repository = "civitaspo/dbt-authorized-models";
+        for comment in [
+            json!({
+                "body":"/merge",
+                "user":{"id":4525500,"login":"civitaspo","type":"User"},
+                "issue_url":format!("https://api.github.com/repos/{repository}/issues/7")
+            }),
+            json!({
+                "body":"/approve",
+                "user":{"id":4525501,"login":"civitaspo","type":"User"},
+                "issue_url":format!("https://api.github.com/repos/{repository}/issues/7")
+            }),
+            json!({
+                "body":"/approve",
+                "user":{"id":4525500,"login":"civitaspo","type":"User"},
+                "issue_url":format!("https://api.github.com/repos/{repository}/issues/8")
+            }),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(
+                format!("/repos/{repository}/issues/comments/19"),
+                comment,
+            )]);
+            assert!(
+                acknowledge_request(&fixture.api, repository, 7, 19, RequestKind::Approve,)
+                    .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn acknowledge_rejects_invalid_identity_without_network_access() {
+        let api = GitHub::new("https://api.github.com", "fixture-token".into()).unwrap();
+        assert!(
+            acknowledge_request(&api, "civitaspo/../other", 7, 19, RequestKind::Approve).is_err()
+        );
+        assert!(
+            acknowledge_request(&api, "civitaspo/example", 0, 19, RequestKind::Approve).is_err()
+        );
+        assert!(
+            acknowledge_request(&api, "civitaspo/example", 7, 0, RequestKind::Approve).is_err()
+        );
+    }
 
     #[test]
     fn request_kind_matches_only_ascii_whitespace_trimmed_commands() {

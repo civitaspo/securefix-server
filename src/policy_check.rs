@@ -15,6 +15,7 @@ use std::fs;
 const WRAPPER: &str = ".github/workflows/policy-check.yml";
 const REUSABLE: &str = ".github/workflows/reusable-policy-check.yml";
 const CHECK: &str = "securefix-policy-check";
+pub(crate) const COMMENT_MARKER: &str = securefix::api::POLICY_FAILURE_COMMENT_MARKER;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -520,7 +521,140 @@ fn apply() -> Result<()> {
         success,
         &summary,
     )?;
+    if let Target::PullRequest {
+        number, head_sha, ..
+    } = &manifest.target
+    {
+        report_result(
+            &write,
+            &manifest.repository,
+            *number,
+            head_sha,
+            success,
+            &summary,
+        )?;
+    }
     Ok(())
+}
+
+fn server_run_url() -> Result<String> {
+    let run: u64 = std::env::var("GITHUB_RUN_ID")?.parse()?;
+    let attempt: u32 = std::env::var("GITHUB_RUN_ATTEMPT")?.parse()?;
+    ensure!(run > 0 && attempt > 0, "invalid server CI identity");
+    Ok(format!(
+        "https://github.com/{}/actions/runs/{run}/attempts/{attempt}",
+        config::trusted()?.deployment.server.repository
+    ))
+}
+
+pub(crate) fn report_result(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    sha: &str,
+    success: bool,
+    summary: &str,
+) -> Result<()> {
+    report_result_with_url(
+        api,
+        repository,
+        number,
+        sha,
+        success,
+        summary,
+        &server_run_url()?,
+    )
+}
+
+fn report_result_with_url(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    sha: &str,
+    success: bool,
+    summary: &str,
+    run_url: &str,
+) -> Result<()> {
+    validate_repository(repository)?;
+    validate_sha(sha)?;
+    ensure!(number > 0, "invalid policy comment PR number");
+    if !current_report_target(api, repository, number, sha, success)? {
+        return Ok(());
+    }
+    let comments: Vec<Value> =
+        api.paginate(&format!("/repos/{repository}/issues/{number}/comments"))?;
+    let trusted = config::trusted()?;
+    let previous: Vec<_> = comments
+        .iter()
+        .filter(|comment| {
+            crate::request::matches_principal(
+                &comment["user"],
+                trusted.server_bot_id,
+                &trusted.deployment.server_bot_login,
+                "Bot",
+            ) && comment["body"]
+                .as_str()
+                .is_some_and(|body| body.starts_with(COMMENT_MARKER))
+        })
+        .collect();
+    let body = policy_failure_comment(repository, sha, summary, run_url);
+    let keep = if success {
+        None
+    } else {
+        previous
+            .iter()
+            .rev()
+            .find(|comment| comment["body"] == body)
+            .and_then(|comment| comment["id"].as_u64())
+    };
+    if !success && keep.is_none() {
+        if !current_report_target(api, repository, number, sha, success)? {
+            return Ok(());
+        }
+        let _: Value = api.post(
+            &format!("/repos/{repository}/issues/{number}/comments"),
+            &json!({"body":body}),
+        )?;
+    }
+    for comment in previous {
+        let id = comment["id"].as_u64().context("policy comment has no ID")?;
+        if Some(id) != keep {
+            if !current_report_target(api, repository, number, sha, success)? {
+                return Ok(());
+            }
+            api.minimize_policy_comment(repository, number, id)?;
+        }
+    }
+    Ok(())
+}
+
+fn current_report_target(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    sha: &str,
+    success: bool,
+) -> Result<bool> {
+    let pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    Ok(pr["head"]["sha"] == sha && (success || pr["state"] == "open"))
+}
+
+fn policy_failure_comment(repository: &str, sha: &str, summary: &str, run_url: &str) -> String {
+    let escaped: String = summary
+        .chars()
+        .take(6000)
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '@' => "&#64;".to_owned(),
+            _ => c.to_string(),
+        })
+        .collect();
+    format!(
+        "{COMMENT_MARKER}\n**Securefix policy check failed**\n\n<pre>{escaped}</pre>\n\n<sub><a href=\"{run_url}\">Server CI: policy decision</a> · <a href=\"https://github.com/{repository}/commit/{sha}\">Commit {}</a></sub>",
+        &sha[..12]
+    )
 }
 
 pub fn publish(
@@ -548,7 +682,10 @@ pub fn publish(
         .filter(|c| c["name"] == CHECK && c["app"]["id"] == policy_app_id)
         .collect();
     ensure!(matches.len() <= 1, "duplicate policy check source");
-    let body = json!({"name":CHECK,"head_sha":sha,"status":"completed","conclusion":if success {"success"} else {"failure"},"output":{"title":if success {"Policy accepted"} else {"Policy rejected"},"summary":summary}});
+    let mut body = json!({"name":CHECK,"head_sha":sha,"status":"completed","conclusion":if success {"success"} else {"failure"},"output":{"title":if success {"Policy accepted"} else {"Policy rejected"},"summary":summary}});
+    if std::env::var_os("GITHUB_RUN_ID").is_some() {
+        body["details_url"] = json!(server_run_url()?);
+    }
     if let Some(existing) = matches.first() {
         let id = existing["id"].as_u64().context("missing check ID")?;
         let mut update = body.clone();
@@ -604,6 +741,21 @@ mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
 
+    fn report_pr(sha: &str) -> Value {
+        json!({"state":"open","head":{"sha":sha}})
+    }
+
+    fn existing_policy_comment(id: u64, body: &str) -> Value {
+        let trusted = config::trusted().unwrap();
+        json!({
+            "id":id,
+            "node_id":format!("IC_{id}"),
+            "issue_url":"https://api.github.com/repos/civitaspo/example/issues/7",
+            "body":body,
+            "user":{"id":trusted.server_bot_id,"login":trusted.deployment.server_bot_login,"type":"Bot"}
+        })
+    }
+
     fn pr_source() -> (Value, Target) {
         (
             serde_json::from_str(include_str!("../tests/fixtures/policy-pr-target-run.json"))
@@ -638,6 +790,145 @@ mod tests {
             };
             assert!(caller_revision(&run, 1250079425, "main", &mismatched).is_err());
         }
+    }
+
+    #[test]
+    fn failure_posts_actionable_escaped_report_and_hides_only_previous_server_reports() {
+        let sha = "a".repeat(40);
+        let trusted = config::trusted().unwrap();
+        let run_url = "https://github.com/civitaspo/securefix-server/actions/runs/42/attempts/1";
+        let old_id = 101;
+        let old_body = format!("{COMMENT_MARKER}\nOld report");
+        let unmarked = existing_policy_comment(102, "unrelated bot comment");
+        let mut owner_report =
+            existing_policy_comment(103, &format!("{COMMENT_MARKER}\nOwner report"));
+        owner_report["user"] =
+            json!({"id":trusted.owner_id,"login":trusted.deployment.owner_login,"type":"User"});
+        let summary = "bad <script> @team & more";
+        let expected_body = policy_failure_comment("civitaspo/example", &sha, summary, run_url);
+        let gql = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
+        let fixture = Fixture::new(vec![
+            Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
+            Route::get("/repos/civitaspo/example/issues/7/comments?per_page=100&page=1", json!([
+                existing_policy_comment(old_id, &old_body), unmarked, owner_report
+            ])),
+            Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
+            Route::get(
+                format!("/repos/{}/commits/{}", trusted.deployment.server.repository, trusted.deployment.server.default_branch),
+                json!({"sha":sha}),
+            ),
+            Route::request(
+                "POST", "/repos/civitaspo/example/issues/7/comments", 201,
+                json!({"id":104,"body":expected_body}),
+            ).with_request_body(json!({"body":expected_body})),
+            Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
+            Route::get(
+                format!("/repos/civitaspo/example/issues/comments/{old_id}"),
+                existing_policy_comment(old_id, &old_body),
+            ),
+            Route::get(
+                format!("/repos/{}/commits/{}", trusted.deployment.server.repository, trusted.deployment.server.default_branch),
+                json!({"sha":sha}),
+            ),
+            Route::request(
+                "POST", "/graphql", 200,
+                json!({"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}),
+            ).with_request_body(json!({"query":gql,"variables":{"input":{"subjectId":format!("IC_{old_id}"),"classifier":"OUTDATED"}}})),
+        ]);
+        report_result_with_url(
+            &fixture.api,
+            "civitaspo/example",
+            7,
+            &sha,
+            false,
+            summary,
+            run_url,
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn successful_policy_report_posts_nothing_and_hides_prior_failure() {
+        let sha = "a".repeat(40);
+        let trusted = config::trusted().unwrap();
+        let id = 101;
+        let body = format!("{COMMENT_MARKER}\nOld failure");
+        let gql = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
+        let fixture = Fixture::new(vec![
+            Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
+            Route::get("/repos/civitaspo/example/issues/7/comments?per_page=100&page=1", json!([
+                existing_policy_comment(id, &body)
+            ])),
+            Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
+            Route::get(
+                format!("/repos/civitaspo/example/issues/comments/{id}"),
+                existing_policy_comment(id, &body),
+            ),
+            Route::get(
+                format!("/repos/{}/commits/{}", trusted.deployment.server.repository, trusted.deployment.server.default_branch),
+                json!({"sha":sha}),
+            ),
+            Route::request(
+                "POST", "/graphql", 200,
+                json!({"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}),
+            ).with_request_body(json!({"query":gql,"variables":{"input":{"subjectId":format!("IC_{id}"),"classifier":"OUTDATED"}}})),
+        ]);
+        report_result_with_url(
+            &fixture.api,
+            "civitaspo/example",
+            7,
+            &sha,
+            true,
+            "accepted",
+            "https://example.invalid/run",
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn stale_policy_failure_is_ignored_before_listing_or_writing_comments() {
+        let fixture = Fixture::new(vec![Route::get(
+            "/repos/civitaspo/example/pulls/7",
+            report_pr(&"b".repeat(40)),
+        )]);
+        report_result_with_url(
+            &fixture.api,
+            "civitaspo/example",
+            7,
+            &"a".repeat(40),
+            false,
+            "stale failure",
+            "https://example.invalid/run",
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn retry_with_an_identical_failure_report_does_not_post_a_duplicate() {
+        let sha = "a".repeat(40);
+        let run_url = "https://github.com/civitaspo/securefix-server/actions/runs/42/attempts/1";
+        let body = policy_failure_comment("civitaspo/example", &sha, "same failure", run_url);
+        let fixture = Fixture::new(vec![
+            Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
+            Route::get(
+                "/repos/civitaspo/example/issues/7/comments?per_page=100&page=1",
+                json!([existing_policy_comment(101, &body)]),
+            ),
+        ]);
+        report_result_with_url(
+            &fixture.api,
+            "civitaspo/example",
+            7,
+            &sha,
+            false,
+            "same failure",
+            run_url,
+        )
+        .unwrap();
+        fixture.finish();
     }
 
     #[test]

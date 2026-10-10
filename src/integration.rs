@@ -1880,6 +1880,34 @@ fn verify_inner(
         RequestKind::Approve.matches_comment_body(&approve_comment["body"]),
         "the owner approval comment is not an exact /approve command"
     );
+    let server_bot_id = trusted_config()?.server_bot_id;
+    for (comment, kind) in [
+        (&approve_comment, RequestKind::Approve),
+        (&positive_merge_comment, RequestKind::Merge),
+    ] {
+        let id = comment["id"]
+            .as_u64()
+            .context("fixture command has no ID")?;
+        request::acknowledge_request(
+            api,
+            integration_repository()?,
+            scenario.positive.number,
+            id,
+            kind,
+        )?;
+        let reactions = api.paginate(&format!(
+            "/repos/{}/issues/comments/{id}/reactions",
+            integration_repository()?
+        ))?;
+        ensure!(
+            reactions
+                .iter()
+                .any(|reaction| reaction["content"] == "eyes"
+                    && reaction["user"]["id"].as_u64() == Some(server_bot_id)),
+            "owner request did not receive a receipt reaction"
+        );
+    }
+    verify_policy_feedback(api, &scenario.distribution)?;
 
     request::validate_pr_authorization(
         api,
@@ -2117,6 +2145,88 @@ fn verify_inner(
         annotated_tag_verified: true,
         closed_or_merged: true,
     })
+}
+
+fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<()> {
+    let repo = integration_repository()?;
+    let server_bot_id = trusted_config()?.server_bot_id;
+    let mut failure_ids = Vec::new();
+    for reason in [
+        "Integration probe: current-head approval is missing.",
+        "Integration probe: policy rejection was superseded.",
+    ] {
+        policy_check::publish(api, repo, &fixture.head_sha, false, reason)?;
+        policy_check::report_result(api, repo, fixture.number, &fixture.head_sha, false, reason)?;
+        let comments =
+            api.paginate(&format!("/repos/{repo}/issues/{}/comments", fixture.number))?;
+        let comment = comments
+            .iter()
+            .rev()
+            .find(|comment| {
+                comment["body"].as_str().is_some_and(|body| {
+                    body.starts_with(policy_check::COMMENT_MARKER) && body.contains(reason)
+                }) && comment["user"]["id"].as_u64() == Some(server_bot_id)
+            })
+            .context("policy failure comment was not published")?;
+        let body = comment["body"]
+            .as_str()
+            .context("missing policy failure body")?;
+        ensure!(
+            body.contains("<sub>")
+                && body.contains("/actions/runs/")
+                && body.contains(&fixture.head_sha),
+            "policy comment does not identify its CI run and target commit"
+        );
+        failure_ids.push(
+            comment["node_id"]
+                .as_str()
+                .context("missing comment node")?
+                .to_owned(),
+        );
+        let states = api.graphql(
+            "query($ids:[ID!]!){nodes(ids:$ids){...on IssueComment{id isMinimized}}}",
+            json!({"ids":failure_ids}),
+        )?;
+        let nodes = states["nodes"]
+            .as_array()
+            .context("missing policy comment states")?;
+        ensure!(
+            nodes.len() == failure_ids.len()
+                && nodes
+                    .iter()
+                    .enumerate()
+                    .all(|(i, node)| node["id"] == failure_ids[i]
+                        && node["isMinimized"] == (i + 1 < nodes.len())),
+            "only the newest policy failure comment should remain visible"
+        );
+    }
+    policy_check::publish(
+        api,
+        repo,
+        &fixture.head_sha,
+        true,
+        "Integration feedback recovery succeeded.",
+    )?;
+    policy_check::report_result(
+        api,
+        repo,
+        fixture.number,
+        &fixture.head_sha,
+        true,
+        "Integration feedback recovery succeeded.",
+    )?;
+    let states = api.graphql(
+        "query($ids:[ID!]!){nodes(ids:$ids){...on IssueComment{id isMinimized}}}",
+        json!({"ids":failure_ids}),
+    )?;
+    ensure!(
+        states["nodes"].as_array().is_some_and(
+            |nodes| nodes.len() == 2 && nodes.iter().all(|node| node["isMinimized"] == true)
+        ),
+        "successful policy check did not hide both historical failure comments"
+    );
+    println!("Verified command receipt reactions and policy failure/success comment lifecycle.");
+    Ok(())
 }
 
 fn verify_disposable_release_tag(

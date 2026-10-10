@@ -12,6 +12,8 @@ use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
 #[cfg(test)]
 const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
 
+pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check -->";
+
 #[derive(Clone)]
 enum WriteContext {
     ReadOnly,
@@ -289,6 +291,81 @@ impl GitHub {
             .get("data")
             .cloned()
             .context("missing GraphQL data")
+    }
+
+    pub fn minimize_policy_comment(
+        &self,
+        repository: &str,
+        number: u64,
+        comment_id: u64,
+    ) -> Result<()> {
+        crate::policy::validate_repository(repository)?;
+        ensure!(
+            number > 0 && comment_id > 0,
+            "invalid policy comment target"
+        );
+        ensure!(
+            matches!(
+                self.writes,
+                WriteContext::Production(_) | WriteContext::Scratch { .. }
+            ),
+            "policy comments can only be minimized by the server"
+        );
+
+        let path = format!("/repos/{repository}/issues/comments/{comment_id}");
+        self.require_write_target(&path)?;
+        let comment: Value = self.get(&path)?;
+        let policy = crate::config::trusted()?;
+        let expected_issue_path = format!("/repos/{repository}/issues/{number}");
+        let issue_url_matches = comment["issue_url"]
+            .as_str()
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .is_some_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str() == Some("api.github.com")
+                    && url.path() == expected_issue_path
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            });
+        ensure!(
+            comment["id"].as_u64() == Some(comment_id)
+                && issue_url_matches
+                && comment["user"]["id"].as_u64() == Some(policy.server_bot_id)
+                && comment["user"]["login"].as_str()
+                    == Some(policy.deployment.server_bot_login.as_str())
+                && comment["user"]["type"] == "Bot"
+                && comment["body"]
+                    .as_str()
+                    .is_some_and(|body| body.starts_with(POLICY_FAILURE_COMMENT_MARKER)),
+            "comment is not a marked policy failure from the configured server bot on this PR"
+        );
+        let node_id = comment["node_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .context("policy comment has no GraphQL node ID")?;
+
+        self.require_current_revision()?;
+        let query = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
+        let response = self
+            .builder(Method::POST, "/graphql")?
+            .json(&serde_json::json!({
+                "query":query,
+                "variables":{"input":{"subjectId":node_id,"classifier":"OUTDATED"}}
+            }))
+            .send()
+            .context("GitHub policy comment minimization failed")?;
+        ensure!(
+            response.status().is_success(),
+            "GitHub policy comment minimization returned {}",
+            response.status()
+        );
+        let value: Value = serde_json::from_slice(&bounded_read(response, 1024 * 1024)?)?;
+        ensure!(
+            value.get("errors").is_none()
+                && value["data"]["minimizeComment"]["minimizedComment"]["isMinimized"] == true,
+            "GitHub did not minimize the policy failure comment"
+        );
+        Ok(())
     }
 
     pub fn create_commit(
@@ -690,6 +767,156 @@ mod tests {
             api.enable_scratch_auto_merge(SCRATCH_REPOSITORY, 7, &"b".repeat(40))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn policy_comment_minimization_is_bound_to_the_configured_bot_pr_and_runtime() {
+        use crate::fixtures::{Fixture, Route};
+        let repository = "civitaspo/example";
+        let number = 17;
+        let comment_id = 23;
+        let policy = crate::config::trusted().unwrap();
+        let issue_url = format!("https://api.github.com/repos/{repository}/issues/{number}");
+        let query = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
+        let node_id = "IC_fixture";
+        let mut fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/issues/comments/{comment_id}"),
+                serde_json::json!({
+                    "id":comment_id,"node_id":node_id,"issue_url":issue_url,
+                    "body":format!("{POLICY_FAILURE_COMMENT_MARKER}\nPolicy check failed."),
+                    "user":{"id":policy.server_bot_id,"login":policy.deployment.server_bot_login,"type":"Bot"}
+                }),
+            ),
+            Route::get(
+                "/repos/civitaspo/securefix-server/commits/main",
+                serde_json::json!({"sha":"a".repeat(40)}),
+            ),
+            Route::request(
+                "POST",
+                "/graphql",
+                200,
+                serde_json::json!({"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}),
+            )
+            .with_request_body(serde_json::json!({
+                "query":query,"variables":{"input":{"subjectId":node_id,"classifier":"OUTDATED"}}
+            })),
+        ]);
+        fixture.api.writes = WriteContext::Production(Some("a".repeat(40)));
+        fixture
+            .api
+            .minimize_policy_comment(repository, number, comment_id)
+            .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn policy_comment_minimization_rejects_unrelated_or_unowned_comments_before_writing() {
+        use crate::fixtures::{Fixture, Route};
+        let repository = "civitaspo/example";
+        let number = 17;
+        let comment_id = 23;
+        let policy = crate::config::trusted().unwrap();
+        let issue_url = format!("https://api.github.com/repos/{repository}/issues/{number}");
+        let valid_user = serde_json::json!({
+            "id":policy.server_bot_id,"login":policy.deployment.server_bot_login,"type":"Bot"
+        });
+        let invalid_comments = [
+            serde_json::json!({"id":comment_id,"node_id":"IC_fixture","issue_url":issue_url,"body":format!("other {POLICY_FAILURE_COMMENT_MARKER}"),"user":valid_user}),
+            serde_json::json!({"id":comment_id,"node_id":"IC_fixture","issue_url":issue_url,"body":POLICY_FAILURE_COMMENT_MARKER,"user":{"id":policy.owner_id,"login":"owner","type":"User"}}),
+            serde_json::json!({"id":comment_id,"node_id":"IC_fixture","issue_url":"https://api.github.com/repos/civitaspo/other/issues/17","body":POLICY_FAILURE_COMMENT_MARKER,"user":valid_user}),
+        ];
+        for comment in invalid_comments {
+            let mut fixture = Fixture::new(vec![Route::get(
+                format!("/repos/{repository}/issues/comments/{comment_id}"),
+                comment,
+            )]);
+            fixture.api.writes = WriteContext::Production(Some("a".repeat(40)));
+            assert!(
+                fixture
+                    .api
+                    .minimize_policy_comment(repository, number, comment_id)
+                    .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn policy_comment_minimization_rejects_stale_runtime_before_graphql_mutation() {
+        use crate::fixtures::{Fixture, Route};
+        let repository = "civitaspo/example";
+        let number = 17;
+        let comment_id = 23;
+        let policy = crate::config::trusted().unwrap();
+        let issue_url = format!("https://api.github.com/repos/{repository}/issues/{number}");
+        let mut fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/issues/comments/{comment_id}"),
+                serde_json::json!({
+                    "id":comment_id,"node_id":"IC_fixture","issue_url":issue_url,
+                    "body":POLICY_FAILURE_COMMENT_MARKER,
+                    "user":{"id":policy.server_bot_id,"login":policy.deployment.server_bot_login,"type":"Bot"}
+                }),
+            ),
+            Route::get(
+                "/repos/civitaspo/securefix-server/commits/main",
+                serde_json::json!({"sha":"b".repeat(40)}),
+            ),
+        ]);
+        fixture.api.writes = WriteContext::Production(Some("a".repeat(40)));
+        assert!(
+            fixture
+                .api
+                .minimize_policy_comment(repository, number, comment_id)
+                .is_err()
+        );
+        fixture.finish();
+    }
+
+    #[test]
+    fn scratch_policy_comment_minimization_is_confined_to_the_scratch_repository() {
+        use crate::fixtures::{Fixture, Route};
+        let repository = SCRATCH_REPOSITORY;
+        let number = 17;
+        let comment_id = 23;
+        let policy = crate::config::trusted().unwrap();
+        let issue_url = format!("https://api.github.com/repos/{repository}/issues/{number}");
+        let node_id = "IC_scratch";
+        let query = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
+        let mut fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/issues/comments/{comment_id}"),
+                serde_json::json!({
+                    "id":comment_id,"node_id":node_id,"issue_url":issue_url,
+                    "body":POLICY_FAILURE_COMMENT_MARKER,
+                    "user":{"id":policy.server_bot_id,"login":policy.deployment.server_bot_login,"type":"Bot"}
+                }),
+            ),
+            Route::request(
+                "POST",
+                "/graphql",
+                200,
+                serde_json::json!({"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}),
+            )
+            .with_request_body(serde_json::json!({
+                "query":query,"variables":{"input":{"subjectId":node_id,"classifier":"OUTDATED"}}
+            })),
+        ]);
+        fixture.api.writes = WriteContext::Scratch {
+            candidate_sha: "a".repeat(40),
+        };
+        fixture
+            .api
+            .minimize_policy_comment(repository, number, comment_id)
+            .unwrap();
+        assert!(
+            fixture
+                .api
+                .minimize_policy_comment("civitaspo/securefix-server", 17, 23)
+                .is_err()
+        );
+        fixture.finish();
     }
 
     #[test]

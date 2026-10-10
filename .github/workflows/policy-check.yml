@@ -104,6 +104,7 @@ jobs:
           owner: civitaspo
           repositories: ${{ steps.locate.outputs.repository_name }}
           permission-checks: write
+          permission-issues: write
       - run: securefix check apply
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}

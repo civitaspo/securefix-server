@@ -311,12 +311,27 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         let actual_yaml: serde_yaml::Value = serde_yaml::from_slice(actual)?;
         let expected_yaml: serde_yaml::Value = serde_yaml::from_slice(contents)?;
         ensure!(
-            actual_yaml == expected_yaml,
+            actual_yaml == expected_yaml
+                || legacy_request_permission(path, expected_yaml.clone())
+                    .is_some_and(|legacy| actual_yaml == legacy),
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
     }
     caller::validate_previous_client_generation(files, sha, branch)?;
     Ok(())
+}
+
+fn legacy_request_permission(
+    path: &str,
+    mut expected: serde_yaml::Value,
+) -> Option<serde_yaml::Value> {
+    let (job, permission) = match path {
+        ".github/workflows/approve-request.yml" => ("approve", "issues"),
+        ".github/workflows/merge-request.yml" => ("request", "issues"),
+        _ => return None,
+    };
+    expected["jobs"][job]["permissions"][permission] = serde_yaml::Value::String("read".to_owned());
+    Some(expected)
 }
 
 fn validate_automation_branch(

@@ -440,10 +440,54 @@ fn prior_generation_ignores_only_runtime_comment_changes() {
 
     let approve: serde_yaml::Value = serde_yaml::from_slice(&files[approve_path]).unwrap();
     let mut changed = approve;
-    changed["jobs"]["approve"]["permissions"]["issues"] = serde_yaml::Value::String("write".into());
+    changed["jobs"]["approve"]["permissions"]["contents"] =
+        serde_yaml::Value::String("write".into());
     files.insert(
         approve_path.to_owned(),
         serde_yaml::to_string(&changed).unwrap().into_bytes(),
+    );
+    assert!(validate_previous_generation(&files, false).is_err());
+}
+
+#[test]
+fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows() {
+    let sha = "a".repeat(40);
+    let mut files = caller::rendered_files(&sha, "v0.2.0-pre.1", "main", false).unwrap();
+    for (path, job) in [
+        (".github/workflows/approve-request.yml", "approve"),
+        (".github/workflows/merge-request.yml", "request"),
+    ] {
+        let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+        workflow["jobs"][job]["permissions"]["issues"] = serde_yaml::Value::String("read".into());
+        files.insert(
+            path.to_owned(),
+            serde_yaml::to_string(&workflow).unwrap().into_bytes(),
+        );
+    }
+    assert!(validate_previous_generation(&files, false).is_ok());
+
+    let path = ".github/workflows/policy-check.yml";
+    let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+    workflow["jobs"]["check"]["permissions"]["pull-requests"] =
+        serde_yaml::Value::String("write".into());
+    files.insert(
+        path.to_owned(),
+        serde_yaml::to_string(&workflow).unwrap().into_bytes(),
+    );
+    assert!(validate_previous_generation(&files, false).is_err());
+
+    // Reset to the exact legacy generation before checking an unrelated broadening
+    // on the request workflow itself.
+    let path = ".github/workflows/policy-check.yml";
+    let canonical = caller::rendered_files(&sha, "v0.2.0-pre.1", "main", false).unwrap();
+    files.insert(path.to_owned(), canonical[path].clone());
+    let path = ".github/workflows/approve-request.yml";
+    let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+    workflow["jobs"]["approve"]["permissions"]["contents"] =
+        serde_yaml::Value::String("write".into());
+    files.insert(
+        path.to_owned(),
+        serde_yaml::to_string(&workflow).unwrap().into_bytes(),
     );
     assert!(validate_previous_generation(&files, false).is_err());
 }
