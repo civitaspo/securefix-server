@@ -9,23 +9,34 @@ same way. Do not pass a user token or a production installation token to the
 candidate process.
 
 The trusted workflow builds the candidate without credentials, then runs the
-artifact in an isolated job. Run `securefix integration run --phase prepare`
+artifact in an isolated job. On an integration branch, it separately captures
+the exact protected server default-branch SHA, builds that baseline with locked
+dependencies, and uploads a distinct immutable artifact. Baseline commands
+validate the producer and retrieve fixture state; candidate commands prepare
+client input, exercise the isolated mutations, and verify the client result.
+The baseline SHA must remain current throughout the test. Run `securefix integration run --phase prepare`
 with the candidate SHA and a state-file path. The workflow producer SHA is
 recorded separately from the candidate SHA, so a candidate commit does not
 need to contain the workflow that produced its fixture artifact. The workflow
 sets `SECUREFIX_TEST_WORKFLOW_SHA` to its own source SHA. The command creates three signed,
 disposable PRs in the scratch repository: one for the approval/merge path, one
 for stale-head rejection, and one containing the managed workflow files rendered
-from the current published stable runtime SHA. The host verifies that stable release
-and its exact SemVer annotation tag before passing `SECUREFIX_PUBLISHED_RUNTIME_SHA`
-to the candidate. This reuses an existing stable release and creates no candidate release.
+from the current published stable runtime SHA. Before minting App tokens, the host validates the published baseline source
+and Release metadata and resolves its source-bound version tag. It passes
+`SECUREFIX_PUBLISHED_RUNTIME_SHA` and `SECUREFIX_PUBLISHED_RUNTIME_TAG` to the
+candidate, then independently rechecks both after candidate execution.
+The test-only tag resolver permits the legacy exact-SHA annotation during the
+first SemVer cutover; production consumers require canonical `v<version>` tags.
+The baseline build does not download or attest the published Release asset.
+Production loading and the separate published-client test verify archive bytes
+and attestation. This test creates no candidate Release.
 The prepare run uploads its `state.json` as the
 `scratch-fixtures` artifact.
 
 Post an exact owner `/approve` and `/merge` comment to the positive PR, plus an
 exact owner `/merge` comment to the stale-head PR. The positive PR also needs a
 current non-author review approval and the required checks. Run the workflow's
-verify phase with the successful prepare run ID. A validator compiled from the trusted defining workflow revision fetches state
+verify phase with the successful prepare run ID. A validator built from the captured current default-branch source fetches state
 only from that exact successful owner-run `workflow_dispatch`, validates the
 server repository ID, owner actor, workflow path, producer SHA, the configured default branch or
 SHA-named frozen integration branch, and single bounded artifact. Prepare also

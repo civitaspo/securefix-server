@@ -24,7 +24,7 @@ steps:
       commit-message: Prepare the release
 ```
 
-`runtime-sha` identifies the exact `securefix-runtime-<sha>` release. `runtime-repository` defaults to `server-repository`; use it to run an upstream runtime against a separately configured server deployment. The action verifies the archive attestation against the runtime repository, `runtime-default-branch`, `publish-runtime.yml` signer, and the same source and signer SHA before extracting it. The archive supplies both `securefix` and its adjacent `policy.json`.
+`runtime-sha` identifies the exact promoted source revision. The action reads that revision’s `Cargo.toml` and loads its immutable `v<package.version>` Release, requiring the tag to resolve directly to the requested SHA. `runtime-repository` defaults to `server-repository`; use it to run an upstream runtime against a separately configured server deployment. The action verifies the archive attestation against the runtime repository, `runtime-default-branch`, `publish-runtime.yml` signer, and the same source and signer SHA before extracting it. The archive supplies both `securefix` and its adjacent `policy.json`.
 
 The action's `files` input is newline-separated and relative to `root-dir` (default `.`). `repository` may select the destination repository; `branch` and `commit-message` are optional. To request a pull request, provide `pull-request-title` and `pull-request-base`, with optional `pull-request-body`. `custom-json` must be a JSON object. The action exposes `artifact-name`, `source-label`, and `changed-files` outputs; when `files` is empty, it skips upload and dispatch.
 

@@ -189,13 +189,15 @@ pub(crate) fn validate_promotion(
         main["sha"] == source_sha,
         "publisher is not the current server main revision"
     );
-    let tag = format!("securefix-runtime-{source_sha}");
+    let version = crate::runtime::version_at_source(api, source_sha)?;
+    let tag = version.tag();
     let release: Value = api.get(&format!("/repos/{server_repository}/releases/tags/{tag}"))?;
     ensure!(
         release["tag_name"] == tag
+            && release["name"] == tag
             && release["target_commitish"] == source_sha
             && release["draft"] == false
-            && release["prerelease"] == true,
+            && release["prerelease"] == !version.as_semver().pre.is_empty(),
         "exact runtime release is not published"
     );
     let assets = release["assets"]
@@ -206,17 +208,22 @@ pub(crate) fn validate_promotion(
         assets[0]["name"] == RUNTIME_ASSET
             && assets[0]["state"] == "uploaded"
             && assets[0]["size"].as_u64().is_some_and(|size| size > 0)
-            && assets[0]["digest"]
-                .as_str()
-                .is_some_and(|digest| digest.starts_with("sha256:")),
+            && assets[0]["digest"].as_str().is_some_and(|digest| digest
+                .strip_prefix("sha256:")
+                .is_some_and(|hex| hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))),
         "published runtime asset is invalid"
     );
-    let version_tag = crate::runtime::version_tag(source_sha)?;
+    let version_tag = tag;
     let version_ref: Value = api.get(&format!(
         "/repos/{server_repository}/git/ref/tags/{version_tag}"
     ))?;
     ensure!(
-        version_ref["object"]["type"] == "commit" && version_ref["object"]["sha"] == source_sha,
+        version_ref["ref"] == format!("refs/tags/{version_tag}")
+            && version_ref["object"]["type"] == "commit"
+            && version_ref["object"]["sha"] == source_sha,
         "runtime version annotation does not resolve to the published source"
     );
     Ok(PublishedRuntime {
@@ -296,7 +303,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         .and_then(|values| (values.len() == 1).then(|| values[0].as_str()).flatten())
         .context("managed policy branch missing")?;
     validate_branch(branch)?;
-    let expected = rendered_files(sha, branch, releases)?;
+    let expected = rendered_files(sha, "v0.0.0", branch, releases)?;
     for (path, contents) in &expected {
         let actual = files
             .get(path)

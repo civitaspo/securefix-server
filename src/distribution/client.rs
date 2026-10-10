@@ -31,8 +31,9 @@ pub(super) fn validate_previous_generation(
     let workflow_call = files
         .get(CALLER_PATH)
         .context("automation branch client workflow generation is incomplete")?;
-    let migrated = migrate_autofix(autofix, runtime_sha)?;
-    let autofix_is_native = migrated == *autofix;
+    let migrated = migrate_autofix(autofix, runtime_sha, "v0.0.0")?;
+    let autofix_is_native =
+        serde_yaml::from_slice::<Value>(&migrated)? == serde_yaml::from_slice::<Value>(autofix)?;
     if let Some(native_sha) = native_runtime_sha(autofix)? {
         ensure!(
             native_sha == runtime_sha && autofix_is_native,
@@ -67,7 +68,11 @@ fn native_runtime_sha(source: &[u8]) -> Result<Option<String>> {
     Ok(native.map(|(_, sha)| sha.to_owned()))
 }
 
-pub(super) fn migrate_autofix(source: &[u8], runtime_sha: &str) -> Result<Vec<u8>> {
+pub(super) fn migrate_autofix(
+    source: &[u8],
+    runtime_sha: &str,
+    runtime_tag: &str,
+) -> Result<Vec<u8>> {
     crate::policy::validate_sha(runtime_sha)?;
     let source = std::str::from_utf8(source).context("autofix workflow is not UTF-8")?;
     let workflow: Value = serde_yaml::from_str(source).context("unsupported autofix workflow")?;
@@ -116,7 +121,7 @@ pub(super) fn migrate_autofix(source: &[u8], runtime_sha: &str) -> Result<Vec<u8
         &server.repository,
         &server.default_branch,
     )?;
-    let runtime_version = crate::runtime::version_tag(runtime_sha)?;
+    super::validate_runtime_annotation(runtime_tag, runtime_sha)?;
     let action_condition = steps[action_index]["if"]
         .as_str()
         .context("Securefix step condition missing")?;
@@ -133,7 +138,7 @@ pub(super) fn migrate_autofix(source: &[u8], runtime_sha: &str) -> Result<Vec<u8
         commit_message,
         config,
         runtime_sha,
-        &runtime_version,
+        runtime_tag,
     )?;
 
     let spans = step_spans(source)?;
@@ -665,7 +670,8 @@ mod tests {
     #[test]
     fn client_workflow_migration_is_byte_preserving_and_idempotent() {
         let original = legacy_autofix();
-        let migrated = migrate_autofix(original.as_bytes(), &"a".repeat(40)).unwrap();
+        let migrated =
+            migrate_autofix(original.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").unwrap();
         let migrated = String::from_utf8(migrated).unwrap();
         assert!(migrated.contains("attestations: read"));
         assert!(migrated.contains(
@@ -674,7 +680,7 @@ mod tests {
         assert!(migrated.contains("files: ${{ steps.securefix-files.outputs.files }}"));
         assert!(migrated.contains("name: Require SecureFix configuration"));
         assert_eq!(
-            migrate_autofix(migrated.as_bytes(), &"a".repeat(40)).unwrap(),
+            migrate_autofix(migrated.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").unwrap(),
             migrated.as_bytes()
         );
     }
@@ -713,7 +719,8 @@ mod tests {
                     .nth(1)
                     .unwrap(),
             );
-        let migrated = migrate_autofix(original.as_bytes(), &"a".repeat(40)).unwrap();
+        let migrated =
+            migrate_autofix(original.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").unwrap();
         assert!(String::from_utf8_lossy(&migrated).contains("steps.fixes.outputs.changed"));
         assert!(
             !String::from_utf8_lossy(&migrated)
@@ -728,13 +735,13 @@ mod tests {
             "      - name: Require SecureFix configuration",
             "      - run: exit 0\n      - name: Require SecureFix configuration",
         );
-        assert!(migrate_autofix(unnamed.as_bytes(), &"a".repeat(40)).is_err());
+        assert!(migrate_autofix(unnamed.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").is_err());
 
         let extra_input = original.replace(
             "          action: client",
             "          unsupported: true\n          action: client",
         );
-        assert!(migrate_autofix(extra_input.as_bytes(), &"a".repeat(40)).is_err());
+        assert!(migrate_autofix(extra_input.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").is_err());
 
         let (pull_request, workflow_call) = caller_chain();
         let extra_permission = String::from_utf8(pull_request).unwrap().replace(
@@ -747,11 +754,14 @@ mod tests {
     #[test]
     fn native_client_generation_is_idempotent_at_its_pinned_sha() {
         let legacy = legacy_autofix();
-        let first = migrate_autofix(legacy.as_bytes(), &"a".repeat(40)).unwrap();
-        let second = migrate_autofix(&first, &"b".repeat(40)).unwrap();
+        let first = migrate_autofix(legacy.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").unwrap();
+        let second = migrate_autofix(&first, &"b".repeat(40), "v0.2.0-pre.1").unwrap();
         let second_text = String::from_utf8(second.clone()).unwrap();
         assert!(second_text.contains(&format!("@{}\" # v", "b".repeat(40))));
-        assert_eq!(migrate_autofix(&second, &"b".repeat(40)).unwrap(), second);
+        assert_eq!(
+            migrate_autofix(&second, &"b".repeat(40), "v0.2.0-pre.1").unwrap(),
+            second
+        );
 
         let (pull_request, workflow_call) = caller_chain();
         let (pull_request, workflow_call) =

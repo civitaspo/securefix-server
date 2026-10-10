@@ -4,7 +4,7 @@ Privileged OSS automation for civitaspo repositories, based on the client/server
 The Rust `securefix` executable owns approval, merge, release, settings, and request validation.
 GitHub Actions workflows route events, load the verified prebuilt executable, isolate credentials, and call its commands.
 
-After staging succeeds, the owner manually runs `Publish Runtime` on protected `main` to publish `securefix-runtime-<full-SHA>`.
+After staging succeeds, the owner manually runs `Publish Runtime` on protected `main` to publish `v<package.version>` (for example `v0.2.0-pre.1`) at the exact promoted source SHA.
 Successful publication starts the server default-head Policy Check and opens or updates signed runtime migration PRs in the configured callers.
 Review and merge those PRs through the [upgrade maintenance procedure](docs/migration.md#subsequent-server-upgrades).
 Intermediate commits and test candidates do not create Releases.

@@ -505,7 +505,27 @@ fn validate_default_branch_ruleset(api: &GitHub, repository: &str, checks: &Chec
         matches.len() == 1,
         "{repository} must have exactly one default-branch ruleset"
     );
-    validate_default_ruleset(&matches[0], repository, checks)
+    let listed = &matches[0];
+    let id = listed["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("default-branch ruleset list entry has no valid ID")?;
+    ensure!(
+        listed["source_type"] == "Repository"
+            && listed["name"] == "default-branch"
+            && listed["target"] == "branch",
+        "{repository} default-branch ruleset list identity is invalid"
+    );
+    let detail: Value = api.get(&format!("/repos/{repository}/rulesets/{id}"))?;
+    ensure!(
+        detail["id"].as_u64() == Some(id)
+            && detail["source_type"] == "Repository"
+            && detail["source"] == repository
+            && detail["name"] == "default-branch"
+            && detail["target"] == "branch",
+        "{repository} default-branch ruleset detail identity changed"
+    );
+    validate_default_ruleset(&detail, repository, checks)
 }
 
 fn validate_default_ruleset(ruleset: &Value, repository: &str, checks: &Checks) -> Result<()> {
@@ -513,8 +533,11 @@ fn validate_default_ruleset(ruleset: &Value, repository: &str, checks: &Checks) 
         ruleset["enforcement"] == "active"
             && ruleset["bypass_actors"]
                 .as_array()
-                .is_some_and(Vec::is_empty),
-        "{repository} default-branch protections are not active and bypass-free"
+                .is_some_and(Vec::is_empty)
+            && ruleset["target"] == "branch"
+            && ruleset["conditions"]["ref_name"]["include"] == json!(["~DEFAULT_BRANCH"])
+            && ruleset["conditions"]["ref_name"]["exclude"] == json!([]),
+        "{repository} default-branch protections are not active, exact, and bypass-free"
     );
     let rules = ruleset["rules"]
         .as_array()
@@ -1277,7 +1300,11 @@ mod tests {
             policy_app_id: 23,
         };
         let valid = json!({
-            "enforcement":"active", "bypass_actors":[], "rules":[
+            "target":"branch",
+            "enforcement":"active",
+            "bypass_actors":[],
+            "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
+            "rules":[
                 {"type":"required_signatures"},
                 {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
                 {"type":"required_status_checks","parameters":{"required_status_checks":[
@@ -1294,6 +1321,105 @@ mod tests {
         let mut stale_reviews = valid;
         stale_reviews["rules"][1]["parameters"]["dismiss_stale_reviews_on_push"] = json!(false);
         assert!(validate_default_ruleset(&stale_reviews, "forge/example", &checks).is_err());
+        let mut other_branch = json!({
+            "target":"branch",
+            "enforcement":"active",
+            "bypass_actors":[],
+            "conditions":{"ref_name":{"include":["refs/heads/release"],"exclude":[]}},
+            "rules":[
+                {"type":"required_signatures"},
+                {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
+                {"type":"required_status_checks","parameters":{"required_status_checks":[
+                    {"context":"status-check","integration_id":17},
+                    {"context":"securefix-policy-check","integration_id":23}
+                ]}}
+            ]
+        });
+        assert!(validate_default_ruleset(&other_branch, "forge/example", &checks).is_err());
+        other_branch["conditions"]["ref_name"]["include"] = json!(["~DEFAULT_BRANCH"]);
+        other_branch["conditions"]["ref_name"]["exclude"] = json!(["refs/heads/main"]);
+        assert!(validate_default_ruleset(&other_branch, "forge/example", &checks).is_err());
+    }
+
+    #[test]
+    fn current_default_ruleset_is_fetched_by_id_before_validating_protections() {
+        let checks = Checks {
+            status_app_id: 17,
+            policy_app_id: 23,
+        };
+        let list_path = "/repos/forge/example/rulesets?includes_parents=false&per_page=100&page=1";
+        let detail_path = "/repos/forge/example/rulesets/41";
+        // The list endpoint returns summary metadata only. Protection data must
+        // come from the per-ID detail endpoint, where bypass actors and rules live.
+        let listed = json!([{
+            "id":41,
+            "name":"default-branch",
+            "target":"branch",
+            "source_type":"Repository"
+        }]);
+        let detail = json!({
+            "id":41,
+            "name":"default-branch",
+            "target":"branch",
+            "source":"forge/example",
+            "source_type":"Repository",
+            "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
+            "enforcement":"active",
+            "bypass_actors":[],
+            "rules":[
+                {"type":"required_signatures"},
+                {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
+                {"type":"required_status_checks","parameters":{"required_status_checks":[
+                    {"context":"status-check","integration_id":17},
+                    {"context":"securefix-policy-check","integration_id":23}
+                ]}}
+            ]
+        });
+        let fixture = Fixture::new(vec![
+            Route::get(list_path, listed.clone()),
+            Route::get(detail_path, detail.clone()),
+        ]);
+        validate_default_branch_ruleset(&fixture.api, "forge/example", &checks).unwrap();
+        fixture.finish();
+
+        for (pointer, replacement) in [
+            ("/id", json!(42)),
+            ("/name", json!("other")),
+            ("/source_type", json!("Organization")),
+            ("/source", json!("forge/other")),
+        ] {
+            let mut malformed = detail.clone();
+            malformed
+                .pointer_mut(pointer)
+                .unwrap()
+                .clone_from(&replacement);
+            let fixture = Fixture::new(vec![
+                Route::get(list_path, listed.clone()),
+                Route::get(detail_path, malformed),
+            ]);
+            assert!(
+                validate_default_branch_ruleset(&fixture.api, "forge/example", &checks).is_err(),
+                "mismatched detail identity {pointer} passed validation"
+            );
+            fixture.finish();
+        }
+
+        for (pointer, replacement) in [
+            ("/name", json!("other")),
+            ("/source_type", json!("Organization")),
+        ] {
+            let mut malformed = listed.clone();
+            malformed[0]
+                .pointer_mut(pointer)
+                .unwrap()
+                .clone_from(&replacement);
+            let fixture = Fixture::new(vec![Route::get(list_path, malformed)]);
+            assert!(
+                validate_default_branch_ruleset(&fixture.api, "forge/example", &checks).is_err(),
+                "mismatched list identity {pointer} passed validation"
+            );
+            fixture.finish();
+        }
     }
 
     #[test]

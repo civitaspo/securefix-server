@@ -10,15 +10,18 @@ The pinned official attestation action signs that exact archive.
 A separate contents-write job downloads the producer's immutable artifact ID, verifies the same archive before extraction, installs the executable, and calls Rust to publish a draft-first Release.
 Pushes and intermediate test revisions do not publish runtime Releases.
 
-The release tag is `securefix-runtime-<full-SHA>` and its single asset is `securefix-runtime-linux-x86_64.tar.gz`.
-The SHA identifies a deliberately promoted production revision; it does not schedule publication for every commit.
+The tag and Release name are both `v<package.version>` from `Cargo.toml` at the exact promoted source SHA, for example `v0.2.0-pre.1`.
+Versions follow SemVer without build metadata; a prerelease identifier makes the Release a prerelease.
+The single asset is `securefix-runtime-linux-x86_64.tar.gz`.
+A version identifies one immutable source revision. Bump `package.version` and the root lockfile before promoting a different revision; an existing version cannot be moved or reused.
+Publication remains an explicit promotion after testing, not a release on every commit.
 An existing release must have the exact tag commit, target SHA, asset name, uploaded state, and SHA256 digest.
 An empty draft may resume an upload, and a matching draft may be published.
 Different bytes or extra assets fail; published assets are never overwritten.
 Every publication write uses the current-main guard.
 
 `load-cli.yml` has no checkout, compilation, or custom secrets.
-The runner's native `gh` downloads the exact SHA-based release and verifies the archive before extraction.
+The runner's native `gh` reads the package version at the requested full SHA, requires the canonical tag to point directly to that SHA, and verifies the Release and archive before extraction.
 Verification fixes the repository, signer workflow path, signer digest, source digest, main ref, GitHub OIDC issuer, SLSA predicate type, and hosted-runner requirement.
 Source and signer digests must both equal the actual reusable job's `job.workflow_sha`.
 The CLI checks these identities against the signed certificate and matches the archive's digest to the attestation subject.
