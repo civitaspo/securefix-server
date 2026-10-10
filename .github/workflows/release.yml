@@ -76,6 +76,7 @@ jobs:
           owner: civitaspo
           repositories: ${{ needs.resolve-request.outputs.repo_name }}
           permission-actions: read
+          permission-administration: read
           permission-contents: write
           permission-pull-requests: read
       - name: Validate current release provenance
