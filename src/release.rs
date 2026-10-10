@@ -1455,19 +1455,19 @@ fn validate_source_manifest_provenance(
                 "source PR head does not match the release PR"
             );
             // GitHub's run head_sha and pull_requests[].head.sha identify the
-            // PR head. Read the caller workflow from the PR's base revision,
-            // which is already part of the default branch, not that PR head.
+            // PR head. Read the caller workflow from the validated merge
+            // commit so changes to the wrapper in the merged PR are included.
             let ancestry: Value = api.get(&format!(
                 "/repos/{}/compare/{}...{}",
                 repo.as_str(),
-                pr.base.sha,
+                merge_sha.as_str(),
                 url_encode(default_branch)
             ))?;
             ensure!(
                 matches!(ancestry["status"].as_str(), Some("ahead" | "identical")),
-                "release caller base revision is not on the default branch"
+                "release caller merge revision is not on the default branch"
             );
-            CommitSha::parse(&pr.base.sha)?
+            merge_sha.clone()
         }
         Some("workflow_dispatch") => {
             ensure!(
@@ -4215,6 +4215,13 @@ mod tests {
     }
 
     fn successful_pr_provenance_routes(version: &str) -> Vec<crate::fixtures::Route> {
+        successful_pr_provenance_routes_with_wrapper_pin(version, &"a".repeat(40))
+    }
+
+    fn successful_pr_provenance_routes_with_wrapper_pin(
+        version: &str,
+        wrapper_pin: &str,
+    ) -> Vec<crate::fixtures::Route> {
         use crate::fixtures::Route;
         use base64::Engine;
         let trusted = crate::config::trusted().unwrap();
@@ -4227,7 +4234,7 @@ mod tests {
         let merge = "d".repeat(40);
         let workflow = format!(
             "name: Release Tag\non:\n  pull_request:\njobs:\n  tag:\n    uses: {server_repository}/.github/workflows/reusable-release-tag.yml@{}\n",
-            "a".repeat(40)
+            wrapper_pin
         );
         let content = |path: &str, sha: &str, text: &str| {
             Route::get(
@@ -4296,10 +4303,10 @@ mod tests {
             ),
             content(".release-version", &merge, version),
             Route::get(
-                format!("/repos/{repo}/compare/{base}...{default_branch}"),
+                format!("/repos/{repo}/compare/{merge}...{default_branch}"),
                 json!({"status":"identical"}),
             ),
-            content(".github/workflows/release-tag.yml", &base, &workflow),
+            content(".github/workflows/release-tag.yml", &merge, &workflow),
             Route::get(
                 format!("/repos/{repo}/git/ref/tags/v1.2.3"),
                 json!({"object":{"type":"tag","sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}),
@@ -4312,7 +4319,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_pr_provenance_uses_default_branch_wrapper_and_verified_version() {
+    fn merged_pr_provenance_uses_merged_wrapper_and_verified_version() {
         let api = crate::fixtures::Fixture::new(successful_pr_provenance_routes("1.2.3"));
         let policy = provenance_test_policy();
         let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
@@ -4324,6 +4331,31 @@ mod tests {
             ReleaseStrategy::GithubRelease,
         )
         .unwrap();
+        api.finish();
+    }
+
+    #[test]
+    fn merged_pr_provenance_rejects_stale_wrapper_at_merge_commit() {
+        let mut routes = successful_pr_provenance_routes_with_wrapper_pin(
+            "1.2.3",
+            &"f".repeat(40),
+        );
+        routes.truncate(9);
+        let api = crate::fixtures::Fixture::new(routes);
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let error = validate_source_manifest_provenance(
+            &api.api,
+            &policy,
+            &repo,
+            &provenance_test_manifest(),
+            ReleaseStrategy::GithubRelease,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("caller must pin one current reusable workflow"),
+            "stale merged wrapper was rejected for the wrong reason: {error:#}"
+        );
         api.finish();
     }
 
