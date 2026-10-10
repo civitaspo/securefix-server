@@ -979,6 +979,13 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         &positive_fix,
         candidate_sha,
     )?;
+    verify_sensitive_path_authorization(
+        &server,
+        &scratch_policy,
+        &positive,
+        &default_branch,
+        candidate_sha,
+    )?;
     let stale = create_pr(
         &server,
         &base_sha,
@@ -1111,6 +1118,237 @@ fn create_pr_with_changes(
             .context("scratch pull request has no URL")?
             .to_owned(),
     })
+}
+
+fn verify_sensitive_path_authorization(
+    api: &GitHub,
+    policy: &Policy,
+    positive: &PullRequestFixture,
+    default_branch: &str,
+    candidate_sha: &str,
+) -> Result<()> {
+    const OWNER_REQUIRED: &str = "owner authorization for this exact pull request head is missing";
+
+    let mut sensitive_policy = policy.clone();
+    sensitive_policy.repositories[0].sensitive_paths = vec!["**".to_owned()];
+    sensitive_policy.sensitive_path_approval_exemptions = Default::default();
+    let existing_comments = api.paginate(&format!(
+        "/repos/{}/issues/{}/comments",
+        integration_repository()?,
+        positive.number
+    ))?;
+    let marker_prefix = format!("<!-- securefix:v2:owner:{}:", positive.head_sha);
+    ensure!(
+        existing_comments.iter().all(|comment| {
+            !comment["body"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line.starts_with(&marker_prefix)))
+        }),
+        "positive Bot-authored fixture already has owner authorization before the sensitive-path probe"
+    );
+    expect_owner_authorization_required(
+        request::validate_pr_authorization(
+            api,
+            &sensitive_policy,
+            integration_repository()?,
+            positive.number,
+            &positive.head_sha,
+            false,
+        ),
+        "Bot author without an exemption",
+        OWNER_REQUIRED,
+    )?;
+
+    sensitive_policy
+        .sensitive_path_approval_exemptions
+        .github_apps
+        .push(securefix::policy::SensitivePathApprovalGitHubApp {
+            bot_id: policy.server_bot_id,
+            bot_login: policy.deployment.server_bot_login.clone(),
+        });
+    ensure!(
+        request::validate_pr_authorization(
+            api,
+            &sensitive_policy,
+            integration_repository()?,
+            positive.number,
+            &positive.head_sha,
+            false,
+        )?,
+        "configured GitHub App Bot did not trigger the sensitive-path exemption"
+    );
+
+    sensitive_policy.sensitive_path_approval_exemptions = Default::default();
+    expect_owner_authorization_required(
+        request::validate_pr_authorization(
+            api,
+            &sensitive_policy,
+            integration_repository()?,
+            positive.number,
+            &positive.head_sha,
+            false,
+        ),
+        "Bot author after restoring empty exemptions",
+        OWNER_REQUIRED,
+    )?;
+
+    let owner_fixture_head = std::env::var("SECUREFIX_APPROVAL_FIXTURE_HEAD").unwrap_or_default();
+    if !owner_fixture_head.is_empty() {
+        validate_sha(&owner_fixture_head)?;
+        sensitive_policy
+            .sensitive_path_approval_exemptions
+            .github_apps
+            .push(securefix::policy::SensitivePathApprovalGitHubApp {
+                bot_id: policy.server_bot_id,
+                bot_login: policy.deployment.server_bot_login.clone(),
+            });
+        let branch = format!("{BRANCH_PREFIX}sensitive-mixed-{}", &candidate_sha[..12]);
+        let fixture = create_pr(
+            api,
+            &owner_fixture_head,
+            default_branch,
+            &branch,
+            &format!(
+                "test: sensitive mixed actor authorization {}",
+                &candidate_sha[..12]
+            ),
+            BTreeMap::from([(
+                format!(
+                    "{FIX_PATH_PREFIX}sensitive-mixed-{}.txt",
+                    &candidate_sha[..12]
+                ),
+                format!("candidate={candidate_sha}\nscenario=sensitive-mixed-actor\n").into_bytes(),
+            )]),
+        );
+        let fixture = match fixture {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                return match delete_scratch_branch(api, &branch) {
+                    Ok(()) => Err(error.context("create mixed-actor sensitive-path fixture")),
+                    Err(cleanup_error) => Err(error.context(format!(
+                        "mixed-actor fixture creation failed; branch cleanup also failed: {cleanup_error:#}"
+                    ))),
+                };
+            }
+        };
+
+        let probe = (|| {
+            let pull: Value = api.get(&format!(
+                "/repos/{}/pulls/{}",
+                integration_repository()?,
+                fixture.number
+            ))?;
+            ensure!(
+                pull["user"]["id"].as_u64() == Some(policy.server_bot_id)
+                    && pull["user"]["type"] == "Bot",
+                "mixed-actor sensitive-path fixture was not created by the configured GitHub App Bot"
+            );
+            let commits = api.paginate(&format!(
+                "/repos/{}/pulls/{}/commits",
+                integration_repository()?,
+                fixture.number
+            ))?;
+            ensure!(
+                commits.len() == 2
+                    && commits[0]["sha"] == owner_fixture_head
+                    && commits[1]["sha"] == fixture.head_sha,
+                "mixed-actor sensitive-path fixture does not contain exactly the owner and App commits"
+            );
+            expect_owner_authorization_required(
+                request::validate_pr_authorization(
+                    api,
+                    &sensitive_policy,
+                    integration_repository()?,
+                    fixture.number,
+                    &fixture.head_sha,
+                    false,
+                ),
+                "mixed owner and App commit history",
+                OWNER_REQUIRED,
+            )
+        })();
+        let cleanup = cleanup_sensitive_probe(api, &fixture);
+        match (probe, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(()), Err(error)) => {
+                return Err(error.context("clean mixed-actor sensitive-path fixture"));
+            }
+            (Err(error), Err(cleanup_error)) => {
+                return Err(error.context(format!(
+                    "mixed-actor sensitive-path probe cleanup also failed: {cleanup_error:#}"
+                )));
+            }
+        }
+    }
+
+    if owner_fixture_head.is_empty() {
+        println!(
+            "Verified sensitive-path authorization for the GitHub App Bot; mixed-actor probe skipped because no owner fixture was configured."
+        );
+    } else {
+        println!(
+            "Verified sensitive-path authorization for the GitHub App Bot and rejection of mixed owner/App commits."
+        );
+    }
+    Ok(())
+}
+
+fn expect_owner_authorization_required(
+    result: Result<bool>,
+    scenario: &str,
+    expected_error: &str,
+) -> Result<()> {
+    match result {
+        Err(error) => {
+            ensure!(
+                error.to_string() == expected_error,
+                "{scenario} failed for the wrong reason: {error}"
+            );
+            Ok(())
+        }
+        Ok(true) => anyhow::bail!("{scenario} unexpectedly bypassed owner authorization"),
+        Ok(false) => anyhow::bail!("{scenario} did not match a sensitive path"),
+    }
+}
+
+fn cleanup_sensitive_probe(api: &GitHub, fixture: &PullRequestFixture) -> Result<()> {
+    let pull: Value = api.get(&format!(
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
+        fixture.number
+    ))?;
+    if pull["state"] == "open" {
+        let _: Value = api.patch(
+            &format!(
+                "/repos/{}/pulls/{}",
+                integration_repository()?,
+                fixture.number
+            ),
+            &json!({"state":"closed"}),
+        )?;
+    }
+    validate_branch(&fixture.branch)?;
+    delete_scratch_branch(api, &fixture.branch)
+}
+
+fn delete_scratch_branch(api: &GitHub, branch: &str) -> Result<()> {
+    validate_branch(branch)?;
+    match api.delete(&format!(
+        "/repos/{}/git/refs/heads/{}",
+        integration_repository()?,
+        branch
+    )) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error).context("delete scratch sensitive-probe branch"),
+    }
 }
 
 fn create_nativefix_positive_pr(

@@ -10,6 +10,15 @@
     "renovate[bot]",
     "dependabot[bot]"
   ],
+  "sensitive_path_approval_exemptions": {
+    "users": [],
+    "github_apps": [
+      {
+        "bot_id": 29139614,
+        "bot_login": "renovate[bot]"
+      }
+    ]
+  },
   "merge_controls_enabled": true,
   "repositories": [
     {
