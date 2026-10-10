@@ -104,6 +104,230 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
 }
 
 #[test]
+fn runtime_update_auto_merge_requires_the_fresh_server_owned_pr_and_managed_files() {
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let migration = CallerMigration {
+        repository: "civitaspo/nagi".into(),
+        default_branch: "main".into(),
+        source_sha: "a".repeat(40),
+        files: BTreeMap::from([(".github/workflows/ci.yml".into(), b"canonical".to_vec())]),
+        default_current: false,
+    };
+    let head = "b".repeat(40);
+    let pull = json!({
+        "number": 19,
+        "state": "open",
+        "draft": false,
+        "user": {"id": policy.server_bot_id, "type": "Bot"},
+        "head": {"repo": {"full_name": "civitaspo/nagi"}, "ref": "automation/securefix-runtime", "sha": head},
+        "base": {"repo": {"full_name": "civitaspo/nagi"}, "ref": "main"}
+    });
+    assert!(validate_runtime_update_pull_request(&policy, &migration, 19, &pull, &head).is_ok());
+    let mut bad = pull.clone();
+    bad["draft"] = json!(true);
+    assert!(validate_runtime_update_pull_request(&policy, &migration, 19, &bad, &head).is_err());
+    let mut bad = pull.clone();
+    bad["head"]["sha"] = json!("c".repeat(40));
+    assert!(validate_runtime_update_pull_request(&policy, &migration, 19, &bad, &head).is_err());
+    let mut bad = pull;
+    bad["user"]["type"] = json!("User");
+    assert!(validate_runtime_update_pull_request(&policy, &migration, 19, &bad, &head).is_err());
+
+    assert!(
+        validate_runtime_update_changed_files(
+            &migration,
+            &[json!({"filename":".github/workflows/ci.yml","status":"modified"})]
+        )
+        .is_ok()
+    );
+    for changed in [
+        vec![json!({"filename":".github/workflows/extra.yml","status":"added"})],
+        vec![json!({"filename":".github/workflows/ci.yml","status":"removed"})],
+        vec![],
+    ] {
+        assert!(validate_runtime_update_changed_files(&migration, &changed).is_err());
+    }
+}
+
+#[test]
+fn runtime_update_auto_merge_sha_pins_the_merge_and_verifies_default_branch_contents() {
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let repository = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .integration
+        .repository
+        .clone();
+    let branch = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .runtime_update_branch
+        .clone();
+    let source_sha = "a".repeat(40);
+    let migration = CallerMigration {
+        repository: repository.clone(),
+        default_branch: "main".into(),
+        source_sha: source_sha.clone(),
+        files: rendered_files(&source_sha, "v0.2.3", "main", false).unwrap(),
+        default_current: false,
+    };
+    let head = "c".repeat(40);
+    let base = "d".repeat(40);
+    let merge_sha = "f".repeat(40);
+    let pull = json!({
+        "number": 19,
+        "state": "open",
+        "draft": false,
+        "user": {"id": policy.server_bot_id, "type": "Bot"},
+        "head": {"repo": {"full_name": repository}, "ref": branch, "sha": head},
+        "base": {"repo": {"full_name": repository}, "ref": "main"}
+    });
+    let diff = migration
+        .files
+        .keys()
+        .map(|path| json!({"filename":path,"status":"modified"}))
+        .collect::<Vec<_>>();
+    let entries = migration
+        .files
+        .keys()
+        .map(|path| json!({"path":path,"type":"blob","mode":"100644","sha":"e".repeat(40)}))
+        .collect::<Vec<_>>();
+    let content = |bytes: &[u8]| json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)});
+    let mut routes = vec![
+        Route::get(format!("/repos/{repository}/pulls/19"), pull.clone()),
+        Route::get(
+            format!("/repos/{repository}/git/ref/heads/{branch}"),
+            json!({"object":{"sha":head}}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/commits/main"),
+            json!({"sha":base}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/compare/{base}...{head}"),
+            json!({"status":"ahead","files":diff,"total_commits":1,"commits":[{"sha":head}]}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/commits/{head}"),
+            json!({"author":{"id":policy.server_bot_id},"commit":{"verification":{"verified":true}}}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/git/commits/{head}"),
+            json!({"tree":{"sha":"e".repeat(40)}}),
+        ),
+        Route::get(
+            format!(
+                "/repos/{repository}/git/trees/{}?recursive=1",
+                "e".repeat(40)
+            ),
+            json!({"truncated":false,"tree":entries}),
+        ),
+    ];
+    for (path, bytes) in &migration.files {
+        routes.push(Route::get(
+            format!("/repos/{repository}/contents/{path}?ref={head}"),
+            content(bytes),
+        ));
+    }
+    routes.extend([
+        Route::get(
+            format!("/repos/{repository}/pulls/19/files?per_page=100&page=1"),
+            json!(
+                migration
+                    .files
+                    .keys()
+                    .map(|path| json!({"filename":path,"status":"modified"}))
+                    .collect::<Vec<_>>()
+            ),
+        ),
+        Route::get(format!("/repos/{repository}/pulls/19"), pull),
+        Route::get(
+            format!("/repos/{repository}/git/ref/heads/{branch}"),
+            json!({"object":{"sha":head}}),
+        ),
+        Route::get(
+            format!(
+                "/repos/{}/commits/main",
+                crate::config::trusted()
+                    .unwrap()
+                    .deployment
+                    .server
+                    .repository
+            ),
+            json!({"sha":source_sha}),
+        ),
+        Route::request(
+            "PUT",
+            format!("/repos/{repository}/pulls/19/merge"),
+            200,
+            json!({"merged":true,"sha":merge_sha}),
+        )
+        .with_request_body(json!({"sha":head,"merge_method":"squash"})),
+        Route::get(
+            format!("/repos/{repository}/commits/main"),
+            json!({"sha":merge_sha}),
+        ),
+    ]);
+    for (path, bytes) in &migration.files {
+        routes.push(Route::get(
+            format!("/repos/{repository}/contents/{path}?ref={merge_sha}"),
+            content(bytes),
+        ));
+    }
+    let fixture = Fixture::new(routes);
+    assert_eq!(
+        merge_runtime_update(&fixture.api, &policy, &migration, 19, &head).unwrap(),
+        merge_sha
+    );
+    fixture.finish();
+}
+
+#[test]
+fn runtime_update_auto_merge_aborts_when_the_branch_head_moves_before_validation() {
+    use crate::fixtures::{Fixture, Route};
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let migration = CallerMigration {
+        repository: crate::config::trusted()
+            .unwrap()
+            .deployment
+            .integration
+            .repository
+            .clone(),
+        default_branch: "main".into(),
+        source_sha: "a".repeat(40),
+        files: BTreeMap::from([(".github/workflows/ci.yml".into(), b"canonical".to_vec())]),
+        default_current: false,
+    };
+    let branch = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .runtime_update_branch
+        .clone();
+    let head = "b".repeat(40);
+    let moved_head = "c".repeat(40);
+    let pull = json!({
+        "number": 19,
+        "state": "open",
+        "draft": false,
+        "user": {"id": policy.server_bot_id, "type": "Bot"},
+        "head": {"repo": {"full_name": migration.repository}, "ref": branch, "sha": head},
+        "base": {"repo": {"full_name": migration.repository}, "ref": "main"}
+    });
+    let fixture = Fixture::new(vec![
+        Route::get(format!("/repos/{}/pulls/19", migration.repository), pull),
+        Route::get(
+            format!("/repos/{}/git/ref/heads/{branch}", migration.repository),
+            json!({"object":{"sha":moved_head}}),
+        ),
+    ]);
+    assert!(merge_runtime_update(&fixture.api, &policy, &migration, 19, &head).is_err());
+    fixture.finish();
+}
+
+#[test]
 fn caller_migration_requires_repository_owner_identity_not_human_owner_identity() {
     use crate::fixtures::{Fixture, Route};
 
@@ -688,7 +912,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
     ]);
 
     assert_eq!(
-        apply_caller_migration(&fixture.api, &policy, &migration).unwrap(),
+        apply_caller_migration(&fixture.api, &policy, &migration, false).unwrap(),
         4
     );
     fixture.finish();
