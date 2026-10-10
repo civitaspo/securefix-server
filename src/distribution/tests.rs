@@ -541,7 +541,7 @@ fn release_tag_validator_accepts_exact_previous_empty_event_input_fallback() {
     let mut files = caller::rendered_files(&sha, "v0.2.2", "main", true).unwrap();
     let path = ".github/workflows/release-tag.yml";
     let canonical = String::from_utf8(files[path].clone()).unwrap();
-    let new_value = "${{ inputs.release_pr_number || github.event.pull_request.number || 0 }}";
+    let new_value = "${{ fromJSON(format('{0}', inputs.release_pr_number || github.event.pull_request.number || 0)) }}";
     assert!(canonical.contains(new_value));
     let previous = canonical.replace(new_value, "${{ inputs.release_pr_number }}");
     files.insert(path.to_owned(), previous.as_bytes().to_vec());
