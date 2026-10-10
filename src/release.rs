@@ -2236,7 +2236,6 @@ fn publish() -> Result<()> {
             && manifest.tag == plan.tag,
         "publish plan no longer matches authorized source"
     );
-    ensure_immutable_releases_enabled(&api, &repo)?;
     let tag_ref: Value = api.get(&format!(
         "/repos/{}/git/ref/tags/{}",
         repo.as_str(),
@@ -2337,16 +2336,6 @@ fn publish() -> Result<()> {
     }
     let published: Value = api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
     ensure_published_immutable_release(&published, release_id, &plan.tag)?;
-    Ok(())
-}
-
-fn ensure_immutable_releases_enabled(api: &GitHub, repo: &Repository) -> Result<()> {
-    let setting: Value = api.get(&format!("/repos/{}/immutable-releases", repo.as_str()))?;
-    ensure!(
-        setting["enabled"] == true,
-        "immutable releases are disabled for {}",
-        repo.as_str()
-    );
     Ok(())
 }
 
@@ -4408,47 +4397,6 @@ mod tests {
         let unexpected =
             vec![json!({"name":"extra.zip","digest":format!("sha256:{}", "a".repeat(64))})];
         assert!(validate_release_asset_state(&expected, &unexpected, false).is_err());
-    }
-
-    #[test]
-    fn immutable_release_preflight_fails_closed_before_release_writes() {
-        use crate::fixtures::{Fixture, Route};
-
-        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
-        let api = Fixture::new(vec![Route::get(
-            "/repos/civitaspo/terraform-provider-sigma/immutable-releases",
-            json!({"enabled":false}),
-        )]);
-        assert!(ensure_immutable_releases_enabled(&api.api, &repo).is_err());
-        api.finish();
-    }
-
-    #[test]
-    fn immutable_release_preflight_fails_closed_on_github_disabled_response() {
-        use crate::fixtures::{Fixture, Route};
-
-        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
-        let api = Fixture::new(vec![Route::request(
-            "GET",
-            "/repos/civitaspo/terraform-provider-sigma/immutable-releases",
-            404,
-            json!({"message":"Not Found"}),
-        )]);
-        assert!(ensure_immutable_releases_enabled(&api.api, &repo).is_err());
-        api.finish();
-    }
-
-    #[test]
-    fn immutable_release_preflight_accepts_enabled_setting() {
-        use crate::fixtures::{Fixture, Route};
-
-        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
-        let api = Fixture::new(vec![Route::get(
-            "/repos/civitaspo/terraform-provider-sigma/immutable-releases",
-            json!({"enabled":true,"enforced_by_owner":false}),
-        )]);
-        ensure_immutable_releases_enabled(&api.api, &repo).unwrap();
-        api.finish();
     }
 
     #[test]
