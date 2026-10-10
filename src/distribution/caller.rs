@@ -136,6 +136,7 @@ pub(super) fn prepare_caller(
         repository: repository.to_owned(),
         default_branch: default_branch.to_owned(),
         source_sha: source_sha.to_owned(),
+        runtime_tag,
         files,
         default_current,
     })
