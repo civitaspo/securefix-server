@@ -453,18 +453,39 @@ fn prior_generation_ignores_only_runtime_comment_changes() {
 fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows() {
     let sha = "a".repeat(40);
     let mut files = caller::rendered_files(&sha, "v0.2.0-pre.1", "main", false).unwrap();
-    for (path, job) in [
-        (".github/workflows/approve-request.yml", "approve"),
-        (".github/workflows/merge-request.yml", "request"),
+    for (path, job, approval) in [
+        (".github/workflows/approve-request.yml", "approve", true),
+        (".github/workflows/merge-request.yml", "request", false),
     ] {
-        let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
-        workflow["jobs"][job]["permissions"]["issues"] = serde_yaml::Value::String("read".into());
-        files.insert(
-            path.to_owned(),
-            serde_yaml::to_string(&workflow).unwrap().into_bytes(),
-        );
+        for issues in ["write", "read"] {
+            let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+            workflow["jobs"][job]["permissions"]["issues"] =
+                serde_yaml::Value::String(issues.into());
+            workflow["jobs"][job]["permissions"]["pull-requests"] =
+                serde_yaml::Value::String("read".into());
+            if approval {
+                workflow["concurrency"]["group"] = serde_yaml::Value::String(
+                    "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}".into(),
+                );
+            }
+            files.insert(
+                path.to_owned(),
+                serde_yaml::to_string(&workflow).unwrap().into_bytes(),
+            );
+            assert!(validate_previous_generation(&files, false).is_ok());
+        }
     }
     assert!(validate_previous_generation(&files, false).is_ok());
+
+    let path = ".github/workflows/approve-request.yml";
+    let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+    workflow["concurrency"]["group"] =
+        serde_yaml::Value::String("approve-request-${{ github.event.issue.number }}".into());
+    files.insert(
+        path.to_owned(),
+        serde_yaml::to_string(&workflow).unwrap().into_bytes(),
+    );
+    assert!(validate_previous_generation(&files, false).is_err());
 
     let path = ".github/workflows/policy-check.yml";
     let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
@@ -490,6 +511,28 @@ fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows
         serde_yaml::to_string(&workflow).unwrap().into_bytes(),
     );
     assert!(validate_previous_generation(&files, false).is_err());
+}
+
+#[test]
+fn caller_validator_accepts_only_the_exact_legacy_approve_concurrency_group() {
+    let sha = "a".repeat(40);
+    let files = caller::rendered_files(&sha, "v0.2.0-pre.1", "main", false).unwrap();
+    let path = ".github/workflows/approve-request.yml";
+    let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+    workflow["concurrency"]["group"] = serde_yaml::Value::String(
+        "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}".into(),
+    );
+    workflow["jobs"]["approve"]["permissions"]["issues"] =
+        serde_yaml::Value::String("write".into());
+    workflow["jobs"]["approve"]["permissions"]["pull-requests"] =
+        serde_yaml::Value::String("read".into());
+    let legacy = serde_yaml::to_string(&workflow).unwrap();
+    assert!(caller::validate_existing(path, legacy.as_bytes(), "main").is_ok());
+
+    workflow["concurrency"]["group"] =
+        serde_yaml::Value::String("approve-request-${{ github.event.issue.number }}".into());
+    let unknown = serde_yaml::to_string(&workflow).unwrap();
+    assert!(caller::validate_existing(path, unknown.as_bytes(), "main").is_err());
 }
 
 #[test]

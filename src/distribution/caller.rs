@@ -483,6 +483,14 @@ pub(super) fn validate_previous_client_generation(
 }
 
 fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut serde_yaml::Value) {
+    if path == ".github/workflows/approve-request.yml"
+        && actual["concurrency"]["group"].as_str()
+            == Some(
+                "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}",
+            )
+    {
+        expected["concurrency"]["group"] = actual["concurrency"]["group"].clone();
+    }
     if path == ".github/workflows/merge-request.yml"
         && let Some(condition) = expected["jobs"]["request"]["if"].as_str()
     {
