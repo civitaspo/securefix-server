@@ -140,6 +140,17 @@
       ],
       "release": "github-release",
       "protect_tags": true
+    },
+    {
+      "repository": "civitaspo/testing-securefix-server",
+      "capabilities": [
+        "approve",
+        "merge",
+        "securefix",
+        "release"
+      ],
+      "release": "terraform-provider",
+      "protect_tags": false
     }
   ],
   "default_sensitive_paths": [

@@ -22,7 +22,7 @@ jobs:
     permissions:
       contents: read
       attestations: read
-      issues: read
+      issues: write
       pull-requests: read
     uses: @SERVER_REPOSITORY@/.github/workflows/reusable-approve-request.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
     secrets:

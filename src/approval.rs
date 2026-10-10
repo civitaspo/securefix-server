@@ -212,6 +212,14 @@ fn apply() -> Result<()> {
             "Changes passed signature and review checks."
         },
     )?;
+    crate::policy_check::report_result(
+        &write,
+        repository,
+        manifest.pull_request.number,
+        &manifest.pull_request.head_sha,
+        true,
+        "Changes passed signature and review checks.",
+    )?;
     Ok(())
 }
 
