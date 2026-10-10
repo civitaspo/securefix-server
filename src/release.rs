@@ -4336,10 +4336,7 @@ mod tests {
 
     #[test]
     fn merged_pr_provenance_rejects_stale_wrapper_at_merge_commit() {
-        let mut routes = successful_pr_provenance_routes_with_wrapper_pin(
-            "1.2.3",
-            &"f".repeat(40),
-        );
+        let mut routes = successful_pr_provenance_routes_with_wrapper_pin("1.2.3", &"f".repeat(40));
         routes.truncate(9);
         let api = crate::fixtures::Fixture::new(routes);
         let policy = provenance_test_policy();
