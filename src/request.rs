@@ -338,7 +338,7 @@ pub(crate) fn acknowledge_request(
     );
     let _: Value = api.post(
         &format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
-        &json!({"content":"eyes"}),
+        &json!({"content":"rocket"}),
     )?;
     Ok(())
 }
@@ -984,7 +984,7 @@ mod tests {
         let number = 7;
         let comment_id = 19;
         let server = &config::trusted().unwrap().deployment.server;
-        let reaction = json!({"id":91,"content":"eyes"});
+        let reaction = json!({"id":91,"content":"rocket"});
         let fixture = Fixture::new(vec![
             Route::get(
                 format!("/repos/{repository}/issues/comments/{comment_id}"),
@@ -1007,7 +1007,7 @@ mod tests {
                 201,
                 reaction.clone(),
             )
-            .with_request_body(json!({"content":"eyes"})),
+            .with_request_body(json!({"content":"rocket"})),
         ]);
 
         acknowledge_request(

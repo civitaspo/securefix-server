@@ -1902,7 +1902,7 @@ fn verify_inner(
         ensure!(
             reactions
                 .iter()
-                .any(|reaction| reaction["content"] == "eyes"
+                .any(|reaction| reaction["content"] == "rocket"
                     && reaction["user"]["id"].as_u64() == Some(server_bot_id)),
             "owner request did not receive a receipt reaction"
         );

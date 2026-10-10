@@ -69,6 +69,6 @@ No verification-repository environment variable bypasses the exact policy.
 A scratch repository must be explicitly added to a reviewed temporary capability policy.
 The [historical GitHub tests](archive/merge-verification-2026-10-08.md) cover the former implementation and do not certify the Rust path.
 
-Owner `/approve` and `/merge` commands receive an eyes reaction after the trusted request runtime validates the comment identity and exact command. The reaction acknowledges receipt for processing; it does not mean approval or merge succeeded. It appears when the Actions runner starts the capture step after loading the CLI.
+Owner `/approve` and `/merge` commands receive a rocket reaction after the trusted request runtime validates the comment identity and exact command. The reaction acknowledges receipt for processing; it does not mean approval or merge succeeded. It appears when the Actions runner starts the capture step after loading the CLI.
 
 A failed `securefix-policy-check` posts one English Server App comment with the rejection reason and a small Server CI/commit reference. Subsequent results hide this App's older marked failure comments as outdated. Success hides the failure history without posting a success comment. Other comments and owner authorization records remain visible. The check itself links directly to the server run that made the decision.
