@@ -1575,24 +1575,23 @@ fn validate_source_pr_association(
         source_run_sha.as_str() == pr.head.sha,
         "source pull request run head does not match the release PR head"
     );
-    if !associated.is_empty() {
-        ensure!(
-            associated
-                .iter()
-                .any(|candidate| candidate["number"].as_u64() == Some(release_pr_number)),
-            "source run is not associated with the release PR"
-        );
+    // GitHub can update this list when the release branch is reused; only a
+    // matching PR number is authoritative here, otherwise bind by source commit.
+    if associated
+        .iter()
+        .any(|candidate| candidate["number"].as_u64() == Some(release_pr_number))
+    {
         return Ok(());
     }
 
     let trusted = crate::config::trusted()?;
     ensure!(
         run["head_branch"] == pr.head.name,
-        "empty source PR associations do not match the release branch"
+        "source PR associations do not match the release branch"
     );
     ensure!(
         run["actor"]["id"].as_u64() == Some(policy.server_bot_id) && run["actor"]["type"] == "Bot",
-        "empty source PR associations are only accepted for a Server App run"
+        "source PR association fallback is only accepted for a Server App run"
     );
     ensure!(
         pr.number == release_pr_number
@@ -4068,6 +4067,40 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_source_run_associations_fall_back_to_the_exact_merged_release_pr() {
+        use crate::fixtures::{Fixture, Route};
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let pr = associated_release_pr();
+        let head = CommitSha::parse(&"a".repeat(40)).unwrap();
+        let merge = CommitSha::parse(&"c".repeat(40)).unwrap();
+        let fixture = Fixture::new(vec![Route::get(
+            format!(
+                "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                repo.as_str(),
+                head.as_str()
+            ),
+            json!([associated_release_pr_response()]),
+        )]);
+        let mut run = empty_association_run();
+        run["pull_requests"] = json!([{"number":96,"head":{"sha":"79cd"}}]);
+        validate_source_pr_association(
+            &fixture.api,
+            &policy,
+            &repo,
+            SourcePrAssociation {
+                run: &run,
+                source_run_sha: &head,
+                release_pr_number: 87,
+                pr: &pr,
+                merge_sha: &merge,
+            },
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
     fn empty_source_run_associations_reject_unrelated_or_changed_pull_requests() {
         use crate::fixtures::{Fixture, Route};
         let policy = provenance_test_policy();
@@ -4092,30 +4125,34 @@ mod tests {
             variants.push(candidate);
         }
         for candidate in variants {
-            let fixture = Fixture::new(vec![Route::get(
-                format!(
-                    "/repos/{}/commits/{}/pulls?per_page=100&page=1",
-                    repo.as_str(),
-                    head.as_str()
-                ),
-                json!([candidate]),
-            )]);
-            assert!(
-                validate_source_pr_association(
-                    &fixture.api,
-                    &policy,
-                    &repo,
-                    SourcePrAssociation {
-                        run: &empty_association_run(),
-                        source_run_sha: &head,
-                        release_pr_number: 87,
-                        pr: &pr,
-                        merge_sha: &merge,
-                    },
-                )
-                .is_err()
-            );
-            fixture.finish();
+            for associations in [json!([]), json!([{"number":96}])] {
+                let fixture = Fixture::new(vec![Route::get(
+                    format!(
+                        "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                        repo.as_str(),
+                        head.as_str()
+                    ),
+                    json!([candidate.clone()]),
+                )]);
+                let mut run = empty_association_run();
+                run["pull_requests"] = associations;
+                assert!(
+                    validate_source_pr_association(
+                        &fixture.api,
+                        &policy,
+                        &repo,
+                        SourcePrAssociation {
+                            run: &run,
+                            source_run_sha: &head,
+                            release_pr_number: 87,
+                            pr: &pr,
+                            merge_sha: &merge,
+                        },
+                    )
+                    .is_err()
+                );
+                fixture.finish();
+            }
         }
     }
 
@@ -4179,21 +4216,28 @@ mod tests {
             );
         }
         run["pull_requests"] = json!([{"number":99}]);
-        assert!(
-            validate_source_pr_association(
-                &fixture.api,
-                &policy,
-                &repo,
-                SourcePrAssociation {
-                    run: &run,
-                    source_run_sha: &head,
-                    release_pr_number: 87,
-                    pr: &pr,
-                    merge_sha: &merge,
-                },
-            )
-            .is_err()
-        );
+        let unrelated_fixture = Fixture::new(vec![crate::fixtures::Route::get(
+            format!(
+                "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                repo.as_str(),
+                head.as_str()
+            ),
+            json!([associated_release_pr_response()]),
+        )]);
+        validate_source_pr_association(
+            &unrelated_fixture.api,
+            &policy,
+            &repo,
+            SourcePrAssociation {
+                run: &run,
+                source_run_sha: &head,
+                release_pr_number: 87,
+                pr: &pr,
+                merge_sha: &merge,
+            },
+        )
+        .unwrap();
+        unrelated_fixture.finish();
         let mut wrong_actor = empty_association_run();
         wrong_actor["actor"]["id"] = json!(policy.owner_id);
         assert!(
