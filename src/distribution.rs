@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use securefix::output_multiline;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, thread, time::Duration};
 
 pub(crate) mod caller;
 use caller::{prepare_caller, rendered_files, validate_migration_files, write_migration};
@@ -796,6 +796,21 @@ fn validate_runtime_update_pull_request(
     pull: &Value,
     expected_head: &str,
 ) -> Result<()> {
+    let actual_head =
+        validate_runtime_update_pull_request_identity(policy, migration, number, pull)?;
+    ensure!(
+        actual_head == expected_head,
+        "runtime update PR changed or is not an open server-owned PR for the configured branch"
+    );
+    Ok(())
+}
+
+fn validate_runtime_update_pull_request_identity<'a>(
+    policy: &Policy,
+    migration: &CallerMigration,
+    number: u64,
+    pull: &'a Value,
+) -> Result<&'a str> {
     let update_branch = crate::config::trusted()?
         .deployment
         .runtime_update_branch
@@ -808,12 +823,75 @@ fn validate_runtime_update_pull_request(
             && pull["user"]["type"] == "Bot"
             && pull["head"]["repo"]["full_name"] == migration.repository
             && pull["head"]["ref"] == update_branch
-            && pull["head"]["sha"] == expected_head
             && pull["base"]["repo"]["full_name"] == migration.repository
             && pull["base"]["ref"] == migration.default_branch,
         "runtime update PR changed or is not an open server-owned PR for the configured branch"
     );
-    Ok(())
+    let head = pull["head"]["sha"]
+        .as_str()
+        .context("runtime update PR head SHA missing")?;
+    validate_sha(head)?;
+    Ok(head)
+}
+
+fn wait_for_runtime_update_pull_request(
+    api: &GitHub,
+    policy: &Policy,
+    migration: &CallerMigration,
+    number: u64,
+    expected_head: &str,
+) -> Result<Value> {
+    wait_for_runtime_update_pull_request_with_interval(
+        api,
+        policy,
+        migration,
+        number,
+        expected_head,
+        Duration::from_secs(2),
+    )
+}
+
+fn wait_for_runtime_update_pull_request_with_interval(
+    api: &GitHub,
+    policy: &Policy,
+    migration: &CallerMigration,
+    number: u64,
+    expected_head: &str,
+    interval: Duration,
+) -> Result<Value> {
+    let path = format!("/repos/{}/pulls/{number}", migration.repository);
+    let mut pull: Value = api.get(&path)?;
+    let initial_head =
+        validate_runtime_update_pull_request_identity(policy, migration, number, &pull)?;
+    if initial_head == expected_head {
+        return Ok(pull);
+    }
+    let stale_head = initial_head.to_owned();
+    for _ in 0..10 {
+        let update_branch = crate::config::trusted()?
+            .deployment
+            .runtime_update_branch
+            .as_str();
+        ensure!(
+            automation_branch_head(api, &migration.repository, update_branch)?.as_deref()
+                == Some(expected_head),
+            "runtime update branch head changed while waiting for PR head propagation"
+        );
+        thread::sleep(interval);
+        pull = api.get(&path)?;
+        let observed =
+            validate_runtime_update_pull_request_identity(policy, migration, number, &pull)?;
+        ensure!(
+            observed == stale_head || observed == expected_head,
+            "runtime update PR head changed unexpectedly while waiting for propagation"
+        );
+        if observed == expected_head {
+            return Ok(pull);
+        }
+    }
+    anyhow::bail!(
+        "runtime update PR head did not catch up to its validated branch within 20 seconds"
+    )
 }
 
 fn merge_runtime_update(
@@ -823,8 +901,7 @@ fn merge_runtime_update(
     number: u64,
     expected_head: &str,
 ) -> Result<String> {
-    let pull_path = format!("/repos/{}/pulls/{number}", migration.repository);
-    let pull: Value = api.get(&pull_path)?;
+    let pull = wait_for_runtime_update_pull_request(api, policy, migration, number, expected_head)?;
     validate_runtime_update_pull_request(policy, migration, number, &pull, expected_head)?;
 
     let update_branch = crate::config::trusted()?
@@ -849,7 +926,8 @@ fn merge_runtime_update(
     ))?;
     validate_runtime_update_changed_files(migration, &changed)?;
 
-    let latest_pull: Value = api.get(&pull_path)?;
+    let latest_pull =
+        wait_for_runtime_update_pull_request(api, policy, migration, number, expected_head)?;
     validate_runtime_update_pull_request(policy, migration, number, &latest_pull, expected_head)?;
     ensure!(
         automation_branch_head(api, &migration.repository, update_branch)?.as_deref()
