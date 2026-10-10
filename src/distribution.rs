@@ -312,8 +312,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         let expected_yaml: serde_yaml::Value = serde_yaml::from_slice(contents)?;
         ensure!(
             actual_yaml == expected_yaml
-                || legacy_request_permission(path, expected_yaml.clone())
-                    .is_some_and(|legacy| actual_yaml == legacy),
+                || legacy_request_generations(path, expected_yaml.clone()).contains(&actual_yaml),
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
     }
@@ -321,17 +320,26 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
     Ok(())
 }
 
-fn legacy_request_permission(
-    path: &str,
-    mut expected: serde_yaml::Value,
-) -> Option<serde_yaml::Value> {
-    let (job, permission) = match path {
-        ".github/workflows/approve-request.yml" => ("approve", "issues"),
-        ".github/workflows/merge-request.yml" => ("request", "issues"),
-        _ => return None,
+fn legacy_request_generations(path: &str, expected: serde_yaml::Value) -> Vec<serde_yaml::Value> {
+    let (job, is_approval) = match path {
+        ".github/workflows/approve-request.yml" => ("approve", true),
+        ".github/workflows/merge-request.yml" => ("request", false),
+        _ => return Vec::new(),
     };
-    expected["jobs"][job]["permissions"][permission] = serde_yaml::Value::String("read".to_owned());
-    Some(expected)
+    let mut generations = Vec::with_capacity(2);
+    for issues in ["write", "read"] {
+        let mut legacy = expected.clone();
+        legacy["jobs"][job]["permissions"]["issues"] = serde_yaml::Value::String(issues.to_owned());
+        legacy["jobs"][job]["permissions"]["pull-requests"] =
+            serde_yaml::Value::String("read".to_owned());
+        if is_approval {
+            legacy["concurrency"]["group"] = serde_yaml::Value::String(
+                "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}".to_owned(),
+            );
+        }
+        generations.push(legacy);
+    }
+    generations
 }
 
 fn validate_automation_branch(

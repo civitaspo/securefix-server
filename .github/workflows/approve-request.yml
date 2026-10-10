@@ -14,7 +14,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: approve-request-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.comment.id || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -29,6 +29,6 @@ jobs:
       contents: read
       attestations: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
