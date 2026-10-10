@@ -34,6 +34,32 @@ pub struct RepositoryPolicy {
     pub protect_tags: bool,
 }
 
+/// Principals allowed to make additional owner-sensitive approvals unnecessary.
+/// These identities must still be trusted committers and are authenticated from
+/// GitHub's user or Bot response by the request authorization layer.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SensitivePathApprovalExemptions {
+    #[serde(default)]
+    pub users: Vec<SensitivePathApprovalUser>,
+    #[serde(default)]
+    pub github_apps: Vec<SensitivePathApprovalGitHubApp>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SensitivePathApprovalUser {
+    pub id: u64,
+    pub login: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SensitivePathApprovalGitHubApp {
+    pub bot_id: u64,
+    pub bot_login: String,
+}
+
 impl RepositoryPolicy {
     pub fn require(&self, capability: Capability) -> Result<()> {
         ensure!(
@@ -63,6 +89,8 @@ pub struct Policy {
     pub client_bot_id: u64,
     pub server_bot_id: u64,
     pub trusted_committers: Vec<String>,
+    #[serde(default)]
+    pub sensitive_path_approval_exemptions: SensitivePathApprovalExemptions,
     pub default_sensitive_paths: Vec<String>,
     pub merge_controls_enabled: bool,
     pub repositories: Vec<RepositoryPolicy>,
@@ -92,6 +120,7 @@ impl Policy {
             !policy.trusted_committers.is_empty(),
             "no trusted committers"
         );
+        validate_sensitive_path_approval_exemptions(&policy)?;
         ensure!(
             !policy.default_sensitive_paths.is_empty(),
             "missing default sensitive paths"
@@ -161,6 +190,53 @@ impl Policy {
     pub fn latest_revision(api: &GitHub, workflow_path: &str) -> Result<String> {
         latest_revision(api, workflow_path)
     }
+}
+
+fn validate_sensitive_path_approval_exemptions(policy: &Policy) -> Result<()> {
+    let mut ids = HashSet::new();
+    let mut logins = HashSet::new();
+    for (id, login, is_app) in policy
+        .sensitive_path_approval_exemptions
+        .users
+        .iter()
+        .map(|user| (user.id, user.login.as_str(), false))
+        .chain(
+            policy
+                .sensitive_path_approval_exemptions
+                .github_apps
+                .iter()
+                .map(|app| (app.bot_id, app.bot_login.as_str(), true)),
+        )
+    {
+        ensure!(
+            id > 0,
+            "sensitive-path approval exemption ID must be nonzero"
+        );
+        ensure!(
+            !login.is_empty()
+                && login.len() <= 100
+                && login
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_[].".contains(&b)),
+            "invalid sensitive-path approval exemption login"
+        );
+        ensure!(
+            !is_app || login.ends_with("[bot]"),
+            "GitHub App exemption login must end with [bot]"
+        );
+        ensure!(
+            ids.insert(id) && logins.insert(login.to_ascii_lowercase()),
+            "duplicate sensitive-path approval exemption principal"
+        );
+        ensure!(
+            policy
+                .trusted_committers
+                .iter()
+                .any(|trusted| trusted.eq_ignore_ascii_case(login)),
+            "sensitive-path approval exemption must be a trusted committer"
+        );
+    }
+    Ok(())
 }
 
 pub fn validate_repository(value: &str) -> Result<()> {
@@ -269,6 +345,63 @@ mod tests {
                 .unwrap()
         );
     }
+
+    #[test]
+    fn sensitive_path_approval_exemptions_are_optional_typed_and_trusted() {
+        let mut value =
+            serde_json::to_value(Policy::load("tests/fixtures/policy.json").unwrap()).unwrap();
+
+        // Older policy documents remain valid and receive an empty exemption list.
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("sensitive_path_approval_exemptions");
+        let parsed = Policy::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(parsed.sensitive_path_approval_exemptions.users.is_empty());
+        assert!(
+            parsed
+                .sensitive_path_approval_exemptions
+                .github_apps
+                .is_empty()
+        );
+
+        value["trusted_committers"] =
+            serde_json::json!(["maintainer", "automation-reviewer", "example-renovate[bot]"]);
+        value["sensitive_path_approval_exemptions"] = serde_json::json!({
+            "users": [{"id": 601, "login": "automation-reviewer"}],
+            "github_apps": [{"bot_id": 602, "bot_login": "example-renovate[bot]"}]
+        });
+        let parsed = Policy::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(parsed.sensitive_path_approval_exemptions.users[0].id, 601);
+        assert_eq!(
+            parsed.sensitive_path_approval_exemptions.github_apps[0].bot_login,
+            "example-renovate[bot]"
+        );
+
+        for malformed in [
+            serde_json::json!({"users": [{"id": 0, "login": "automation-reviewer"}]}),
+            serde_json::json!({"github_apps": [{"bot_id": 602, "bot_login": "renovate"}]}),
+            serde_json::json!({"users": [{"id": "601", "login": "automation-reviewer"}]}),
+            serde_json::json!({"users": [{"id": 601, "login": "untrusted"}]}),
+            serde_json::json!({"users": [
+                {"id": 601, "login": "automation-reviewer"},
+                {"id": 601, "login": "another"}
+            ]}),
+            serde_json::json!({"github_apps": [
+                {"bot_id": 602, "bot_login": "example-renovate[bot]"},
+                {"bot_id": 603, "bot_login": "EXAMPLE-RENOVATE[bot]"}
+            ]}),
+            serde_json::json!({"users": "automation-reviewer"}),
+        ] {
+            let mut invalid = value.clone();
+            invalid["sensitive_path_approval_exemptions"] = malformed.clone();
+            assert!(
+                Policy::parse(&serde_json::to_vec(&invalid).unwrap()).is_err(),
+                "accepted malformed exemptions: {malformed}"
+            );
+        }
+    }
+
     #[test]
     fn alternate_deployment_requires_no_personal_identities() {
         let mut value =

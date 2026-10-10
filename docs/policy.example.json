@@ -6,9 +6,25 @@
   "trusted_committers": [
     "maintainer",
     "example-server[bot]",
+    "automation-reviewer",
+    "example-renovate[bot]",
     "renovate[bot]",
     "dependabot[bot]"
   ],
+  "sensitive_path_approval_exemptions": {
+    "users": [
+      {
+        "id": 602,
+        "login": "automation-reviewer"
+      }
+    ],
+    "github_apps": [
+      {
+        "bot_id": 603,
+        "bot_login": "example-renovate[bot]"
+      }
+    ]
+  },
   "merge_controls_enabled": true,
   "repositories": [
     {

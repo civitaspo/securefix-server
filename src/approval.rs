@@ -207,7 +207,7 @@ fn apply() -> Result<()> {
         &manifest.pull_request.head_sha,
         true,
         if sensitive {
-            "Sensitive changes passed signature, owner authorization, and review checks."
+            "Sensitive changes passed signature, configured approval policy, and review checks."
         } else {
             "Changes passed signature and review checks."
         },

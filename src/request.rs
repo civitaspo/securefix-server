@@ -736,10 +736,51 @@ pub fn validate_pr_authorization(
         .flatten()
         .collect::<Vec<_>>();
     let sensitive = repo.sensitive(paths.iter().copied())?;
-    if sensitive && !owner_requested {
+    if sensitive
+        && !owner_requested
+        && !sensitive_path_approval_exempt(policy, &pr["user"], &commits, &github_signed)
+    {
         require_owner_marker(api, policy, repository, number, sha)?;
     }
     Ok(sensitive)
+}
+
+fn sensitive_path_approval_exempt(
+    policy: &Policy,
+    author: &Value,
+    commits: &[Value],
+    github_signed: &HashSet<String>,
+) -> bool {
+    let exemptions = &policy.sensitive_path_approval_exemptions;
+    let principal = exemptions
+        .users
+        .iter()
+        .map(|user| (user.id, user.login.as_str(), "User"))
+        .chain(
+            exemptions
+                .github_apps
+                .iter()
+                .map(|app| (app.bot_id, app.bot_login.as_str(), "Bot")),
+        )
+        .find(|(id, login, kind)| matches_principal(author, *id, login, kind));
+    let Some((id, login, kind)) = principal else {
+        return false;
+    };
+    !commits.is_empty()
+        && commits.iter().all(|commit| {
+            let effective = if commit["committer"]["login"] == "web-flow" {
+                if !commit["sha"]
+                    .as_str()
+                    .is_some_and(|sha| github_signed.contains(sha))
+                {
+                    return false;
+                }
+                &commit["author"]
+            } else {
+                &commit["committer"]
+            };
+            matches_principal(effective, id, login, kind)
+        })
 }
 
 fn repo_trusted_committer(commit: &Value, trusted: &[String], github_signed: bool) -> bool {
@@ -1223,6 +1264,141 @@ mod tests {
             .is_err()
         );
         fixture.finish();
+    }
+
+    #[test]
+    fn sensitive_path_exemption_binds_author_and_every_effective_committer() {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.sensitive_path_approval_exemptions = serde_json::from_value(json!({
+            "users":[{"id":42,"login":"maintainer"}],
+            "github_apps":[{"bot_id":43,"bot_login":"updater[bot]"}]
+        }))
+        .unwrap();
+        let sha = "a".repeat(40);
+        for principal in [
+            json!({"id":42,"login":"maintainer","type":"User"}),
+            json!({"id":43,"login":"updater[bot]","type":"Bot"}),
+        ] {
+            let direct = json!({"sha":sha,"author":{"id":99,"login":"other","type":"User"},"committer":principal});
+            assert!(sensitive_path_approval_exempt(
+                &policy,
+                &principal,
+                std::slice::from_ref(&direct),
+                &HashSet::new()
+            ));
+            let web = json!({"sha":sha,"author":principal,"committer":{"login":"web-flow"}});
+            assert!(!sensitive_path_approval_exempt(
+                &policy,
+                &principal,
+                std::slice::from_ref(&web),
+                &HashSet::new()
+            ));
+            let signed = HashSet::from([sha.clone()]);
+            assert!(sensitive_path_approval_exempt(
+                &policy,
+                &principal,
+                std::slice::from_ref(&web),
+                &signed
+            ));
+            assert!(!sensitive_path_approval_exempt(
+                &policy,
+                &principal,
+                &[],
+                &signed
+            ));
+            let mut mixed = web.clone();
+            mixed["author"]["id"] = json!(99);
+            assert!(!sensitive_path_approval_exempt(
+                &policy,
+                &principal,
+                &[web.clone(), mixed],
+                &signed
+            ));
+            for field in ["id", "login", "type"] {
+                let mut impostor = principal.clone();
+                impostor[field] = match field {
+                    "id" => json!(99),
+                    "login" => json!("attacker"),
+                    _ => json!(if principal["type"] == "Bot" {
+                        "User"
+                    } else {
+                        "Bot"
+                    }),
+                };
+                assert!(!sensitive_path_approval_exempt(
+                    &policy,
+                    &impostor,
+                    std::slice::from_ref(&direct),
+                    &signed
+                ));
+                let mut other = direct.clone();
+                other["committer"] = impostor;
+                assert!(!sensitive_path_approval_exempt(
+                    &policy,
+                    &principal,
+                    &[direct.clone(), other],
+                    &signed
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn sensitive_path_exemption_skips_only_owner_marker_and_preserves_signature_checks() {
+        let sha = "a".repeat(40);
+        for kind in ["User", "Bot"] {
+            let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+            let login = if kind == "Bot" {
+                "updater[bot]"
+            } else {
+                "maintainer"
+            };
+            policy.trusted_committers.push(login.into());
+            policy.sensitive_path_approval_exemptions = serde_json::from_value(if kind == "Bot" {
+                json!({"github_apps":[{"bot_id":42,"bot_login":login}]})
+            } else {
+                json!({"users":[{"id":42,"login":login}]})
+            })
+            .unwrap();
+            let principal = json!({"id":42,"login":login,"type":kind});
+            for verified in [true, false] {
+                let pull = Route::get(
+                    "/repos/civitaspo/dbt-authorized-models/pulls/7",
+                    json!({"state":"open","user":principal,"head":{"repo":{"full_name":"civitaspo/dbt-authorized-models"},"sha":sha}}),
+                );
+                let mut routes = vec![
+                    pull,
+                    Route::get(
+                        "/repos/civitaspo/dbt-authorized-models/pulls/7/commits?per_page=100&page=1",
+                        json!([{"sha":sha,"commit":{"verification":{"verified":verified}},"author":principal,"committer":principal}]),
+                    ),
+                ];
+                if verified {
+                    routes.push(Route::get("/repos/civitaspo/dbt-authorized-models/pulls/7/files?per_page=100&page=1",
+                        json!([{"filename":"README.md","previous_filename":".github/workflows/ci.yml"}])));
+                }
+                let fixture = Fixture::new(routes);
+                let result = validate_pr_authorization(
+                    &fixture.api,
+                    &policy,
+                    "civitaspo/dbt-authorized-models",
+                    7,
+                    &sha,
+                    false,
+                );
+                if verified {
+                    assert!(result.unwrap());
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("verified signature")
+                    );
+                }
+                fixture.finish();
+            }
+        }
     }
 
     #[test]
