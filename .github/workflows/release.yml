@@ -67,7 +67,7 @@ jobs:
       - uses: $/.github/actions/install-cli
         with:
           binary: ${{ runner.temp }}/securefix-runtime/securefix
-      - name: Create read-only client token
+      - name: Create repo-scoped token that can inspect draft releases
         id: client-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -76,7 +76,7 @@ jobs:
           owner: civitaspo
           repositories: ${{ needs.resolve-request.outputs.repo_name }}
           permission-actions: read
-          permission-contents: read
+          permission-contents: write
           permission-pull-requests: read
       - name: Validate current release provenance
         id: preflight

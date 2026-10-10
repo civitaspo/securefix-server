@@ -120,3 +120,29 @@ client Action to produce an artifact and request label using the attested publis
 runtime, and verifies the label before deleting it. Its token and deployment policy
 target only the scratch repository. The required `status-check` fails if this chain
 fails or is skipped, and separately verifies every generated action pin with pinact.
+
+## Provider release rehearsal without publication
+
+The `provider` phase of `testing-securefix-server.yml` calls
+`testing-provider-release.yml` at a reviewed, frozen integration revision with
+an owner-only dispatch. It compiles a test executable once, then uses the same
+fixed production Go build helper in a parallel target matrix against an exact
+provider source commit. Source builds receive no signing key or installation
+token. The resulting archives and Registry manifest are validated before signing.
+
+Fresh signing and retry signing run in separate jobs that reference only the
+protected provider GPG key and passphrase. They execute the prebuilt test artifact;
+they do not check out or execute client source. Draft upload and recovery download
+run separately with a Server App installation token restricted to the configured
+integration repository. A unique SemVer prerelease draft receives the checksums
+and signature first, simulating an interrupted upload. The retry verifies and
+reuses the uploaded signature, uploads the remaining assets, and checks that an
+additional retry leaves their identities and digests unchanged.
+
+The test never finalizes a draft or creates a production release. Its always-run
+cleanup removes only the recorded integration draft and any matching rehearsal
+tag, then checks that neither remains. The protected environment allowance applies only to the exact frozen
+branch during the rehearsal and is removed afterward. The ignored Rust probe is
+compiled only for tests; the installed runtime retains its normal authorization
+and provenance requirements. This verifies build, signing, and draft recovery;
+Terraform Registry ingestion still requires a published release.

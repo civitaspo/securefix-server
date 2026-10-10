@@ -13,6 +13,7 @@ pub struct Route {
     status: u16,
     response: Response,
     request_body: Option<Value>,
+    request_header: Option<(&'static str, &'static str)>,
 }
 
 #[allow(dead_code)]
@@ -30,6 +31,7 @@ impl Route {
             status: 200,
             response: Response::Json(body),
             request_body: None,
+            request_header: None,
         }
     }
     pub fn request(
@@ -44,6 +46,7 @@ impl Route {
             status,
             response: Response::Json(body),
             request_body: None,
+            request_header: None,
         }
     }
     #[allow(dead_code)]
@@ -54,6 +57,7 @@ impl Route {
             status,
             response: Response::Raw(body),
             request_body: None,
+            request_header: None,
         }
     }
     #[allow(dead_code)]
@@ -64,10 +68,16 @@ impl Route {
             status: 200,
             response: Response::Disconnect,
             request_body: None,
+            request_header: None,
         }
     }
     pub fn with_request_body(mut self, body: Value) -> Self {
         self.request_body = Some(body);
+        self
+    }
+    #[allow(dead_code)]
+    pub fn with_request_header(mut self, name: &'static str, value: &'static str) -> Self {
+        self.request_header = Some((name, value));
         self
     }
 }
@@ -125,6 +135,20 @@ impl Fixture {
                 let header = String::from_utf8(request[..header_end].to_vec()).unwrap();
                 let first = header.lines().next().unwrap();
                 assert_eq!(first, format!("{} {} HTTP/1.1", route.method, route.path));
+                if let Some((name, value)) = route.request_header {
+                    let values = header
+                        .lines()
+                        .filter_map(|line| {
+                            line.split_once(':')
+                                .and_then(|(header_name, header_value)| {
+                                    header_name
+                                        .eq_ignore_ascii_case(name)
+                                        .then_some(header_value.trim())
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(values, [value], "expected exactly one {name} header");
+                }
                 let length = header
                     .lines()
                     .find_map(|line| {

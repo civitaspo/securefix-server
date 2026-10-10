@@ -219,6 +219,8 @@ pub struct ReleasePlanV2 {
     pub tag: ReleaseTag,
     pub source_manifest: ReleaseManifestV2,
     pub release_id: Option<u64>,
+    #[serde(default)]
+    pub existing_signature_sha256: Option<String>,
     pub assets: Vec<PlannedAsset>,
 }
 
@@ -255,6 +257,18 @@ impl ReleasePlanV2 {
         ensure!(
             self.release_id.is_none_or(|id| id > 0),
             "invalid release ID"
+        );
+        ensure!(
+            self.existing_signature_sha256
+                .as_ref()
+                .is_none_or(|digest| {
+                    self.release_id.is_some()
+                        && digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                }),
+            "invalid existing signature digest"
         );
         let mut names = BTreeSet::new();
         for asset in &self.assets {
@@ -812,63 +826,7 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
     }
     std::fs::create_dir_all(output_dir)?;
     for target in PROVIDER_TARGETS {
-        let windows = target.os == "windows";
-        let binary_name = format!(
-            "{project}_v{}{}",
-            tag.version(),
-            if windows { ".exe" } else { "" }
-        );
-        let binary_path = output_dir.join(format!(
-            ".build-{}-{}{}",
-            target.os,
-            target.arch,
-            if windows { ".exe" } else { "" }
-        ));
-        let mut cmd = ProcessCommand::new("go");
-        cmd.current_dir(".")
-            .args([
-                "build",
-                "-mod=readonly",
-                "-trimpath",
-                "-ldflags",
-                &format!("-s -w -X main.version={}", tag.version()),
-                "-o",
-            ])
-            .arg(&binary_path)
-            .arg(".")
-            .env("CGO_ENABLED", "0")
-            .env("GOOS", target.os)
-            .env("GOARCH", target.arch);
-        match target.arch {
-            "amd64" => {
-                cmd.env("GOAMD64", "v1");
-            }
-            "arm" => {
-                cmd.env("GOARM", "6");
-            }
-            "arm64" => {
-                cmd.env("GOARM64", "v8.0");
-            }
-            _ => {}
-        }
-        let status = cmd
-            .status()
-            .with_context(|| format!("build {} {} provider", target.os, target.arch))?;
-        ensure!(
-            status.success(),
-            "Go provider build failed for {} {}",
-            target.os,
-            target.arch
-        );
-        let archive_name = format!(
-            "{project}_{}_{}_{}.zip",
-            tag.version(),
-            target.os,
-            target.arch
-        );
-        let archive_path = output_dir.join(&archive_name);
-        write_provider_zip(&binary_path, &binary_name, Path::new("."), &archive_path)?;
-        std::fs::remove_file(binary_path)?;
+        build_provider_target(Path::new("."), project, &tag, *target, output_dir)?;
     }
     let manifest_name = format!("{project}_{}_manifest.json", tag.version());
     std::fs::copy(
@@ -880,6 +838,76 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
     crate::output("merge_sha", merge_sha.as_str())?;
     crate::output("asset_count", files.len().to_string())?;
     Ok(())
+}
+
+fn build_provider_target(
+    source_dir: &Path,
+    project: &str,
+    tag: &ReleaseTag,
+    target: ProviderTarget,
+    output_dir: &Path,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(output_dir)?;
+    let source_dir = source_dir.canonicalize()?;
+    let output_dir = output_dir.canonicalize()?;
+    let windows = target.os == "windows";
+    let binary_name = format!(
+        "{project}_v{}{}",
+        tag.version(),
+        if windows { ".exe" } else { "" }
+    );
+    let binary_path = output_dir.join(format!(
+        ".build-{}-{}{}",
+        target.os,
+        target.arch,
+        if windows { ".exe" } else { "" }
+    ));
+    let mut cmd = ProcessCommand::new("go");
+    cmd.current_dir(&source_dir)
+        .args([
+            "build",
+            "-mod=readonly",
+            "-trimpath",
+            "-ldflags",
+            &format!("-s -w -X main.version={}", tag.version()),
+            "-o",
+        ])
+        .arg(&binary_path)
+        .arg(".")
+        .env("CGO_ENABLED", "0")
+        .env("GOOS", target.os)
+        .env("GOARCH", target.arch);
+    match target.arch {
+        "amd64" => {
+            cmd.env("GOAMD64", "v1");
+        }
+        "arm" => {
+            cmd.env("GOARM", "6");
+        }
+        "arm64" => {
+            cmd.env("GOARM64", "v8.0");
+        }
+        _ => {}
+    }
+    let status = cmd
+        .status()
+        .with_context(|| format!("build {} {} provider", target.os, target.arch))?;
+    ensure!(
+        status.success(),
+        "Go provider build failed for {} {}",
+        target.os,
+        target.arch
+    );
+    let archive_name = format!(
+        "{project}_{}_{}_{}.zip",
+        tag.version(),
+        target.os,
+        target.arch
+    );
+    let archive_path = output_dir.join(archive_name);
+    write_provider_zip(&binary_path, &binary_name, &source_dir, &archive_path)?;
+    std::fs::remove_file(binary_path)?;
+    Ok(archive_path)
 }
 
 fn write_provider_zip(
@@ -1147,7 +1175,7 @@ fn parse_request() -> Result<()> {
 
 fn preflight() -> Result<()> {
     let read = GitHub::from_env("GITHUB_TOKEN")?;
-    let app = GitHub::from_env("GH_TOKEN")?;
+    let app = GitHub::new("https://api.github.com", env("GH_TOKEN")?)?;
     let policy = current_policy(&read)?;
     let event = crate::event()?;
     let (repo, run_id) = request_parts(&event)?;
@@ -1159,7 +1187,11 @@ fn preflight() -> Result<()> {
     let _runtime = require_current_runtime(&read, ".github/workflows/release.yml")?;
     let manifest = validated_source(&app, &policy, &repo, run_id, strategy)?;
     let tag = manifest.tag.clone();
-    let release_id = find_release(&app, &repo, &tag)?.and_then(|release| release["id"].as_u64());
+    let release = find_release(&app, &repo, &tag)?;
+    let release_id = release
+        .as_ref()
+        .map(|release| release["id"].as_u64().context("existing release lacks ID"))
+        .transpose()?;
     if let Some(id) = release_id {
         let release: Value = app.get(&format!("/repos/{}/releases/{id}", repo.as_str()))?;
         ensure!(
@@ -1189,6 +1221,7 @@ fn preflight() -> Result<()> {
         tag,
         source_manifest: manifest.clone(),
         release_id,
+        existing_signature_sha256: None,
         assets: Vec::new(),
     };
     let input_dir = PathBuf::from("release-input");
@@ -1222,6 +1255,22 @@ fn preflight() -> Result<()> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        if let Some(release) = release.as_ref() {
+            let existing_assets: Vec<Value> = app.paginate(&format!(
+                "/repos/{}/releases/{}/assets",
+                repo.as_str(),
+                release_id.context("existing release lacks ID")?
+            ))?;
+            plan.existing_signature_sha256 = prepare_existing_provider_signature(
+                &app,
+                &repo,
+                release,
+                &existing_assets,
+                &plan,
+                &assets_dir,
+                &input_dir,
+            )?;
+        }
         ensure!(
             artifact["size_in_bytes"].as_u64().unwrap_or_default() <= 512 * 1024 * 1024,
             "provider artifact is too large"
@@ -1680,17 +1729,38 @@ fn find_release(api: &GitHub, repo: &Repository, tag: &ReleaseTag) -> Result<Opt
         repo.as_str(),
         url_encode(tag.as_str())
     );
-    match api.get(&path) {
-        Ok(release) => Ok(Some(release)),
+    match api.get::<Value>(&path) {
+        Ok(release) => {
+            ensure!(
+                release["tag_name"] == tag.as_str(),
+                "release lookup returned a different tag"
+            );
+            Ok(Some(release))
+        }
         Err(error)
             if error
                 .downcast_ref::<ApiError>()
                 .is_some_and(|api_error| api_error.status == reqwest::StatusCode::NOT_FOUND) =>
         {
-            Ok(None)
+            // GitHub's tag lookup may not expose draft releases. Listing requires
+            // push access to include drafts, which the preflight token has.
+            let releases = api.paginate(&format!("/repos/{}/releases", repo.as_str()))?;
+            release_with_tag(&releases, tag)
         }
         Err(error) => Err(error),
     }
+}
+
+fn release_with_tag(releases: &[Value], tag: &ReleaseTag) -> Result<Option<Value>> {
+    let mut matching = releases
+        .iter()
+        .filter(|release| release["tag_name"] == tag.as_str());
+    let release = matching.next().cloned();
+    ensure!(
+        matching.next().is_none(),
+        "multiple releases use the requested tag"
+    );
+    Ok(release)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1705,6 +1775,115 @@ fn sha256_file(path: &Path) -> Result<String> {
         digest.update(&buffer[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+const MAX_PROVIDER_SIGNATURE_BYTES: usize = 1024 * 1024;
+
+fn canonical_provider_sums(assets_dir: &Path, assets: &[PlannedAsset]) -> Result<Vec<u8>> {
+    let mut sums = String::new();
+    for asset in assets {
+        let path = assets_dir.join(&asset.name);
+        ensure!(
+            sha256_file(&path)? == asset.sha256,
+            "provider asset digest changed: {}",
+            asset.name
+        );
+        sums.push_str(&format!("{}  {}\n", asset.sha256, asset.name));
+    }
+    Ok(sums.into_bytes())
+}
+
+fn prepare_existing_provider_signature(
+    api: &GitHub,
+    repo: &Repository,
+    release: &Value,
+    existing: &[Value],
+    plan: &ReleasePlanV2,
+    assets_dir: &Path,
+    input_dir: &Path,
+) -> Result<Option<String>> {
+    let project = Repository::parse(&plan.repository)?;
+    let project = project.name();
+    let sums_name = format!("{project}_{}_SHA256SUMS", plan.tag.version());
+    let signature_name = format!("{sums_name}.sig");
+    let mut expected: std::collections::BTreeMap<String, String> = plan
+        .assets
+        .iter()
+        .map(|asset| (asset.name.clone(), asset.sha256.clone()))
+        .collect();
+    expected.insert(
+        sums_name.clone(),
+        format!(
+            "{:x}",
+            Sha256::digest(canonical_provider_sums(assets_dir, &plan.assets)?)
+        ),
+    );
+    let mut by_name = std::collections::BTreeMap::new();
+    for asset in existing {
+        let name = asset["name"]
+            .as_str()
+            .context("existing release asset lacks name")?;
+        ensure!(
+            name == signature_name || expected.contains_key(name),
+            "release contains an unexpected asset: {name}"
+        );
+        ensure!(
+            by_name.insert(name.to_owned(), asset).is_none(),
+            "duplicate release asset: {name}"
+        );
+        if name != signature_name {
+            let digest = format!("sha256:{}", expected.get(name).expect("checked above"));
+            ensure!(
+                asset["digest"] == digest,
+                "existing release asset has different bytes: {name}"
+            );
+        }
+    }
+    if release["draft"] == false {
+        ensure!(
+            by_name.len() == expected.len() + 1,
+            "published provider release is incomplete"
+        );
+    }
+    let Some(signature) = by_name.get(&signature_name) else {
+        return Ok(None);
+    };
+    ensure!(
+        by_name.contains_key(&sums_name),
+        "existing signature has no checksum asset"
+    );
+    let size = signature["size"].as_u64().unwrap_or_default();
+    ensure!(
+        size > 0 && size <= MAX_PROVIDER_SIGNATURE_BYTES as u64,
+        "existing signature has invalid size"
+    );
+    let asset_id = signature["id"]
+        .as_u64()
+        .context("existing signature lacks asset ID")?;
+    let digest = signature["digest"]
+        .as_str()
+        .context("existing signature lacks digest")?;
+    ensure!(
+        digest.starts_with("sha256:") && digest.len() == 71,
+        "existing signature has invalid digest"
+    );
+    let bytes = api.download(
+        &format!("/repos/{}/releases/assets/{asset_id}", repo.as_str()),
+        MAX_PROVIDER_SIGNATURE_BYTES,
+    )?;
+    ensure!(
+        bytes.len() as u64 == size,
+        "existing signature size changed during download"
+    );
+    let downloaded_digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    ensure!(
+        downloaded_digest == digest,
+        "existing signature digest changed during download"
+    );
+    std::fs::write(input_dir.join("existing-signature.sig"), &bytes)?;
+    Ok(Some(
+        downloaded_digest.trim_start_matches("sha256:").to_owned(),
+    ))
 }
 
 fn sign() -> Result<()> {
@@ -1748,10 +1927,7 @@ fn sign() -> Result<()> {
             asset.name
         );
     }
-    let mut sums = String::new();
-    for asset in &plan.assets {
-        sums.push_str(&format!("{}  {}\n", asset.sha256, asset.name));
-    }
+    let sums = canonical_provider_sums(&assets_dir, &plan.assets)?;
     let sums_path = assets_dir.join(format!("{}_{}_SHA256SUMS", repo.name(), plan.tag.version()));
     std::fs::write(&sums_path, &sums)?;
     let signature_path = assets_dir.join(format!(
@@ -1759,34 +1935,17 @@ fn sign() -> Result<()> {
         repo.name(),
         plan.tag.version()
     ));
-    let mut gpg = ProcessCommand::new("gpg");
-    gpg.args([
-        "--batch",
-        "--pinentry-mode",
-        "loopback",
-        "--passphrase-fd",
-        "0",
-        "--local-user",
-    ])
-    .arg(env("GPG_FINGERPRINT")?)
-    .arg("--output")
-    .arg(&signature_path)
-    .arg("--detach-sign")
-    .arg(&sums_path)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped());
-    let mut child = gpg.spawn().context("start checksum signing")?;
-    let passphrase = std::env::var("GPG_PASSPHRASE").unwrap_or_default();
-    if let Some(mut stdin) = child.stdin.take() {
-        writeln!(stdin, "{passphrase}")?;
-    }
-    let result = child.wait_with_output()?;
-    ensure!(result.status.success(), "checksum signing failed");
-    ensure!(
-        signature_path.metadata()?.len() > 0,
-        "signing produced an empty signature"
-    );
+    let fingerprint = env("GPG_FINGERPRINT")?;
+    let signature_input = input.join("existing-signature.sig");
+    reuse_or_sign_checksum(
+        &sums_path,
+        &signature_path,
+        &signature_input,
+        plan.existing_signature_sha256.as_deref(),
+        &fingerprint,
+        &std::env::var("GPG_PASSPHRASE").unwrap_or_default(),
+        None,
+    )?;
     ensure!(
         plan.assets
             .iter()
@@ -1812,6 +1971,150 @@ fn sign() -> Result<()> {
     plan.validate()?;
     validate_signed_provider_assets(&assets_dir, &plan)?;
     write_json(input.join("plan.json"), &plan)?;
+    Ok(())
+}
+
+fn sign_checksum(
+    sums_path: &Path,
+    signature_path: &Path,
+    fingerprint: &str,
+    passphrase: &str,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    let mut gpg = ProcessCommand::new("gpg");
+    gpg.arg("--batch");
+    gpg.args(["--no-auto-key-retrieve", "--no-auto-key-import"]);
+    if let Some(homedir) = homedir {
+        gpg.arg("--homedir").arg(homedir);
+    }
+    gpg.args([
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase-fd",
+        "0",
+        "--local-user",
+    ])
+    .arg(fingerprint)
+    .arg("--output")
+    .arg(signature_path)
+    .arg("--detach-sign")
+    .arg(sums_path)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    let mut child = gpg.spawn().context("start checksum signing")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{passphrase}")?;
+    }
+    let result = child.wait_with_output()?;
+    ensure!(result.status.success(), "checksum signing failed");
+    ensure!(
+        signature_path.metadata()?.len() > 0,
+        "signing produced an empty signature"
+    );
+    verify_checksum_signature(signature_path, sums_path, fingerprint, homedir)
+}
+
+fn reuse_or_sign_checksum(
+    sums_path: &Path,
+    signature_path: &Path,
+    existing_path: &Path,
+    expected_digest: Option<&str>,
+    fingerprint: &str,
+    passphrase: &str,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    if let Some(expected_digest) = expected_digest {
+        ensure!(
+            existing_path.is_file(),
+            "planned existing signature is missing"
+        );
+        ensure!(
+            sha256_file(existing_path)? == expected_digest,
+            "existing signature artifact digest changed"
+        );
+        std::fs::copy(existing_path, signature_path)?;
+        verify_checksum_signature(signature_path, sums_path, fingerprint, homedir)?;
+    } else {
+        ensure!(
+            !existing_path.exists(),
+            "unplanned existing signature is present"
+        );
+        sign_checksum(sums_path, signature_path, fingerprint, passphrase, homedir)?;
+    }
+    Ok(())
+}
+
+fn verify_checksum_signature(
+    signature_path: &Path,
+    sums_path: &Path,
+    fingerprint: &str,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    let mut gpg = ProcessCommand::new("gpg");
+    gpg.arg("--batch");
+    gpg.args(["--no-auto-key-retrieve", "--no-auto-key-import"]);
+    if let Some(homedir) = homedir {
+        gpg.arg("--homedir").arg(homedir);
+    }
+    let output = gpg
+        .args(["--status-fd", "1", "--verify"])
+        .arg(signature_path)
+        .arg(sums_path)
+        .output()
+        .context("start checksum signature verification")?;
+    ensure!(
+        output.status.success(),
+        "checksum signature verification failed"
+    );
+    let status = String::from_utf8(output.stdout).context("GPG status is not UTF-8")?;
+    validate_gpg_status(&status, fingerprint)
+}
+
+fn validate_gpg_status(status: &str, fingerprint: &str) -> Result<()> {
+    let expected = fingerprint.trim().to_ascii_uppercase();
+    ensure!(!expected.is_empty(), "configured GPG fingerprint is empty");
+    let mut valid_signatures = Vec::new();
+    for line in status.lines() {
+        let Some(payload) = line.strip_prefix("[GNUPG:] ") else {
+            continue;
+        };
+        let mut fields = payload.split_ascii_whitespace();
+        let Some(kind) = fields.next() else { continue };
+        ensure!(
+            !matches!(
+                kind,
+                "BADSIG"
+                    | "ERRSIG"
+                    | "NO_PUBKEY"
+                    | "EXPSIG"
+                    | "EXPKEYSIG"
+                    | "REVKEYSIG"
+                    | "KEYEXPIRED"
+                    | "KEYREVOKED"
+                    | "SIGEXPIRED"
+            ),
+            "GPG reported an invalid or expired signature"
+        );
+        if kind == "VALIDSIG" {
+            let signer = fields
+                .next()
+                .context("GPG VALIDSIG lacks signer fingerprint")?
+                .to_ascii_uppercase();
+            let remaining: Vec<_> = fields.collect();
+            let primary = remaining.get(8).map(|value| value.to_ascii_uppercase());
+            valid_signatures.push((signer, primary));
+        }
+    }
+    ensure!(
+        valid_signatures.len() == 1,
+        "GPG did not report exactly one valid signature"
+    );
+    let (signer, primary) = &valid_signatures[0];
+    ensure!(
+        signer == &expected || primary.as_ref() == Some(&expected),
+        "checksum signature uses an unexpected key"
+    );
     Ok(())
 }
 
@@ -1864,12 +2167,11 @@ fn publish() -> Result<()> {
         "release tag moved after preflight"
     );
     let existing = find_release(&api, &repo, &plan.tag)?;
-    if let (Some(expected_id), Some(current)) = (plan.release_id, existing.as_ref()) {
-        ensure!(
-            current["id"].as_u64() == Some(expected_id),
-            "release identity changed after preflight"
-        );
-    }
+    let current_id = existing
+        .as_ref()
+        .map(|release| release["id"].as_u64().context("existing release lacks ID"))
+        .transpose()?;
+    validate_release_identity(plan.release_id, current_id)?;
     let release = match existing {
         Some(release) => {
             ensure!(
@@ -1978,6 +2280,14 @@ fn ensure_published_immutable_release(
     Ok(())
 }
 
+fn validate_release_identity(expected: Option<u64>, current: Option<u64>) -> Result<()> {
+    ensure!(
+        expected == current,
+        "release identity changed after preflight"
+    );
+    Ok(())
+}
+
 fn validate_release_asset_state(
     expected: &[PlannedAsset],
     existing: &[Value],
@@ -2012,7 +2322,14 @@ fn validate_release_asset_state(
 
 fn validate_signed_provider_assets(directory: &Path, plan: &ReleasePlanV2) -> Result<()> {
     let repository = Repository::parse(&plan.repository)?;
-    let project = repository.name();
+    validate_signed_provider_assets_for_project(directory, plan, repository.name())
+}
+
+fn validate_signed_provider_assets_for_project(
+    directory: &Path,
+    plan: &ReleasePlanV2,
+    project: &str,
+) -> Result<()> {
     let mut expected = provider_asset_names(&plan.tag, project);
     let sums_name = format!("{project}_{}_SHA256SUMS", plan.tag.version());
     let signature_name = format!("{sums_name}.sig");
@@ -2244,6 +2561,698 @@ fn validate_provider_archive(
 mod tests {
     use super::*;
 
+    // This ignored probe is invoked only by the frozen, trusted integration
+    // workflow. Every phase is explicitly selected; production release
+    // commands never expose this mode.
+    #[test]
+    #[ignore = "requires isolated provider probe workflow and credentials"]
+    fn provider_no_publish_probe() {
+        provider_no_publish_probe_inner().unwrap();
+    }
+
+    fn provider_no_publish_probe_inner() -> Result<()> {
+        let phase = env("SECUREFIX_PROVIDER_PROBE_PHASE")?;
+        let project = env("SECUREFIX_PROVIDER_PROBE_PROJECT")?;
+        Repository::parse(&format!("probe/{project}"))?;
+        let tag = ReleaseTag::parse(&env("SECUREFIX_PROVIDER_PROBE_TAG")?)?;
+        let assets = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_ASSET_DIR")?);
+        std::fs::create_dir_all(&assets)?;
+        match phase.as_str() {
+            "build-target" => {
+                let source = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_SOURCE_DIR")?);
+                let output = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_OUTPUT_DIR")?);
+                let os = env("SECUREFIX_PROVIDER_PROBE_OS")?;
+                let arch = env("SECUREFIX_PROVIDER_PROBE_ARCH")?;
+                let target = PROVIDER_TARGETS
+                    .iter()
+                    .copied()
+                    .find(|target| target.os == os && target.arch == arch)
+                    .context("target is not in the supported provider matrix")?;
+                build_provider_target(&source, &project, &tag, target, &output)?;
+            }
+            "build-manifest" => {
+                let source = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_SOURCE_DIR")?);
+                let name = format!("{project}_{}_manifest.json", tag.version());
+                std::fs::copy(
+                    source.join("terraform-registry-manifest.json"),
+                    assets.join(name),
+                )?;
+            }
+            "fresh-sign" => {
+                let fingerprint = env("GPG_FINGERPRINT")?;
+                ensure!(
+                    fingerprint == env("SECUREFIX_PROVIDER_PROBE_EXPECTED_GPG_FINGERPRINT")?,
+                    "signing key differs from configured Registry key"
+                );
+                export_probe_public_key(&fingerprint)?;
+                let passphrase = std::env::var("GPG_PASSPHRASE").unwrap_or_default();
+                let input = assets.join("existing-signature.sig");
+                let sums_name = format!("{project}_{}_SHA256SUMS", tag.version());
+                let mut plan = probe_plan(&assets, &project, tag.clone())?;
+                let sums = canonical_provider_sums(&assets, &plan.assets)?;
+                let sums_path = assets.join(&sums_name);
+                std::fs::write(&sums_path, sums)?;
+                let signature_path = assets.join(format!("{sums_name}.sig"));
+                reuse_or_sign_checksum(
+                    &sums_path,
+                    &signature_path,
+                    &input,
+                    None,
+                    &fingerprint,
+                    &passphrase,
+                    None,
+                )?;
+                append_signed_assets(&mut plan, &assets, &sums_path, &signature_path)?;
+                validate_signed_provider_assets_for_project(&assets, &plan, &project)?;
+            }
+            "create-draft" => {
+                let (api, repo) = probe_write_api()?;
+                let target_sha = probe_scratch_target_sha(&repo)?;
+                let tag_ref = format!(
+                    "/repos/{}/git/ref/tags/{}",
+                    repo.as_str(),
+                    url_encode(tag.as_str())
+                );
+                ensure!(
+                    probe_not_found(&api, &tag_ref)?,
+                    "scratch tag already exists"
+                );
+                let release: Value = api.post(
+                    &format!("/repos/{}/releases", repo.as_str()),
+                    &json!({"tag_name":tag.as_str(),"target_commitish":target_sha,"name":tag.as_str(),"draft":true,"prerelease":true,"generate_release_notes":false}),
+                )?;
+                let release_id = release["id"].as_u64().context("created draft lacks ID")?;
+                crate::output("release_id", release_id.to_string())?;
+                crate::output("target_sha", &target_sha)?;
+                write_probe_receipt(release_id, tag.as_str(), &target_sha)?;
+                ensure!(
+                    release["draft"] == true && release["tag_name"] == tag.as_str(),
+                    "created release is not the expected draft"
+                );
+                ensure!(
+                    probe_not_found(&api, &tag_ref)?
+                        || probe_tag_points_to_commit(&api, &repo, tag.as_str(), &target_sha)?,
+                    "created probe tag does not point to the recorded target commit"
+                );
+                crate::output("tag", tag.as_str())?;
+            }
+            "recover-download" => {
+                let repo_name = env("SECUREFIX_PROVIDER_PROBE_REPOSITORY")?;
+                ensure!(
+                    repo_name == crate::config::trusted()?.deployment.integration.repository,
+                    "provider probe repository is not the trusted integration repository"
+                );
+                let repo = Repository::parse(&repo_name)?;
+                let release_id = probe_release_id()?;
+                ensure!(release_id > 0, "release ID must be positive");
+                let api = GitHub::new("https://api.github.com", env("GH_TOKEN")?)?;
+                let found = find_release(&api, &repo, &tag)?;
+                ensure!(
+                    found.as_ref().and_then(|release| release["id"].as_u64()) == Some(release_id),
+                    "scratch tag does not resolve to the receipt-bound draft release"
+                );
+                let release: Value =
+                    api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
+                ensure!(
+                    release["id"].as_u64() == Some(release_id)
+                        && release["draft"] == true
+                        && release["tag_name"] == tag.as_str(),
+                    "probe target is not the expected draft release"
+                );
+                let target_sha = probe_target_sha()?;
+                write_probe_receipt(release_id, tag.as_str(), &target_sha)?;
+                crate::output("release_id", release_id.to_string())?;
+                let existing: Vec<Value> = api.paginate(&format!(
+                    "/repos/{}/releases/{release_id}/assets",
+                    repo.as_str()
+                ))?;
+                let plan = probe_plan(&assets, &project, tag.clone())?;
+                let input = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_OUTPUT_DIR")?);
+                std::fs::create_dir_all(&input)?;
+                let digest = prepare_existing_provider_signature(
+                    &api, &repo, &release, &existing, &plan, &assets, &input,
+                )?
+                .context("scratch draft has no signature to recover")?;
+                write_json(
+                    input.join("receipt.json"),
+                    &json!({"release_id":release_id,"tag":tag.as_str(),"sha256":digest}),
+                )?;
+                write_probe_receipt(release_id, tag.as_str(), &probe_target_sha()?)?;
+                crate::output("release_id", release_id.to_string())?;
+            }
+            "stage-draft" | "complete-draft" => {
+                let repo_name = env("SECUREFIX_PROVIDER_PROBE_REPOSITORY")?;
+                ensure!(
+                    repo_name == crate::config::trusted()?.deployment.integration.repository,
+                    "provider probe repository is not the trusted integration repository"
+                );
+                let repo = Repository::parse(&repo_name)?;
+                let (api, _) = probe_write_api()?;
+                let release_id = probe_release_id()?;
+                let release: Value =
+                    api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
+                ensure!(
+                    release["id"].as_u64() == Some(release_id)
+                        && release["draft"] == true
+                        && release["tag_name"] == tag.as_str(),
+                    "probe target is not the expected draft release"
+                );
+                write_probe_receipt(release_id, tag.as_str(), &probe_target_sha()?)?;
+                crate::output("release_id", release_id.to_string())?;
+                let mut expected = probe_plan(&assets, &project, tag.clone())?;
+                if phase == "complete-draft" {
+                    let sums = assets.join(format!("{project}_{}_SHA256SUMS", tag.version()));
+                    let sig = assets.join(format!("{project}_{}_SHA256SUMS.sig", tag.version()));
+                    append_signed_assets(&mut expected, &assets, &sums, &sig)?;
+                    validate_signed_provider_assets_for_project(&assets, &expected, &project)?;
+                } else {
+                    for name in [
+                        format!("{project}_{}_SHA256SUMS", tag.version()),
+                        format!("{project}_{}_SHA256SUMS.sig", tag.version()),
+                    ] {
+                        let path = assets.join(&name);
+                        expected.assets.push(PlannedAsset {
+                            name,
+                            sha256: sha256_file(&path)?,
+                        });
+                    }
+                }
+                let mut existing: Vec<Value> = api.paginate(&format!(
+                    "/repos/{}/releases/{release_id}/assets",
+                    repo.as_str()
+                ))?;
+                validate_release_asset_state(&expected.assets, &existing, false)?;
+                let names: Vec<String> = if phase == "stage-draft" {
+                    expected
+                        .assets
+                        .iter()
+                        .filter(|asset| {
+                            asset.name.ends_with("SHA256SUMS")
+                                || asset.name.ends_with("SHA256SUMS.sig")
+                        })
+                        .map(|asset| asset.name.clone())
+                        .collect()
+                } else {
+                    expected
+                        .assets
+                        .iter()
+                        .map(|asset| asset.name.clone())
+                        .collect()
+                };
+                for name in names {
+                    if existing.iter().any(|asset| asset["name"] == name) {
+                        continue;
+                    }
+                    let path = assets.join(&name);
+                    let url = format!(
+                        "https://uploads.github.com/repos/{}/releases/{release_id}/assets?name={}",
+                        repo.as_str(),
+                        url_encode(&name)
+                    );
+                    api.upload(&url, std::fs::read(path)?, "application/octet-stream")?;
+                }
+                existing = api.paginate(&format!(
+                    "/repos/{}/releases/{release_id}/assets",
+                    repo.as_str()
+                ))?;
+                validate_release_asset_state(
+                    &expected.assets,
+                    &existing,
+                    phase == "complete-draft",
+                )?;
+                if phase == "complete-draft" {
+                    let snapshot = existing
+                        .iter()
+                        .map(|asset| {
+                            Ok((
+                                asset["name"]
+                                    .as_str()
+                                    .context("release asset lacks name")?
+                                    .to_owned(),
+                                json!({"id":asset["id"],"digest":asset["digest"]}),
+                            ))
+                        })
+                        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+                    let snapshot_path = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_STATE_DIR")?)
+                        .join("uploaded-assets.json");
+                    if snapshot_path.exists() {
+                        let previous: Value =
+                            serde_json::from_slice(&std::fs::read(&snapshot_path)?)?;
+                        ensure!(
+                            serde_json::to_value(&snapshot)? == previous,
+                            "scratch draft asset IDs or digests changed after completion"
+                        );
+                    } else {
+                        write_json(&snapshot_path, &serde_json::to_value(&snapshot)?)?;
+                    }
+                }
+                crate::output("release_id", release_id.to_string())?;
+                crate::output("tag", tag.as_str())?;
+            }
+            "recover-sign" => {
+                let fingerprint = env("GPG_FINGERPRINT")?;
+                ensure!(
+                    fingerprint == env("SECUREFIX_PROVIDER_PROBE_EXPECTED_GPG_FINGERPRINT")?,
+                    "signing key differs from configured Registry key"
+                );
+                let passphrase = std::env::var("GPG_PASSPHRASE").unwrap_or_default();
+                let recovery = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_RECOVERY_DIR")?);
+                let receipt: Value =
+                    serde_json::from_slice(&std::fs::read(recovery.join("receipt.json"))?)?;
+                ensure!(
+                    receipt["release_id"].as_u64() == Some(probe_release_id()?),
+                    "recovery receipt release ID mismatch"
+                );
+                ensure!(
+                    receipt["tag"] == tag.as_str(),
+                    "recovery receipt tag mismatch"
+                );
+                let plan = probe_plan(&assets, &project, tag.clone())?;
+                let sums = canonical_provider_sums(&assets, &plan.assets)?;
+                let digest = receipt["sha256"]
+                    .as_str()
+                    .context("receipt lacks signature digest")?;
+                let sums_path = assets.join(format!("{project}_{}_SHA256SUMS", tag.version()));
+                std::fs::write(&sums_path, sums)?;
+                let signature_path =
+                    assets.join(format!("{project}_{}_SHA256SUMS.sig", tag.version()));
+                let recovered = recovery.join("existing-signature.sig");
+                ensure!(
+                    sha256_file(&recovered)? == digest,
+                    "recovery artifact digest mismatch"
+                );
+                reuse_or_sign_checksum(
+                    &sums_path,
+                    &signature_path,
+                    &recovered,
+                    Some(digest),
+                    &fingerprint,
+                    &passphrase,
+                    None,
+                )?;
+                ensure!(
+                    std::fs::read(&signature_path)? == std::fs::read(&recovered)?,
+                    "recovered signature bytes changed"
+                );
+                verify_checksum_signature(&signature_path, &sums_path, &fingerprint, None)?;
+            }
+            "verify-draft" => {
+                let repo_name = env("SECUREFIX_PROVIDER_PROBE_REPOSITORY")?;
+                ensure!(
+                    repo_name == crate::config::trusted()?.deployment.integration.repository,
+                    "provider probe repository is not the trusted integration repository"
+                );
+                let repo = Repository::parse(&repo_name)?;
+                let release_id = probe_release_id()?;
+                let api = GitHub::new("https://api.github.com", env("GH_TOKEN")?)?;
+                let release: Value =
+                    api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
+                ensure!(
+                    release["id"].as_u64() == Some(release_id)
+                        && release["draft"] == true
+                        && release["tag_name"] == tag.as_str(),
+                    "probe target is not the expected draft release"
+                );
+                write_probe_receipt(release_id, tag.as_str(), &probe_target_sha()?)?;
+                crate::output("release_id", release_id.to_string())?;
+                let existing: Vec<Value> = api.paginate(&format!(
+                    "/repos/{}/releases/{release_id}/assets",
+                    repo.as_str()
+                ))?;
+                let mut plan = probe_plan(&assets, &project, tag)?;
+                for entry in std::fs::read_dir(&assets)? {
+                    let path = entry?.path();
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .context("invalid asset name")?
+                        .to_owned();
+                    if name.ends_with("SHA256SUMS") || name.ends_with("SHA256SUMS.sig") {
+                        plan.assets.push(PlannedAsset {
+                            name,
+                            sha256: sha256_file(&path)?,
+                        });
+                    }
+                }
+                validate_signed_provider_assets_for_project(&assets, &plan, &project)?;
+                validate_release_asset_state(&plan.assets, &existing, true)?;
+                let state = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_STATE_DIR")?);
+                let import = ProcessCommand::new("gpg")
+                    .arg("--batch")
+                    .arg("--import")
+                    .arg(state.join("public-key.asc"))
+                    .output()
+                    .context("import public provider signing key")?;
+                ensure!(
+                    import.status.success(),
+                    "could not import public provider signing key"
+                );
+                let fingerprint = env("SECUREFIX_PROVIDER_PROBE_EXPECTED_GPG_FINGERPRINT")?;
+                ensure!(
+                    fingerprint == env("GPG_FINGERPRINT")?,
+                    "verification key differs from configured Registry key"
+                );
+                verify_checksum_signature(
+                    &assets.join(format!("{project}_{}_SHA256SUMS.sig", plan.tag.version())),
+                    &assets.join(format!("{project}_{}_SHA256SUMS", plan.tag.version())),
+                    &fingerprint,
+                    None,
+                )?;
+            }
+            "cleanup-draft" => {
+                let repo_name = env("SECUREFIX_PROVIDER_PROBE_REPOSITORY")?;
+                ensure!(
+                    repo_name == crate::config::trusted()?.deployment.integration.repository,
+                    "provider probe repository is not the trusted integration repository"
+                );
+                let release_id = probe_release_id()?;
+                let (api, repo) = probe_write_api()?;
+                let release_path = format!("/repos/{}/releases/{release_id}", repo.as_str());
+                let ref_path = format!(
+                    "/repos/{}/git/ref/tags/{}",
+                    repo.as_str(),
+                    url_encode(tag.as_str())
+                );
+                let receipt = load_probe_receipt()?;
+                ensure!(
+                    receipt["tag"] == tag.as_str(),
+                    "cleanup receipt tag mismatch"
+                );
+                ensure!(
+                    receipt["release_id"].as_u64() == Some(release_id),
+                    "cleanup receipt release ID mismatch"
+                );
+                let recorded_target = receipt["target_sha"]
+                    .as_str()
+                    .context("cleanup receipt lacks target SHA")?;
+                crate::policy::validate_sha(recorded_target)?;
+                if let Ok(expected_target) =
+                    std::env::var("SECUREFIX_PROVIDER_PROBE_EXPECTED_TARGET_SHA")
+                {
+                    ensure!(
+                        recorded_target == expected_target,
+                        "cleanup target SHA differs from recorded workflow output"
+                    );
+                }
+                let tag_exists = !probe_not_found(&api, &ref_path)?;
+                if tag_exists {
+                    ensure!(
+                        probe_tag_points_to_commit(&api, &repo, tag.as_str(), recorded_target)?,
+                        "scratch tag differs from receipt target; refusing cleanup"
+                    );
+                }
+                if !probe_not_found(&api, &release_path)? {
+                    let release: Value = api.get(&release_path)?;
+                    ensure!(
+                        release["id"].as_u64() == Some(release_id)
+                            && release["draft"] == true
+                            && release["tag_name"] == tag.as_str(),
+                        "refusing to delete a non-matching draft"
+                    );
+                    api.delete(&release_path)?;
+                }
+                if tag_exists && !probe_not_found(&api, &ref_path)? {
+                    ensure!(
+                        probe_tag_points_to_commit(&api, &repo, tag.as_str(), recorded_target)?,
+                        "scratch tag changed during cleanup; refusing deletion"
+                    );
+                    api.delete(&format!(
+                        "/repos/{}/git/refs/tags/{}",
+                        repo.as_str(),
+                        url_encode(tag.as_str())
+                    ))?;
+                }
+                ensure!(
+                    probe_not_found(&api, &release_path)?,
+                    "scratch release still exists after cleanup"
+                );
+                ensure!(
+                    probe_not_found(&api, &ref_path)?,
+                    "scratch tag exists after cleanup"
+                );
+            }
+            _ => bail!("unsupported provider probe phase"),
+        }
+        Ok(())
+    }
+
+    fn probe_release_id() -> Result<u64> {
+        if let Ok(value) = std::env::var("SECUREFIX_PROVIDER_PROBE_RELEASE_ID") {
+            let id = value.parse::<u64>()?;
+            ensure!(id > 0, "release ID must be positive");
+            return Ok(id);
+        }
+        let receipt = load_probe_receipt()?;
+        let id = receipt["release_id"]
+            .as_u64()
+            .context("receipt lacks release ID")?;
+        ensure!(id > 0, "release ID must be positive");
+        Ok(id)
+    }
+
+    fn write_probe_receipt(release_id: u64, tag: &str, target_sha: &str) -> Result<()> {
+        ensure!(release_id > 0, "release ID must be positive");
+        crate::policy::validate_sha(target_sha)?;
+        let state = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_STATE_DIR")?);
+        std::fs::create_dir_all(&state)?;
+        let path = state.join("receipt.json");
+        if path.exists() {
+            let previous: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            ensure!(
+                previous["release_id"].as_u64() == Some(release_id)
+                    && previous["tag"] == tag
+                    && previous["target_sha"] == target_sha,
+                "probe receipt identity changed"
+            );
+            return Ok(());
+        }
+        write_json(
+            path,
+            &json!({"release_id":release_id,"tag":tag,"target_sha":target_sha}),
+        )
+    }
+
+    fn load_probe_receipt() -> Result<Value> {
+        let state = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_STATE_DIR")?);
+        let path = state.join("receipt.json");
+        if path.exists() {
+            return Ok(serde_json::from_slice(&std::fs::read(path)?)?);
+        }
+        let release_id = env("SECUREFIX_PROVIDER_PROBE_RELEASE_ID")?.parse::<u64>()?;
+        ensure!(release_id > 0, "release ID must be positive");
+        let tag = env("SECUREFIX_PROVIDER_PROBE_TAG")?;
+        let target_sha = env("SECUREFIX_PROVIDER_PROBE_EXPECTED_TARGET_SHA")?;
+        crate::policy::validate_sha(&target_sha)?;
+        Ok(json!({"release_id":release_id,"tag":tag,"target_sha":target_sha}))
+    }
+
+    fn probe_target_sha() -> Result<String> {
+        let receipt = load_probe_receipt()?;
+        let target = receipt["target_sha"]
+            .as_str()
+            .context("probe receipt lacks target SHA")?;
+        crate::policy::validate_sha(target)?;
+        Ok(target.to_owned())
+    }
+
+    fn probe_tag_points_to_commit(
+        api: &GitHub,
+        repo: &Repository,
+        tag: &str,
+        expected: &str,
+    ) -> Result<bool> {
+        let path = format!("/repos/{}/git/ref/tags/{}", repo.as_str(), url_encode(tag));
+        let reference: Value = match api.get(&path) {
+            Ok(reference) => reference,
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let object = &reference["object"];
+        let sha = object["sha"].as_str().context("tag ref lacks object SHA")?;
+        match object["type"]
+            .as_str()
+            .context("tag ref lacks object type")?
+        {
+            "commit" => Ok(sha == expected),
+            "tag" => {
+                let annotation: Value =
+                    api.get(&format!("/repos/{}/git/tags/{sha}", repo.as_str()))?;
+                Ok(annotation["object"]["type"] == "commit"
+                    && annotation["object"]["sha"] == expected)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn probe_scratch_target_sha(repo: &Repository) -> Result<String> {
+        let api = GitHub::anonymous()?;
+        let repository: Value = api.get(&format!("/repos/{}", repo.as_str()))?;
+        let branch = repository["default_branch"]
+            .as_str()
+            .context("scratch repository default branch missing")?;
+        let commit: Value = api.get(&format!(
+            "/repos/{}/commits/{}",
+            repo.as_str(),
+            url_encode(branch)
+        ))?;
+        let sha = commit["sha"]
+            .as_str()
+            .context("scratch default branch lacks commit SHA")?;
+        crate::policy::validate_sha(sha)?;
+        Ok(sha.to_owned())
+    }
+
+    fn export_probe_public_key(fingerprint: &str) -> Result<()> {
+        let state = PathBuf::from(env("SECUREFIX_PROVIDER_PROBE_STATE_DIR")?);
+        std::fs::create_dir_all(&state)?;
+        let output = ProcessCommand::new("gpg")
+            .arg("--batch")
+            .arg("--armor")
+            .arg("--export")
+            .arg(fingerprint)
+            .output()
+            .context("export provider signing public key")?;
+        ensure!(
+            output.status.success() && !output.stdout.is_empty(),
+            "could not export provider signing public key"
+        );
+        std::fs::write(state.join("public-key.asc"), output.stdout)?;
+        Ok(())
+    }
+
+    fn probe_not_found(api: &GitHub, path: &str) -> Result<bool> {
+        match api.get::<Value>(path) {
+            Ok(_) => Ok(false),
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn probe_write_api() -> Result<(GitHub, Repository)> {
+        let repo_name = env("SECUREFIX_PROVIDER_PROBE_REPOSITORY")?;
+        ensure!(
+            repo_name == crate::config::trusted()?.deployment.integration.repository,
+            "provider probe repository is not the trusted integration repository"
+        );
+        let repo = Repository::parse(&repo_name)?;
+        let token_name = "SECUREFIX_SERVER_APP_TOKEN";
+        let token = env(token_name)?;
+        // This validation requires the installation to be scoped to the one configured scratch repository.
+        let candidate_sha = env("GITHUB_SHA")?;
+        let _validated_scratch_token = GitHub::scratch_from_env(token_name, &candidate_sha)?;
+        let anonymous = GitHub::anonymous()?;
+        let server = &crate::config::trusted()?.deployment.server;
+        let repository: Value = anonymous.get(&format!("/repos/{}", server.repository))?;
+        let branch = repository["default_branch"]
+            .as_str()
+            .context("server default branch missing")?;
+        let reference: Value = anonymous.get(&format!(
+            "/repos/{}/git/ref/heads/{}",
+            server.repository,
+            url_encode(branch)
+        ))?;
+        let runtime_sha = reference["object"]["sha"]
+            .as_str()
+            .context("server runtime ref lacks SHA")?;
+        Ok((
+            GitHub::new("https://api.github.com", token)?.with_runtime_revision(runtime_sha)?,
+            repo,
+        ))
+    }
+
+    fn probe_plan(assets: &Path, project: &str, tag: ReleaseTag) -> Result<ReleasePlanV2> {
+        for name in provider_asset_names(&tag, project) {
+            let path = assets.join(&name);
+            let metadata = std::fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "provider probe asset must be a regular file"
+            );
+            ensure!(
+                metadata.len() > 0 && metadata.len() <= MAX_PROVIDER_ARCHIVE_BYTES,
+                "provider probe asset has invalid size"
+            );
+            if name.ends_with(".zip") {
+                validate_provider_archive(&path, &name, &tag, project)?;
+            } else {
+                let manifest: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+                ensure!(
+                    manifest["version"] == 1
+                        && manifest["metadata"]["protocol_versions"] == json!(["6.0"]),
+                    "unexpected Terraform Registry manifest"
+                );
+            }
+        }
+        let assets = provider_asset_names(&tag, project)
+            .into_iter()
+            .map(|name| {
+                Ok(PlannedAsset {
+                    sha256: sha256_file(&assets.join(&name))?,
+                    name,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ReleasePlanV2 {
+            schema_version: 2,
+            server_revision: "provider-no-publish-probe".to_owned(),
+            repository: format!("probe/{project}"),
+            strategy: ReleaseStrategy::TerraformProvider,
+            source_run_id: RunId(1),
+            source_run_attempt: 1,
+            source_revision: "0".repeat(40),
+            release_pr_number: 1,
+            release_pr_sha: "0".repeat(40),
+            tag,
+            source_manifest: ReleaseManifestV2 {
+                schema_version: 2,
+                repository: format!("probe/{project}"),
+                source_run_id: RunId(1),
+                source_run_sha: CommitSha::parse(&"0".repeat(40))?,
+                run_attempt: 1,
+                source_revision: CommitSha::parse(&"0".repeat(40))?,
+                release_pr_number: 1,
+                release_pr_sha: CommitSha::parse(&"0".repeat(40))?,
+                tag: ReleaseTag::parse("v0.0.1")?,
+                artifact_id: None,
+            },
+            release_id: Some(1),
+            existing_signature_sha256: None,
+            assets,
+        })
+    }
+
+    fn append_signed_assets(
+        plan: &mut ReleasePlanV2,
+        assets: &Path,
+        sums: &Path,
+        signature: &Path,
+    ) -> Result<()> {
+        for path in [sums, signature] {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("invalid signed asset name")?
+                .to_owned();
+            plan.assets.push(PlannedAsset {
+                sha256: sha256_file(assets.join(&name).as_path())?,
+                name,
+            });
+        }
+        Ok(())
+    }
+
     #[test]
     fn repository_rejects_path_injection() {
         assert!(Repository::parse("civitaspo/terraform-provider-sigma").is_ok());
@@ -2311,12 +3320,454 @@ mod tests {
             tag: source_manifest.tag.clone(),
             source_manifest: source_manifest.clone(),
             release_id: None,
+            existing_signature_sha256: None,
             assets: Vec::new(),
         };
         assert!(plan.validate().is_ok());
         let mut tampered = plan;
         tampered.release_pr_sha = "e".repeat(40);
         assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn release_identity_requires_exact_preflight_binding() {
+        assert!(validate_release_identity(None, None).is_ok());
+        assert!(validate_release_identity(Some(7), Some(7)).is_ok());
+        assert!(validate_release_identity(None, Some(7)).is_err());
+        assert!(validate_release_identity(Some(7), None).is_err());
+        assert!(validate_release_identity(Some(7), Some(8)).is_err());
+    }
+
+    #[test]
+    fn find_release_falls_back_to_paginated_listing_for_drafts_and_fails_closed() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repo = Repository::parse("example/provider").unwrap();
+        let tag = ReleaseTag::parse("v1.2.3").unwrap();
+        let lookup = "/repos/example/provider/releases/tags/v1.2.3";
+        let listing = "/repos/example/provider/releases?per_page=100&page=1";
+
+        let fixture = Fixture::new(vec![Route::get(
+            lookup,
+            json!({"id":7,"tag_name":"v1.2.3","draft":false}),
+        )]);
+        let found = find_release(&fixture.api, &repo, &tag).unwrap().unwrap();
+        assert_eq!(found["id"], 7);
+        assert_eq!(found["draft"], false);
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![
+            Route::request("GET", lookup, 404, json!({"message":"Not Found"})),
+            Route::get(
+                listing,
+                json!([
+                    {"id":10,"tag_name":"v1.2.2","draft":false},
+                    {"id":42,"tag_name":"v1.2.3","draft":true}
+                ]),
+            ),
+        ]);
+        let found = find_release(&fixture.api, &repo, &tag).unwrap().unwrap();
+        assert_eq!(found["id"], 42);
+        assert_eq!(found["draft"], true);
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![
+            Route::request("GET", lookup, 404, json!({"message":"Not Found"})),
+            Route::get(listing, json!([{"id":10,"tag_name":"v1.2.2"}])),
+        ]);
+        assert!(find_release(&fixture.api, &repo, &tag).unwrap().is_none());
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![
+            Route::request("GET", lookup, 404, json!({"message":"Not Found"})),
+            Route::get(
+                listing,
+                json!([
+                    {"id":42,"tag_name":"v1.2.3","draft":true},
+                    {"id":43,"tag_name":"v1.2.3","draft":true}
+                ]),
+            ),
+        ]);
+        assert!(find_release(&fixture.api, &repo, &tag).is_err());
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![Route::request(
+            "GET",
+            lookup,
+            403,
+            json!({"message":"Forbidden"}),
+        )]);
+        assert!(find_release(&fixture.api, &repo, &tag).is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn gpg_status_rejects_expired_revoked_and_multiple_signatures() {
+        let expected = "A".repeat(40);
+        let signer = "B".repeat(40);
+        let valid = format!(
+            "[GNUPG:] VALIDSIG {signer} 2026-01-01 1767225600 0 4 0 1 10 00 {expected} future-field\n"
+        );
+        assert!(validate_gpg_status(&valid, &expected).is_ok());
+        for rejected in ["EXPSIG", "EXPKEYSIG", "REVKEYSIG"] {
+            let status = format!("[GNUPG:] {rejected} keyid user\n{valid}");
+            assert!(
+                validate_gpg_status(&status, &expected).is_err(),
+                "{rejected}"
+            );
+        }
+        assert!(validate_gpg_status(&(valid.clone() + &valid), &expected).is_err());
+    }
+
+    fn provider_signature_test_plan(assets_dir: &Path) -> ReleasePlanV2 {
+        let tag = ReleaseTag::parse("v1.2.3").unwrap();
+        let repository = "example/terraform-provider-sigma".to_owned();
+        let source_manifest = ReleaseManifestV2 {
+            schema_version: 2,
+            repository: repository.clone(),
+            source_run_id: RunId(7),
+            source_run_sha: CommitSha::parse(&"a".repeat(40)).unwrap(),
+            run_attempt: 1,
+            source_revision: CommitSha::parse(&"b".repeat(40)).unwrap(),
+            release_pr_number: 8,
+            release_pr_sha: CommitSha::parse(&"c".repeat(40)).unwrap(),
+            tag: tag.clone(),
+            artifact_id: Some(9),
+        };
+        let mut plan = ReleasePlanV2 {
+            schema_version: 2,
+            server_revision: "d".repeat(40),
+            repository,
+            strategy: ReleaseStrategy::TerraformProvider,
+            source_run_id: RunId(7),
+            source_run_attempt: 1,
+            source_revision: "b".repeat(40),
+            release_pr_number: 8,
+            release_pr_sha: "c".repeat(40),
+            tag,
+            source_manifest,
+            release_id: Some(17),
+            existing_signature_sha256: None,
+            assets: Vec::new(),
+        };
+        let asset = assets_dir.join("provider.zip");
+        std::fs::write(&asset, b"provider bytes").unwrap();
+        plan.assets.push(PlannedAsset {
+            name: "provider.zip".into(),
+            sha256: sha256_file(&asset).unwrap(),
+        });
+        plan
+    }
+
+    fn expected_release_asset(name: &str, digest: &str, id: u64, size: u64) -> Value {
+        json!({"name":name,"digest":format!("sha256:{digest}"),"id":id,"size":size})
+    }
+
+    #[test]
+    fn preflight_downloads_only_the_bounded_digest_matched_signature_asset() {
+        use crate::fixtures::{Fixture, Route};
+        let input = tempfile::tempdir().unwrap();
+        let assets_dir = input.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let plan = provider_signature_test_plan(&assets_dir);
+        let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
+        let project = Repository::parse(&plan.repository).unwrap();
+        let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
+        let sums_digest = format!("{:x}", Sha256::digest(&sums));
+        let signature = b"opaque test signature";
+        let signature_digest = format!("{:x}", Sha256::digest(signature));
+        let existing = vec![
+            expected_release_asset(&sums_name, &sums_digest, 41, sums.len() as u64),
+            expected_release_asset(
+                &format!("{sums_name}.sig"),
+                &signature_digest,
+                42,
+                signature.len() as u64,
+            ),
+        ];
+        let release = json!({"draft":true});
+        let fixture = Fixture::new(vec![
+            Route::raw(
+                "GET",
+                "/repos/example/terraform-provider-sigma/releases/assets/42",
+                200,
+                signature.to_vec(),
+            )
+            .with_request_header("Accept", "application/octet-stream"),
+        ]);
+        let digest = prepare_existing_provider_signature(
+            &fixture.api,
+            &project,
+            &release,
+            &existing,
+            &plan,
+            &assets_dir,
+            input.path(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(digest, signature_digest);
+        assert_eq!(
+            std::fs::read(input.path().join("existing-signature.sig")).unwrap(),
+            signature
+        );
+        fixture.finish();
+    }
+
+    #[test]
+    fn preflight_allows_checksum_only_draft_and_rejects_unexpected_or_duplicate_assets() {
+        let input = tempfile::tempdir().unwrap();
+        let assets_dir = input.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let plan = provider_signature_test_plan(&assets_dir);
+        let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
+        let project = Repository::parse(&plan.repository).unwrap();
+        let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
+        let checksum = expected_release_asset(
+            &sums_name,
+            &format!("{:x}", Sha256::digest(&sums)),
+            41,
+            sums.len() as u64,
+        );
+        let api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        assert!(
+            prepare_existing_provider_signature(
+                &api,
+                &project,
+                &json!({"draft":true}),
+                std::slice::from_ref(&checksum),
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        let unexpected = expected_release_asset("other.zip", &"e".repeat(64), 43, 1);
+        assert!(
+            prepare_existing_provider_signature(
+                &api,
+                &project,
+                &json!({"draft":true}),
+                &[unexpected],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_existing_provider_signature(
+                &api,
+                &project,
+                &json!({"draft":true}),
+                &[checksum.clone(), checksum],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_signature_digest_mismatch_and_download_over_limit() {
+        use crate::fixtures::{Fixture, Route};
+        let input = tempfile::tempdir().unwrap();
+        let assets_dir = input.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let plan = provider_signature_test_plan(&assets_dir);
+        let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
+        let project = Repository::parse(&plan.repository).unwrap();
+        let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
+        let sums_asset = expected_release_asset(
+            &sums_name,
+            &format!("{:x}", Sha256::digest(&sums)),
+            41,
+            sums.len() as u64,
+        );
+        let signature_name = format!("{sums_name}.sig");
+        let bytes = b"actual signature bytes";
+        let bad_asset =
+            expected_release_asset(&signature_name, &"0".repeat(64), 42, bytes.len() as u64);
+        let fixture = Fixture::new(vec![Route::raw(
+            "GET",
+            "/repos/example/terraform-provider-sigma/releases/assets/42",
+            200,
+            bytes.to_vec(),
+        )]);
+        assert!(
+            prepare_existing_provider_signature(
+                &fixture.api,
+                &project,
+                &json!({"draft":true}),
+                &[sums_asset.clone(), bad_asset],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+        fixture.finish();
+
+        let oversized = vec![b'x'; MAX_PROVIDER_SIGNATURE_BYTES + 1];
+        let oversized_asset = expected_release_asset(
+            &signature_name,
+            &format!("{:x}", Sha256::digest(&oversized)),
+            42,
+            1,
+        );
+        let fixture = Fixture::new(vec![Route::raw(
+            "GET",
+            "/repos/example/terraform-provider-sigma/releases/assets/42",
+            200,
+            oversized,
+        )]);
+        assert!(
+            prepare_existing_provider_signature(
+                &fixture.api,
+                &project,
+                &json!({"draft":true}),
+                &[sums_asset, oversized_asset],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+        fixture.finish();
+    }
+
+    fn test_gpg(home: &Path, args: &[&str]) -> std::process::Output {
+        ProcessCommand::new("gpg")
+            .arg("--batch")
+            .arg("--homedir")
+            .arg(home)
+            .args(args)
+            .output()
+            .expect("GPG must be installed for release signing tests")
+    }
+
+    struct ScopedGpgHome(tempfile::TempDir);
+
+    impl ScopedGpgHome {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(
+                home.path(),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            )
+            .unwrap();
+            Self(home)
+        }
+
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl Drop for ScopedGpgHome {
+        fn drop(&mut self) {
+            let _ = ProcessCommand::new("gpgconf")
+                .arg("--homedir")
+                .arg(self.path())
+                .args(["--kill", "gpg-agent"])
+                .output();
+        }
+    }
+
+    fn generate_test_signing_key(home: &Path, email: &str) -> String {
+        let output = test_gpg(
+            home,
+            &[
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                &format!("Securefix Test <{email}>"),
+                "ed25519",
+                "sign",
+                "0",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "GPG test key generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = test_gpg(home, &["--with-colons", "--list-secret-keys", email]);
+        assert!(output.status.success(), "GPG test key listing failed");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("fpr:")
+                    .and_then(|line| line.split(':').nth(8))
+            })
+            .expect("generated GPG key fingerprint")
+            .to_owned()
+    }
+
+    #[test]
+    fn provider_signature_retry_reuses_verified_bytes_and_rejects_wrong_or_tampered_signatures() {
+        let home = ScopedGpgHome::new();
+        let output = test_gpg(home.path(), &["--version"]);
+        assert!(
+            output.status.success(),
+            "GPG must be installed for release signing tests"
+        );
+        let fingerprint = generate_test_signing_key(home.path(), "release@example.test");
+        let wrong_fingerprint = generate_test_signing_key(home.path(), "other@example.test");
+        let sums = home.path().join("SHA256SUMS");
+        std::fs::write(&sums, b"0123456789abcdef  provider.zip\n").unwrap();
+        let first = home.path().join("first.sig");
+        sign_checksum(&sums, &first, &fingerprint, "", Some(home.path())).unwrap();
+        let original = std::fs::read(&first).unwrap();
+
+        let reusable = home.path().join("existing-signature.sig");
+        std::fs::write(&reusable, &original).unwrap();
+        let output_signature = home.path().join("retry.sig");
+        reuse_or_sign_checksum(
+            &sums,
+            &output_signature,
+            &reusable,
+            Some(&format!("{:x}", Sha256::digest(&original))),
+            &fingerprint,
+            "",
+            Some(home.path()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&output_signature).unwrap(), original);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = home.path().join("second.sig");
+        sign_checksum(&sums, &second, &fingerprint, "", Some(home.path())).unwrap();
+        assert_ne!(
+            std::fs::read(&second).unwrap(),
+            original,
+            "fresh signatures should differ across signing times"
+        );
+        assert!(
+            verify_checksum_signature(&first, &sums, &wrong_fingerprint, Some(home.path()))
+                .is_err()
+        );
+
+        std::fs::write(&sums, b"tampered checksum contents\n").unwrap();
+        assert!(verify_checksum_signature(&first, &sums, &fingerprint, Some(home.path())).is_err());
+        assert!(
+            reuse_or_sign_checksum(
+                &sums,
+                &home.path().join("bad-retry.sig"),
+                &reusable,
+                Some(&format!("{:x}", Sha256::digest(&original))),
+                &fingerprint,
+                "",
+                Some(home.path()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
