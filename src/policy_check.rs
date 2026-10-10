@@ -1021,7 +1021,10 @@ mod tests {
         let check_path = format!(
             "/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={CHECK}&app_id={policy_app_id}"
         );
-        let body = json!({"name":CHECK,"status":"completed","conclusion":"failure","output":{"title":"Policy rejected","summary":"Changed head"}});
+        let mut body = json!({"name":CHECK,"status":"completed","conclusion":"failure","output":{"title":"Policy rejected","summary":"Changed head"}});
+        if std::env::var_os("GITHUB_RUN_ID").is_some() {
+            body["details_url"] = json!(server_run_url().unwrap());
+        }
         let fixture = Fixture::new(vec![
             Route::get(
                 check_path,
