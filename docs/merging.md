@@ -55,7 +55,7 @@ The contents-write token is created after readiness succeeds and is scoped to th
 The Merge API receives the accepted SHA as its optimistic precondition.
 HTTP 405, 422, and 503 retry within the same deadline after full revalidation; head conflicts fail immediately.
 The squash body retains the PR description and unique co-author trailers.
-GitHub branch rules remain the final merge authority.
+For ordinary PRs, GitHub's review/check rules remain active and the Rust processor independently checks the review and required statuses before calling the Merge API. A separate review/check ruleset grants the Server App pull-request-only bypass used by the runtime distributor; the default-branch integrity ruleset remains bypass-free and requires signatures, linear history, pull-request-only changes, and deletion/non-fast-forward protection. GitHub's bypass applies to any PR the Server App merges, not only PRs authored by that App. The distributor's Rust fast path is restricted to its validated canonical managed-file PR; other Server App merge paths retain the normal Rust review and check gates. Renovate is not an actor in that bypass list, so its own native auto-merge still has to satisfy required checks.
 Comment/timeline reads and the Merge API are separate requests, so timeline visibility can lag; the SHA precondition prevents merging a different head.
 
 The Server App needs `actions: read`, `checks: write`, `statuses: read`, `contents: write`, `issues: write`, and `pull requests: write` on clients.

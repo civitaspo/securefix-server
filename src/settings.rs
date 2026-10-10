@@ -179,6 +179,7 @@ fn reconcile_one(
         }
         Err(error) => return Err(error),
     };
+    let is_new_repository = existing.is_none();
     if let Some(existing) = &existing {
         ensure_owner(
             existing,
@@ -217,11 +218,15 @@ fn reconcile_one(
     let merge_settings = read_json("repo-settings/repository.json")?;
     api.patch::<Value>(&format!("/repos/{repository}"), &merge_settings)?;
 
-    upsert_ruleset(
-        api,
-        repository,
-        &read_json(&format!("{RULESET_DIR}/default-branch.json"))?,
-    )?;
+    let default_ruleset = read_json(&format!("{RULESET_DIR}/default-branch.json"))?;
+    // New repositories need the non-bypassable baseline before installing the
+    // bypassable checks ruleset. Existing repositories already have that baseline,
+    // so install the checks ruleset before relaxing their default rules.
+    if is_new_repository {
+        upsert_ruleset(api, repository, &default_ruleset)?;
+    }
+    upsert_ruleset(api, repository, &desired_review_and_checks_ruleset()?)?;
+    upsert_ruleset(api, repository, &default_ruleset)?;
     if repo_policy.protect_tags {
         let tag_ruleset = read_json(&format!("{RULESET_DIR}/all-tags.json"))?;
         upsert_ruleset(api, repository, &tag_ruleset)?;
@@ -311,7 +316,13 @@ fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
     validate_server_app_installation(&repositories, deployment.repository_owner.id)?;
     for repository in &repositories {
         validate_repo_identity(api, repository)?;
-        validate_default_branch_ruleset(api, repository, &deployment.checks)?;
+        validate_default_branch_ruleset(api, repository)?;
+        validate_review_and_checks_ruleset(
+            api,
+            repository,
+            deployment.server_app_id,
+            &deployment.checks,
+        )?;
         validate_current_policy_check(api, repository, &deployment.checks)?;
         validate_collaborator(api, repository, &deployment.approval_reviewer.login)?;
         if repository != &deployment.server.repository {
@@ -499,71 +510,165 @@ fn validate_current_policy_check(api: &GitHub, repository: &str, checks: &Checks
     Ok(())
 }
 
-fn validate_default_branch_ruleset(api: &GitHub, repository: &str, checks: &Checks) -> Result<()> {
-    let matches = repository_rulesets(api, repository, "default-branch")?;
+fn validate_default_branch_ruleset(api: &GitHub, repository: &str) -> Result<()> {
+    let detail = repository_ruleset(api, repository, "default-branch")?;
+    validate_default_ruleset(&detail, repository)
+}
+
+fn validate_review_and_checks_ruleset(
+    api: &GitHub,
+    repository: &str,
+    server_app_id: u64,
+    checks: &Checks,
+) -> Result<()> {
+    let detail = repository_ruleset(api, repository, "review-and-checks")?;
+    validate_review_and_checks(&detail, repository, server_app_id, checks)
+}
+
+fn repository_ruleset(api: &GitHub, repository: &str, name: &str) -> Result<Value> {
+    let matches = repository_rulesets(api, repository, name)?;
     ensure!(
         matches.len() == 1,
-        "{repository} must have exactly one default-branch ruleset"
+        "{repository} must have exactly one {name} ruleset"
     );
     let listed = &matches[0];
     let id = listed["id"]
         .as_u64()
         .filter(|id| *id > 0)
-        .context("default-branch ruleset list entry has no valid ID")?;
+        .with_context(|| format!("{name} ruleset list entry has no valid ID"))?;
     ensure!(
         listed["source_type"] == "Repository"
-            && listed["name"] == "default-branch"
+            && listed["name"] == name
             && listed["target"] == "branch",
-        "{repository} default-branch ruleset list identity is invalid"
+        "{repository} {name} ruleset list identity is invalid"
     );
     let detail: Value = api.get(&format!("/repos/{repository}/rulesets/{id}"))?;
     ensure!(
         detail["id"].as_u64() == Some(id)
             && detail["source_type"] == "Repository"
             && detail["source"] == repository
-            && detail["name"] == "default-branch"
+            && detail["name"] == name
             && detail["target"] == "branch",
-        "{repository} default-branch ruleset detail identity changed"
+        "{repository} {name} ruleset detail identity changed"
     );
-    validate_default_ruleset(&detail, repository, checks)
+    Ok(detail)
 }
 
-fn validate_default_ruleset(ruleset: &Value, repository: &str, checks: &Checks) -> Result<()> {
+fn validate_ruleset_scope(ruleset: &Value, repository: &str, name: &str) -> Result<()> {
     ensure!(
         ruleset["enforcement"] == "active"
-            && ruleset["bypass_actors"]
-                .as_array()
-                .is_some_and(Vec::is_empty)
             && ruleset["target"] == "branch"
             && ruleset["conditions"]["ref_name"]["include"] == json!(["~DEFAULT_BRANCH"])
             && ruleset["conditions"]["ref_name"]["exclude"] == json!([]),
-        "{repository} default-branch protections are not active, exact, and bypass-free"
+        "{repository} {name} protections are not active on exactly the default branch"
+    );
+    Ok(())
+}
+
+fn validate_default_ruleset(ruleset: &Value, repository: &str) -> Result<()> {
+    validate_ruleset_scope(ruleset, repository, "default-branch")?;
+    ensure!(
+        ruleset["bypass_actors"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{repository} default-branch rules must be bypass-free"
     );
     let rules = ruleset["rules"]
         .as_array()
         .context("default-branch rules missing")?;
     ensure!(
-        rules
-            .iter()
-            .any(|rule| rule["type"] == "required_signatures"),
-        "{repository} requires signed commits"
+        rules.len() == 5,
+        "{repository} default-branch rule set is not exact"
     );
-    let pull_request = rules
+    for rule_type in [
+        "deletion",
+        "non_fast_forward",
+        "required_linear_history",
+        "required_signatures",
+    ] {
+        ensure!(
+            rules.iter().any(|rule| rule["type"] == rule_type),
+            "{repository} default-branch protections lack {rule_type}"
+        );
+    }
+    let pull_rules: Vec<_> = rules
         .iter()
-        .find(|rule| rule["type"] == "pull_request")
-        .context("{repository} lacks pull-request rules")?;
+        .filter(|rule| rule["type"] == "pull_request")
+        .collect();
+    ensure!(
+        pull_rules.len() == 1,
+        "{repository} must have one pull-request rule"
+    );
+    let pull_request = pull_rules[0];
+    ensure!(
+        pull_request["parameters"]["required_approving_review_count"] == 0
+            && pull_request["parameters"]["allowed_merge_methods"] == json!(["squash"]),
+        "{repository} default-branch must require PRs and squash-only merges, without reviews"
+    );
+    ensure!(
+        !rules
+            .iter()
+            .any(|rule| rule["type"] == "required_status_checks"),
+        "{repository} required checks must live in the separately bypassable ruleset"
+    );
+    Ok(())
+}
+
+fn validate_review_and_checks(
+    ruleset: &Value,
+    repository: &str,
+    server_app_id: u64,
+    checks: &Checks,
+) -> Result<()> {
+    validate_ruleset_scope(ruleset, repository, "review-and-checks")?;
+    ensure!(
+        ruleset["bypass_actors"]
+            == json!([{"actor_id":server_app_id,"actor_type":"Integration","bypass_mode":"pull_request"}]),
+        "{repository} review-and-checks ruleset must have only the configured Server App PR bypass"
+    );
+    let rules = ruleset["rules"]
+        .as_array()
+        .context("review-and-checks rules missing")?;
+    ensure!(
+        rules.len() == 2,
+        "{repository} review-and-checks rule set is not exact"
+    );
+    let pull_rules: Vec<_> = rules
+        .iter()
+        .filter(|rule| rule["type"] == "pull_request")
+        .collect();
+    ensure!(
+        pull_rules.len() == 1,
+        "{repository} must have one review rule"
+    );
+    let pull_request = pull_rules[0];
     ensure!(
         pull_request["parameters"]["required_approving_review_count"] == 1
-            && pull_request["parameters"]["dismiss_stale_reviews_on_push"] == true,
-        "{repository} review rules must require one approval and dismiss stale approvals"
+            && pull_request["parameters"]["dismiss_stale_reviews_on_push"] == true
+            && pull_request["parameters"]["allowed_merge_methods"] == json!(["squash"]),
+        "{repository} review-and-checks must require one current approval"
     );
-    let required_checks = rules
+    let status_rules: Vec<_> = rules
         .iter()
-        .find(|rule| rule["type"] == "required_status_checks")
-        .context("{repository} lacks required status checks")?;
+        .filter(|rule| rule["type"] == "required_status_checks")
+        .collect();
+    ensure!(
+        status_rules.len() == 1,
+        "{repository} must have one status-check rule"
+    );
+    let required_checks = status_rules[0];
+    ensure!(
+        required_checks["parameters"]["strict_required_status_checks_policy"] == false
+            && required_checks["parameters"]["do_not_enforce_on_create"] == false,
+        "{repository} status-check rule parameters are not exact"
+    );
     let statuses = required_checks["parameters"]["required_status_checks"]
         .as_array()
         .context("required status checks missing")?;
+    ensure!(
+        statuses.len() == 2,
+        "{repository} required status-check set is not exact"
+    );
     for (name, integration_id) in [
         ("status-check", checks.status_app_id),
         ("securefix-policy-check", checks.policy_app_id),
@@ -826,6 +931,15 @@ fn validate_desired_settings() -> Result<()> {
         "collaborator.json must grant push access"
     );
     let default = read_json(&format!("{RULESET_DIR}/default-branch.json"))?;
+    validate_default_ruleset(&default, "configured repository")?;
+    let review_and_checks = desired_review_and_checks_ruleset()?;
+    let trusted = config::trusted()?;
+    validate_review_and_checks(
+        &review_and_checks,
+        "configured repository",
+        trusted.deployment.server_app_id,
+        &trusted.deployment.checks,
+    )?;
     ensure!(
         default["name"] == "default-branch"
             && default["target"] == "branch"
@@ -847,6 +961,39 @@ fn validate_desired_settings() -> Result<()> {
         "invalid all-tags ruleset"
     );
     Ok(())
+}
+
+fn desired_review_and_checks_ruleset() -> Result<Value> {
+    let mut ruleset = read_json(&format!("{RULESET_DIR}/review-and-checks.json"))?;
+    let trusted = config::trusted()?;
+    ruleset["bypass_actors"][0]["actor_id"] = json!(trusted.deployment.server_app_id);
+    let statuses = ruleset["rules"]
+        .as_array_mut()
+        .and_then(|rules| {
+            rules
+                .iter_mut()
+                .find(|rule| rule["type"] == "required_status_checks")
+        })
+        .and_then(|rule| rule["parameters"]["required_status_checks"].as_array_mut())
+        .context("review-and-checks status template missing")?;
+    for (name, app_id) in [
+        ("status-check", trusted.deployment.checks.status_app_id),
+        (
+            "securefix-policy-check",
+            trusted.deployment.checks.policy_app_id,
+        ),
+    ] {
+        let mut matching = statuses.iter_mut().filter(|check| check["context"] == name);
+        let check = matching
+            .next()
+            .with_context(|| format!("review-and-checks template missing {name}"))?;
+        ensure!(
+            matching.next().is_none(),
+            "review-and-checks template must contain one {name}"
+        );
+        check["integration_id"] = json!(app_id);
+    }
+    Ok(ruleset)
 }
 
 fn read_json(path: &str) -> Result<Value> {
@@ -1294,59 +1441,95 @@ mod tests {
     }
 
     #[test]
-    fn default_ruleset_requires_all_review_and_check_sources() {
-        let checks = config::Checks {
-            status_app_id: 17,
-            policy_app_id: 23,
-        };
+    fn default_ruleset_keeps_unbypassable_pr_integrity_without_reviews_or_checks() {
         let valid = json!({
             "target":"branch",
             "enforcement":"active",
             "bypass_actors":[],
             "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
             "rules":[
+                {"type":"deletion"},
+                {"type":"non_fast_forward"},
+                {"type":"required_linear_history"},
                 {"type":"required_signatures"},
-                {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
-                {"type":"required_status_checks","parameters":{"required_status_checks":[
-                    {"context":"status-check","integration_id":17},
-                    {"context":"securefix-policy-check","integration_id":23}
-                ]}}
+                {"type":"pull_request","parameters":{"required_approving_review_count":0,"allowed_merge_methods":["squash"]}}
             ]
         });
-        assert!(validate_default_ruleset(&valid, "forge/example", &checks).is_ok());
-        let mut wrong_source = valid.clone();
-        wrong_source["rules"][2]["parameters"]["required_status_checks"][1]["integration_id"] =
-            json!(15368);
-        assert!(validate_default_ruleset(&wrong_source, "forge/example", &checks).is_err());
-        let mut stale_reviews = valid;
-        stale_reviews["rules"][1]["parameters"]["dismiss_stale_reviews_on_push"] = json!(false);
-        assert!(validate_default_ruleset(&stale_reviews, "forge/example", &checks).is_err());
-        let mut other_branch = json!({
-            "target":"branch",
-            "enforcement":"active",
-            "bypass_actors":[],
-            "conditions":{"ref_name":{"include":["refs/heads/release"],"exclude":[]}},
-            "rules":[
-                {"type":"required_signatures"},
-                {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
-                {"type":"required_status_checks","parameters":{"required_status_checks":[
-                    {"context":"status-check","integration_id":17},
-                    {"context":"securefix-policy-check","integration_id":23}
-                ]}}
-            ]
-        });
-        assert!(validate_default_ruleset(&other_branch, "forge/example", &checks).is_err());
-        other_branch["conditions"]["ref_name"]["include"] = json!(["~DEFAULT_BRANCH"]);
-        other_branch["conditions"]["ref_name"]["exclude"] = json!(["refs/heads/main"]);
-        assert!(validate_default_ruleset(&other_branch, "forge/example", &checks).is_err());
+        assert!(validate_default_ruleset(&valid, "forge/example").is_ok());
+        let mut bypass = valid.clone();
+        bypass["bypass_actors"] = json!([{"actor_id":23}]);
+        assert!(validate_default_ruleset(&bypass, "forge/example").is_err());
+        let mut review = valid.clone();
+        review["rules"][4]["parameters"]["required_approving_review_count"] = json!(1);
+        assert!(validate_default_ruleset(&review, "forge/example").is_err());
+        let mut checks = valid.clone();
+        checks["rules"].as_array_mut().unwrap().push(json!({
+            "type":"required_status_checks",
+            "parameters":{"required_status_checks":[]}
+        }));
+        assert!(validate_default_ruleset(&checks, "forge/example").is_err());
+        let mut missing_signature = valid.clone();
+        missing_signature["rules"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|rule| rule["type"] != "required_signatures");
+        assert!(validate_default_ruleset(&missing_signature, "forge/example").is_err());
+        let mut other_branch = valid.clone();
+        other_branch["conditions"]["ref_name"]["include"] = json!(["refs/heads/release"]);
+        assert!(validate_default_ruleset(&other_branch, "forge/example").is_err());
     }
 
     #[test]
-    fn current_default_ruleset_is_fetched_by_id_before_validating_protections() {
+    fn review_and_checks_ruleset_requires_exact_server_app_bypass_and_configured_checks() {
         let checks = Checks {
             status_app_id: 17,
             policy_app_id: 23,
         };
+        let valid = json!({
+            "target":"branch",
+            "enforcement":"active",
+            "bypass_actors":[{"actor_id":29,"actor_type":"Integration","bypass_mode":"pull_request"}],
+            "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
+            "rules":[
+                {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"allowed_merge_methods":["squash"]}},
+                {"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"do_not_enforce_on_create":false,"required_status_checks":[
+                    {"context":"status-check","integration_id":17},
+                    {"context":"securefix-policy-check","integration_id":23}
+                ]}}
+            ]
+        });
+        assert!(validate_review_and_checks(&valid, "forge/example", 29, &checks).is_ok());
+
+        let mut wrong_app = valid.clone();
+        wrong_app["bypass_actors"][0]["actor_id"] = json!(30);
+        assert!(validate_review_and_checks(&wrong_app, "forge/example", 29, &checks).is_err());
+        let mut extra_bypass = valid.clone();
+        extra_bypass["bypass_actors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "actor_id":100,"actor_type":"RepositoryRole","bypass_mode":"always"
+            }));
+        assert!(validate_review_and_checks(&extra_bypass, "forge/example", 29, &checks).is_err());
+        let mut direct_bypass = valid.clone();
+        direct_bypass["bypass_actors"][0]["bypass_mode"] = json!("always");
+        assert!(validate_review_and_checks(&direct_bypass, "forge/example", 29, &checks).is_err());
+        let mut wrong_check_source = valid.clone();
+        wrong_check_source["rules"][1]["parameters"]["required_status_checks"][1]["integration_id"] =
+            json!(15368);
+        assert!(
+            validate_review_and_checks(&wrong_check_source, "forge/example", 29, &checks).is_err()
+        );
+        let mut stale_reviews = valid.clone();
+        stale_reviews["rules"][0]["parameters"]["dismiss_stale_reviews_on_push"] = json!(false);
+        assert!(validate_review_and_checks(&stale_reviews, "forge/example", 29, &checks).is_err());
+        let mut other_branch = valid;
+        other_branch["conditions"]["ref_name"]["include"] = json!(["refs/heads/release"]);
+        assert!(validate_review_and_checks(&other_branch, "forge/example", 29, &checks).is_err());
+    }
+
+    #[test]
+    fn current_default_ruleset_is_fetched_by_id_before_validating_protections() {
         let list_path = "/repos/forge/example/rulesets?includes_parents=false&per_page=100&page=1";
         let detail_path = "/repos/forge/example/rulesets/41";
         // The list endpoint returns summary metadata only. Protection data must
@@ -1367,19 +1550,18 @@ mod tests {
             "enforcement":"active",
             "bypass_actors":[],
             "rules":[
+                {"type":"deletion"},
+                {"type":"non_fast_forward"},
+                {"type":"required_linear_history"},
                 {"type":"required_signatures"},
-                {"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true}},
-                {"type":"required_status_checks","parameters":{"required_status_checks":[
-                    {"context":"status-check","integration_id":17},
-                    {"context":"securefix-policy-check","integration_id":23}
-                ]}}
+                {"type":"pull_request","parameters":{"required_approving_review_count":0,"allowed_merge_methods":["squash"]}}
             ]
         });
         let fixture = Fixture::new(vec![
             Route::get(list_path, listed.clone()),
             Route::get(detail_path, detail.clone()),
         ]);
-        validate_default_branch_ruleset(&fixture.api, "forge/example", &checks).unwrap();
+        validate_default_branch_ruleset(&fixture.api, "forge/example").unwrap();
         fixture.finish();
 
         for (pointer, replacement) in [
@@ -1398,7 +1580,7 @@ mod tests {
                 Route::get(detail_path, malformed),
             ]);
             assert!(
-                validate_default_branch_ruleset(&fixture.api, "forge/example", &checks).is_err(),
+                validate_default_branch_ruleset(&fixture.api, "forge/example").is_err(),
                 "mismatched detail identity {pointer} passed validation"
             );
             fixture.finish();
@@ -1415,7 +1597,7 @@ mod tests {
                 .clone_from(&replacement);
             let fixture = Fixture::new(vec![Route::get(list_path, malformed)]);
             assert!(
-                validate_default_branch_ruleset(&fixture.api, "forge/example", &checks).is_err(),
+                validate_default_branch_ruleset(&fixture.api, "forge/example").is_err(),
                 "mismatched list identity {pointer} passed validation"
             );
             fixture.finish();
