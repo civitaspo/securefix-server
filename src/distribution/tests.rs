@@ -203,6 +203,10 @@ fn runtime_update_auto_merge_sha_pins_the_merge_and_verifies_default_branch_cont
             json!({"object":{"sha":head}}),
         ),
         Route::get(
+            format!("/repos/{repository}/git/ref/heads/{branch}"),
+            json!({"object":{"sha":head}}),
+        ),
+        Route::get(
             format!("/repos/{repository}/commits/main"),
             json!({"sha":base}),
         ),
