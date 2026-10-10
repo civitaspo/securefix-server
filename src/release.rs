@@ -219,6 +219,8 @@ pub struct ReleasePlanV2 {
     pub tag: ReleaseTag,
     pub source_manifest: ReleaseManifestV2,
     pub release_id: Option<u64>,
+    #[serde(default)]
+    pub existing_signature_sha256: Option<String>,
     pub assets: Vec<PlannedAsset>,
 }
 
@@ -255,6 +257,18 @@ impl ReleasePlanV2 {
         ensure!(
             self.release_id.is_none_or(|id| id > 0),
             "invalid release ID"
+        );
+        ensure!(
+            self.existing_signature_sha256
+                .as_ref()
+                .is_none_or(|digest| {
+                    self.release_id.is_some()
+                        && digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                }),
+            "invalid existing signature digest"
         );
         let mut names = BTreeSet::new();
         for asset in &self.assets {
@@ -1159,7 +1173,11 @@ fn preflight() -> Result<()> {
     let _runtime = require_current_runtime(&read, ".github/workflows/release.yml")?;
     let manifest = validated_source(&app, &policy, &repo, run_id, strategy)?;
     let tag = manifest.tag.clone();
-    let release_id = find_release(&app, &repo, &tag)?.and_then(|release| release["id"].as_u64());
+    let release = find_release(&app, &repo, &tag)?;
+    let release_id = release
+        .as_ref()
+        .map(|release| release["id"].as_u64().context("existing release lacks ID"))
+        .transpose()?;
     if let Some(id) = release_id {
         let release: Value = app.get(&format!("/repos/{}/releases/{id}", repo.as_str()))?;
         ensure!(
@@ -1189,6 +1207,7 @@ fn preflight() -> Result<()> {
         tag,
         source_manifest: manifest.clone(),
         release_id,
+        existing_signature_sha256: None,
         assets: Vec::new(),
     };
     let input_dir = PathBuf::from("release-input");
@@ -1222,6 +1241,22 @@ fn preflight() -> Result<()> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        if let Some(release) = release.as_ref() {
+            let existing_assets: Vec<Value> = app.paginate(&format!(
+                "/repos/{}/releases/{}/assets",
+                repo.as_str(),
+                release_id.context("existing release lacks ID")?
+            ))?;
+            plan.existing_signature_sha256 = prepare_existing_provider_signature(
+                &app,
+                &repo,
+                release,
+                &existing_assets,
+                &plan,
+                &assets_dir,
+                &input_dir,
+            )?;
+        }
         ensure!(
             artifact["size_in_bytes"].as_u64().unwrap_or_default() <= 512 * 1024 * 1024,
             "provider artifact is too large"
@@ -1707,6 +1742,114 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+const MAX_PROVIDER_SIGNATURE_BYTES: usize = 1024 * 1024;
+
+fn canonical_provider_sums(assets_dir: &Path, assets: &[PlannedAsset]) -> Result<Vec<u8>> {
+    let mut sums = String::new();
+    for asset in assets {
+        let path = assets_dir.join(&asset.name);
+        ensure!(
+            sha256_file(&path)? == asset.sha256,
+            "provider asset digest changed: {}",
+            asset.name
+        );
+        sums.push_str(&format!("{}  {}\n", asset.sha256, asset.name));
+    }
+    Ok(sums.into_bytes())
+}
+
+fn prepare_existing_provider_signature(
+    api: &GitHub,
+    repo: &Repository,
+    release: &Value,
+    existing: &[Value],
+    plan: &ReleasePlanV2,
+    assets_dir: &Path,
+    input_dir: &Path,
+) -> Result<Option<String>> {
+    let project = repo.name();
+    let sums_name = format!("{project}_{}_SHA256SUMS", plan.tag.version());
+    let signature_name = format!("{sums_name}.sig");
+    let mut expected: std::collections::BTreeMap<String, String> = plan
+        .assets
+        .iter()
+        .map(|asset| (asset.name.clone(), asset.sha256.clone()))
+        .collect();
+    expected.insert(
+        sums_name.clone(),
+        format!(
+            "{:x}",
+            Sha256::digest(canonical_provider_sums(assets_dir, &plan.assets)?)
+        ),
+    );
+    let mut by_name = std::collections::BTreeMap::new();
+    for asset in existing {
+        let name = asset["name"]
+            .as_str()
+            .context("existing release asset lacks name")?;
+        ensure!(
+            name == signature_name || expected.contains_key(name),
+            "release contains an unexpected asset: {name}"
+        );
+        ensure!(
+            by_name.insert(name.to_owned(), asset).is_none(),
+            "duplicate release asset: {name}"
+        );
+        if name != signature_name {
+            let digest = format!("sha256:{}", expected.get(name).expect("checked above"));
+            ensure!(
+                asset["digest"] == digest,
+                "existing release asset has different bytes: {name}"
+            );
+        }
+    }
+    if release["draft"] == false {
+        ensure!(
+            by_name.len() == expected.len() + 1,
+            "published provider release is incomplete"
+        );
+    }
+    let Some(signature) = by_name.get(&signature_name) else {
+        return Ok(None);
+    };
+    ensure!(
+        by_name.contains_key(&sums_name),
+        "existing signature has no checksum asset"
+    );
+    let size = signature["size"].as_u64().unwrap_or_default();
+    ensure!(
+        size > 0 && size <= MAX_PROVIDER_SIGNATURE_BYTES as u64,
+        "existing signature has invalid size"
+    );
+    let asset_id = signature["id"]
+        .as_u64()
+        .context("existing signature lacks asset ID")?;
+    let digest = signature["digest"]
+        .as_str()
+        .context("existing signature lacks digest")?;
+    ensure!(
+        digest.starts_with("sha256:") && digest.len() == 71,
+        "existing signature has invalid digest"
+    );
+    let bytes = api.download(
+        &format!("/repos/{}/releases/assets/{asset_id}", repo.as_str()),
+        MAX_PROVIDER_SIGNATURE_BYTES,
+    )?;
+    ensure!(
+        bytes.len() as u64 == size,
+        "existing signature size changed during download"
+    );
+    let downloaded_digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    ensure!(
+        downloaded_digest == digest,
+        "existing signature digest changed during download"
+    );
+    std::fs::write(input_dir.join("existing-signature.sig"), &bytes)?;
+    Ok(Some(
+        downloaded_digest.trim_start_matches("sha256:").to_owned(),
+    ))
+}
+
 fn sign() -> Result<()> {
     let server = GitHub::from_env("GITHUB_TOKEN")?;
     let policy = current_policy(&server)?;
@@ -1748,10 +1891,7 @@ fn sign() -> Result<()> {
             asset.name
         );
     }
-    let mut sums = String::new();
-    for asset in &plan.assets {
-        sums.push_str(&format!("{}  {}\n", asset.sha256, asset.name));
-    }
+    let sums = canonical_provider_sums(&assets_dir, &plan.assets)?;
     let sums_path = assets_dir.join(format!("{}_{}_SHA256SUMS", repo.name(), plan.tag.version()));
     std::fs::write(&sums_path, &sums)?;
     let signature_path = assets_dir.join(format!(
@@ -1759,34 +1899,17 @@ fn sign() -> Result<()> {
         repo.name(),
         plan.tag.version()
     ));
-    let mut gpg = ProcessCommand::new("gpg");
-    gpg.args([
-        "--batch",
-        "--pinentry-mode",
-        "loopback",
-        "--passphrase-fd",
-        "0",
-        "--local-user",
-    ])
-    .arg(env("GPG_FINGERPRINT")?)
-    .arg("--output")
-    .arg(&signature_path)
-    .arg("--detach-sign")
-    .arg(&sums_path)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped());
-    let mut child = gpg.spawn().context("start checksum signing")?;
-    let passphrase = std::env::var("GPG_PASSPHRASE").unwrap_or_default();
-    if let Some(mut stdin) = child.stdin.take() {
-        writeln!(stdin, "{passphrase}")?;
-    }
-    let result = child.wait_with_output()?;
-    ensure!(result.status.success(), "checksum signing failed");
-    ensure!(
-        signature_path.metadata()?.len() > 0,
-        "signing produced an empty signature"
-    );
+    let fingerprint = env("GPG_FINGERPRINT")?;
+    let signature_input = input.join("existing-signature.sig");
+    reuse_or_sign_checksum(
+        &sums_path,
+        &signature_path,
+        &signature_input,
+        plan.existing_signature_sha256.as_deref(),
+        &fingerprint,
+        &std::env::var("GPG_PASSPHRASE").unwrap_or_default(),
+        None,
+    )?;
     ensure!(
         plan.assets
             .iter()
@@ -1812,6 +1935,145 @@ fn sign() -> Result<()> {
     plan.validate()?;
     validate_signed_provider_assets(&assets_dir, &plan)?;
     write_json(input.join("plan.json"), &plan)?;
+    Ok(())
+}
+
+fn sign_checksum(
+    sums_path: &Path,
+    signature_path: &Path,
+    fingerprint: &str,
+    passphrase: &str,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    let mut gpg = ProcessCommand::new("gpg");
+    gpg.arg("--batch");
+    gpg.args(["--no-auto-key-retrieve", "--no-auto-key-import"]);
+    if let Some(homedir) = homedir {
+        gpg.arg("--homedir").arg(homedir);
+    }
+    gpg.args([
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase-fd",
+        "0",
+        "--local-user",
+    ])
+    .arg(fingerprint)
+    .arg("--output")
+    .arg(signature_path)
+    .arg("--detach-sign")
+    .arg(sums_path)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    let mut child = gpg.spawn().context("start checksum signing")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{passphrase}")?;
+    }
+    let result = child.wait_with_output()?;
+    ensure!(result.status.success(), "checksum signing failed");
+    ensure!(
+        signature_path.metadata()?.len() > 0,
+        "signing produced an empty signature"
+    );
+    verify_checksum_signature(signature_path, sums_path, fingerprint, homedir)
+}
+
+fn reuse_or_sign_checksum(
+    sums_path: &Path,
+    signature_path: &Path,
+    existing_path: &Path,
+    expected_digest: Option<&str>,
+    fingerprint: &str,
+    passphrase: &str,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    if let Some(expected_digest) = expected_digest {
+        ensure!(
+            existing_path.is_file(),
+            "planned existing signature is missing"
+        );
+        ensure!(
+            sha256_file(existing_path)? == expected_digest,
+            "existing signature artifact digest changed"
+        );
+        std::fs::copy(existing_path, signature_path)?;
+        verify_checksum_signature(signature_path, sums_path, fingerprint, homedir)?;
+    } else {
+        ensure!(
+            !existing_path.exists(),
+            "unplanned existing signature is present"
+        );
+        sign_checksum(sums_path, signature_path, fingerprint, passphrase, homedir)?;
+    }
+    Ok(())
+}
+
+fn verify_checksum_signature(
+    signature_path: &Path,
+    sums_path: &Path,
+    fingerprint: &str,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    let mut gpg = ProcessCommand::new("gpg");
+    gpg.arg("--batch");
+    gpg.args(["--no-auto-key-retrieve", "--no-auto-key-import"]);
+    if let Some(homedir) = homedir {
+        gpg.arg("--homedir").arg(homedir);
+    }
+    let output = gpg
+        .args(["--status-fd", "1", "--verify"])
+        .arg(signature_path)
+        .arg(sums_path)
+        .output()
+        .context("start checksum signature verification")?;
+    ensure!(
+        output.status.success(),
+        "checksum signature verification failed"
+    );
+    let status = String::from_utf8(output.stdout).context("GPG status is not UTF-8")?;
+    let expected = fingerprint.trim().to_ascii_uppercase();
+    ensure!(!expected.is_empty(), "configured GPG fingerprint is empty");
+    let mut valid_signatures = Vec::new();
+    for line in status.lines() {
+        let Some(payload) = line.strip_prefix("[GNUPG:] ") else {
+            continue;
+        };
+        let mut fields = payload.split_ascii_whitespace();
+        let Some(kind) = fields.next() else { continue };
+        ensure!(
+            !matches!(
+                kind,
+                "BADSIG"
+                    | "ERRSIG"
+                    | "NO_PUBKEY"
+                    | "EXPKEYSIG"
+                    | "REVKEYSIG"
+                    | "KEYEXPIRED"
+                    | "KEYREVOKED"
+                    | "SIGEXPIRED"
+            ),
+            "GPG reported an invalid or expired signature"
+        );
+        if kind == "VALIDSIG" {
+            let signer = fields
+                .next()
+                .context("GPG VALIDSIG lacks signer fingerprint")?
+                .to_ascii_uppercase();
+            let remaining: Vec<_> = fields.collect();
+            let primary = remaining.last().map(|value| value.to_ascii_uppercase());
+            valid_signatures.push((signer, primary));
+        }
+    }
+    ensure!(
+        valid_signatures.len() == 1,
+        "GPG did not report exactly one valid signature"
+    );
+    let (signer, primary) = &valid_signatures[0];
+    ensure!(
+        signer == &expected || primary.as_ref() == Some(&expected),
+        "checksum signature uses an unexpected key"
+    );
     Ok(())
 }
 
@@ -1864,12 +2126,11 @@ fn publish() -> Result<()> {
         "release tag moved after preflight"
     );
     let existing = find_release(&api, &repo, &plan.tag)?;
-    if let (Some(expected_id), Some(current)) = (plan.release_id, existing.as_ref()) {
-        ensure!(
-            current["id"].as_u64() == Some(expected_id),
-            "release identity changed after preflight"
-        );
-    }
+    let current_id = existing
+        .as_ref()
+        .map(|release| release["id"].as_u64().context("existing release lacks ID"))
+        .transpose()?;
+    validate_release_identity(plan.release_id, current_id)?;
     let release = match existing {
         Some(release) => {
             ensure!(
@@ -1974,6 +2235,14 @@ fn ensure_published_immutable_release(
     ensure!(
         release["immutable"] == true,
         "published release is not immutable"
+    );
+    Ok(())
+}
+
+fn validate_release_identity(expected: Option<u64>, current: Option<u64>) -> Result<()> {
+    ensure!(
+        expected == current,
+        "release identity changed after preflight"
     );
     Ok(())
 }
@@ -2311,12 +2580,373 @@ mod tests {
             tag: source_manifest.tag.clone(),
             source_manifest: source_manifest.clone(),
             release_id: None,
+            existing_signature_sha256: None,
             assets: Vec::new(),
         };
         assert!(plan.validate().is_ok());
         let mut tampered = plan;
         tampered.release_pr_sha = "e".repeat(40);
         assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn release_identity_requires_exact_preflight_binding() {
+        assert!(validate_release_identity(None, None).is_ok());
+        assert!(validate_release_identity(Some(7), Some(7)).is_ok());
+        assert!(validate_release_identity(None, Some(7)).is_err());
+        assert!(validate_release_identity(Some(7), None).is_err());
+        assert!(validate_release_identity(Some(7), Some(8)).is_err());
+    }
+
+    fn provider_signature_test_plan(assets_dir: &Path) -> ReleasePlanV2 {
+        let tag = ReleaseTag::parse("v1.2.3").unwrap();
+        let repository = "example/terraform-provider-sigma".to_owned();
+        let source_manifest = ReleaseManifestV2 {
+            schema_version: 2,
+            repository: repository.clone(),
+            source_run_id: RunId(7),
+            source_run_sha: CommitSha::parse(&"a".repeat(40)).unwrap(),
+            run_attempt: 1,
+            source_revision: CommitSha::parse(&"b".repeat(40)).unwrap(),
+            release_pr_number: 8,
+            release_pr_sha: CommitSha::parse(&"c".repeat(40)).unwrap(),
+            tag: tag.clone(),
+            artifact_id: Some(9),
+        };
+        let mut plan = ReleasePlanV2 {
+            schema_version: 2,
+            server_revision: "d".repeat(40),
+            repository,
+            strategy: ReleaseStrategy::TerraformProvider,
+            source_run_id: RunId(7),
+            source_run_attempt: 1,
+            source_revision: "b".repeat(40),
+            release_pr_number: 8,
+            release_pr_sha: "c".repeat(40),
+            tag,
+            source_manifest,
+            release_id: Some(17),
+            existing_signature_sha256: None,
+            assets: Vec::new(),
+        };
+        let asset = assets_dir.join("provider.zip");
+        std::fs::write(&asset, b"provider bytes").unwrap();
+        plan.assets.push(PlannedAsset {
+            name: "provider.zip".into(),
+            sha256: sha256_file(&asset).unwrap(),
+        });
+        plan
+    }
+
+    fn expected_release_asset(name: &str, digest: &str, id: u64, size: u64) -> Value {
+        json!({"name":name,"digest":format!("sha256:{digest}"),"id":id,"size":size})
+    }
+
+    #[test]
+    fn preflight_downloads_only_the_bounded_digest_matched_signature_asset() {
+        use crate::fixtures::{Fixture, Route};
+        let input = tempfile::tempdir().unwrap();
+        let assets_dir = input.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let plan = provider_signature_test_plan(&assets_dir);
+        let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
+        let project = Repository::parse(&plan.repository).unwrap();
+        let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
+        let sums_digest = format!("{:x}", Sha256::digest(&sums));
+        let signature = b"opaque test signature";
+        let signature_digest = format!("{:x}", Sha256::digest(signature));
+        let existing = vec![
+            expected_release_asset(&sums_name, &sums_digest, 41, sums.len() as u64),
+            expected_release_asset(
+                &format!("{sums_name}.sig"),
+                &signature_digest,
+                42,
+                signature.len() as u64,
+            ),
+        ];
+        let release = json!({"draft":true});
+        let fixture = Fixture::new(vec![
+            Route::raw(
+                "GET",
+                "/repos/example/terraform-provider-sigma/releases/assets/42",
+                200,
+                signature.to_vec(),
+            )
+            .with_request_header("Accept", "application/octet-stream"),
+        ]);
+        let digest = prepare_existing_provider_signature(
+            &fixture.api,
+            &project,
+            &release,
+            &existing,
+            &plan,
+            &assets_dir,
+            input.path(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(digest, signature_digest);
+        assert_eq!(
+            std::fs::read(input.path().join("existing-signature.sig")).unwrap(),
+            signature
+        );
+        fixture.finish();
+    }
+
+    #[test]
+    fn preflight_allows_checksum_only_draft_and_rejects_unexpected_or_duplicate_assets() {
+        let input = tempfile::tempdir().unwrap();
+        let assets_dir = input.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let plan = provider_signature_test_plan(&assets_dir);
+        let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
+        let project = Repository::parse(&plan.repository).unwrap();
+        let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
+        let checksum = expected_release_asset(
+            &sums_name,
+            &format!("{:x}", Sha256::digest(&sums)),
+            41,
+            sums.len() as u64,
+        );
+        let api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        assert!(
+            prepare_existing_provider_signature(
+                &api,
+                &project,
+                &json!({"draft":true}),
+                std::slice::from_ref(&checksum),
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .unwrap()
+            .is_none()
+        );
+        let unexpected = expected_release_asset("other.zip", &"e".repeat(64), 43, 1);
+        assert!(
+            prepare_existing_provider_signature(
+                &api,
+                &project,
+                &json!({"draft":true}),
+                &[unexpected],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_existing_provider_signature(
+                &api,
+                &project,
+                &json!({"draft":true}),
+                &[checksum.clone(), checksum],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_signature_digest_mismatch_and_download_over_limit() {
+        use crate::fixtures::{Fixture, Route};
+        let input = tempfile::tempdir().unwrap();
+        let assets_dir = input.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let plan = provider_signature_test_plan(&assets_dir);
+        let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
+        let project = Repository::parse(&plan.repository).unwrap();
+        let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
+        let sums_asset = expected_release_asset(
+            &sums_name,
+            &format!("{:x}", Sha256::digest(&sums)),
+            41,
+            sums.len() as u64,
+        );
+        let signature_name = format!("{sums_name}.sig");
+        let bytes = b"actual signature bytes";
+        let bad_asset =
+            expected_release_asset(&signature_name, &"0".repeat(64), 42, bytes.len() as u64);
+        let fixture = Fixture::new(vec![Route::raw(
+            "GET",
+            "/repos/example/terraform-provider-sigma/releases/assets/42",
+            200,
+            bytes.to_vec(),
+        )]);
+        assert!(
+            prepare_existing_provider_signature(
+                &fixture.api,
+                &project,
+                &json!({"draft":true}),
+                &[sums_asset.clone(), bad_asset],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+        fixture.finish();
+
+        let oversized = vec![b'x'; MAX_PROVIDER_SIGNATURE_BYTES + 1];
+        let oversized_asset = expected_release_asset(
+            &signature_name,
+            &format!("{:x}", Sha256::digest(&oversized)),
+            42,
+            1,
+        );
+        let fixture = Fixture::new(vec![Route::raw(
+            "GET",
+            "/repos/example/terraform-provider-sigma/releases/assets/42",
+            200,
+            oversized,
+        )]);
+        assert!(
+            prepare_existing_provider_signature(
+                &fixture.api,
+                &project,
+                &json!({"draft":true}),
+                &[sums_asset, oversized_asset],
+                &plan,
+                &assets_dir,
+                input.path(),
+            )
+            .is_err()
+        );
+        fixture.finish();
+    }
+
+    fn test_gpg(home: &Path, args: &[&str]) -> std::process::Output {
+        ProcessCommand::new("gpg")
+            .arg("--batch")
+            .arg("--homedir")
+            .arg(home)
+            .args(args)
+            .output()
+            .expect("GPG must be installed for release signing tests")
+    }
+
+    struct ScopedGpgHome(tempfile::TempDir);
+
+    impl ScopedGpgHome {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(
+                home.path(),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            )
+            .unwrap();
+            Self(home)
+        }
+
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl Drop for ScopedGpgHome {
+        fn drop(&mut self) {
+            let _ = ProcessCommand::new("gpgconf")
+                .arg("--homedir")
+                .arg(self.path())
+                .args(["--kill", "gpg-agent"])
+                .output();
+        }
+    }
+
+    fn generate_test_signing_key(home: &Path, email: &str) -> String {
+        let output = test_gpg(
+            home,
+            &[
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                &format!("Securefix Test <{email}>"),
+                "ed25519",
+                "sign",
+                "0",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "GPG test key generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = test_gpg(home, &["--with-colons", "--list-secret-keys", email]);
+        assert!(output.status.success(), "GPG test key listing failed");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("fpr:")
+                    .and_then(|line| line.split(':').nth(8))
+            })
+            .expect("generated GPG key fingerprint")
+            .to_owned()
+    }
+
+    #[test]
+    fn provider_signature_retry_reuses_verified_bytes_and_rejects_wrong_or_tampered_signatures() {
+        let home = ScopedGpgHome::new();
+        let output = test_gpg(home.path(), &["--version"]);
+        assert!(
+            output.status.success(),
+            "GPG must be installed for release signing tests"
+        );
+        let fingerprint = generate_test_signing_key(home.path(), "release@example.test");
+        let wrong_fingerprint = generate_test_signing_key(home.path(), "other@example.test");
+        let sums = home.path().join("SHA256SUMS");
+        std::fs::write(&sums, b"0123456789abcdef  provider.zip\n").unwrap();
+        let first = home.path().join("first.sig");
+        sign_checksum(&sums, &first, &fingerprint, "", Some(home.path())).unwrap();
+        let original = std::fs::read(&first).unwrap();
+
+        let reusable = home.path().join("existing-signature.sig");
+        std::fs::write(&reusable, &original).unwrap();
+        let output_signature = home.path().join("retry.sig");
+        reuse_or_sign_checksum(
+            &sums,
+            &output_signature,
+            &reusable,
+            Some(&format!("{:x}", Sha256::digest(&original))),
+            &fingerprint,
+            "",
+            Some(home.path()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&output_signature).unwrap(), original);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = home.path().join("second.sig");
+        sign_checksum(&sums, &second, &fingerprint, "", Some(home.path())).unwrap();
+        assert_ne!(
+            std::fs::read(&second).unwrap(),
+            original,
+            "fresh signatures should differ across signing times"
+        );
+        assert!(
+            verify_checksum_signature(&first, &sums, &wrong_fingerprint, Some(home.path()))
+                .is_err()
+        );
+
+        std::fs::write(&sums, b"tampered checksum contents\n").unwrap();
+        assert!(verify_checksum_signature(&first, &sums, &fingerprint, Some(home.path())).is_err());
+        assert!(
+            reuse_or_sign_checksum(
+                &sums,
+                &home.path().join("bad-retry.sig"),
+                &reusable,
+                Some(&format!("{:x}", Sha256::digest(&original))),
+                &fingerprint,
+                "",
+                Some(home.path()),
+            )
+            .is_err()
+        );
     }
 
     #[test]

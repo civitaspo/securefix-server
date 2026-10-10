@@ -1,5 +1,10 @@
 use anyhow::{Context, Result, bail, ensure};
-use reqwest::{Method, StatusCode, blocking::Client, redirect::Policy};
+use reqwest::{
+    Method, StatusCode,
+    blocking::Client,
+    header::{ACCEPT, HeaderMap, HeaderValue},
+    redirect::Policy,
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
@@ -459,7 +464,13 @@ impl GitHub {
         bail!("GitHub pagination exceeded limit")
     }
     pub fn download(&self, path: &str, max: usize) -> Result<Vec<u8>> {
-        let response = self.builder(Method::GET, path)?.send()?;
+        let mut request = self.builder(Method::GET, path)?;
+        if path.contains("/releases/assets/") {
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+            request = request.headers(headers);
+        }
+        let response = request.send()?;
         if response.status().is_redirection() {
             let location = response
                 .headers()
@@ -572,6 +583,27 @@ mod tests {
         ] {
             assert!(api.url(path).is_err());
         }
+    }
+    #[test]
+    fn release_asset_download_requests_binary_bytes() {
+        use crate::fixtures::{Fixture, Route};
+        let fixture = Fixture::new(vec![
+            Route::raw(
+                "GET",
+                "/repos/example/repo/releases/assets/7",
+                200,
+                vec![0, 255, 1],
+            )
+            .with_request_header("Accept", "application/octet-stream"),
+        ]);
+        assert_eq!(
+            fixture
+                .api
+                .download("/repos/example/repo/releases/assets/7", 10)
+                .unwrap(),
+            vec![0, 255, 1]
+        );
+        fixture.finish();
     }
     #[test]
     fn graphql_only_accepts_explicit_read_operations() {
