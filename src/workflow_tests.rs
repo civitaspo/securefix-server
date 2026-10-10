@@ -1076,6 +1076,52 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
 }
 
 #[test]
+fn provider_probe_caller_passes_only_the_required_named_secrets() {
+    let caller = workflow("testing-securefix-server.yml");
+    assert_eq!(
+        caller["jobs"]["provider-release-probe"]["secrets"],
+        serde_json::json!({
+            "TERRAFORM_PROVIDER_GPG_PRIVATE_KEY": "${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}",
+            "TERRAFORM_PROVIDER_GPG_PASSPHRASE": "${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}",
+            "SECUREFIX_SERVER_PRIVATE_KEY": "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+        })
+    );
+
+    let reusable = workflow("testing-provider-release.yml");
+    for secret in [
+        "TERRAFORM_PROVIDER_GPG_PRIVATE_KEY",
+        "TERRAFORM_PROVIDER_GPG_PASSPHRASE",
+        "SECUREFIX_SERVER_PRIVATE_KEY",
+    ] {
+        assert!(
+            reusable["on"]["workflow_call"]["secrets"][secret]["required"]
+                .as_bool()
+                .unwrap_or(false),
+            "provider workflow must declare {secret} required"
+        );
+    }
+
+    for job_id in ["fresh-sign", "recover-sign"] {
+        let job = serde_json::to_string(&reusable["jobs"][job_id]).unwrap();
+        assert!(job.contains("secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+        assert!(job.contains("secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE"));
+        assert!(!job.contains("secrets.SECUREFIX_SERVER_PRIVATE_KEY"));
+        assert!(!job.contains("SECUREFIX_SERVER_APP_TOKEN"));
+    }
+    for job_id in [
+        "create-draft",
+        "stage-draft",
+        "complete-draft",
+        "cleanup-draft",
+    ] {
+        let job = serde_json::to_string(&reusable["jobs"][job_id]).unwrap();
+        assert!(job.contains("secrets.SECUREFIX_SERVER_PRIVATE_KEY"));
+        assert!(!job.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+        assert!(!job.contains("TERRAFORM_PROVIDER_GPG_PASSPHRASE"));
+    }
+}
+
+#[test]
 fn merge_workflow_prefilter_allows_whitespace_for_rust_command_validation() {
     let caller = workflow("merge-request.yml");
     let active_if = caller["jobs"]["request"]["if"].as_str().unwrap();

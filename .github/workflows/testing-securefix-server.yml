@@ -426,3 +426,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+    secrets:
+      TERRAFORM_PROVIDER_GPG_PRIVATE_KEY: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
+      TERRAFORM_PROVIDER_GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+      SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}

@@ -2,6 +2,13 @@ name: Test Provider Release Without Publishing
 
 on:
   workflow_call:
+    secrets:
+      TERRAFORM_PROVIDER_GPG_PRIVATE_KEY:
+        required: true
+      TERRAFORM_PROVIDER_GPG_PASSPHRASE:
+        required: true
+      SECUREFIX_SERVER_PRIVATE_KEY:
+        required: true
 
 permissions: {}
 defaults:
