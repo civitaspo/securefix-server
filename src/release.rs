@@ -1455,19 +1455,19 @@ fn validate_source_manifest_provenance(
                 "source PR head does not match the release PR"
             );
             // GitHub's run head_sha and pull_requests[].head.sha identify the
-            // PR head. Read the caller workflow from the PR's base revision,
-            // which is already part of the default branch, not that PR head.
+            // PR head. Read the caller workflow from the validated merge
+            // commit so changes to the wrapper in the merged PR are included.
             let ancestry: Value = api.get(&format!(
                 "/repos/{}/compare/{}...{}",
                 repo.as_str(),
-                pr.base.sha,
+                merge_sha.as_str(),
                 url_encode(default_branch)
             ))?;
             ensure!(
                 matches!(ancestry["status"].as_str(), Some("ahead" | "identical")),
-                "release caller base revision is not on the default branch"
+                "release caller merge revision is not on the default branch"
             );
-            CommitSha::parse(&pr.base.sha)?
+            merge_sha.clone()
         }
         Some("workflow_dispatch") => {
             ensure!(
@@ -1575,24 +1575,23 @@ fn validate_source_pr_association(
         source_run_sha.as_str() == pr.head.sha,
         "source pull request run head does not match the release PR head"
     );
-    if !associated.is_empty() {
-        ensure!(
-            associated
-                .iter()
-                .any(|candidate| candidate["number"].as_u64() == Some(release_pr_number)),
-            "source run is not associated with the release PR"
-        );
+    // GitHub can update this list when the release branch is reused; only a
+    // matching PR number is authoritative here, otherwise bind by source commit.
+    if associated
+        .iter()
+        .any(|candidate| candidate["number"].as_u64() == Some(release_pr_number))
+    {
         return Ok(());
     }
 
     let trusted = crate::config::trusted()?;
     ensure!(
         run["head_branch"] == pr.head.name,
-        "empty source PR associations do not match the release branch"
+        "source PR associations do not match the release branch"
     );
     ensure!(
         run["actor"]["id"].as_u64() == Some(policy.server_bot_id) && run["actor"]["type"] == "Bot",
-        "empty source PR associations are only accepted for a Server App run"
+        "source PR association fallback is only accepted for a Server App run"
     );
     ensure!(
         pr.number == release_pr_number
@@ -4068,6 +4067,40 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_source_run_associations_fall_back_to_the_exact_merged_release_pr() {
+        use crate::fixtures::{Fixture, Route};
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let pr = associated_release_pr();
+        let head = CommitSha::parse(&"a".repeat(40)).unwrap();
+        let merge = CommitSha::parse(&"c".repeat(40)).unwrap();
+        let fixture = Fixture::new(vec![Route::get(
+            format!(
+                "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                repo.as_str(),
+                head.as_str()
+            ),
+            json!([associated_release_pr_response()]),
+        )]);
+        let mut run = empty_association_run();
+        run["pull_requests"] = json!([{"number":96,"head":{"sha":"79cd"}}]);
+        validate_source_pr_association(
+            &fixture.api,
+            &policy,
+            &repo,
+            SourcePrAssociation {
+                run: &run,
+                source_run_sha: &head,
+                release_pr_number: 87,
+                pr: &pr,
+                merge_sha: &merge,
+            },
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
     fn empty_source_run_associations_reject_unrelated_or_changed_pull_requests() {
         use crate::fixtures::{Fixture, Route};
         let policy = provenance_test_policy();
@@ -4092,30 +4125,34 @@ mod tests {
             variants.push(candidate);
         }
         for candidate in variants {
-            let fixture = Fixture::new(vec![Route::get(
-                format!(
-                    "/repos/{}/commits/{}/pulls?per_page=100&page=1",
-                    repo.as_str(),
-                    head.as_str()
-                ),
-                json!([candidate]),
-            )]);
-            assert!(
-                validate_source_pr_association(
-                    &fixture.api,
-                    &policy,
-                    &repo,
-                    SourcePrAssociation {
-                        run: &empty_association_run(),
-                        source_run_sha: &head,
-                        release_pr_number: 87,
-                        pr: &pr,
-                        merge_sha: &merge,
-                    },
-                )
-                .is_err()
-            );
-            fixture.finish();
+            for associations in [json!([]), json!([{"number":96}])] {
+                let fixture = Fixture::new(vec![Route::get(
+                    format!(
+                        "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                        repo.as_str(),
+                        head.as_str()
+                    ),
+                    json!([candidate.clone()]),
+                )]);
+                let mut run = empty_association_run();
+                run["pull_requests"] = associations;
+                assert!(
+                    validate_source_pr_association(
+                        &fixture.api,
+                        &policy,
+                        &repo,
+                        SourcePrAssociation {
+                            run: &run,
+                            source_run_sha: &head,
+                            release_pr_number: 87,
+                            pr: &pr,
+                            merge_sha: &merge,
+                        },
+                    )
+                    .is_err()
+                );
+                fixture.finish();
+            }
         }
     }
 
@@ -4179,21 +4216,28 @@ mod tests {
             );
         }
         run["pull_requests"] = json!([{"number":99}]);
-        assert!(
-            validate_source_pr_association(
-                &fixture.api,
-                &policy,
-                &repo,
-                SourcePrAssociation {
-                    run: &run,
-                    source_run_sha: &head,
-                    release_pr_number: 87,
-                    pr: &pr,
-                    merge_sha: &merge,
-                },
-            )
-            .is_err()
-        );
+        let unrelated_fixture = Fixture::new(vec![crate::fixtures::Route::get(
+            format!(
+                "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+                repo.as_str(),
+                head.as_str()
+            ),
+            json!([associated_release_pr_response()]),
+        )]);
+        validate_source_pr_association(
+            &unrelated_fixture.api,
+            &policy,
+            &repo,
+            SourcePrAssociation {
+                run: &run,
+                source_run_sha: &head,
+                release_pr_number: 87,
+                pr: &pr,
+                merge_sha: &merge,
+            },
+        )
+        .unwrap();
+        unrelated_fixture.finish();
         let mut wrong_actor = empty_association_run();
         wrong_actor["actor"]["id"] = json!(policy.owner_id);
         assert!(
@@ -4215,6 +4259,13 @@ mod tests {
     }
 
     fn successful_pr_provenance_routes(version: &str) -> Vec<crate::fixtures::Route> {
+        successful_pr_provenance_routes_with_wrapper_pin(version, &"a".repeat(40))
+    }
+
+    fn successful_pr_provenance_routes_with_wrapper_pin(
+        version: &str,
+        wrapper_pin: &str,
+    ) -> Vec<crate::fixtures::Route> {
         use crate::fixtures::Route;
         use base64::Engine;
         let trusted = crate::config::trusted().unwrap();
@@ -4227,7 +4278,7 @@ mod tests {
         let merge = "d".repeat(40);
         let workflow = format!(
             "name: Release Tag\non:\n  pull_request:\njobs:\n  tag:\n    uses: {server_repository}/.github/workflows/reusable-release-tag.yml@{}\n",
-            "a".repeat(40)
+            wrapper_pin
         );
         let content = |path: &str, sha: &str, text: &str| {
             Route::get(
@@ -4296,10 +4347,10 @@ mod tests {
             ),
             content(".release-version", &merge, version),
             Route::get(
-                format!("/repos/{repo}/compare/{base}...{default_branch}"),
+                format!("/repos/{repo}/compare/{merge}...{default_branch}"),
                 json!({"status":"identical"}),
             ),
-            content(".github/workflows/release-tag.yml", &base, &workflow),
+            content(".github/workflows/release-tag.yml", &merge, &workflow),
             Route::get(
                 format!("/repos/{repo}/git/ref/tags/v1.2.3"),
                 json!({"object":{"type":"tag","sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}),
@@ -4312,7 +4363,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_pr_provenance_uses_default_branch_wrapper_and_verified_version() {
+    fn merged_pr_provenance_uses_merged_wrapper_and_verified_version() {
         let api = crate::fixtures::Fixture::new(successful_pr_provenance_routes("1.2.3"));
         let policy = provenance_test_policy();
         let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
@@ -4324,6 +4375,28 @@ mod tests {
             ReleaseStrategy::GithubRelease,
         )
         .unwrap();
+        api.finish();
+    }
+
+    #[test]
+    fn merged_pr_provenance_rejects_stale_wrapper_at_merge_commit() {
+        let mut routes = successful_pr_provenance_routes_with_wrapper_pin("1.2.3", &"f".repeat(40));
+        routes.truncate(9);
+        let api = crate::fixtures::Fixture::new(routes);
+        let policy = provenance_test_policy();
+        let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();
+        let error = validate_source_manifest_provenance(
+            &api.api,
+            &policy,
+            &repo,
+            &provenance_test_manifest(),
+            ReleaseStrategy::GithubRelease,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("caller must pin one current reusable workflow"),
+            "stale merged wrapper was rejected for the wrong reason: {error:#}"
+        );
         api.finish();
     }
 
