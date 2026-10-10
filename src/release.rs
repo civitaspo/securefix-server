@@ -2032,6 +2032,10 @@ fn verify_checksum_signature(
         "checksum signature verification failed"
     );
     let status = String::from_utf8(output.stdout).context("GPG status is not UTF-8")?;
+    validate_gpg_status(&status, fingerprint)
+}
+
+fn validate_gpg_status(status: &str, fingerprint: &str) -> Result<()> {
     let expected = fingerprint.trim().to_ascii_uppercase();
     ensure!(!expected.is_empty(), "configured GPG fingerprint is empty");
     let mut valid_signatures = Vec::new();
@@ -2047,6 +2051,7 @@ fn verify_checksum_signature(
                 "BADSIG"
                     | "ERRSIG"
                     | "NO_PUBKEY"
+                    | "EXPSIG"
                     | "EXPKEYSIG"
                     | "REVKEYSIG"
                     | "KEYEXPIRED"
@@ -2061,7 +2066,7 @@ fn verify_checksum_signature(
                 .context("GPG VALIDSIG lacks signer fingerprint")?
                 .to_ascii_uppercase();
             let remaining: Vec<_> = fields.collect();
-            let primary = remaining.last().map(|value| value.to_ascii_uppercase());
+            let primary = remaining.get(8).map(|value| value.to_ascii_uppercase());
             valid_signatures.push((signer, primary));
         }
     }
@@ -2596,6 +2601,24 @@ mod tests {
         assert!(validate_release_identity(None, Some(7)).is_err());
         assert!(validate_release_identity(Some(7), None).is_err());
         assert!(validate_release_identity(Some(7), Some(8)).is_err());
+    }
+
+    #[test]
+    fn gpg_status_rejects_expired_revoked_and_multiple_signatures() {
+        let expected = "A".repeat(40);
+        let signer = "B".repeat(40);
+        let valid = format!(
+            "[GNUPG:] VALIDSIG {signer} 2026-01-01 1767225600 0 4 0 1 10 00 {expected} future-field\n"
+        );
+        assert!(validate_gpg_status(&valid, &expected).is_ok());
+        for rejected in ["EXPSIG", "EXPKEYSIG", "REVKEYSIG"] {
+            let status = format!("[GNUPG:] {rejected} keyid user\n{valid}");
+            assert!(
+                validate_gpg_status(&status, &expected).is_err(),
+                "{rejected}"
+            );
+        }
+        assert!(validate_gpg_status(&(valid.clone() + &valid), &expected).is_err());
     }
 
     fn provider_signature_test_plan(assets_dir: &Path) -> ReleasePlanV2 {
