@@ -72,7 +72,7 @@ jobs:
           mkdir -p probe
           install -m 755 "$binary" probe/release-probe-tests
           install -m 644 policy.json probe/policy.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: provider-probe-harness-${{ github.run_id }}
@@ -138,7 +138,7 @@ jobs:
           mkdir -p "$SECUREFIX_PROVIDER_PROBE_ASSET_DIR"
           chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sigma-probe-${{ github.run_id }}-${{ matrix.name }}
           path: probe/assets/*
@@ -161,7 +161,7 @@ jobs:
           pattern: sigma-probe-${{ github.run_id }}-*
           path: probe/assets
           merge-multiple: true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: sigma-probe-assets-${{ github.run_id }}
@@ -220,7 +220,7 @@ jobs:
           mkdir -p probe/state
           chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: sigma-probe-signed-${{ github.run_id }}
@@ -274,7 +274,7 @@ jobs:
           mkdir -p probe/assets probe/state
           chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: state
         if: always() && hashFiles('probe/state/receipt.json') != ''
         with:
@@ -386,7 +386,7 @@ jobs:
         run: |
           chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: sigma-probe-recovery-${{ github.run_id }}
@@ -453,7 +453,7 @@ jobs:
         run: |
           chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: sigma-probe-recovered-${{ github.run_id }}
@@ -513,7 +513,7 @@ jobs:
           chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
           "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: state
         if: always() && hashFiles('probe/state/receipt.json') != ''
         with:

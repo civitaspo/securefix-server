@@ -82,7 +82,7 @@ jobs:
           SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
         run: securefix release build-provider --release-pr-number "$RELEASE_PR_NUMBER"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: provider-bundle
@@ -115,7 +115,7 @@ jobs:
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           PROVIDER_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id || '0' }}
         run: securefix release tag-pr --release-pr-number "$RELEASE_PR_NUMBER" --artifact-id "$PROVIDER_ARTIFACT_ID"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-manifest
           path: manifest.json

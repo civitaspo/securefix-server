@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           current="$(gh api repos/civitaspo/securefix-server/commits/main --jq .sha)"
           [[ "$current" == "$EXPECTED_SHA" ]] || { echo 'server default branch moved during baseline build' >&2; exit 1; }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: baseline-runtime
@@ -122,7 +122,7 @@ jobs:
       - uses: ./.github/actions/setup-cli
       - name: Test candidate without credentials
         run: cargo +1.99.0 test --locked
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: candidate-runtime
@@ -168,7 +168,7 @@ jobs:
           github-token: ${{ github.token }}
           path: candidate-runtime
           merge-multiple: true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: candidate-runtime
@@ -267,7 +267,7 @@ jobs:
           ARTIFACT_NAME: ${{ steps.request.outputs.artifact-name }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: securefix integration verify-client --artifact-name "$ARTIFACT_NAME" --run-id "$GITHUB_RUN_ID" --workflow-sha "$WORKFLOW_SHA"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: client-verification
           path: client-verification.json
@@ -410,7 +410,7 @@ jobs:
           SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           SECUREFIX_PUBLISHED_RUNTIME_TAG: ${{ steps.runtime.outputs.published_runtime_tag }}
         run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase "$TEST_PHASE" --state-file fixtures/state.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.validate-outputs.outcome == 'success'
         with:
           name: scratch-fixtures
