@@ -2251,7 +2251,7 @@ fn verify_disposable_release_tag(
             integration_repository()?,
             tag.as_str()
         );
-        let reference: Value = api.get(&ref_path)?;
+        let reference = wait_for_created_tag_ref(api, &ref_path)?;
         ensure!(
             reference["object"]["type"] == "tag",
             "scratch release helper created a lightweight tag"
@@ -2301,6 +2301,23 @@ fn verify_disposable_release_tag(
             Ok(())
         }
     }
+}
+
+fn wait_for_created_tag_ref(api: &GitHub, path: &str) -> Result<Value> {
+    for attempt in 0..5 {
+        match api.get(path) {
+            Err(error)
+                if attempt < 4
+                    && error
+                        .downcast_ref::<ApiError>()
+                        .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                thread::sleep(Duration::from_secs(1));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
 }
 
 fn validate_signed_pr(api: &GitHub, policy: &Policy, fixture: &PullRequestFixture) -> Result<()> {
@@ -3329,6 +3346,30 @@ impl RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_tag_read_waits_for_visibility_but_does_not_retry_permission_errors() {
+        use crate::fixtures::{Fixture, Route};
+        let path = "/repos/civitaspo/testing-securefix-server/git/ref/tags/v0.0.0-test";
+        let expected = json!({"object":{"type":"tag","sha":"a".repeat(40)}});
+        let fixture = Fixture::new(vec![
+            Route::request("GET", path, 404, json!({"message":"Not Found"})),
+            Route::get(path, expected.clone()),
+        ]);
+        assert_eq!(
+            wait_for_created_tag_ref(&fixture.api, path).unwrap(),
+            expected
+        );
+        fixture.finish();
+        let fixture = Fixture::new(vec![Route::request(
+            "GET",
+            path,
+            403,
+            json!({"message":"Forbidden"}),
+        )]);
+        assert!(wait_for_created_tag_ref(&fixture.api, path).is_err());
+        fixture.finish();
+    }
 
     #[test]
     fn first_cutover_ignores_only_a_historical_canonical_tag_at_another_source() {
