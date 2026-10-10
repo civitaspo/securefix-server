@@ -438,6 +438,12 @@ fn validate_client_source_run(
 
 fn scratch_client_policy(trusted_policy: &[u8]) -> Result<Vec<u8>> {
     let mut policy: Value = serde_json::from_slice(trusted_policy)?;
+    // Client-only fixtures have no approval capability and must also work with
+    // the currently published runtime while a new policy schema is unreleased.
+    policy
+        .as_object_mut()
+        .context("scratch client policy must be an object")?
+        .remove("sensitive_path_approval_exemptions");
     let server_deployment = policy["deployment"]["server"].clone();
     policy["deployment"]["server"] = policy["deployment"]["integration"].clone();
     policy["deployment"]["integration"] = server_deployment;
@@ -3371,10 +3377,12 @@ mod tests {
 
     #[test]
     fn client_smoke_policy_swaps_only_server_and_scratch_deployments() {
-        let original = crate::config::trusted_policy_bytes().unwrap();
-        let scratch = scratch_client_policy(&original).unwrap();
-        let original: Value = serde_json::from_slice(&original).unwrap();
+        let mut original: Value =
+            serde_json::from_slice(&crate::config::trusted_policy_bytes().unwrap()).unwrap();
+        original["sensitive_path_approval_exemptions"] = json!({"users":[],"github_apps":[]});
+        let scratch = scratch_client_policy(&serde_json::to_vec(&original).unwrap()).unwrap();
         let scratch: Value = serde_json::from_slice(&scratch).unwrap();
+        assert!(scratch.get("sensitive_path_approval_exemptions").is_none());
         assert_eq!(
             scratch["deployment"]["server"],
             original["deployment"]["integration"]
