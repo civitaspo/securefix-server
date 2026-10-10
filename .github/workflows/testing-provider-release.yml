@@ -363,7 +363,7 @@ jobs:
           artifact-ids: ${{ needs.create-draft.outputs.state-artifact-id }}
           path: probe/state
           merge-multiple: true
-      - name: Create a scratch read-only token
+      - name: Create a repo-scoped token that can read draft release assets
         id: scratch-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -371,7 +371,7 @@ jobs:
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
           repositories: testing-securefix-server
-          permission-contents: read
+          permission-contents: write
       - name: Download the exact staged signature and record its digest
         env:
           SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
@@ -547,7 +547,7 @@ jobs:
           artifact-ids: ${{ needs.complete-draft.outputs.state-artifact-id }}
           path: probe/state
           merge-multiple: true
-      - name: Create a scratch read-only token
+      - name: Create a repo-scoped token that can read the completed draft
         id: scratch-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -555,7 +555,7 @@ jobs:
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
           repositories: testing-securefix-server
-          permission-contents: read
+          permission-contents: write
       - name: Verify the complete scratch draft without publishing
         env:
           SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json

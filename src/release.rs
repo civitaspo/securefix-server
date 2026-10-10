@@ -1175,7 +1175,7 @@ fn parse_request() -> Result<()> {
 
 fn preflight() -> Result<()> {
     let read = GitHub::from_env("GITHUB_TOKEN")?;
-    let app = GitHub::from_env("GH_TOKEN")?;
+    let app = GitHub::new("https://api.github.com", env("GH_TOKEN")?)?;
     let policy = current_policy(&read)?;
     let event = crate::event()?;
     let (repo, run_id) = request_parts(&event)?;
@@ -1729,17 +1729,38 @@ fn find_release(api: &GitHub, repo: &Repository, tag: &ReleaseTag) -> Result<Opt
         repo.as_str(),
         url_encode(tag.as_str())
     );
-    match api.get(&path) {
-        Ok(release) => Ok(Some(release)),
+    match api.get::<Value>(&path) {
+        Ok(release) => {
+            ensure!(
+                release["tag_name"] == tag.as_str(),
+                "release lookup returned a different tag"
+            );
+            Ok(Some(release))
+        }
         Err(error)
             if error
                 .downcast_ref::<ApiError>()
                 .is_some_and(|api_error| api_error.status == reqwest::StatusCode::NOT_FOUND) =>
         {
-            Ok(None)
+            // GitHub's tag lookup may not expose draft releases. Listing requires
+            // push access to include drafts, which the preflight token has.
+            let releases = api.paginate(&format!("/repos/{}/releases", repo.as_str()))?;
+            release_with_tag(&releases, tag)
         }
         Err(error) => Err(error),
     }
+}
+
+fn release_with_tag(releases: &[Value], tag: &ReleaseTag) -> Result<Option<Value>> {
+    let mut matching = releases
+        .iter()
+        .filter(|release| release["tag_name"] == tag.as_str());
+    let release = matching.next().cloned();
+    ensure!(
+        matching.next().is_none(),
+        "multiple releases use the requested tag"
+    );
+    Ok(release)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -2644,7 +2665,12 @@ mod tests {
                 let repo = Repository::parse(&repo_name)?;
                 let release_id = probe_release_id()?;
                 ensure!(release_id > 0, "release ID must be positive");
-                let api = GitHub::from_env("GH_TOKEN")?;
+                let api = GitHub::new("https://api.github.com", env("GH_TOKEN")?)?;
+                let found = find_release(&api, &repo, &tag)?;
+                ensure!(
+                    found.as_ref().and_then(|release| release["id"].as_u64()) == Some(release_id),
+                    "scratch tag does not resolve to the receipt-bound draft release"
+                );
                 let release: Value =
                     api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
                 ensure!(
@@ -2838,7 +2864,7 @@ mod tests {
                 );
                 let repo = Repository::parse(&repo_name)?;
                 let release_id = probe_release_id()?;
-                let api = GitHub::from_env("GH_TOKEN")?;
+                let api = GitHub::new("https://api.github.com", env("GH_TOKEN")?)?;
                 let release: Value =
                     api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
                 ensure!(
@@ -3310,6 +3336,69 @@ mod tests {
         assert!(validate_release_identity(None, Some(7)).is_err());
         assert!(validate_release_identity(Some(7), None).is_err());
         assert!(validate_release_identity(Some(7), Some(8)).is_err());
+    }
+
+    #[test]
+    fn find_release_falls_back_to_paginated_listing_for_drafts_and_fails_closed() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repo = Repository::parse("example/provider").unwrap();
+        let tag = ReleaseTag::parse("v1.2.3").unwrap();
+        let lookup = "/repos/example/provider/releases/tags/v1.2.3";
+        let listing = "/repos/example/provider/releases?per_page=100&page=1";
+
+        let fixture = Fixture::new(vec![Route::get(
+            lookup,
+            json!({"id":7,"tag_name":"v1.2.3","draft":false}),
+        )]);
+        let found = find_release(&fixture.api, &repo, &tag).unwrap().unwrap();
+        assert_eq!(found["id"], 7);
+        assert_eq!(found["draft"], false);
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![
+            Route::request("GET", lookup, 404, json!({"message":"Not Found"})),
+            Route::get(
+                listing,
+                json!([
+                    {"id":10,"tag_name":"v1.2.2","draft":false},
+                    {"id":42,"tag_name":"v1.2.3","draft":true}
+                ]),
+            ),
+        ]);
+        let found = find_release(&fixture.api, &repo, &tag).unwrap().unwrap();
+        assert_eq!(found["id"], 42);
+        assert_eq!(found["draft"], true);
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![
+            Route::request("GET", lookup, 404, json!({"message":"Not Found"})),
+            Route::get(listing, json!([{"id":10,"tag_name":"v1.2.2"}])),
+        ]);
+        assert!(find_release(&fixture.api, &repo, &tag).unwrap().is_none());
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![
+            Route::request("GET", lookup, 404, json!({"message":"Not Found"})),
+            Route::get(
+                listing,
+                json!([
+                    {"id":42,"tag_name":"v1.2.3","draft":true},
+                    {"id":43,"tag_name":"v1.2.3","draft":true}
+                ]),
+            ),
+        ]);
+        assert!(find_release(&fixture.api, &repo, &tag).is_err());
+        fixture.finish();
+
+        let fixture = Fixture::new(vec![Route::request(
+            "GET",
+            lookup,
+            403,
+            json!({"message":"Forbidden"}),
+        )]);
+        assert!(find_release(&fixture.api, &repo, &tag).is_err());
+        fixture.finish();
     }
 
     #[test]

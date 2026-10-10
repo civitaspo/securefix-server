@@ -507,20 +507,40 @@ fn operational_workflows_have_no_securefix_action_dependency() {
 
 #[test]
 fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
-    let workflow = workflow("testing-provider-release.yml");
-    assert!(workflow["on"].get("workflow_call").is_some());
-    assert_eq!(workflow["permissions"], serde_json::json!({}));
+    let provider_workflow = workflow("testing-provider-release.yml");
+    assert!(provider_workflow["on"].get("workflow_call").is_some());
+    assert_eq!(provider_workflow["permissions"], serde_json::json!({}));
     assert_eq!(
-        workflow["env"]["PROBE_REPOSITORY"],
+        provider_workflow["env"]["PROBE_REPOSITORY"],
         "civitaspo/testing-securefix-server"
     );
-    assert_eq!(workflow["env"]["PROBE_PROJECT"], "terraform-provider-sigma");
     assert_eq!(
-        workflow["env"]["PROBE_EXPECTED_GPG_FINGERPRINT"],
+        provider_workflow["env"]["PROBE_PROJECT"],
+        "terraform-provider-sigma"
+    );
+    assert_eq!(
+        provider_workflow["env"]["PROBE_EXPECTED_GPG_FINGERPRINT"],
         "12D7B26BEB5394D7AA579FB300F0D373EFFA1DC6"
     );
+    assert_eq!(
+        provider_workflow["on"]["workflow_call"]["secrets"],
+        serde_json::json!({
+            "TERRAFORM_PROVIDER_GPG_PRIVATE_KEY": {"required": true},
+            "TERRAFORM_PROVIDER_GPG_PASSPHRASE": {"required": true},
+            "SECUREFIX_SERVER_PRIVATE_KEY": {"required": true}
+        })
+    );
+    let dispatcher = workflow("testing-securefix-server.yml");
+    assert_eq!(
+        dispatcher["jobs"]["provider-release-probe"]["secrets"],
+        serde_json::json!({
+            "TERRAFORM_PROVIDER_GPG_PRIVATE_KEY": "${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}",
+            "TERRAFORM_PROVIDER_GPG_PASSPHRASE": "${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}",
+            "SECUREFIX_SERVER_PRIVATE_KEY": "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+        })
+    );
 
-    let guard = &workflow["jobs"]["guard"];
+    let guard = &provider_workflow["jobs"]["guard"];
     assert!(
         guard["if"]
             .as_str()
@@ -540,7 +560,7 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
             .contains("[[ \"$current\" == \"$CANDIDATE_SHA\" ]]")
     );
 
-    let build = &workflow["jobs"]["build-provider"];
+    let build = &provider_workflow["jobs"]["build-provider"];
     let checkout = build["steps"]
         .as_array()
         .unwrap()
@@ -592,7 +612,7 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
         1
     );
 
-    let compile = &workflow["jobs"]["compile-harness"];
+    let compile = &provider_workflow["jobs"]["compile-harness"];
     assert!(compile["steps"].as_array().unwrap().iter().any(|step| {
         step["run"]
             .as_str()
@@ -608,6 +628,18 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
         step["env"]["SECUREFIX_PROVIDER_PROBE_PHASE"]
             == "${{ matrix.kind == 'manifest' && 'build-manifest' || 'build-target' }}"
     }));
+    let build_text = serde_json::to_string(build).unwrap();
+    for forbidden in [
+        "secrets.",
+        "TERRAFORM_PROVIDER_GPG",
+        "SECUREFIX_SERVER_PRIVATE_KEY",
+        "SECUREFIX_SERVER_APP_TOKEN",
+    ] {
+        assert!(
+            !build_text.contains(forbidden),
+            "provider build exposes {forbidden}"
+        );
+    }
     let expected_phases = [
         "fresh-sign",
         "create-draft",
@@ -619,7 +651,7 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
         "cleanup-draft",
     ];
     for phase in expected_phases {
-        let found = workflow["jobs"]
+        let found = provider_workflow["jobs"]
             .as_object()
             .unwrap()
             .iter()
@@ -633,7 +665,7 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
             });
         assert!(found, "missing test-only probe phase {phase}");
     }
-    let text = serde_json::to_string(&workflow).unwrap();
+    let text = serde_json::to_string(&provider_workflow).unwrap();
     assert!(
         !text.contains("draft:false"),
         "probe must never publish its release"
@@ -643,22 +675,43 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
     for job_id in [
         "create-draft",
         "stage-draft",
+        "recover-download",
         "complete-draft",
+        "verify-draft",
         "cleanup-draft",
     ] {
-        let job_text = serde_json::to_string(&workflow["jobs"][job_id]).unwrap();
+        let job_text = serde_json::to_string(&provider_workflow["jobs"][job_id]).unwrap();
         assert!(job_text.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
         assert!(job_text.contains("testing-securefix-server"));
         assert!(!job_text.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
         assert!(!job_text.contains("GPG_PASSPHRASE"));
+        let token = provider_workflow["jobs"][job_id]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == "scratch-token")
+            .unwrap();
+        assert_eq!(token["with"]["repositories"], "testing-securefix-server");
+        assert_eq!(token["with"]["permission-contents"], "write");
+        for permission in [
+            "permission-actions",
+            "permission-issues",
+            "permission-pull-requests",
+            "permission-workflows",
+        ] {
+            assert!(
+                token["with"].get(permission).is_none(),
+                "{job_id} token should not request {permission}"
+            );
+        }
     }
     for job_id in ["fresh-sign", "recover-sign"] {
-        let job_text = serde_json::to_string(&workflow["jobs"][job_id]).unwrap();
+        let job_text = serde_json::to_string(&provider_workflow["jobs"][job_id]).unwrap();
         assert!(job_text.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
         assert!(!job_text.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
         assert!(!job_text.contains("SECUREFIX_SERVER_APP_TOKEN"));
     }
-    let aggregate = &workflow["jobs"]["assemble-provider"]["steps"];
+    let aggregate = &provider_workflow["jobs"]["assemble-provider"]["steps"];
     assert!(aggregate.as_array().unwrap().iter().any(|step| {
         step["with"]["pattern"] == "sigma-probe-${{ github.run_id }}-*"
             && step["with"]["merge-multiple"] == true
@@ -1251,6 +1304,32 @@ fn provider_build_sign_and_publish_have_distinct_credentials() {
     );
     let server: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/release.yml").unwrap()).unwrap();
+    let preflight_steps = server["jobs"]["preflight"]["steps"].as_array().unwrap();
+    let preflight_token = preflight_steps
+        .iter()
+        .find(|step| step["id"] == "client-token")
+        .unwrap();
+    assert_eq!(
+        preflight_token["with"]["repositories"],
+        "${{ needs.resolve-request.outputs.repo_name }}"
+    );
+    assert_eq!(
+        preflight_token["with"]["permission-contents"], "write",
+        "draft-release inspection requires a push-scoped installation token"
+    );
+    for (permission, expected) in [
+        ("permission-actions", "read"),
+        ("permission-pull-requests", "read"),
+    ] {
+        assert_eq!(preflight_token["with"][permission], expected);
+    }
+    for permission in [
+        "permission-administration",
+        "permission-issues",
+        "permission-workflows",
+    ] {
+        assert!(preflight_token["with"].get(permission).is_none());
+    }
     let sign = &server["jobs"]["sign"];
     let sign_text = serde_json::to_string(sign).unwrap();
     assert!(sign_text.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
