@@ -313,8 +313,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         ensure!(
             actual_yaml == expected_yaml
                 || legacy_request_generations(path, expected_yaml.clone())
-                    .iter()
-                    .any(|legacy| actual_yaml == *legacy),
+                    .contains(&actual_yaml),
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
     }
