@@ -68,6 +68,7 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files,
         default_current: false,
     };
@@ -110,6 +111,7 @@ fn runtime_update_auto_merge_requires_the_fresh_server_owned_pr_and_managed_file
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::from([(".github/workflows/ci.yml".into(), b"canonical".to_vec())]),
         default_current: false,
     };
@@ -171,6 +173,7 @@ fn runtime_update_auto_merge_sha_pins_the_merge_and_verifies_default_branch_cont
         repository: repository.clone(),
         default_branch: "main".into(),
         source_sha: source_sha.clone(),
+        runtime_tag: "v0.2.3".into(),
         files: rendered_files(&source_sha, "v0.2.3", "main", false).unwrap(),
         default_current: false,
     };
@@ -302,6 +305,7 @@ fn runtime_update_auto_merge_aborts_when_the_branch_head_moves_before_validation
             .clone(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::from([(".github/workflows/ci.yml".into(), b"canonical".to_vec())]),
         default_current: false,
     };
@@ -352,6 +356,7 @@ fn runtime_update_auto_merge_waits_for_only_the_same_valid_pr_head_to_catch_up()
         repository: repository.clone(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::new(),
         default_current: false,
     };
@@ -855,6 +860,7 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::from([(
             ".github/workflows/approve-request.yml".into(),
             b"approved".to_vec(),
@@ -872,8 +878,15 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
             json!([{"filename":".github/workflows/approve-request.yml","status":"modified"}]),
         ),
         Route::get(
+            "/repos/civitaspo/securefix-server/commits/main",
+            json!({"sha":"a".repeat(40)}),
+        ),
+        Route::request("PATCH", "/repos/civitaspo/nagi/pulls/4", 200, json!({})).with_request_body(
+            json!({"title":"chore: update Securefix caller workflows to v0.2.3"}),
+        ),
+        Route::get(
             "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
-            json!([pr]),
+            json!([{ "title": "chore: update Securefix caller workflows to v0.2.3", "user":pr["user"], "number":4, "head":pr["head"], "base":pr["base"] }]),
         ),
         Route::get(
             "/repos/civitaspo/nagi/pulls/4/files?per_page=100&per_page=100&page=1",
@@ -918,6 +931,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
         repository: repository.into(),
         default_branch: "main".into(),
         source_sha: source_sha.clone(),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::from([(path.into(), contents.clone())]),
         default_current: false,
     };
@@ -991,6 +1005,7 @@ fn caller_pr_with_wrong_base_fails_before_reading_or_writing_files() {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::from([(
             ".github/workflows/approve-request.yml".into(),
             b"approved".to_vec(),
@@ -1072,6 +1087,7 @@ fn canonical_bot_branch_accepts_current_or_prior_runtime_and_rejects_bad_commits
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
         source_sha: source_sha.clone(),
+        runtime_tag: "v0.2.3".into(),
         files,
         default_current: false,
     };
@@ -1151,6 +1167,7 @@ fn already_migrated_default_branch_is_a_noop_without_pull_request_api_calls() {
         repository: "civitaspo/nagi".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
+        runtime_tag: "v0.2.3".into(),
         files: BTreeMap::new(),
         default_current: true,
     };
