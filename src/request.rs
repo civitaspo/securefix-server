@@ -1283,21 +1283,21 @@ mod tests {
             assert!(sensitive_path_approval_exempt(
                 &policy,
                 &principal,
-                &[direct.clone()],
+                std::slice::from_ref(&direct),
                 &HashSet::new()
             ));
             let web = json!({"sha":sha,"author":principal,"committer":{"login":"web-flow"}});
             assert!(!sensitive_path_approval_exempt(
                 &policy,
                 &principal,
-                &[web.clone()],
+                std::slice::from_ref(&web),
                 &HashSet::new()
             ));
             let signed = HashSet::from([sha.clone()]);
             assert!(sensitive_path_approval_exempt(
                 &policy,
                 &principal,
-                &[web.clone()],
+                std::slice::from_ref(&web),
                 &signed
             ));
             assert!(!sensitive_path_approval_exempt(
@@ -1328,7 +1328,7 @@ mod tests {
                 assert!(!sensitive_path_approval_exempt(
                     &policy,
                     &impostor,
-                    &[direct.clone()],
+                    std::slice::from_ref(&direct),
                     &signed
                 ));
                 let mut other = direct.clone();

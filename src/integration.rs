@@ -1202,31 +1202,77 @@ fn verify_sensitive_path_authorization(
                 bot_id: policy.server_bot_id,
                 bot_login: policy.deployment.server_bot_login.clone(),
             });
-        let branch = format!("{BRANCH_PREFIX}sensitive-mixed-{}", &candidate_sha[..12]);
-        let fixture = create_pr(
-            api,
-            &owner_fixture_head,
-            default_branch,
-            &branch,
-            &format!(
-                "test: sensitive mixed actor authorization {}",
-                &candidate_sha[..12]
-            ),
-            BTreeMap::from([(
-                format!(
-                    "{FIX_PATH_PREFIX}sensitive-mixed-{}.txt",
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let branch = format!(
+            "{BRANCH_PREFIX}sensitive-mixed-{}-{nonce}",
+            &candidate_sha[..12]
+        );
+        validate_branch(&branch)?;
+        // Record ownership only after GitHub confirms that this unique ref was created.
+        let _: Value = api.post(
+            &format!("/repos/{}/git/refs", integration_repository()?),
+            &json!({"ref":format!("refs/heads/{branch}"),"sha":owner_fixture_head}),
+        )?;
+        let mut created_head = None;
+        let fixture_result = (|| {
+            let head_sha = api.create_commit(
+                integration_repository()?,
+                &branch,
+                &owner_fixture_head,
+                &format!(
+                    "test: sensitive mixed actor authorization {}",
                     &candidate_sha[..12]
                 ),
-                format!("candidate={candidate_sha}\nscenario=sensitive-mixed-actor\n").into_bytes(),
-            )]),
-        );
-        let fixture = match fixture {
+                BTreeMap::from([(
+                    format!(
+                        "{FIX_PATH_PREFIX}sensitive-mixed-{}.txt",
+                        &candidate_sha[..12]
+                    ),
+                    format!("candidate={candidate_sha}\nscenario=sensitive-mixed-actor\n")
+                        .into_bytes(),
+                )]),
+                Vec::new(),
+            )?;
+            created_head = Some(head_sha.clone());
+            let title = format!(
+                "test: sensitive mixed actor authorization {}",
+                &candidate_sha[..12]
+            );
+            let pull: Value = api.post(
+                &format!("/repos/{}/pulls", integration_repository()?),
+                &json!({"title":title,"head":branch,"base":default_branch,"body":"Created by the native Securefix scratch integration harness."}),
+            )?;
+            ensure!(
+                pull["state"] == "open"
+                    && pull["base"]["ref"] == default_branch
+                    && pull["head"]["sha"] == head_sha
+                    && pull["head"]["ref"] == branch,
+                "GitHub created an unexpected mixed-actor scratch pull request"
+            );
+            Ok(PullRequestFixture {
+                number: pull["number"]
+                    .as_u64()
+                    .context("mixed-actor scratch pull request has no number")?,
+                branch: branch.clone(),
+                head_sha,
+                url: pull["html_url"]
+                    .as_str()
+                    .context("mixed-actor scratch pull request has no URL")?
+                    .to_owned(),
+            })
+        })();
+        let fixture = match fixture_result {
             Ok(fixture) => fixture,
             Err(error) => {
-                return match delete_scratch_branch(api, &branch) {
+                return match cleanup_failed_sensitive_probe_creation(
+                    api,
+                    &branch,
+                    default_branch,
+                    created_head.as_deref(),
+                ) {
                     Ok(()) => Err(error.context("create mixed-actor sensitive-path fixture")),
                     Err(cleanup_error) => Err(error.context(format!(
-                        "mixed-actor fixture creation failed; branch cleanup also failed: {cleanup_error:#}"
+                        "mixed-actor fixture creation failed; safe cleanup also failed: {cleanup_error:#}"
                     ))),
                 };
             }
@@ -1330,6 +1376,55 @@ fn cleanup_sensitive_probe(api: &GitHub, fixture: &PullRequestFixture) -> Result
     }
     validate_branch(&fixture.branch)?;
     delete_scratch_branch(api, &fixture.branch)
+}
+
+fn cleanup_failed_sensitive_probe_creation(
+    api: &GitHub,
+    branch: &str,
+    default_branch: &str,
+    created_head: Option<&str>,
+) -> Result<()> {
+    validate_branch(branch)?;
+    if let Some(head_sha) = created_head {
+        validate_sha(head_sha)?;
+        let repository = integration_repository()?;
+        let owner = repository
+            .split_once('/')
+            .context("scratch repository has no owner")?
+            .0;
+        let pulls: Vec<Value> = api.paginate(&format!(
+            "/repos/{repository}/pulls?state=all&head={owner}:{branch}"
+        ))?;
+        let matches = pulls
+            .iter()
+            .filter(|pull| pull["head"]["ref"] == branch)
+            .collect::<Vec<_>>();
+        ensure!(
+            matches.len() <= 1,
+            "ambiguous mixed-actor fixture cleanup found multiple pull requests"
+        );
+        if let Some(pull) = matches.first() {
+            ensure!(
+                pull["head"]["sha"] == head_sha
+                    && pull["head"]["repo"]["full_name"] == repository
+                    && pull["head"]["repo"]["id"].as_u64() == Some(integration_repository_id()?)
+                    && pull["base"]["ref"] == default_branch
+                    && pull["user"]["id"].as_u64() == Some(trusted_config()?.server_bot_id)
+                    && pull["user"]["type"] == "Bot",
+                "ambiguous mixed-actor fixture cleanup found an unexpected pull request"
+            );
+            if pull["state"] == "open" {
+                let number = pull["number"]
+                    .as_u64()
+                    .context("ambiguous mixed-actor pull request has no number")?;
+                let _: Value = api.patch(
+                    &format!("/repos/{repository}/pulls/{number}"),
+                    &json!({"state":"closed"}),
+                )?;
+            }
+        }
+    }
+    delete_scratch_branch(api, branch)
 }
 
 fn delete_scratch_branch(api: &GitHub, branch: &str) -> Result<()> {
