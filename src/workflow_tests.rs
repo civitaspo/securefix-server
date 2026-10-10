@@ -889,7 +889,14 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
             .unwrap()
             .contains("candidate-runtime")
     );
-    let text = serde_json::to_string(&candidate).unwrap();
+    // The provider rehearsal has its own credential-boundary test; the native
+    // candidate runner must still receive no provider signing credentials.
+    let mut native_candidate = candidate.clone();
+    native_candidate["jobs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("provider-release-probe");
+    let text = serde_json::to_string(&native_candidate).unwrap();
     for forbidden in [
         "CIVITASPO_BOT_PR_APPROVE_TOKEN",
         "TERRAFORM_PROVIDER_GPG",
