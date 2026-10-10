@@ -332,6 +332,63 @@ fn runtime_update_auto_merge_aborts_when_the_branch_head_moves_before_validation
 }
 
 #[test]
+fn runtime_update_auto_merge_waits_for_only_the_same_valid_pr_head_to_catch_up() {
+    use crate::fixtures::{Fixture, Route};
+    use std::time::Duration;
+
+    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let repository = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .integration
+        .repository
+        .clone();
+    let branch = crate::config::trusted()
+        .unwrap()
+        .deployment
+        .runtime_update_branch
+        .clone();
+    let migration = CallerMigration {
+        repository: repository.clone(),
+        default_branch: "main".into(),
+        source_sha: "a".repeat(40),
+        files: BTreeMap::new(),
+        default_current: false,
+    };
+    let old_head = "b".repeat(40);
+    let expected_head = "c".repeat(40);
+    let pr = |head: &str| {
+        json!({
+            "number": 19,
+            "state": "open",
+            "draft": false,
+            "user": {"id": policy.server_bot_id, "type": "Bot"},
+            "head": {"repo": {"full_name": repository}, "ref": branch, "sha": head},
+            "base": {"repo": {"full_name": repository}, "ref": "main"}
+        })
+    };
+    let fixture = Fixture::new(vec![
+        Route::get(format!("/repos/{repository}/pulls/19"), pr(&old_head)),
+        Route::get(
+            format!("/repos/{repository}/git/ref/heads/{branch}"),
+            json!({"object":{"sha":expected_head}}),
+        ),
+        Route::get(format!("/repos/{repository}/pulls/19"), pr(&expected_head)),
+    ]);
+    let pull = wait_for_runtime_update_pull_request_with_interval(
+        &fixture.api,
+        &policy,
+        &migration,
+        19,
+        &expected_head,
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(pull["head"]["sha"], expected_head);
+    fixture.finish();
+}
+
+#[test]
 fn caller_migration_requires_repository_owner_identity_not_human_owner_identity() {
     use crate::fixtures::{Fixture, Route};
 
