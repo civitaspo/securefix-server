@@ -79,6 +79,20 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                 );
                 if uses.starts_with("actions/download-artifact@") {
                     let inputs = &step["with"];
+                    if path == ".github/workflows/testing-provider-release.yml"
+                        && job_id == "assemble-provider"
+                    {
+                        assert_eq!(
+                            inputs["pattern"], "sigma-probe-${{ github.run_id }}-*",
+                            "only the current run's provider matrix artifacts may be assembled"
+                        );
+                        assert_eq!(inputs["path"], "probe/assets");
+                        assert_eq!(inputs["merge-multiple"], true);
+                        assert!(inputs.get("artifact-ids").is_none());
+                        assert!(inputs.get("repository").is_none());
+                        assert!(inputs.get("run-id").is_none());
+                        continue;
+                    }
                     if path == ".github/workflows/testing-securefix-server.yml" && job_id == "reuse"
                     {
                         if inputs["artifact-ids"]
@@ -452,6 +466,11 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             if path == ".github/workflows/testing-securefix-server.yml" && job_id == "build" {
                 continue;
             }
+            if path == ".github/workflows/testing-provider-release.yml"
+                && job_id == "compile-harness"
+            {
+                continue;
+            }
             for step in job["steps"].as_array().into_iter().flatten() {
                 if let Some(run) = step["run"].as_str() {
                     assert!(
@@ -484,6 +503,166 @@ fn operational_workflows_have_no_securefix_action_dependency() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
+    let workflow = workflow("testing-provider-release.yml");
+    assert!(workflow["on"].get("workflow_call").is_some());
+    assert_eq!(workflow["permissions"], serde_json::json!({}));
+    assert_eq!(
+        workflow["env"]["PROBE_REPOSITORY"],
+        "civitaspo/testing-securefix-server"
+    );
+    assert_eq!(workflow["env"]["PROBE_PROJECT"], "terraform-provider-sigma");
+    assert_eq!(
+        workflow["env"]["PROBE_EXPECTED_GPG_FINGERPRINT"],
+        "12D7B26BEB5394D7AA579FB300F0D373EFFA1DC6"
+    );
+
+    let guard = &workflow["jobs"]["guard"];
+    assert!(
+        guard["if"]
+            .as_str()
+            .unwrap()
+            .contains("github.actor_id == '4525500'")
+    );
+    assert!(
+        guard["if"]
+            .as_str()
+            .unwrap()
+            .contains("refs/heads/integration/native-")
+    );
+    assert!(
+        guard["steps"][0]["run"]
+            .as_str()
+            .unwrap()
+            .contains("[[ \"$current\" == \"$CANDIDATE_SHA\" ]]")
+    );
+
+    let build = &workflow["jobs"]["build-provider"];
+    let checkout = build["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .unwrap();
+    assert_eq!(
+        checkout["with"]["repository"],
+        "civitaspo/terraform-provider-sigma"
+    );
+    assert_eq!(
+        checkout["with"]["ref"],
+        "50a03ed7723ff026c0c8f1d567c4ee3f82e39675"
+    );
+    let matrix = build["strategy"]["matrix"]["include"].as_array().unwrap();
+    let targets = matrix
+        .iter()
+        .filter(|item| item["kind"] == "target")
+        .map(|item| {
+            format!(
+                "{}:{}",
+                item["os"].as_str().unwrap(),
+                item["arch"].as_str().unwrap()
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let target_count = matrix
+        .iter()
+        .filter(|item| item["kind"] == "target")
+        .count();
+    let expected = crate::release::PROVIDER_TARGETS
+        .iter()
+        .map(|target| format!("{}:{}", target.os, target.arch))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        targets, expected,
+        "matrix must build each supported provider target exactly once"
+    );
+    assert_eq!(target_count, crate::release::PROVIDER_TARGETS.len());
+    assert_eq!(
+        matrix
+            .iter()
+            .filter(|item| item["kind"] == "manifest")
+            .count(),
+        1
+    );
+
+    let compile = &workflow["jobs"]["compile-harness"];
+    assert!(compile["steps"].as_array().unwrap().iter().any(|step| {
+        step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("cargo +1.99.0 test --locked --bin securefix --no-run"))
+    }));
+    assert!(compile["steps"].as_array().unwrap().iter().all(|step| {
+        !serde_json::to_string(step).unwrap().contains("secrets.")
+            && !step["env"].to_string().contains("GPG_")
+            && !step["env"].to_string().contains("APP_TOKEN")
+    }));
+
+    assert!(build["steps"].as_array().unwrap().iter().any(|step| {
+        step["env"]["SECUREFIX_PROVIDER_PROBE_PHASE"]
+            == "${{ matrix.kind == 'manifest' && 'build-manifest' || 'build-target' }}"
+    }));
+    let expected_phases = [
+        "fresh-sign",
+        "create-draft",
+        "stage-draft",
+        "recover-download",
+        "recover-sign",
+        "complete-draft",
+        "verify-draft",
+        "cleanup-draft",
+    ];
+    for phase in expected_phases {
+        let found = workflow["jobs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .any(|(_, job)| {
+                job["steps"].as_array().into_iter().flatten().any(|step| {
+                    step["env"]["SECUREFIX_PROVIDER_PROBE_PHASE"] == phase
+                        && step["run"].as_str().is_some_and(|run| {
+                            run.contains("release::tests::provider_no_publish_probe")
+                        })
+                })
+            });
+        assert!(found, "missing test-only probe phase {phase}");
+    }
+    let text = serde_json::to_string(&workflow).unwrap();
+    assert!(
+        !text.contains("draft:false"),
+        "probe must never publish its release"
+    );
+    assert!(!text.contains("gh release create") && !text.contains("gh release edit"));
+
+    for job_id in [
+        "create-draft",
+        "stage-draft",
+        "complete-draft",
+        "cleanup-draft",
+    ] {
+        let job_text = serde_json::to_string(&workflow["jobs"][job_id]).unwrap();
+        assert!(job_text.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
+        assert!(job_text.contains("testing-securefix-server"));
+        assert!(!job_text.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+        assert!(!job_text.contains("GPG_PASSPHRASE"));
+    }
+    for job_id in ["fresh-sign", "recover-sign"] {
+        let job_text = serde_json::to_string(&workflow["jobs"][job_id]).unwrap();
+        assert!(job_text.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+        assert!(!job_text.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
+        assert!(!job_text.contains("SECUREFIX_SERVER_APP_TOKEN"));
+    }
+    let aggregate = &workflow["jobs"]["assemble-provider"]["steps"];
+    assert!(aggregate.as_array().unwrap().iter().any(|step| {
+        step["with"]["pattern"] == "sigma-probe-${{ github.run_id }}-*"
+            && step["with"]["merge-multiple"] == true
+    }));
 }
 
 #[test]
@@ -737,6 +916,9 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     .is_some_and(|u| u.starts_with("actions/download-artifact@"))
                     && step["with"]["artifact-ids"].is_string()
             });
+            if path == ".github/workflows/testing-provider-release.yml" {
+                continue;
+            }
             let installer = steps
                 .iter()
                 .position(|step| step["uses"] == "$/.github/actions/install-cli");

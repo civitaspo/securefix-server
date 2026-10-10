@@ -8,9 +8,9 @@ on:
         type: string
         default: ''
       phase:
-        description: Prepare scratch fixtures or verify owner-authorized outcomes
+        description: Prepare/verify Securefix fixtures or test the no-publish Sigma release flow
         type: choice
-        options: [prepare, verify]
+        options: [prepare, verify, provider]
         default: prepare
       fixture_run_id:
         description: Successful prepare run whose binary and state are reused
@@ -38,14 +38,14 @@ concurrency:
 
 jobs:
   trusted-runtime-main:
-    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
+    if: inputs.phase != 'provider' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/load-cli.yml
     permissions:
       contents: read
       attestations: read
 
   baseline-build:
-    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    if: inputs.phase != 'provider' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -419,3 +419,10 @@ jobs:
             fixtures/verification.json
           if-no-files-found: error
           retention-days: 7
+
+  provider-release-probe:
+    if: inputs.phase == 'provider'
+    uses: ./.github/workflows/testing-provider-release.yml
+    permissions:
+      actions: read
+      contents: read

@@ -1,0 +1,614 @@
+name: Test Provider Release Without Publishing
+
+on:
+  workflow_call:
+
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+concurrency:
+  group: provider-release-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROBE_PROJECT: terraform-provider-sigma
+  PROBE_TAG: v0.2.1-pre.${{ github.run_id }}
+  PROBE_REPOSITORY: civitaspo/testing-securefix-server
+  PROBE_EXPECTED_GPG_FINGERPRINT: 12D7B26BEB5394D7AA579FB300F0D373EFFA1DC6
+
+jobs:
+  guard:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      candidate-sha: ${{ steps.guard.outputs.candidate-sha }}
+    steps:
+      - name: Require the frozen candidate branch to match this run
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'candidate SHA is invalid' >&2; exit 1; }
+          [[ "$BRANCH" =~ ^integration/native-[0-9a-f]{12}$ ]] || { echo 'workflow must run from a SHA-named frozen integration branch' >&2; exit 1; }
+          [[ "${BRANCH##*-}" == "${CANDIDATE_SHA:0:12}" ]] || { echo 'frozen branch name does not bind this candidate SHA' >&2; exit 1; }
+          current="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq .object.sha)"
+          [[ "$current" == "$CANDIDATE_SHA" ]] || { echo 'frozen branch moved during dispatch' >&2; exit 1; }
+          echo "candidate-sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
+  compile-harness:
+    needs: guard
+    if: needs.guard.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.guard.outputs.candidate-sha }}
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Compile the isolated release probe test binary
+        run: |
+          cargo +1.99.0 test --locked --bin securefix --no-run --message-format=json > "$RUNNER_TEMP/cargo-test.json"
+          binary="$(jq -er 'select(.reason == "compiler-artifact" and .target.name == "securefix" and .profile.test == true and (.target.kind | index("bin")) != null) | .executable' "$RUNNER_TEMP/cargo-test.json")"
+          [[ -x "$binary" ]] || { echo 'compiled release probe test binary is missing' >&2; exit 1; }
+          mkdir -p probe
+          install -m 755 "$binary" probe/release-probe-tests
+          install -m 644 policy.json probe/policy.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: provider-probe-harness-${{ github.run_id }}
+          path: probe/
+          if-no-files-found: error
+          retention-days: 1
+
+  build-provider:
+    needs: [guard, compile-harness]
+    if: needs.guard.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, os: linux, arch: amd64, kind: target }
+          - { name: linux-386, os: linux, arch: '386', kind: target }
+          - { name: linux-arm, os: linux, arch: arm, kind: target }
+          - { name: linux-arm64, os: linux, arch: arm64, kind: target }
+          - { name: darwin-amd64, os: darwin, arch: amd64, kind: target }
+          - { name: darwin-arm64, os: darwin, arch: arm64, kind: target }
+          - { name: windows-amd64, os: windows, arch: amd64, kind: target }
+          - { name: windows-386, os: windows, arch: '386', kind: target }
+          - { name: windows-arm64, os: windows, arch: arm64, kind: target }
+          - { name: freebsd-amd64, os: freebsd, arch: amd64, kind: target }
+          - { name: freebsd-386, os: freebsd, arch: '386', kind: target }
+          - { name: freebsd-arm, os: freebsd, arch: arm, kind: target }
+          - { name: freebsd-arm64, os: freebsd, arch: arm64, kind: target }
+          - { name: manifest, os: '', arch: '', kind: manifest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/terraform-provider-sigma
+          ref: 50a03ed7723ff026c0c8f1d567c4ee3f82e39675
+          path: sigma
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.kind == 'target'
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Build one fixed provider target or copy the registry manifest
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: ${{ matrix.kind == 'manifest' && 'build-manifest' || 'build-target' }}
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_SOURCE_DIR: ${{ github.workspace }}/sigma
+          SECUREFIX_PROVIDER_PROBE_OUTPUT_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_OS: ${{ matrix.os }}
+          SECUREFIX_PROVIDER_PROBE_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$SECUREFIX_PROVIDER_PROBE_ASSET_DIR"
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sigma-probe-${{ github.run_id }}-${{ matrix.name }}
+          path: probe/assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble-provider:
+    needs: [guard, build-provider]
+    if: needs.guard.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: sigma-probe-${{ github.run_id }}-*
+          path: probe/assets
+          merge-multiple: true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: sigma-probe-assets-${{ github.run_id }}
+          path: probe/assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  fresh-sign:
+    needs: [guard, compile-harness, assemble-provider]
+    if: needs.guard.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.assemble-provider.outputs.artifact-id }}
+          path: probe/assets
+          merge-multiple: true
+      - name: Recheck the frozen candidate branch before loading signing secrets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.guard.outputs.candidate-sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          current="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq .object.sha)"
+          [[ "$current" == "$CANDIDATE_SHA" ]] || { echo 'candidate branch moved before signing' >&2; exit 1; }
+      - name: Import the registered provider signing key
+        id: gpg
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        with:
+          gpg_private_key: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+      - name: Sign and verify canonical provider checksums
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: fresh-sign
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+          GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+          SECUREFIX_PROVIDER_PROBE_EXPECTED_GPG_FINGERPRINT: ${{ env.PROBE_EXPECTED_GPG_FINGERPRINT }}
+        run: |
+          mkdir -p probe/state
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: sigma-probe-signed-${{ github.run_id }}
+          path: |
+            probe/assets/*
+            probe/state/public-key.asc
+          if-no-files-found: error
+          retention-days: 1
+
+  create-draft:
+    needs: [guard, compile-harness, fresh-sign]
+    if: needs.guard.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      release-id: ${{ steps.create.outputs.release_id }}
+      target-sha: ${{ steps.create.outputs.target_sha }}
+      state-artifact-id: ${{ steps.state.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - name: Create a scratch-only token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+      - name: Create the uniquely tagged scratch draft
+        id: create
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: create-draft
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
+          GITHUB_SHA: ${{ needs.guard.outputs.candidate-sha }}
+        run: |
+          mkdir -p probe/assets probe/state
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: state
+        if: always() && hashFiles('probe/state/receipt.json') != ''
+        with:
+          name: sigma-probe-state-${{ github.run_id }}
+          path: probe/state/receipt.json
+          if-no-files-found: error
+          retention-days: 1
+
+  stage-draft:
+    needs: [guard, compile-harness, assemble-provider, fresh-sign, create-draft]
+    if: needs.guard.result == 'success' && needs.create-draft.outputs.release-id != ''
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.assemble-provider.outputs.artifact-id }}
+          path: probe/assets
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.fresh-sign.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.create-draft.outputs.state-artifact-id }}
+          path: probe/state
+          merge-multiple: true
+      - name: Create a scratch-only token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+      - name: Stage only the checksum and signature assets
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: stage-draft
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
+        run: |
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+
+  recover-download:
+    needs: [guard, compile-harness, assemble-provider, create-draft, stage-draft]
+    if: needs.guard.result == 'success' && needs.stage-draft.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.assemble-provider.outputs.artifact-id }}
+          path: probe/assets
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.create-draft.outputs.state-artifact-id }}
+          path: probe/state
+          merge-multiple: true
+      - name: Create a scratch read-only token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: read
+      - name: Download the exact staged signature and record its digest
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: recover-download
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          SECUREFIX_PROVIDER_PROBE_OUTPUT_DIR: ${{ github.workspace }}/probe/recovery
+          GH_TOKEN: ${{ steps.scratch-token.outputs.token }}
+        run: |
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: sigma-probe-recovery-${{ github.run_id }}
+          path: probe/recovery/
+          if-no-files-found: error
+          retention-days: 1
+
+  recover-sign:
+    needs: [guard, compile-harness, assemble-provider, fresh-sign, create-draft, recover-download]
+    if: needs.guard.result == 'success' && needs.recover-download.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.assemble-provider.outputs.artifact-id }}
+          path: probe/assets
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.fresh-sign.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recover-download.outputs.artifact-id }}
+          path: probe/recovery
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.create-draft.outputs.state-artifact-id }}
+          path: probe/state
+          merge-multiple: true
+      - name: Import the registered provider signing key
+        id: gpg
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        with:
+          gpg_private_key: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+      - name: Verify and reuse the recovered signature offline
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: recover-sign
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          SECUREFIX_PROVIDER_PROBE_RECOVERY_DIR: ${{ github.workspace }}/probe/recovery
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+          GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+          SECUREFIX_PROVIDER_PROBE_EXPECTED_GPG_FINGERPRINT: ${{ env.PROBE_EXPECTED_GPG_FINGERPRINT }}
+          SECUREFIX_PROVIDER_PROBE_RELEASE_ID: ${{ needs.create-draft.outputs.release-id }}
+        run: |
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: sigma-probe-recovered-${{ github.run_id }}
+          path: |
+            probe/assets/*
+            probe/state/public-key.asc
+          if-no-files-found: error
+          retention-days: 1
+
+  complete-draft:
+    needs: [guard, compile-harness, create-draft, recover-sign]
+    if: needs.guard.result == 'success' && needs.recover-sign.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      state-artifact-id: ${{ steps.state.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recover-sign.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.create-draft.outputs.state-artifact-id }}
+          path: probe/state
+          merge-multiple: true
+      - name: Create a scratch-only token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+      - name: Complete the draft twice and require unchanged asset identities
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: complete-draft
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
+        run: |
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: state
+        if: always() && hashFiles('probe/state/receipt.json') != ''
+        with:
+          name: sigma-probe-complete-state-${{ github.run_id }}
+          path: probe/state/
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-draft:
+    needs: [guard, compile-harness, create-draft, recover-sign, complete-draft]
+    if: needs.guard.result == 'success' && needs.complete-draft.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recover-sign.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.complete-draft.outputs.state-artifact-id }}
+          path: probe/state
+          merge-multiple: true
+      - name: Create a scratch read-only token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: read
+      - name: Verify the complete scratch draft without publishing
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: verify-draft
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          GH_TOKEN: ${{ steps.scratch-token.outputs.token }}
+          GPG_FINGERPRINT: ${{ env.PROBE_EXPECTED_GPG_FINGERPRINT }}
+          SECUREFIX_PROVIDER_PROBE_EXPECTED_GPG_FINGERPRINT: ${{ env.PROBE_EXPECTED_GPG_FINGERPRINT }}
+        run: |
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
+
+  cleanup-draft:
+    needs: [guard, compile-harness, create-draft, stage-draft, recover-download, recover-sign, complete-draft, verify-draft]
+    if: always() && (needs.create-draft.outputs.release-id != '' || needs.create-draft.outputs.state-artifact-id != '')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: needs.compile-harness.outputs.artifact-id != ''
+        with:
+          artifact-ids: ${{ needs.compile-harness.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: needs.create-draft.outputs.state-artifact-id != ''
+        with:
+          artifact-ids: ${{ needs.create-draft.outputs.state-artifact-id }}
+          path: probe/state
+          merge-multiple: true
+      - name: Create a scratch-only cleanup token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+      - name: Delete only the receipt-bound scratch draft
+        env:
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_PROVIDER_PROBE_PHASE: cleanup-draft
+          SECUREFIX_PROVIDER_PROBE_PROJECT: ${{ env.PROBE_PROJECT }}
+          SECUREFIX_PROVIDER_PROBE_TAG: ${{ env.PROBE_TAG }}
+          SECUREFIX_PROVIDER_PROBE_ASSET_DIR: ${{ github.workspace }}/probe/assets
+          SECUREFIX_PROVIDER_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          SECUREFIX_PROVIDER_PROBE_STATE_DIR: ${{ github.workspace }}/probe/state
+          SECUREFIX_PROVIDER_PROBE_RELEASE_ID: ${{ needs.create-draft.outputs.release-id }}
+          SECUREFIX_PROVIDER_PROBE_EXPECTED_TARGET_SHA: ${{ needs.create-draft.outputs.target-sha }}
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
+        run: |
+          if [[ -z "$SECUREFIX_PROVIDER_PROBE_RELEASE_ID" ]]; then unset SECUREFIX_PROVIDER_PROBE_RELEASE_ID; fi
+          chmod 755 "$GITHUB_WORKSPACE/probe/release-probe-tests"
+          "$GITHUB_WORKSPACE/probe/release-probe-tests" --ignored --exact release::tests::provider_no_publish_probe --nocapture
