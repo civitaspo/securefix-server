@@ -144,7 +144,7 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       source-sha: ${{ inputs.candidate_sha || job.workflow_sha }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}
           path: trusted-runtime
@@ -160,7 +160,7 @@ jobs:
           FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
         run: |
           "$RUNNER_TEMP/securefix-bin/securefix" integration fetch-state --candidate-sha "$CANDIDATE_SHA" --run-id "$FIXTURE_RUN_ID" --state-file fixtures/state.json
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.state.outputs.candidate_artifact_id }}
           repository: civitaspo/securefix-server
@@ -191,7 +191,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}
           path: trusted-runtime
@@ -211,7 +211,7 @@ jobs:
           ref: ${{ needs.build.outputs.source-sha }}
           path: candidate
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: candidate-runtime
@@ -284,7 +284,7 @@ jobs:
       contents: read
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}
           path: trusted-runtime
@@ -309,7 +309,7 @@ jobs:
           SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
         run: |
           "$RUNNER_TEMP/securefix-bin/securefix" integration fetch-state --candidate-sha "$CANDIDATE_SHA" --run-id "$FIXTURE_RUN_ID" --state-file fixtures/state.json
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id || needs.reuse.outputs.artifact-id }}
           path: candidate-runtime
