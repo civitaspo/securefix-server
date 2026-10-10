@@ -312,8 +312,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         let expected_yaml: serde_yaml::Value = serde_yaml::from_slice(contents)?;
         ensure!(
             actual_yaml == expected_yaml
-                || legacy_request_generations(path, expected_yaml.clone())
-                    .contains(&actual_yaml),
+                || legacy_request_generations(path, expected_yaml.clone()).contains(&actual_yaml),
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
     }
