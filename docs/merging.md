@@ -11,7 +11,8 @@ The server checks every source commit's verified signature and committer identit
 GitHub web commits additionally require the exact commit's GraphQL proof of a valid GitHub signature and a trusted author; a missing committer identity is rejected.
 Fork PRs are rejected.
 Missing, truncated, unsigned, or mismatched commit lists fail closed.
-Sensitive paths in [`policy.json`](../policy.json), including dependency manifests and workflow/build configuration, require an owner command for the same head.
+Sensitive paths in [`policy.json`](../policy.json), including dependency manifests and workflow/build configuration, require an owner command for the same head unless the author and every effective committer satisfy `sensitive_path_approval_exemptions`.
+The deployed policy exempts Renovate by its exact bot ID/login. `trusted_committers` alone is insufficient. This exemption skips only owner authorization; signatures, current-head approval, provenance, and required checks remain mandatory.
 Renames inspect both the current and previous path.
 Every change in the server repository is sensitive.
 
@@ -66,7 +67,7 @@ Source-read tokens are read-only; authorization and notification tokens do not r
 
 Follow [migration.md](migration.md) before activating the full configured set.
 No verification-repository environment variable bypasses the exact policy.
-A scratch repository must be explicitly added to a reviewed temporary capability policy.
+The scratch repository and its capabilities must be explicitly configured in the reviewed policy. Candidate integration uses its separate, repository-scoped scratch context; it does not require widening the production allowlist.
 The [historical GitHub tests](archive/merge-verification-2026-10-08.md) cover the former implementation and do not certify the Rust path.
 
 Owner `/approve` and `/merge` commands receive a rocket reaction after the trusted request runtime validates the comment identity and exact command. The reaction acknowledges receipt for processing; it does not mean approval or merge succeeded. It appears when the Actions runner starts the capture step after loading the CLI.

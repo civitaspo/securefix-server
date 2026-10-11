@@ -1,7 +1,8 @@
 # Rust migration: GitHub verification
 
-The implementation is available for review in [server PR56](https://github.com/civitaspo/securefix-server/pull/56).
-It has not been deployed to the production default branch.
+This is a historical pre-deployment report for [server PR56](https://github.com/civitaspo/securefix-server/pull/56).
+At the time of these probes it had not been deployed to the production default branch.
+The migration has since been deployed; see [deployment verification](deployment-verification-2026-10-11.md) for the native runtime and production lifecycle results.
 The checks below distinguish live API behavior from the full privileged workflow lifecycle.
 
 ## PR CI
