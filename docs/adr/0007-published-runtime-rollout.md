@@ -14,7 +14,7 @@ Failed publication and stale publication events authorize neither operation.
 The PR source check also distinguishes the workflow's base revision from the PR head.
 The Actions REST response for [run 37874975712](https://github.com/civitaspo/securefix-server/actions/runs/37874975712) reports its PR head in `head_sha`, although its reusable loader ran at the default-branch revision.
 Using that head as the caller workflow source caused [the receiver](https://github.com/civitaspo/securefix-server/actions/runs/37875015547) to reject a valid PR-target request.
-The receiver now verifies the single REST PR association, reads the wrapper at its base SHA, and binds the manifest's PR number, head SHA, and base branch to the same record.
+The receiver verifies the single REST PR association and binds the manifest's PR number, head SHA, and base branch to it. The caller workflow SHA is recorded separately from the PR head and event-snapshot base SHA; the receiver verifies default-branch ancestry and the exact wrapper/pin at that recorded caller revision. A default-branch advance need not match the event-snapshot base SHA.
 The server's caller source and referenced runtime loader must both equal the active server revision.
 Caller default-push checks continue to use their own push head.
 
@@ -24,7 +24,7 @@ Rust treats this as a separate promotion source and checks the publisher, curren
 The existing client PR and release-PR source rules remain separate.
 Downloaded caller files never supply executable code for the distribution job.
 
-The Rust updater verifies branch ownership, complete signed commit history and the exact managed workflow tree before capturing its expected head. A compare-and-swap signed commit uses that same head. An identical retry reuses the bot-owned PR; a later promoted SHA updates the same branch. Unexpected ownership or files stop the update for review. The updater never merges its PRs or changes branch protection. If the default branch already contains the canonical files, no update is needed. A fresh owner-dispatched `Distribute Runtime` can recover from partial failure using the successful publisher run ID.
+The Rust updater verifies branch ownership, complete signed commit history and the exact managed workflow tree before capturing its expected head. A compare-and-swap signed commit uses that same head. An identical retry reuses the bot-owned PR; a later promoted SHA updates the same branch. Unexpected ownership or files stop the update for review. The updater automatically squash merges only the validated canonical, server-owned workflow migration, using the exact expected PR head and verifying the resulting default-branch files. The separate review/check ruleset provides Server App pull-request-only bypass for this transition; the default-branch integrity ruleset remains bypass-free. Ordinary approval/merge paths retain their Rust review and check gates. The updater does not change branch protection. If the default branch already contains the canonical files, no update is needed. A fresh owner-dispatched `Distribute Runtime` can recover from partial failure using the successful publisher run ID.
 
 The first distribution includes the caller contract migration, such as the policy-check wrapper, attestation-read permissions, head-bound approval requests, and release retry input.
 These changes remain reviewable in the caller PR.

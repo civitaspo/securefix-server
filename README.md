@@ -6,7 +6,9 @@ GitHub Actions workflows route events, load the verified prebuilt executable, is
 
 After staging succeeds, the owner manually runs `Publish Runtime` on protected `main` to publish `v<package.version>` (for example `v0.2.0-pre.1`) at the exact promoted source SHA.
 Successful publication starts the server default-head Policy Check and opens or updates signed runtime migration PRs in the configured callers.
-Review and merge those PRs through the [upgrade maintenance procedure](docs/migration.md#subsequent-server-upgrades).
+The Rust distributor automatically merges only validated, server-owned PRs whose changed files exactly match the generated caller workflows.
+It checks the expected head and verifies the resulting default-branch files; unexpected ownership, files, or concurrent changes stop the update.
+See the [upgrade procedure](docs/migration.md#subsequent-server-upgrades) for publication and recovery.
 Intermediate commits and test candidates do not create Releases.
 `Load CLI` downloads that exact release and verifies its archive against the server SHA and publishing workflow's GitHub attestation before extraction.
 It transfers the verified runtime to execution jobs using an immutable same-run artifact ID.
@@ -23,7 +25,9 @@ Every server commit therefore requires client pin updates.
 
 Owner commands `/approve` and `/merge` bind authorization to the PR head observed at intake.
 All source commits need verified signatures and an allowed committer.
-Sensitive changes need owner authorization for that exact head.
+Sensitive changes need owner authorization for that exact head unless the author and every effective committer satisfy a configured `sensitive_path_approval_exemptions` entry.
+The current policy exempts the Renovate App; membership in `trusted_committers` alone does not grant that exemption.
+Signature, source, current-head approval, and merge checks still apply.
 The server publishes `securefix-policy-check` from the Server App; an approval for an earlier head cannot satisfy it for an updated head.
 Ordinary Renovate automerge remains possible under the same required checks and stale-review dismissal.
 
@@ -32,7 +36,8 @@ Repository capabilities in policy.json are the only Securefix allowlist.
 Client CI fixes its own non-default branch. A pinned release workflow can update a non-default release branch in the same repository.
 Artifact extraction rejects unsafe paths, symlinks, duplicate files and oversized content.
 Every repair uses a verified GitHub-signed commit and an expected-head comparison before updating its destination. A newer head invalidates a same-branch fix.
-Caller distribution commits the generated workflows directly and opens one review PR per caller after a successful stable runtime publication.
+Caller distribution commits generated workflows on the configured update branch, opens or reuses one version-named PR per caller, and automatically merges the exact validated migration after a successful stable runtime publication.
+This managed-workflow path does not grant ordinary PRs an exemption from approval or required checks.
 The [native protocol decision](docs/adr/0008-native-securefix.md) replaces the upstream implementation decision.
 
 ## Operations
@@ -44,7 +49,7 @@ The [native protocol decision](docs/adr/0008-native-securefix.md) replaces the u
 | Release | `release` | [Client releases](docs/client-releases.md) |
 | Settings | `settings` | [Settings and activation](docs/repo-settings.md) |
 | Signed fixes | `securefix` | [Migration](docs/migration.md) |
-| Runtime rollout | `runtime` | [Published runtime rollout](docs/adr/0007-published-runtime-rollout.md) |
+| Runtime rollout | `runtime`, `distribute` | [Published runtime rollout](docs/adr/0007-published-runtime-rollout.md) |
 
 Provider releases use a secret-free fixed build, a GPG-only signer, and a publisher with a repository-scoped contents token.
 Publication requires immutable releases to be enabled and verifies the published release's immutable state.
@@ -73,6 +78,13 @@ The capture job receives its value from the protected `main` environment; the ex
 `civitaspo-bot` must retain write collaborator access for its reviews to count.
 The operation documents list the required App permissions.
 
+## Dependency updates
+
+[`renovate.json`](renovate.json) manages dependency updates using signed platform commits.
+Non-major updates and lockfile maintenance may automerge after required checks and approval; major updates remain manual.
+Renovate performs PR squash merges itself (`platformAutomerge: false`); GitHub native auto-merge need not be enabled.
+Dependabot version-update configuration has been removed. Dependabot vulnerability alerts are a separate repository setting.
+
 ## Development and rollout
 
 ```sh
@@ -83,8 +95,9 @@ cargo clippy --locked --all-targets -- -D warnings
 
 CI also runs pinned actionlint and structural workflow tests.
 The [candidate integration harness](docs/integration-testing.md) builds a reviewed candidate without secrets and exercises its writes only against `testing-securefix-server`, without publishing a runtime Release.
-The [Rust GitHub verification](docs/github-verification-2026-10-08.md) records PR CI, isolated live API checks, and the remaining deployment tests.
+The Rust migration is deployed. The [deployment verification](docs/deployment-verification-2026-10-11.md) records candidate tests, published client/runtime verification, automatic distribution, exact-head approvals, and the merged Sigma release registered in Terraform Registry.
+The [initial Rust GitHub verification](docs/github-verification-2026-10-08.md) records the earlier pre-deployment API probes.
 See [migration and rollout](docs/migration.md), the [domain glossary](CONTEXT.md), and [architecture decisions](docs/adr/).
-The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence; the Rust implementation still needs deployment validation before activation.
+The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence for the former implementation.
 
 Deployment identities and branch names are configured in [policy.json](policy.json); see [deployment configuration](docs/configuration.md) and the [organization example](docs/policy.example.json). The Rust runtime has no account or GitHub App defaults.

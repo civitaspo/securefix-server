@@ -8,16 +8,16 @@ Workflows retain event routing, permissions, environments, isolated jobs, pinned
 - [x] Build the common API boundary, policy model, and immutable CLI artifact transport.
 - [x] Replace each operation and verify its rejection cases.
 - [x] Review the integrated workflows independently and run the full local checks.
-- [x] Replace per-operation Rust builds with attested SHA-keyed Releases and verify the hosted loader boundary.
-- [ ] Deploy to GitHub and verify real App permissions and lifecycle behavior before activation.
+- [x] Replace per-operation Rust builds with attested SemVer Releases bound to the exact source SHA and verify the hosted loader boundary.
+- [x] Deploy to GitHub and verify real App permissions, approval/merge, release publication, and settings lifecycle behavior.
+- [x] Verify automatic caller distribution and remove temporary deployment allowances and fixtures.
 
 Local completion means the CLI builds with locked dependencies, formatting and Clippy pass, workflow validation passes, and regression tests exercise authorization decisions through typed input or HTTP fixtures.
-Deployment is a separate operation.
-The migration PR is not deployed, and production settings, tags, releases, and merges are unchanged.
-The existing default-branch approval workflow automatically reviewed the migration PR.
-Live API fixtures and App credential probes are recorded in the [GitHub verification report](github-verification-2026-10-08.md).
+Deployment and lifecycle verification are also complete. The native Rust runtime is active on protected main and distributed to the configured callers.
+See the [deployment verification](deployment-verification-2026-10-11.md) for dated evidence, including the normal merged release-PR path and Terraform Registry registration.
+The [initial GitHub verification report](github-verification-2026-10-08.md) describes pre-deployment API probes and remains historical evidence.
 
-The implementation runs across three disjoint workstreams.
+The implementation was delivered across three disjoint workstreams.
 Approval and merge share request provenance and owner authorization.
 Release owns packaging, signing, and publication.
 Settings owns reconciliation, activation, and the Securefix adapter.
