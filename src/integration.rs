@@ -108,10 +108,31 @@ pub enum Command {
     },
     /// Prepare the exact scratch policy and file used by the client action smoke test.
     PrepareClientInput,
+    /// Exercise refresh of the same managed release PR after main advances.
+    ReleasePr {
+        #[arg(long, value_enum)]
+        phase: ReleasePrPhase,
+        #[arg(long)]
+        candidate_sha: String,
+        #[arg(long)]
+        state_file: PathBuf,
+        #[arg(long)]
+        scratch_checkout: PathBuf,
+        #[arg(long)]
+        prepare_run_id: Option<u64>,
+        #[arg(long, default_value = "0.1.1")]
+        version: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Phase {
+    Prepare,
+    Verify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReleasePrPhase {
     Prepare,
     Verify,
 }
@@ -171,6 +192,25 @@ struct ClientVerification {
     request_label: String,
     request_label_description: String,
     verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleasePrState {
+    version: u32,
+    candidate_sha: String,
+    prepare_run_id: u64,
+    repository: String,
+    repository_id: u64,
+    default_branch: String,
+    base_sha: String,
+    release_branch: String,
+    release_pr: u64,
+    first_head_sha: String,
+    first_changelog: String,
+    historical_changelog: String,
+    stable_tag: String,
+    stable_base_sha: String,
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -247,6 +287,33 @@ pub fn run(command: Command) -> Result<()> {
             verify_client(&artifact_name, run_id, &workflow_sha)
         }
         Command::PrepareClientInput => prepare_client_input(),
+        Command::ReleasePr {
+            phase,
+            candidate_sha,
+            state_file,
+            scratch_checkout,
+            prepare_run_id,
+            version,
+        } => {
+            validate_sha(&candidate_sha)?;
+            validate_state_path(&state_file)?;
+            ensure!(
+                semver::Version::parse(&version).is_ok(),
+                "invalid release fixture version"
+            );
+            ensure!(
+                version == "0.1.1",
+                "release fixture version is fixed at 0.1.1"
+            );
+            release_pr(
+                phase,
+                &candidate_sha,
+                &state_file,
+                &scratch_checkout,
+                prepare_run_id,
+                &version,
+            )
+        }
     }
 }
 
@@ -363,6 +430,645 @@ fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result
         },
     )?;
     println!("Verified client smoke artifact and request label for workflow run {run_id}.");
+    Ok(())
+}
+
+fn release_pr(
+    phase: ReleasePrPhase,
+    candidate_sha: &str,
+    state_file: &Path,
+    scratch_checkout: &Path,
+    prepare_run_id: Option<u64>,
+    version: &str,
+) -> Result<()> {
+    let run_id = std::env::var("GITHUB_RUN_ID")?.parse::<u64>()?;
+    ensure!(run_id > 0, "invalid release fixture run ID");
+    ensure!(
+        (phase == ReleasePrPhase::Prepare && prepare_run_id.is_none())
+            || (phase == ReleasePrPhase::Verify && prepare_run_id.is_some()),
+        "prepare run ID must be supplied only for the verify phase"
+    );
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY")
+            .is_ok_and(|repo| repo == server_repository().unwrap_or_default())
+            && std::env::var("GITHUB_SHA").is_ok_and(|sha| sha == candidate_sha)
+            && std::env::var("GITHUB_ACTOR_ID").is_ok_and(
+                |actor| actor.parse::<u64>().ok() == Some(owner_id().unwrap_or_default())
+            )
+            && std::env::var("GITHUB_RUN_ATTEMPT").is_ok_and(|attempt| attempt == "1"),
+        "release fixture must run in a first-attempt owner-triggered candidate workflow"
+    );
+    let checkout = scratch_checkout.canonicalize()?;
+    let remote = git_output(&checkout, &["remote", "get-url", "origin"])?;
+    let repository_suffix = integration_repository()?;
+    ensure!(
+        remote == format!("https://github.com/{repository_suffix}")
+            || remote == format!("https://github.com/{repository_suffix}.git")
+            || remote == format!("git@github.com:{repository_suffix}")
+            || remote == format!("git@github.com:{repository_suffix}.git"),
+        "release fixture checkout remote is not the configured scratch repository"
+    );
+    ensure!(
+        state_file.is_absolute(),
+        "release fixture state path must be absolute"
+    );
+    let original_dir = std::env::current_dir()?;
+    std::env::set_current_dir(&checkout)?;
+    let api = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
+    crate::settings::validate_installation_scope(
+        &api,
+        &[integration_repository()?.to_owned()],
+        trusted_config()?.deployment.repository_owner.id,
+    )?;
+    let policy = scratch_policy(candidate_sha)?;
+    let repository: Value = api.get(&format!("/repos/{}", integration_repository()?))?;
+    ensure!(
+        repository["id"].as_u64() == Some(integration_repository_id()?)
+            && repository["default_branch"]
+                .as_str()
+                .is_some_and(|branch| !branch.is_empty()),
+        "release fixture scratch repository identity or default branch changed"
+    );
+    let default_branch = repository["default_branch"].as_str().unwrap().to_owned();
+    let base: Value = api.get(&format!(
+        "/repos/{}/commits/{default_branch}",
+        integration_repository()?
+    ))?;
+    let base_sha = base["sha"]
+        .as_str()
+        .context("scratch main SHA missing")?
+        .to_owned();
+    validate_sha(&base_sha)?;
+    let local_head = git_output(&checkout, &["rev-parse", "HEAD"])?;
+    ensure!(
+        local_head == base_sha,
+        "scratch checkout is not at the live default branch head"
+    );
+
+    let state = match phase {
+        ReleasePrPhase::Prepare => {
+            let stable_base_sha = std::env::var("SECUREFIX_RELEASE_STABLE_SHA")?;
+            validate_sha(&stable_base_sha)?;
+            ensure!(
+                base_sha != stable_base_sha,
+                "scratch main must advance beyond the stable release boundary"
+            );
+            let comparison: Value = api.get(&format!(
+                "/repos/{}/compare/{stable_base_sha}...{base_sha}",
+                integration_repository()?
+            ))?;
+            ensure!(
+                comparison["status"] == "ahead" && comparison["behind_by"] == 0,
+                "stable release boundary must be an ancestor of scratch main"
+            );
+            let (stable_tag, _stable_changelog) =
+                ensure_release_fixture_tag(&api, &checkout, &stable_base_sha)?;
+            let changelog =
+                api.content(integration_repository()?, "CHANGELOG.md", &stable_base_sha)?;
+            ensure!(
+                changelog.len() <= 256 * 1024,
+                "stable changelog exceeds fixture limit"
+            );
+            crate::release::prepare_metadata(version)?;
+            let additions = release_metadata_files(&checkout)?;
+            let version_heading = format!("[{}]", version.trim_start_matches('v'));
+            ensure!(
+                std::str::from_utf8(&additions["CHANGELOG.md"])?.contains(&version_heading),
+                "git-cliff output did not include the release version"
+            );
+            let release_branch = trusted_config()?.deployment.release_branch.clone();
+            let body = release_pr_body(version, additions.len() > 2);
+            let create_pull_request = json!({
+                "title": format!("chore(release): v{version}"),
+                "body": body,
+                "base": default_branch,
+            })
+            .to_string();
+            let label = format!("securefix-release-pr-{run_id}");
+            let source = crate::securefix_gate::SourceRequest {
+                repository: integration_repository()?,
+                run_id,
+                label: &label,
+                branch: &default_branch,
+                sha: &base_sha,
+            };
+            let fix = crate::securefix_gate::artifact::FixArtifact {
+                repository: integration_repository()?.to_owned(),
+                branch: release_branch.clone(),
+                run_id,
+                source_sha: base_sha.clone(),
+                commit_message: format!("chore(release): prepare v{version}"),
+                create_pull_request: Some(create_pull_request),
+                additions,
+                deletions: Vec::new(),
+            };
+            let destination =
+                crate::securefix_gate::destination_head(&api, &source, &fix, &None, &policy)?;
+            ensure!(
+                !destination.branch_exists,
+                "release fixture branch already exists; refusing to reuse stale state"
+            );
+            let plan = crate::securefix_gate::FixPlan {
+                version: 1,
+                source_repository: integration_repository()?.to_owned(),
+                source_run_id: run_id,
+                source_sha: base_sha.clone(),
+                artifact_name: label.clone(),
+                artifact_id: run_id,
+                destination_repository: integration_repository()?.to_owned(),
+                destination_branch: release_branch.clone(),
+                expected_head: destination.sha,
+                destination_branch_exists: destination.branch_exists,
+                existing_pull_request: destination.pull_request,
+            };
+            let applied = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
+                read_api: &api,
+                write_api: &api,
+                policy: &policy,
+                source,
+                plan: &plan,
+                fix: &fix,
+                server_url: "https://github.com",
+                server_repository: server_repository()?,
+                server_run: &run_id.to_string(),
+            })?;
+            let pr_number = applied
+                .pull_request_number
+                .context("release fixture PR was not created")?;
+            let pull: Value = api.get(&format!(
+                "/repos/{}/pulls/{pr_number}",
+                integration_repository()?
+            ))?;
+            ensure!(
+                pull["state"] == "open"
+                    && pull["head"]["ref"] == release_branch
+                    && pull["head"]["sha"] == applied.commit_sha
+                    && pull["base"]["sha"] == base_sha,
+                "created managed release PR does not match the signed commit"
+            );
+            let first_changelog = String::from_utf8(api.content(
+                integration_repository()?,
+                "CHANGELOG.md",
+                &applied.commit_sha,
+            )?)?;
+            ensure!(
+                !first_changelog.contains("include later merged change in release PR refresh"),
+                "initial release metadata unexpectedly includes the later fixture change"
+            );
+            ReleasePrState {
+                version: 1,
+                candidate_sha: candidate_sha.to_owned(),
+                prepare_run_id: run_id,
+                repository: integration_repository()?.to_owned(),
+                repository_id: integration_repository_id()?,
+                default_branch,
+                base_sha,
+                release_branch,
+                release_pr: pr_number,
+                first_head_sha: applied.commit_sha,
+                first_changelog,
+                historical_changelog: String::from_utf8(changelog)?,
+                stable_tag,
+                stable_base_sha,
+            }
+        }
+        ReleasePrPhase::Verify => {
+            let state: ReleasePrState = serde_json::from_slice(&fs::read(state_file)?)?;
+            ensure!(
+                state.version == 1
+                    && state.candidate_sha == candidate_sha
+                    && state.repository == integration_repository()?
+                    && state.repository_id == integration_repository_id()?
+                    && state.version.to_string() == version
+                    && state.default_branch == default_branch,
+                "release fixture state belongs to a different candidate or scratch repository"
+            );
+            let prepare_run_id =
+                prepare_run_id.context("verify phase requires --prepare-run-id")?;
+            ensure!(
+                state.prepare_run_id == prepare_run_id,
+                "state artifact came from a different prepare run"
+            );
+            validate_release_pr_prepare_run(prepare_run_id, candidate_sha)?;
+            ensure!(
+                base_sha != state.base_sha,
+                "scratch main did not advance after release PR preparation"
+            );
+            let comparison: Value = api.get(&format!(
+                "/repos/{}/compare/{}...{base_sha}",
+                integration_repository()?,
+                state.base_sha
+            ))?;
+            ensure!(
+                comparison["status"] == "ahead" && comparison["behind_by"] == 0,
+                "prepared scratch main is not an ancestor of current main"
+            );
+            let files = comparison["files"]
+                .as_array()
+                .context("main comparison files missing")?;
+            ensure!(
+                files
+                    .iter()
+                    .any(|file| file["filename"] == ".securefix-fixtures/release-pr-refresh.txt"),
+                "normal owner PR fixture file is missing from main advancement"
+            );
+            let commit_messages = comparison["commits"]
+                .as_array()
+                .context("main comparison commits missing")?
+                .iter()
+                .filter_map(|commit| commit["commit"]["message"].as_str())
+                .collect::<Vec<_>>();
+            ensure!(
+                commit_messages
+                    .iter()
+                    .any(|message| message
+                        .contains("include later merged change in release PR refresh")),
+                "normal owner PR commit message is absent from the main advancement"
+            );
+            ensure!(
+                git_output(
+                    &checkout,
+                    &["rev-parse", &format!("{}^{{}}", state.stable_tag)]
+                )? == state.stable_base_sha,
+                "scratch checkout does not contain the exact disposable stable tag"
+            );
+            crate::release::prepare_metadata(version)?;
+            let additions = release_metadata_files(&checkout)?;
+            let changelog = std::str::from_utf8(&additions["CHANGELOG.md"])?;
+            ensure!(
+                !state
+                    .first_changelog
+                    .contains("include later merged change in release PR refresh")
+                    && changelog.contains("include later merged change in release PR refresh"),
+                "refreshed release changelog does not uniquely include the later main commit"
+            );
+            ensure_changelog_history(
+                &state.historical_changelog,
+                changelog,
+                &version_heading(version),
+            )?;
+            let label = format!("securefix-release-pr-{run_id}");
+            let source = crate::securefix_gate::SourceRequest {
+                repository: integration_repository()?,
+                run_id,
+                label: &label,
+                branch: &default_branch,
+                sha: &base_sha,
+            };
+            let fix = crate::securefix_gate::artifact::FixArtifact {
+                repository: integration_repository()?.to_owned(),
+                branch: state.release_branch.clone(),
+                run_id,
+                source_sha: base_sha.clone(),
+                commit_message: format!("chore(release): refresh v{version}"),
+                create_pull_request: Some(
+                    json!({
+                        "title": format!("chore(release): v{version}"),
+                        "body": release_pr_body(version, additions.len() > 2),
+                        "base": default_branch,
+                    })
+                    .to_string(),
+                ),
+                additions,
+                deletions: Vec::new(),
+            };
+            let destination =
+                crate::securefix_gate::destination_head(&api, &source, &fix, &None, &policy)?;
+            ensure!(
+                destination.branch_exists
+                    && destination.pull_request == Some(state.release_pr)
+                    && destination.sha == state.first_head_sha,
+                "managed release PR changed before refresh"
+            );
+            let plan = crate::securefix_gate::FixPlan {
+                version: 1,
+                source_repository: integration_repository()?.to_owned(),
+                source_run_id: run_id,
+                source_sha: base_sha.clone(),
+                artifact_name: label.clone(),
+                artifact_id: run_id,
+                destination_repository: integration_repository()?.to_owned(),
+                destination_branch: state.release_branch.clone(),
+                expected_head: destination.sha.clone(),
+                destination_branch_exists: true,
+                existing_pull_request: Some(state.release_pr),
+            };
+            let applied = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
+                read_api: &api,
+                write_api: &api,
+                policy: &policy,
+                source,
+                plan: &plan,
+                fix: &fix,
+                server_url: "https://github.com",
+                server_repository: server_repository()?,
+                server_run: &run_id.to_string(),
+            })?;
+            ensure!(
+                !applied.already_applied && applied.pull_request_number == Some(state.release_pr),
+                "refresh did not update the same managed release PR"
+            );
+            let commit: Value = api.get(&format!(
+                "/repos/{}/commits/{}",
+                integration_repository()?,
+                applied.commit_sha
+            ))?;
+            ensure!(
+                commit["parents"].as_array().is_some_and(
+                    |parents| parents.len() == 1 && parents[0]["sha"] == state.first_head_sha
+                ) && commit["author"]["id"].as_u64() == Some(trusted_config()?.server_bot_id)
+                    && commit["commit"]["verification"]["verified"] == true,
+                "refreshed metadata commit is not signed or parented on the original managed PR head"
+            );
+            let pull: Value = api.get(&format!(
+                "/repos/{}/pulls/{}",
+                integration_repository()?,
+                state.release_pr
+            ))?;
+            ensure!(
+                pull["state"] == "open"
+                    && pull["head"]["ref"] == state.release_branch
+                    && pull["head"]["sha"] == applied.commit_sha,
+                "managed release PR was not refreshed in place"
+            );
+            println!(
+                "Verified managed release PR refresh for #{}.",
+                state.release_pr
+            );
+            let verification = json!({
+                "version": 1,
+                "candidate_sha": candidate_sha,
+                "prepare_run_id": state.prepare_run_id,
+                "verify_run_id": run_id,
+                "repository": state.repository,
+                "repository_id": state.repository_id,
+                "default_branch": state.default_branch,
+                "initial_base_sha": state.base_sha,
+                "verified_base_sha": base_sha,
+                "release_branch": state.release_branch,
+                "pull_number": state.release_pr,
+                "initial_pr_head_sha": state.first_head_sha,
+                "refreshed_pr_head_sha": applied.commit_sha,
+                "stable_tag": state.stable_tag,
+                "stable_base_sha": state.stable_base_sha,
+                "new_fixture_change_in_changelog": true,
+                "released_history_preserved": true,
+                "verified": true,
+            });
+            cleanup_release_pr(&api, checkout, state_file, &pull, &state)?;
+            workflow::write_json(
+                state_file.with_file_name("verification.json"),
+                &verification,
+            )?;
+            return Ok(());
+        }
+    };
+    std::env::set_current_dir(original_dir)?;
+    workflow::write_json(state_file, &state)?;
+    println!(
+        "Prepared managed release PR #{} for main advancement.",
+        state.release_pr
+    );
+    Ok(())
+}
+
+fn release_metadata_files(checkout: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut files = BTreeMap::from([
+        (
+            ".release-version".to_owned(),
+            fs::read(checkout.join(".release-version"))?,
+        ),
+        (
+            "CHANGELOG.md".to_owned(),
+            fs::read(checkout.join("CHANGELOG.md"))?,
+        ),
+    ]);
+    for path in ["dbt_project.yml", "pyproject.toml"] {
+        if checkout.join(path).is_file() {
+            files.insert(path.to_owned(), fs::read(checkout.join(path))?);
+        }
+    }
+    Ok(files)
+}
+
+fn version_heading(version: &str) -> String {
+    format!("[{}]", version.trim_start_matches('v'))
+}
+
+fn ensure_changelog_history(historical: &str, refreshed: &str, version: &str) -> Result<()> {
+    let section = |content: &str, start: usize| {
+        content[start + 1..]
+            .find("\n## ")
+            .map(|offset| start + 1 + offset + 1)
+    };
+    let old_start = historical
+        .find("\n## ")
+        .map(|offset| offset + 1)
+        .context("historical changelog has no released version section")?;
+    let new_start = refreshed
+        .find("\n## ")
+        .map(|offset| offset + 1)
+        .context("refreshed changelog has no version section")?;
+    let new_old_start = section(refreshed, new_start)
+        .context("refreshed changelog omitted historical release sections")?;
+    ensure!(
+        refreshed[..new_start] == historical[..old_start]
+            && refreshed[new_old_start..].trim_end() == historical[old_start..].trim_end()
+            && refreshed[new_start..new_old_start].contains(version),
+        "refreshed release changelog changed or lost its released history"
+    );
+    Ok(())
+}
+
+fn validate_release_pr_prepare_run(run_id: u64, candidate_sha: &str) -> Result<()> {
+    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
+    let api = GitHub::new("https://api.github.com", token)?;
+    let run: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{run_id}",
+        server_repository()?
+    ))?;
+    let allowed_paths = [
+        ".github/workflows/testing-securefix-server.yml",
+        ".github/workflows/testing-release-pr.yml",
+    ];
+    let branch = run["head_branch"]
+        .as_str()
+        .context("prepare run branch missing")?;
+    ensure!(
+        run["id"].as_u64() == Some(run_id)
+            && run["repository"]["id"].as_u64() == Some(server_repository_id()?)
+            && run["head_repository"]["id"].as_u64() == Some(server_repository_id()?)
+            && run["head_sha"] == candidate_sha
+            && run["event"] == "workflow_dispatch"
+            && run["status"] == "completed"
+            && run["conclusion"] == "success"
+            && run["run_attempt"].as_u64() == Some(1)
+            && run["actor"]["id"].as_u64() == Some(owner_id()?)
+            && run["triggering_actor"]["id"].as_u64() == Some(owner_id()?)
+            && run["path"]
+                .as_str()
+                .is_some_and(|path| allowed_paths.contains(&path))
+            && branch.starts_with("integration/native-"),
+        "release PR state is not from a successful owner-run candidate workflow"
+    );
+    validate_workflow_ref(candidate_sha, &format!("refs/heads/{branch}"))?;
+    let source: Value = api.get(&format!(
+        "/repos/{}/commits/{}",
+        server_repository()?,
+        branch.replace('/', "%2F")
+    ))?;
+    ensure!(
+        source["sha"] == candidate_sha,
+        "candidate branch moved after release PR prepare"
+    );
+    Ok(())
+}
+
+fn release_pr_body(version: &str, package: bool) -> String {
+    let metadata = if package {
+        "package version metadata"
+    } else {
+        "release metadata"
+    };
+    format!(
+        "## Summary\n- Prepare release v{version}\n- Update the changelog and {metadata}\n\nThis pull request is managed by the Release PR workflow."
+    )
+}
+
+fn git_output(repository: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repository)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn ensure_release_fixture_tag(
+    api: &GitHub,
+    checkout: &Path,
+    stable_sha: &str,
+) -> Result<(String, Vec<u8>)> {
+    use crate::release::{CommitSha, ReleaseTag, Repository};
+    let repo = Repository::parse(integration_repository()?)?;
+    let tag = ReleaseTag::parse("v0.1.0")?;
+    let path = format!(
+        "/repos/{}/git/ref/tags/{}",
+        integration_repository()?,
+        tag.as_str()
+    );
+    match api.get::<Value>(&path) {
+        Ok(_) => anyhow::bail!("stable fixture tag already exists; refusing to overwrite it"),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) => {}
+        Err(error) => return Err(error).context("read scratch stable fixture tag"),
+    }
+    crate::release::create_annotated_tag(api, &repo, &tag, &CommitSha::parse(stable_sha)?)?;
+    if git_output(
+        checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/tags/v0.1.0^{commit}",
+        ],
+    )
+    .is_err()
+    {
+        git_output(checkout, &["tag", "v0.1.0", stable_sha])?;
+    }
+    let changelog = api.content(integration_repository()?, "CHANGELOG.md", stable_sha)?;
+    Ok((tag.as_str().to_owned(), changelog))
+}
+
+fn cleanup_release_pr(
+    api: &GitHub,
+    checkout: PathBuf,
+    state_file: &Path,
+    pull: &Value,
+    state: &ReleasePrState,
+) -> Result<()> {
+    let repo = integration_repository()?;
+    let head = pull["head"]["sha"]
+        .as_str()
+        .context("verified release PR has no head SHA")?;
+    let live_pull: Value = api.get(&format!("/repos/{repo}/pulls/{}", state.release_pr))?;
+    ensure!(
+        live_pull["number"].as_u64() == Some(state.release_pr)
+            && live_pull["state"] == "open"
+            && live_pull["head"]["ref"] == state.release_branch
+            && live_pull["head"]["repo"]["id"].as_u64() == Some(integration_repository_id()?)
+            && live_pull["base"]["repo"]["id"].as_u64() == Some(integration_repository_id()?)
+            && live_pull["head"]["sha"] == head,
+        "release PR identity or head changed before cleanup"
+    );
+    let branch: Value = api.get(&format!(
+        "/repos/{repo}/git/ref/heads/{}",
+        state.release_branch
+    ))?;
+    ensure!(
+        branch["object"]["sha"] == head,
+        "release branch changed before cleanup"
+    );
+    let tag: Value = api.get(&format!("/repos/{repo}/git/ref/tags/{}", state.stable_tag))?;
+    let tag_object = tag["object"]["sha"]
+        .as_str()
+        .context("stable fixture tag object missing")?;
+    let tag_commit = if tag["object"]["type"] == "tag" {
+        let annotated: Value = api.get(&format!("/repos/{repo}/git/tags/{tag_object}"))?;
+        annotated["object"]["sha"]
+            .as_str()
+            .context("stable fixture tag target missing")?
+            .to_owned()
+    } else {
+        tag_object.to_owned()
+    };
+    ensure!(
+        tag_commit == state.stable_base_sha,
+        "stable fixture tag changed before cleanup"
+    );
+    let closed: Value = api.patch(
+        &format!("/repos/{repo}/pulls/{}", state.release_pr),
+        &json!({"state":"closed"}),
+    )?;
+    ensure!(
+        closed["state"] == "closed" && closed["head"]["sha"] == head,
+        "release PR changed while it was being closed"
+    );
+    let branch_after_close: Value = api.get(&format!(
+        "/repos/{repo}/git/ref/heads/{}",
+        state.release_branch
+    ))?;
+    ensure!(
+        branch_after_close["object"]["sha"] == head,
+        "release branch changed while the PR was being closed"
+    );
+    let tag_after_close: Value =
+        api.get(&format!("/repos/{repo}/git/ref/tags/{}", state.stable_tag))?;
+    ensure!(
+        tag_after_close["object"]["sha"] == tag_object,
+        "stable fixture tag changed while the PR was being closed"
+    );
+    let delete_branch = api.delete(&format!(
+        "/repos/{repo}/git/refs/heads/{}",
+        state.release_branch
+    ));
+    let delete_tag = api.delete(&format!("/repos/{repo}/git/refs/tags/{}", state.stable_tag));
+    let _ = std::process::Command::new("git")
+        .args(["tag", "-d", &state.stable_tag])
+        .current_dir(checkout)
+        .output();
+    delete_branch?;
+    delete_tag?;
+    fs::remove_file(state_file)?;
     Ok(())
 }
 

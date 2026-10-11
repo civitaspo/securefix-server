@@ -86,10 +86,10 @@ pub(crate) struct ApplyResult {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct DestinationHead {
-    sha: String,
-    branch_exists: bool,
-    pull_request: Option<u64>,
+pub(crate) struct DestinationHead {
+    pub(crate) sha: String,
+    pub(crate) branch_exists: bool,
+    pub(crate) pull_request: Option<u64>,
 }
 
 #[derive(Args)]
@@ -874,7 +874,7 @@ fn load_fix(api: &GitHub, p: &Policy) -> Result<LoadedFix> {
     })
 }
 
-fn destination_head(
+pub(crate) fn destination_head(
     api: &GitHub,
     source: &SourceRequest<'_>,
     fix: &artifact::FixArtifact,
@@ -983,10 +983,6 @@ fn destination_head(
         "/repos/{}/compare/{}...{head}",
         source.repository, source.sha
     ))?;
-    ensure!(
-        comparison["status"] != "diverged",
-        "release branch has diverged from source history"
-    );
     validate_release_comparison(&comparison, p.server_bot_id)?;
     let changed = comparison["files"]
         .as_array()
@@ -1634,6 +1630,82 @@ mod tests {
         let mut untrusted = trusted;
         untrusted["commits"][0]["commit"]["verification"]["verified"] = json!(false);
         assert!(validate_release_comparison(&untrusted, 288069019).is_err());
+    }
+
+    #[test]
+    fn advanced_default_branch_allows_only_the_bot_owned_release_branch_changes() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repository = "civitaspo/dbt-authorized-models";
+        let source_sha = "a".repeat(40);
+        let release_sha = "b".repeat(40);
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        let fix = artifact::FixArtifact {
+            repository: repository.into(),
+            branch: "release/feature".into(),
+            run_id: 18,
+            source_sha: source_sha.clone(),
+            commit_message: "release".into(),
+            create_pull_request: Some(json!({"title":"Release", "base":"main"}).to_string()),
+            additions: std::collections::BTreeMap::from([("README.md".into(), b"x".to_vec())]),
+            deletions: vec![],
+        };
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"default_branch":"main"}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/branches/release%2Ffeature"),
+                json!({"commit":{"sha":release_sha}}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{repository}/pulls?head=civitaspo:release%2Ffeature&base=main&state=open&per_page=100"
+                ),
+                json!([{
+                    "state":"open",
+                    "number":42,
+                    "user":{"id":policy.server_bot_id},
+                    "head":{"ref":"release/feature","repo":{"full_name":repository}},
+                    "base":{"ref":"main","repo":{"full_name":repository}}
+                }]),
+            ),
+            Route::get(
+                format!("/repos/{repository}/compare/{source_sha}...{release_sha}"),
+                json!({
+                    "status":"diverged",
+                    "total_commits":1,
+                    "commits":[{
+                        "author":{"id":policy.server_bot_id},
+                        "commit":{"verification":{"verified":true}}
+                    }],
+                    "files":[{"filename":"README.md"}]
+                }),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{release_sha}"),
+                json!({"author":{"id":policy.client_bot_id,"type":"Bot"}}),
+            ),
+        ]);
+        let destination = destination_head(
+            &fixture.api,
+            &SourceRequest {
+                repository,
+                run_id: 18,
+                label: "securefix-abc123",
+                branch: "main",
+                sha: &source_sha,
+            },
+            &fix,
+            &None,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(destination.sha, release_sha);
+        assert_eq!(destination.pull_request, Some(42));
+        assert!(destination.branch_exists);
+        fixture.finish();
     }
 
     #[test]
