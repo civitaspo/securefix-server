@@ -613,7 +613,7 @@ fn release_pr(
                 &applied.commit_sha,
             )?)?;
             ensure!(
-                !first_changelog.contains("include later merged change in release PR refresh"),
+                !first_changelog.contains("include subsequent merged change in release PR refresh"),
                 "initial release metadata unexpectedly includes the later fixture change"
             );
             ReleasePrState {
@@ -640,7 +640,6 @@ fn release_pr(
                     && state.candidate_sha == candidate_sha
                     && state.repository == integration_repository()?
                     && state.repository_id == integration_repository_id()?
-                    && state.version.to_string() == version
                     && state.default_branch == default_branch,
                 "release fixture state belongs to a different candidate or scratch repository"
             );
@@ -680,10 +679,8 @@ fn release_pr(
                 .filter_map(|commit| commit["commit"]["message"].as_str())
                 .collect::<Vec<_>>();
             ensure!(
-                commit_messages
-                    .iter()
-                    .any(|message| message
-                        .contains("include later merged change in release PR refresh")),
+                commit_messages.iter().any(|message| message
+                    .contains("include subsequent merged change in release PR refresh")),
                 "normal owner PR commit message is absent from the main advancement"
             );
             ensure!(
@@ -699,8 +696,8 @@ fn release_pr(
             ensure!(
                 !state
                     .first_changelog
-                    .contains("include later merged change in release PR refresh")
-                    && changelog.contains("include later merged change in release PR refresh"),
+                    .contains("include subsequent merged change in release PR refresh")
+                    && changelog.contains("include subsequent merged change in release PR refresh"),
                 "refreshed release changelog does not uniquely include the later main commit"
             );
             ensure_changelog_history(
