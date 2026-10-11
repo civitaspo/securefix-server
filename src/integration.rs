@@ -1,8 +1,8 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs,
@@ -17,7 +17,7 @@ use crate::{
 };
 use securefix::{
     api::{ApiError, GitHub},
-    policy::{Capability, Policy, ReleaseStrategy, validate_sha},
+    policy::{validate_sha, Capability, Policy, ReleaseStrategy},
     workflow,
 };
 
@@ -679,8 +679,10 @@ fn release_pr(
                 .filter_map(|commit| commit["commit"]["message"].as_str())
                 .collect::<Vec<_>>();
             ensure!(
-                commit_messages.iter().any(|message| message
-                    .contains("include final merged change in release PR refresh")),
+                commit_messages
+                    .iter()
+                    .any(|message| message
+                        .contains("include final merged change in release PR refresh")),
                 "normal owner PR commit message is absent from the main advancement"
             );
             ensure!(
@@ -4219,24 +4221,20 @@ mod tests {
             additions,
             deletions: Vec::new(),
         };
-        assert!(
-            validate_client_smoke_artifact(
-                &fix,
-                integration_repository().unwrap(),
-                run_id,
-                &workflow_sha
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_client_smoke_artifact(
-                &fix,
-                integration_repository().unwrap(),
-                run_id + 1,
-                &workflow_sha
-            )
-            .is_err()
-        );
+        assert!(validate_client_smoke_artifact(
+            &fix,
+            integration_repository().unwrap(),
+            run_id,
+            &workflow_sha
+        )
+        .is_ok());
+        assert!(validate_client_smoke_artifact(
+            &fix,
+            integration_repository().unwrap(),
+            run_id + 1,
+            &workflow_sha
+        )
+        .is_err());
     }
 
     #[test]
@@ -4287,17 +4285,15 @@ mod tests {
             "actor": {"id": trusted.owner_id},
             "triggering_actor": {"id": trusted.owner_id}
         });
-        assert!(
-            validate_client_source_run(
-                &run,
-                run_id,
-                &workflow_sha,
-                &server.repository,
-                server.id,
-                trusted.owner_id
-            )
-            .is_ok()
-        );
+        assert!(validate_client_source_run(
+            &run,
+            run_id,
+            &workflow_sha,
+            &server.repository,
+            server.id,
+            trusted.owner_id
+        )
+        .is_ok());
 
         let mut wrong_actor = run.clone();
         wrong_actor["actor"]["id"] = json!(trusted.owner_id + 1);
@@ -4308,17 +4304,15 @@ mod tests {
         let mut wrong_attempt = run.clone();
         wrong_attempt["run_attempt"] = json!(2);
         for wrong in [wrong_actor, wrong_sha, wrong_repository, wrong_attempt] {
-            assert!(
-                validate_client_source_run(
-                    &wrong,
-                    run_id,
-                    &workflow_sha,
-                    &server.repository,
-                    server.id,
-                    trusted.owner_id
-                )
-                .is_err()
-            );
+            assert!(validate_client_source_run(
+                &wrong,
+                run_id,
+                &workflow_sha,
+                &server.repository,
+                server.id,
+                trusted.owner_id
+            )
+            .is_err());
         }
     }
 
@@ -4388,17 +4382,15 @@ mod tests {
         )
         .unwrap();
         let workflow: serde_yaml::Value = serde_yaml::from_str(autofix).unwrap();
-        assert!(
-            workflow["jobs"]["autofix"]["steps"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .any(|step| step["uses"].as_str()
-                    == Some(&format!(
-                        "{}/.github/actions/client@{sha}",
-                        server_repository().unwrap()
-                    )))
-        );
+        assert!(workflow["jobs"]["autofix"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|step| step["uses"].as_str()
+                == Some(&format!(
+                    "{}/.github/actions/client@{sha}",
+                    server_repository().unwrap()
+                ))));
         assert!(!autofix.contains("csm-actions/securefix-action@"));
         assert!(!autofix.contains("__SECUREFIX_SCRATCH_POLICY_BASE64__"));
         assert!(autofix.contains("id: native-client-action"));
@@ -4509,59 +4501,45 @@ mod tests {
             "base":{"repo":{"full_name":repository},"ref":"main"},
             "head":{"repo":{"full_name":repository},"ref":fixture.branch,"sha":old_head}
         });
-        assert!(
-            !pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .unwrap()
-        );
+        assert!(!pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .unwrap());
         pull["head"]["sha"] = json!(new_head);
-        assert!(
-            pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .unwrap()
-        );
+        assert!(pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .unwrap());
 
         pull["head"]["sha"] = json!("e".repeat(40));
-        assert!(
-            pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .is_err()
-        );
+        assert!(pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .is_err());
         pull["head"]["sha"] = json!(new_head);
         pull["base"]["repo"]["full_name"] = json!("other/repo");
-        assert!(
-            pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .is_err()
-        );
+        assert!(pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .is_err());
         pull["base"]["repo"]["full_name"] = json!(repository);
         pull["head"]["repo"]["full_name"] = json!("other/repo");
-        assert!(
-            pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .is_err()
-        );
+        assert!(pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .is_err());
         pull["head"]["repo"]["full_name"] = json!(repository);
         pull["base"]["ref"] = json!("other-base");
-        assert!(
-            pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .is_err()
-        );
+        assert!(pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .is_err());
         pull["base"]["ref"] = json!("main");
         pull["state"] = json!("closed");
-        assert!(
-            pr_head_observation_is_advanced(
-                &pull, repository, &fixture, "main", &old_head, &new_head,
-            )
-            .is_err()
-        );
+        assert!(pr_head_observation_is_advanced(
+            &pull, repository, &fixture, "main", &old_head, &new_head,
+        )
+        .is_err());
     }
 
     #[test]
@@ -4597,17 +4575,15 @@ mod tests {
             serde_json::to_vec(&scenario).unwrap(),
         )
         .unwrap();
-        assert!(
-            validate_outputs(
-                workspace.path(),
-                state_file,
-                &candidate_sha,
-                Phase::Prepare,
-                &scenario.published_runtime_sha,
-                "v0.2.0-pre.1",
-            )
-            .is_ok()
-        );
+        assert!(validate_outputs(
+            workspace.path(),
+            state_file,
+            &candidate_sha,
+            Phase::Prepare,
+            &scenario.published_runtime_sha,
+            "v0.2.0-pre.1",
+        )
+        .is_ok());
 
         let verification = Verification {
             version: STATE_VERSION,
@@ -4627,17 +4603,15 @@ mod tests {
             serde_json::to_vec(&verification).unwrap(),
         )
         .unwrap();
-        assert!(
-            validate_outputs(
-                workspace.path(),
-                state_file,
-                &candidate_sha,
-                Phase::Verify,
-                &scenario.published_runtime_sha,
-                "v0.2.0-pre.1",
-            )
-            .is_ok()
-        );
+        assert!(validate_outputs(
+            workspace.path(),
+            state_file,
+            &candidate_sha,
+            Phase::Verify,
+            &scenario.published_runtime_sha,
+            "v0.2.0-pre.1",
+        )
+        .is_ok());
         let mut wrong = verification;
         wrong.positive_pr += 1;
         fs::write(
@@ -4645,17 +4619,15 @@ mod tests {
             serde_json::to_vec(&wrong).unwrap(),
         )
         .unwrap();
-        assert!(
-            validate_outputs(
-                workspace.path(),
-                state_file,
-                &candidate_sha,
-                Phase::Verify,
-                &scenario.published_runtime_sha,
-                "v0.2.0-pre.1",
-            )
-            .is_err()
-        );
+        assert!(validate_outputs(
+            workspace.path(),
+            state_file,
+            &candidate_sha,
+            Phase::Verify,
+            &scenario.published_runtime_sha,
+            "v0.2.0-pre.1",
+        )
+        .is_err());
     }
 
     #[test]
@@ -4668,17 +4640,15 @@ mod tests {
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(outside.path(), workspace.path().join("fixtures"))
             .unwrap();
-        assert!(
-            validate_outputs(
-                workspace.path(),
-                Path::new("fixtures/state.json"),
-                &"a".repeat(40),
-                Phase::Prepare,
-                &"b".repeat(40),
-                "v0.2.0-pre.1",
-            )
-            .is_err()
-        );
+        assert!(validate_outputs(
+            workspace.path(),
+            Path::new("fixtures/state.json"),
+            &"a".repeat(40),
+            Phase::Prepare,
+            &"b".repeat(40),
+            "v0.2.0-pre.1",
+        )
+        .is_err());
     }
 
     #[test]
