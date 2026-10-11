@@ -1885,7 +1885,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         digest.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(securefix::hex_encode(digest.finalize()))
 }
 
 const MAX_PROVIDER_SIGNATURE_BYTES: usize = 1024 * 1024;
@@ -1924,10 +1924,10 @@ fn prepare_existing_provider_signature(
         .collect();
     expected.insert(
         sums_name.clone(),
-        format!(
-            "{:x}",
-            Sha256::digest(canonical_provider_sums(assets_dir, &plan.assets)?)
-        ),
+        securefix::hex_encode(Sha256::digest(canonical_provider_sums(
+            assets_dir,
+            &plan.assets,
+        )?)),
     );
     let mut by_name = std::collections::BTreeMap::new();
     for asset in existing {
@@ -1986,7 +1986,7 @@ fn prepare_existing_provider_signature(
         bytes.len() as u64 == size,
         "existing signature size changed during download"
     );
-    let downloaded_digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let downloaded_digest = format!("sha256:{}", securefix::hex_encode(Sha256::digest(&bytes)));
     ensure!(
         downloaded_digest == digest,
         "existing signature digest changed during download"
@@ -3583,9 +3583,9 @@ mod tests {
         let sums = canonical_provider_sums(&assets_dir, &plan.assets).unwrap();
         let project = Repository::parse(&plan.repository).unwrap();
         let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
-        let sums_digest = format!("{:x}", Sha256::digest(&sums));
+        let sums_digest = securefix::hex_encode(Sha256::digest(&sums));
         let signature = b"opaque test signature";
-        let signature_digest = format!("{:x}", Sha256::digest(signature));
+        let signature_digest = securefix::hex_encode(Sha256::digest(signature));
         let existing = vec![
             expected_release_asset(&sums_name, &sums_digest, 41, sums.len() as u64),
             expected_release_asset(
@@ -3635,7 +3635,7 @@ mod tests {
         let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
         let checksum = expected_release_asset(
             &sums_name,
-            &format!("{:x}", Sha256::digest(&sums)),
+            &securefix::hex_encode(Sha256::digest(&sums)),
             41,
             sums.len() as u64,
         );
@@ -3692,7 +3692,7 @@ mod tests {
         let sums_name = format!("{}_{}_SHA256SUMS", project.name(), plan.tag.version());
         let sums_asset = expected_release_asset(
             &sums_name,
-            &format!("{:x}", Sha256::digest(&sums)),
+            &securefix::hex_encode(Sha256::digest(&sums)),
             41,
             sums.len() as u64,
         );
@@ -3723,7 +3723,7 @@ mod tests {
         let oversized = vec![b'x'; MAX_PROVIDER_SIGNATURE_BYTES + 1];
         let oversized_asset = expected_release_asset(
             &signature_name,
-            &format!("{:x}", Sha256::digest(&oversized)),
+            &securefix::hex_encode(Sha256::digest(&oversized)),
             42,
             1,
         );
@@ -3843,7 +3843,7 @@ mod tests {
             &sums,
             &output_signature,
             &reusable,
-            Some(&format!("{:x}", Sha256::digest(&original))),
+            Some(&securefix::hex_encode(Sha256::digest(&original))),
             &fingerprint,
             "",
             Some(home.path()),
@@ -3871,7 +3871,7 @@ mod tests {
                 &sums,
                 &home.path().join("bad-retry.sig"),
                 &reusable,
-                Some(&format!("{:x}", Sha256::digest(&original))),
+                Some(&securefix::hex_encode(Sha256::digest(&original))),
                 &fingerprint,
                 "",
                 Some(home.path()),

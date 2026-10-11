@@ -270,7 +270,7 @@ fn read_archive(path: &Path) -> Result<(Vec<u8>, String)> {
         bytes.len() as u64 <= MAX_ARCHIVE_SIZE,
         "runtime archive exceeds size limit"
     );
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = securefix::hex_encode(Sha256::digest(&bytes));
     Ok((bytes, digest))
 }
 
@@ -400,14 +400,14 @@ mod tests {
     }
 
     fn asset(bytes: &[u8]) -> Value {
-        let digest = format!("{:x}", Sha256::digest(bytes));
+        let digest = securefix::hex_encode(Sha256::digest(bytes));
         json!({"name":ASSET,"state":"uploaded","size":bytes.len(),"digest":format!("sha256:{digest}")})
     }
 
     #[test]
     fn accepts_only_empty_draft_or_exact_single_uploaded_asset() {
         let bytes = b"archive";
-        let digest = format!("{:x}", Sha256::digest(bytes));
+        let digest = securefix::hex_encode(Sha256::digest(bytes));
         assert_eq!(
             validate_assets(&[], &digest, bytes.len() as u64, true).unwrap(),
             AssetState::EmptyDraft

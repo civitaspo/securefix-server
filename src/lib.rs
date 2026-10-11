@@ -50,7 +50,10 @@ pub fn output_multiline(name: &str, value: &str) -> Result<()> {
         value.len() <= 1024 * 1024 && !value.contains('\r'),
         "invalid multiline output"
     );
-    let delimiter = format!("securefix_{:x}", Sha256::digest(value.as_bytes()));
+    let delimiter = format!(
+        "securefix_{}",
+        crate::hex_encode(Sha256::digest(value.as_bytes()))
+    );
     ensure!(
         !value.lines().any(|line| line == delimiter),
         "multiline output delimiter collision"
@@ -64,4 +67,25 @@ pub fn output_multiline(name: &str, value: &str) -> Result<()> {
         println!("{name}<<{delimiter}\n{value}\n{delimiter}");
     }
     Ok(())
+}
+
+pub fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(test)]
+mod hex_tests {
+    #[test]
+    fn sha256_encoding_preserves_canonical_lowercase_hex() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            super::hex_encode(Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(super::hex_encode([0, 1, 15, 255]), "00010fff");
+    }
 }
