@@ -1,0 +1,216 @@
+name: Test Managed Release PR Refresh
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Prepare a managed release PR or verify its refresh after main advances
+        type: choice
+        options: [prepare, verify]
+        default: prepare
+      candidate_sha:
+        description: Exact frozen candidate SHA
+        type: string
+        required: true
+      prepare_run_id:
+        description: Successful prepare run whose binary and state are reused for verification
+        type: string
+        default: ''
+
+permissions: {}
+concurrency:
+  group: release-pr-refresh-fixture
+  cancel-in-progress: false
+
+jobs:
+  trusted-runtime:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && inputs.candidate_sha == github.sha
+    uses: civitaspo/securefix-server/.github/workflows/load-cli.yml@9ec4043ce71f454811ef676b82dcba1314a5f0bb # v0.2.7
+    permissions:
+      contents: read
+      attestations: read
+
+  candidate-build:
+    if: inputs.phase == 'prepare' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && inputs.candidate_sha == github.sha
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - name: Stage candidate CLI and policy
+        run: |
+          mkdir -p candidate-runtime
+          install -m 755 target/release/securefix candidate-runtime/securefix
+          install -m 644 policy.json candidate-runtime/policy.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: release-pr-candidate-${{ github.run_id }}
+          path: candidate-runtime/
+          if-no-files-found: error
+          retention-days: 7
+
+  execute:
+    needs: [trusted-runtime, candidate-build]
+    if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && inputs.candidate_sha == github.sha && needs.trusted-runtime.result == 'success' && (inputs.phase == 'verify' || needs.candidate-build.result == 'success')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.trusted-runtime.outputs.artifact-id }}
+          path: trusted-runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'prepare'
+        with:
+          artifact-ids: ${{ needs.candidate-build.outputs.artifact-id }}
+          path: candidate
+          merge-multiple: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: candidate-source
+          persist-credentials: false
+      - uses: ./candidate-source/.github/actions/install-cli
+        with:
+          binary: ${{ github.workspace }}/trusted-runtime/securefix
+      - name: Validate frozen producer before minting scratch credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+        run: securefix integration validate-producer --workflow-sha "$WORKFLOW_SHA"
+      - name: Validate exact prepare run for verify phase
+        if: inputs.phase == 'verify'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$PREPARE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'verify requires a successful prepare run ID' >&2; exit 1; }
+          gh api "repos/civitaspo/securefix-server/actions/runs/$PREPARE_RUN_ID" > "$RUNNER_TEMP/prepare-run.json"
+          jq -e --arg sha "$CANDIDATE_SHA" --argjson id "$PREPARE_RUN_ID" '
+            .id == $id and .head_sha == $sha and .event == "workflow_dispatch" and
+            .status == "completed" and .conclusion == "success" and .run_attempt == 1 and
+            .actor.id == 4525500 and
+            (.path == ".github/workflows/testing-release-pr.yml" or .path == ".github/workflows/testing-securefix-server.yml")
+          ' "$RUNNER_TEMP/prepare-run.json" >/dev/null || { echo 'prepare run does not match this candidate/workflow' >&2; exit 1; }
+      - name: Resolve immutable prepare artifacts
+        id: artifacts
+        if: inputs.phase == 'verify'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+        run: |
+          set -euo pipefail
+          artifacts="$(gh api "repos/civitaspo/securefix-server/actions/runs/$PREPARE_RUN_ID/artifacts?per_page=100")"
+          jq -e '(.total_count | type == "number" and . <= 100) and (.artifacts | type == "array" and length <= 100)' <<<"$artifacts" >/dev/null || { echo 'prepare run artifact response is unbounded or invalid' >&2; exit 1; }
+          candidate_name="release-pr-candidate-$PREPARE_RUN_ID"
+          state_name="release-pr-state-$PREPARE_RUN_ID"
+          candidate_id="$(jq -er --arg name "$candidate_name" '[.artifacts[] | select(.name == $name)] | if length == 1 and .[0].expired == false and (.[0].size_in_bytes | type == "number" and . > 0 and . <= 134217728) then .[0].id else error("candidate artifact missing, duplicated, expired, or oversized") end' <<<"$artifacts")"
+          state_id="$(jq -er --arg name "$state_name" '[.artifacts[] | select(.name == $name)] | if length == 1 and .[0].expired == false and (.[0].size_in_bytes | type == "number" and . > 0 and . <= 1048576) then .[0].id else error("state artifact missing, duplicated, expired, or oversized") end' <<<"$artifacts")"
+          [[ "$candidate_id" =~ ^[1-9][0-9]{0,19}$ && "$state_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'prepare artifact IDs are invalid' >&2; exit 1; }
+          printf 'candidate_artifact_id=%s\nstate_artifact_id=%s\n' "$candidate_id" "$state_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'verify'
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.candidate_artifact_id }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+          path: candidate
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'verify'
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.state_artifact_id }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+          path: fixture-state
+          merge-multiple: true
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: server
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/testing-securefix-server
+          ref: main
+          path: scratch
+          fetch-depth: 0
+          token: ${{ steps.server.outputs.token }}
+          persist-credentials: false
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          version: "2026.8.3"
+          working_directory: scratch
+          install_args: "aqua:orhun/git-cliff"
+          cache: false
+      - uses: ./candidate-source/.github/actions/install-cli
+        with:
+          binary: ${{ github.workspace }}/candidate/securefix
+      - name: Verify scratch checkout identity and default head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$(git -C scratch remote get-url origin)" == 'https://github.com/civitaspo/testing-securefix-server' ]] || { echo 'unexpected scratch checkout remote' >&2; exit 1; }
+          [[ "$(gh api repos/civitaspo/testing-securefix-server --jq .default_branch)" == main ]] || { echo 'scratch default branch changed' >&2; exit 1; }
+          [[ "$(git -C scratch rev-parse HEAD)" == "$(gh api repos/civitaspo/testing-securefix-server/commits/main --jq .sha)" ]] || { echo 'scratch checkout is not current main' >&2; exit 1; }
+      - name: Exercise managed release PR refresh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_RELEASE_STABLE_SHA: 539ad7655716dd3eb3ee5e2bf69280831fa62bcc
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          PHASE: ${{ inputs.phase }}
+        run: |
+          set -euo pipefail
+          if [[ "$PHASE" == prepare ]]; then
+            mkdir -p release-state
+            securefix integration release-pr --phase prepare --candidate-sha "$CANDIDATE_SHA" --state-file release-state/state.json --scratch-checkout "$GITHUB_WORKSPACE/scratch"
+          else
+            securefix integration release-pr --phase verify --candidate-sha "$CANDIDATE_SHA" --prepare-run-id "$PREPARE_RUN_ID" --state-file fixture-state/state.json --scratch-checkout "$GITHUB_WORKSPACE/scratch"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.phase == 'prepare'
+        with:
+          name: release-pr-state-${{ github.run_id }}
+          path: release-state/state.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.phase == 'verify'
+        with:
+          name: release-pr-verification-${{ github.run_id }}
+          path: fixture-state/verification.json
+          if-no-files-found: error
+          retention-days: 7

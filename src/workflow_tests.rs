@@ -38,10 +38,18 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
         );
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             if let Some(uses) = job["uses"].as_str() {
+                let published_probe_loader = path == ".github/workflows/testing-release-pr.yml"
+                    && job_id == "trusted-runtime"
+                    && uses
+                        == "civitaspo/securefix-server/.github/workflows/load-cli.yml@9ec4043ce71f454811ef676b82dcba1314a5f0bb";
                 assert!(
-                    uses.starts_with("./.github/workflows/"),
+                    uses.starts_with("./.github/workflows/") || published_probe_loader,
                     "{path}/{job_id}: local reusable must use the running revision"
                 );
+                if published_probe_loader {
+                    assert_eq!(job["permissions"]["contents"], "read");
+                    assert_eq!(job["permissions"]["attestations"], "read");
+                }
                 assert!(
                     job.get("secrets").is_none() || uses != "./.github/workflows/load-cli.yml",
                     "runtime loader cannot inherit secrets"
@@ -110,6 +118,41 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                             assert_eq!(inputs["repository"], "civitaspo/securefix-server");
                             assert_eq!(inputs["run-id"], "${{ inputs.fixture_run_id }}");
                             assert_eq!(inputs["merge-multiple"], true);
+                        }
+                        continue;
+                    }
+                    if path == ".github/workflows/testing-release-pr.yml" && job_id == "execute" {
+                        assert_eq!(inputs["merge-multiple"], true);
+                        let artifact_id = inputs["artifact-ids"].as_str().unwrap();
+                        if artifact_id == "${{ needs.trusted-runtime.outputs.artifact-id }}" {
+                            assert_eq!(inputs["path"], "trusted-runtime");
+                            assert!(inputs.get("repository").is_none());
+                            assert!(inputs.get("run-id").is_none());
+                        } else if artifact_id == "${{ needs.candidate-build.outputs.artifact-id }}"
+                        {
+                            assert_eq!(step["if"], "inputs.phase == 'prepare'");
+                            assert_eq!(inputs["path"], "candidate");
+                            assert!(inputs.get("repository").is_none());
+                            assert!(inputs.get("run-id").is_none());
+                        } else {
+                            assert!(
+                                artifact_id
+                                    == "${{ steps.artifacts.outputs.candidate_artifact_id }}"
+                                    || artifact_id
+                                        == "${{ steps.artifacts.outputs.state_artifact_id }}"
+                            );
+                            assert_eq!(step["if"], "inputs.phase == 'verify'");
+                            assert_eq!(inputs["repository"], "civitaspo/securefix-server");
+                            assert_eq!(inputs["run-id"], "${{ inputs.prepare_run_id }}");
+                            assert_eq!(inputs["github-token"], "${{ github.token }}");
+                            assert_eq!(
+                                inputs["path"],
+                                if artifact_id.contains("candidate_artifact") {
+                                    "candidate"
+                                } else {
+                                    "fixture-state"
+                                }
+                            );
                         }
                         continue;
                     }
@@ -450,6 +493,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         [
             ".github/workflows/ci.yml",
             ".github/workflows/publish-runtime.yml",
+            ".github/workflows/testing-release-pr.yml",
             ".github/workflows/testing-securefix-server.yml",
             ".github/workflows/testing-securefix-server.yml"
         ],
@@ -464,6 +508,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         }
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             if path == ".github/workflows/testing-securefix-server.yml" && job_id == "build" {
+                continue;
+            }
+            if path == ".github/workflows/testing-release-pr.yml" && job_id == "candidate-build" {
                 continue;
             }
             if path == ".github/workflows/testing-provider-release.yml"
@@ -982,6 +1029,79 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let installer = steps
                 .iter()
                 .position(|step| step["uses"] == "$/.github/actions/install-cli");
+            if path == ".github/workflows/testing-release-pr.yml" && job_id == "execute" {
+                let trusted_installer = steps
+                    .iter()
+                    .position(|step| {
+                        step["uses"] == "./candidate-source/.github/actions/install-cli"
+                            && step["with"]["binary"]
+                                == "${{ github.workspace }}/trusted-runtime/securefix"
+                    })
+                    .unwrap();
+                let candidate_installer = steps
+                    .iter()
+                    .position(|step| {
+                        step["uses"] == "./candidate-source/.github/actions/install-cli"
+                            && step["with"]["binary"]
+                                == "${{ github.workspace }}/candidate/securefix"
+                    })
+                    .unwrap();
+                let producer_check = steps
+                    .iter()
+                    .position(|step| {
+                        step["name"]
+                            == "Validate frozen producer before minting scratch credentials"
+                    })
+                    .unwrap();
+                let app_token = steps
+                    .iter()
+                    .position(|step| step["id"] == "server")
+                    .unwrap();
+                let mise = steps
+                    .iter()
+                    .position(|step| {
+                        step["uses"]
+                            .as_str()
+                            .is_some_and(|value| value.starts_with("jdx/mise-action@"))
+                    })
+                    .unwrap();
+                let candidate_run = steps
+                    .iter()
+                    .position(|step| step["name"] == "Exercise managed release PR refresh")
+                    .unwrap();
+                let trusted_download = steps
+                    .iter()
+                    .position(|step| {
+                        step["with"]["artifact-ids"]
+                            == "${{ needs.trusted-runtime.outputs.artifact-id }}"
+                    })
+                    .unwrap();
+                assert!(trusted_download < trusted_installer);
+                assert!(trusted_installer < producer_check && producer_check < app_token);
+                let prepare_check = steps
+                    .iter()
+                    .position(|step| step["name"] == "Validate exact prepare run for verify phase")
+                    .unwrap();
+                let artifact_lookup = steps
+                    .iter()
+                    .position(|step| step["id"] == "artifacts")
+                    .unwrap();
+                assert!(producer_check < prepare_check && prepare_check < artifact_lookup);
+                for (index, step) in steps.iter().enumerate() {
+                    if step["with"]["artifact-ids"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("${{ steps.artifacts.outputs."))
+                    {
+                        assert!(artifact_lookup < index && index < app_token);
+                    }
+                }
+                assert!(
+                    app_token < mise
+                        && mise < candidate_installer
+                        && candidate_installer < candidate_run
+                );
+                continue;
+            }
             if downloads_cli {
                 assert!(
                     installer.is_some(),
@@ -1046,13 +1166,27 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && run.contains("expected_digest")
                     && !run.contains("gh api -X")
                     && !run.contains("--method");
+                let bounded_release_artifact_lookup = path
+                    == ".github/workflows/testing-release-pr.yml"
+                    && job_id == "execute"
+                    && ((step["name"] == "Resolve immutable prepare artifacts"
+                        && run.contains("actions/runs/$PREPARE_RUN_ID/artifacts?per_page=100")
+                        && run.contains("total_count")
+                        && run.contains("expired == false"))
+                        || (step["name"] == "Validate exact prepare run for verify phase"
+                            && run.contains("actions/runs/$PREPARE_RUN_ID")
+                            && run.contains("head_sha == $sha")
+                            && run.contains("conclusion == \"success\"")))
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
                         && !run.contains("node ")
                         && (!run.contains("jq ")
                             || bounded_baseline_reads
-                            || canonical_runtime_bootstrap)
+                            || canonical_runtime_bootstrap
+                            || bounded_release_artifact_lookup)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );

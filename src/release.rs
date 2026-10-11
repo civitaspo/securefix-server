@@ -613,6 +613,10 @@ fn stable_release_base() -> Result<Version> {
     Ok(base)
 }
 
+fn release_changelog_range(base: &Version) -> Option<String> {
+    (base != &Version::new(0, 0, 0)).then(|| format!("v{base}..HEAD"))
+}
+
 fn prepare(input_version: &str) -> Result<()> {
     let api = api()?;
     let policy = current_policy(&api)?;
@@ -620,10 +624,16 @@ fn prepare(input_version: &str) -> Result<()> {
         .repository(current_repository()?.as_str())?
         .require(Capability::Release)?;
     require_current_runtime(&api, ".github/workflows/reusable-release-pr.yml")?;
+    prepare_metadata(input_version)
+}
+
+pub(crate) fn prepare_metadata(input_version: &str) -> Result<()> {
+    let base = stable_release_base()?;
     let Some(version) = next_version(input_version)? else {
         crate::output("releasable", "false")?;
         return Ok(());
     };
+    ensure_cliff_base_tag(&base)?;
     let version = version.to_string();
     let tag = format!("v{version}");
     let existing = ProcessCommand::new("git")
@@ -637,7 +647,18 @@ fn prepare(input_version: &str) -> Result<()> {
     if existing.success() {
         bail!("release tag {tag} already exists");
     }
-    let _ = tool_output("git-cliff", &["--tag", &tag, "--output", "CHANGELOG.md"])?;
+    let range = release_changelog_range(&base);
+    let mut cliff_args = vec!["--unreleased"];
+    if let Some(range) = range.as_deref() {
+        cliff_args.push(range);
+    }
+    cliff_args.extend(["--tag", &tag]);
+    cliff_args.extend(if Path::new("CHANGELOG.md").is_file() {
+        ["--prepend", "CHANGELOG.md"]
+    } else {
+        ["--output", "CHANGELOG.md"]
+    });
+    let _ = tool_output("git-cliff", &cliff_args)?;
     std::fs::write(".release-version", format!("{version}\n"))?;
     if Path::new("dbt_project.yml").is_file() {
         update_top_level_yaml_version(Path::new("dbt_project.yml"), &version)?;
@@ -2639,6 +2660,16 @@ fn validate_provider_archive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_changelog_range_starts_at_stable_base() {
+        let stable_base = Version::parse("0.2.2").unwrap();
+        assert_eq!(
+            release_changelog_range(&stable_base).as_deref(),
+            Some("v0.2.2..HEAD")
+        );
+        assert_eq!(release_changelog_range(&Version::new(0, 0, 0)), None);
+    }
 
     // This ignored probe is invoked only by the frozen, trusted integration
     // workflow. Every phase is explicitly selected; production release
