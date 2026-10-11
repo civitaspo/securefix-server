@@ -305,10 +305,11 @@ pub fn run(command: Command) -> Result<()> {
                 version == "0.1.1",
                 "release fixture version is fixed at 0.1.1"
             );
+            let state_path = std::env::current_dir()?.join(&state_file);
             release_pr(
                 phase,
                 &candidate_sha,
-                &state_file,
+                &state_path,
                 &scratch_checkout,
                 prepare_run_id,
                 &version,
