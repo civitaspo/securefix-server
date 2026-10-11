@@ -36,6 +36,8 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,6 +50,7 @@ jobs:
           install -m 755 target/release/securefix candidate-runtime/securefix
           install -m 644 policy.json candidate-runtime/policy.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
         with:
           name: release-pr-candidate-${{ github.run_id }}
           path: candidate-runtime/
@@ -73,24 +76,9 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         if: inputs.phase == 'prepare'
         with:
-          name: release-pr-candidate-${{ github.run_id }}
+          artifact-ids: ${{ needs.candidate-build.outputs.artifact-id }}
           path: candidate
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        if: inputs.phase == 'verify'
-        with:
-          name: release-pr-candidate-${{ inputs.prepare_run_id }}
-          repository: civitaspo/securefix-server
-          run-id: ${{ inputs.prepare_run_id }}
-          github-token: ${{ github.token }}
-          path: candidate
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        if: inputs.phase == 'verify'
-        with:
-          name: release-pr-state-${{ inputs.prepare_run_id }}
-          repository: civitaspo/securefix-server
-          run-id: ${{ inputs.prepare_run_id }}
-          github-token: ${{ github.token }}
-          path: fixture-state
+          merge-multiple: true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.candidate_sha }}
@@ -121,9 +109,40 @@ jobs:
             .actor.id == 4525500 and
             (.path == ".github/workflows/testing-release-pr.yml" or .path == ".github/workflows/testing-securefix-server.yml")
           ' "$RUNNER_TEMP/prepare-run.json" >/dev/null || { echo 'prepare run does not match this candidate/workflow' >&2; exit 1; }
-      - uses: ./candidate-source/.github/actions/install-cli
+      - name: Resolve immutable prepare artifacts
+        id: artifacts
+        if: inputs.phase == 'verify'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+        run: |
+          set -euo pipefail
+          artifacts="$(gh api "repos/civitaspo/securefix-server/actions/runs/$PREPARE_RUN_ID/artifacts?per_page=100")"
+          jq -e '(.total_count | type == "number" and . <= 100) and (.artifacts | type == "array" and length <= 100)' <<<"$artifacts" >/dev/null || { echo 'prepare run artifact response is unbounded or invalid' >&2; exit 1; }
+          candidate_name="release-pr-candidate-$PREPARE_RUN_ID"
+          state_name="release-pr-state-$PREPARE_RUN_ID"
+          candidate_id="$(jq -er --arg name "$candidate_name" '[.artifacts[] | select(.name == $name)] | if length == 1 and .[0].expired == false and (.[0].size_in_bytes | type == "number" and . > 0 and . <= 134217728) then .[0].id else error("candidate artifact missing, duplicated, expired, or oversized") end' <<<"$artifacts")"
+          state_id="$(jq -er --arg name "$state_name" '[.artifacts[] | select(.name == $name)] | if length == 1 and .[0].expired == false and (.[0].size_in_bytes | type == "number" and . > 0 and . <= 1048576) then .[0].id else error("state artifact missing, duplicated, expired, or oversized") end' <<<"$artifacts")"
+          [[ "$candidate_id" =~ ^[1-9][0-9]{0,19}$ && "$state_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'prepare artifact IDs are invalid' >&2; exit 1; }
+          printf 'candidate_artifact_id=%s\nstate_artifact_id=%s\n' "$candidate_id" "$state_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'verify'
         with:
-          binary: ${{ github.workspace }}/candidate/securefix
+          artifact-ids: ${{ steps.artifacts.outputs.candidate_artifact_id }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+          path: candidate
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.phase == 'verify'
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.state_artifact_id }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+          path: fixture-state
+          merge-multiple: true
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: server
         with:
@@ -134,6 +153,7 @@ jobs:
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
+          permission-workflows: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/testing-securefix-server
@@ -148,6 +168,9 @@ jobs:
           working_directory: scratch
           install_args: "aqua:orhun/git-cliff"
           cache: false
+      - uses: ./candidate-source/.github/actions/install-cli
+        with:
+          binary: ${{ github.workspace }}/candidate/securefix
       - name: Verify scratch checkout identity and default head
         env:
           GITHUB_TOKEN: ${{ github.token }}
