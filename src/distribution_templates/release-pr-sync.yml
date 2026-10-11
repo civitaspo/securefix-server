@@ -1,9 +1,7 @@
 name: Release PR Sync
 
 on:
-  push:
-    branches:
-      - @RELEASE_BRANCH@
+  # Managed release PR updates already synchronize their title and body.
   workflow_dispatch:
 
 permissions: {}

@@ -849,6 +849,22 @@ fn release_tag_validator_accepts_exact_previous_empty_event_input_fallback() {
 }
 
 #[test]
+fn release_sync_is_manual_only_and_accepts_the_exact_previous_push_trigger() {
+    let mut files = caller::rendered_files(&"a".repeat(40), "v0.2.9", "main", true).unwrap();
+    let path = ".github/workflows/release-pr-sync.yml";
+    let canonical: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+    assert!(canonical["on"].get("push").is_none());
+    assert!(canonical["on"].get("workflow_dispatch").is_some());
+    let previous = legacy_release_generation(path, canonical).unwrap();
+    let contents = serde_yaml::to_string(&previous).unwrap();
+    files.insert(path.to_owned(), contents.as_bytes().to_vec());
+    assert!(validate_previous_generation(&files, true).is_ok());
+    assert!(caller::validate_existing(path, contents.as_bytes(), "main").is_ok());
+    let unexpected = contents.replace("release/next", "untrusted");
+    assert!(caller::validate_existing(path, unexpected.as_bytes(), "main").is_err());
+}
+
+#[test]
 fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
     use crate::fixtures::{Fixture, Route};
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();

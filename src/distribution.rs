@@ -362,7 +362,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         ensure!(
             actual_yaml == expected_yaml
                 || legacy_request_generations(path, expected_yaml.clone()).contains(&actual_yaml)
-                || legacy_release_tag_generation(path, expected_yaml.clone())
+                || legacy_release_generation(path, expected_yaml.clone())
                     .is_some_and(|legacy| actual_yaml == legacy),
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
@@ -371,15 +371,25 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
     Ok(())
 }
 
-fn legacy_release_tag_generation(
+fn legacy_release_generation(
     path: &str,
     mut expected: serde_yaml::Value,
 ) -> Option<serde_yaml::Value> {
-    if path != ".github/workflows/release-tag.yml" {
-        return None;
+    match path {
+        ".github/workflows/release-tag.yml" => {
+            expected["jobs"]["tag"]["with"]["release_pr_number"] =
+                serde_yaml::Value::String("${{ inputs.release_pr_number }}".to_owned());
+        }
+        ".github/workflows/release-pr-sync.yml" => {
+            let branch = crate::config::trusted()
+                .ok()?
+                .deployment
+                .release_branch
+                .clone();
+            expected["on"]["push"]["branches"] = serde_yaml::to_value(vec![branch]).ok()?;
+        }
+        _ => return None,
     }
-    expected["jobs"]["tag"]["with"]["release_pr_number"] =
-        serde_yaml::Value::String("${{ inputs.release_pr_number }}".to_owned());
     Some(expected)
 }
 

@@ -484,6 +484,12 @@ pub(super) fn validate_previous_client_generation(
 }
 
 fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut serde_yaml::Value) {
+    if path == ".github/workflows/release-pr-sync.yml"
+        && let Some(previous) = super::legacy_release_generation(path, expected.clone())
+        && actual["on"] == previous["on"]
+    {
+        expected["on"] = previous["on"].clone();
+    }
     if path == ".github/workflows/approve-request.yml"
         && actual["concurrency"]["group"].as_str()
             == Some(

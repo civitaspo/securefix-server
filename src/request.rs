@@ -259,12 +259,10 @@ fn capture(kind: RequestKind) -> Result<()> {
         "pull request must be same-repository, open, ready, and target the default branch"
     );
     let caller_workflow_sha = std::env::var("GITHUB_SHA")?;
-    validate_sha(&caller_workflow_sha)?;
     if event_name == "pull_request_target" {
-        ensure!(
-            payload["pull_request"]["base"]["sha"] == caller_workflow_sha,
-            "pull request base SHA differs from the workflow source"
-        );
+        validate_pull_request_target_source(&payload, &caller_workflow_sha)?;
+    } else {
+        validate_sha(&caller_workflow_sha)?;
     }
     let manifest = RequestManifest {
         version: 1,
@@ -310,6 +308,14 @@ fn capture(kind: RequestKind) -> Result<()> {
     )?;
     output("pull_number", manifest.pull_request.number.to_string())?;
     Ok(())
+}
+
+fn validate_pull_request_target_source(payload: &Value, caller_workflow_sha: &str) -> Result<()> {
+    let event_base_sha = payload["pull_request"]["base"]["sha"]
+        .as_str()
+        .context("pull request event has no base SHA")?;
+    validate_sha(event_base_sha)?;
+    validate_sha(caller_workflow_sha)
 }
 
 pub(crate) fn acknowledge_request(
@@ -1104,6 +1110,17 @@ mod tests {
         assert!(matches_principal(&user, 71, "example-app[bot]", "Bot"));
         assert!(!matches_principal(&user, 72, "example-app[bot]", "Bot"));
         assert!(!matches_principal(&user, 71, "another-app[bot]", "Bot"));
+    }
+
+    #[test]
+    fn target_request_accepts_a_default_branch_advance_after_the_event_snapshot() {
+        let payload =
+            json!({"pull_request":{"base":{"sha":"6190000000000000000000000000000000000000"}}});
+        let workflow_sha = "a800000000000000000000000000000000000000";
+
+        assert!(validate_pull_request_target_source(&payload, workflow_sha).is_ok());
+        assert!(validate_pull_request_target_source(&payload, "not-a-sha").is_err());
+        assert!(validate_pull_request_target_source(&json!({}), workflow_sha).is_err());
     }
 
     fn manifest() -> RequestManifest {
