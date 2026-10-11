@@ -613,7 +613,7 @@ fn release_pr(
                 &applied.commit_sha,
             )?)?;
             ensure!(
-                !first_changelog.contains("include subsequent merged change in release PR refresh"),
+                !first_changelog.contains("include final merged change in release PR refresh"),
                 "initial release metadata unexpectedly includes the later fixture change"
             );
             ReleasePrState {
@@ -680,7 +680,7 @@ fn release_pr(
                 .collect::<Vec<_>>();
             ensure!(
                 commit_messages.iter().any(|message| message
-                    .contains("include subsequent merged change in release PR refresh")),
+                    .contains("include final merged change in release PR refresh")),
                 "normal owner PR commit message is absent from the main advancement"
             );
             ensure!(
@@ -696,8 +696,8 @@ fn release_pr(
             ensure!(
                 !state
                     .first_changelog
-                    .contains("include subsequent merged change in release PR refresh")
-                    && changelog.contains("include subsequent merged change in release PR refresh"),
+                    .contains("include final merged change in release PR refresh")
+                    && changelog.contains("include final merged change in release PR refresh"),
                 "refreshed release changelog does not uniquely include the later main commit"
             );
             ensure_changelog_history(
@@ -778,17 +778,26 @@ fn release_pr(
                     && commit["commit"]["verification"]["verified"] == true,
                 "refreshed metadata commit is not signed or parented on the original managed PR head"
             );
-            let pull: Value = api.get(&format!(
-                "/repos/{}/pulls/{}",
-                integration_repository()?,
-                state.release_pr
-            ))?;
-            ensure!(
-                pull["state"] == "open"
-                    && pull["head"]["ref"] == state.release_branch
-                    && pull["head"]["sha"] == applied.commit_sha,
-                "managed release PR was not refreshed in place"
-            );
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let pull = loop {
+                let pull: Value = api.get(&format!(
+                    "/repos/{}/pulls/{}",
+                    integration_repository()?,
+                    state.release_pr
+                ))?;
+                ensure!(
+                    pull["state"] == "open" && pull["head"]["ref"] == state.release_branch,
+                    "managed release PR identity changed after refresh"
+                );
+                if pull["head"]["sha"] == applied.commit_sha {
+                    break pull;
+                }
+                ensure!(
+                    pull["head"]["sha"] == state.first_head_sha && Instant::now() < deadline,
+                    "managed release PR was not refreshed in place"
+                );
+                thread::sleep(Duration::from_secs(1));
+            };
             println!(
                 "Verified managed release PR refresh for #{}.",
                 state.release_pr
