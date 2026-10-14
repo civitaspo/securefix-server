@@ -2260,6 +2260,10 @@ fn create_nativefix_positive_pr(
         existing_pull_request: Some(pr_number),
         ..plan
     };
+    let _: Value = api.patch(
+        &format!("/repos/{}/pulls/{pr_number}", integration_repository()?),
+        &json!({"title":"test: outdated release title", "body":"Outdated release summary."}),
+    )?;
     let retry = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
         read_api: api,
         write_api: api,
@@ -2287,6 +2291,18 @@ fn create_nativefix_positive_pr(
             && pull["head"]["sha"] == first.commit_sha
             && pull["head"]["ref"] == branch,
         "nativefix integration PR does not match the signed commit"
+    );
+    let options: Value = serde_json::from_str(
+        fix.create_pull_request
+            .as_deref()
+            .context("missing fixture PR options")?,
+    )?;
+    ensure!(
+        pull["title"] == options["title"] && pull["body"] == options["body"],
+        "nativefix existing PR title and summary were not synchronized"
+    );
+    println!(
+        "Verified existing release PR title and summary synchronization without a new commit."
     );
     Ok(PullRequestFixture {
         number: pr_number,

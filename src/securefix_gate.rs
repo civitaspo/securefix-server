@@ -786,6 +786,13 @@ pub(crate) fn apply_core(input: ApplyCore<'_>) -> Result<ApplyResult> {
             &plan.destination_branch,
             base,
         )? {
+            let _: Value = write_api.patch(
+                &format!("/repos/{}/pulls/{number}", plan.destination_repository),
+                &json!({
+                    "title": options["title"],
+                    "body": options.get("body").cloned().unwrap_or(Value::Null),
+                }),
+            )?;
             pull_request_number = Some(number);
         } else {
             let created: Value = write_api.post(
