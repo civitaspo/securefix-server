@@ -1503,7 +1503,10 @@ fn policy_feedback_token_can_comment_on_pull_requests_without_contents_write() {
     assert_eq!(write["permission-checks"], "write");
     assert_eq!(write["permission-issues"], "write");
     assert_eq!(write["permission-pull-requests"], "write");
-    assert_eq!(write["repositories"], "${{ steps.locate.outputs.repository_name }}");
+    assert_eq!(
+        write["repositories"],
+        "${{ steps.locate.outputs.repository_name }}"
+    );
     assert!(write.get("permission-contents").is_none());
     assert_eq!(token("read")["with"]["permission-pull-requests"], "read");
 }
