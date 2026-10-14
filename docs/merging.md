@@ -60,7 +60,7 @@ For ordinary PRs, GitHub's review/check rules remain active and the Rust process
 Comment/timeline reads and the Merge API are separate requests, so timeline visibility can lag; the SHA precondition prevents merging a different head.
 
 The Server App needs `actions: read`, `checks: write`, `statuses: read`, `contents: write`, `issues: write`, and `pull requests: write` on clients.
-Workflows narrow tokens by operation.
+Workflows narrow tokens by operation. The policy-result token is scoped to the target repository with `checks: write`, `issues: write`, and `pull requests: write` for check publication, PR failure comments, and hiding obsolete comments; it has no contents-write permission.
 Source-read tokens are read-only; authorization and notification tokens do not receive contents-write permission.
 
 ## Rollout

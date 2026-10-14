@@ -1493,3 +1493,20 @@ fn provider_build_sign_and_publish_have_distinct_credentials() {
         );
     }
 }
+
+#[test]
+fn policy_feedback_token_can_comment_on_pull_requests_without_contents_write() {
+    let policy = workflow("policy-check.yml");
+    let steps = policy["jobs"]["process"]["steps"].as_array().unwrap();
+    let token = |id| steps.iter().find(|step| step["id"] == id).unwrap();
+    let write = &token("write")["with"];
+    assert_eq!(write["permission-checks"], "write");
+    assert_eq!(write["permission-issues"], "write");
+    assert_eq!(write["permission-pull-requests"], "write");
+    assert_eq!(
+        write["repositories"],
+        "${{ steps.locate.outputs.repository_name }}"
+    );
+    assert!(write.get("permission-contents").is_none());
+    assert_eq!(token("read")["with"]["permission-pull-requests"], "read");
+}
