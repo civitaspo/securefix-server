@@ -780,22 +780,21 @@ pub fn validate_pr_authorization(
     if sensitive
         && !owner_requested
         && !sensitive_path_approval_exempt(policy, &pr["user"], &commits, &github_signed)
+        && let Err(error) = require_owner_marker(api, policy, repository, number, sha)
     {
-        if let Err(error) = require_owner_marker(api, policy, repository, number, sha) {
-            let mut matching = Vec::new();
-            for path in matching_paths {
-                if !matching.contains(&path) {
-                    matching.push(path);
-                    if matching.len() == 10 {
-                        break;
-                    }
+        let mut matching = Vec::new();
+        for path in matching_paths {
+            if !matching.contains(&path) {
+                matching.push(path);
+                if matching.len() == 10 {
+                    break;
                 }
             }
-            return Err(error.context(format!(
+        }
+        return Err(error.context(format!(
                 "Owner authorization is required because this PR changes sensitive paths configured in policy.json and does not qualify for a sensitive-path exemption. Post /approve for the current PR head; authorization for earlier heads does not carry over after rebases or force-pushes. Matching sensitive paths (up to 10): {}",
                 serde_json::to_string(&matching)?
             )));
-        }
     }
     Ok(sensitive)
 }
