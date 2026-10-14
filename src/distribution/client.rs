@@ -34,8 +34,19 @@ pub(super) fn validate_previous_generation(
         .get(CALLER_PATH)
         .context("automation branch client workflow generation is incomplete")?;
     let migrated = migrate_autofix(autofix, runtime_sha, "v0.0.0")?;
-    let autofix_is_native =
-        serde_yaml::from_slice::<Value>(&migrated)? == serde_yaml::from_slice::<Value>(autofix)?;
+    // Compare a previously generated native workflow after normalizing only the
+    // audited token action pin. All token inputs were validated by migrate_autofix.
+    let mut previous: Value = serde_yaml::from_slice(autofix)?;
+    if let Some(steps) = previous["jobs"]["autofix"]["steps"].as_sequence_mut() {
+        for step in steps {
+            if step["id"].as_str() == Some("securefix-client-token")
+                && step["uses"].as_str() == Some(PREVIOUS_TOKEN_ACTION)
+            {
+                step["uses"] = Value::String(TOKEN_ACTION.to_owned());
+            }
+        }
+    }
+    let autofix_is_native = serde_yaml::from_slice::<Value>(&migrated)? == previous;
     if let Some(native_sha) = native_runtime_sha(autofix)? {
         ensure!(
             native_sha == runtime_sha && autofix_is_native,
@@ -792,6 +803,15 @@ mod tests {
             "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510",
         ] {
             let previous = original.replace(TOKEN_ACTION, pin);
+            let (pull_request, workflow_call) = caller_chain();
+            let (pull_request, workflow_call) =
+                migrate_call_chain(&pull_request, &workflow_call).unwrap();
+            let files = std::collections::BTreeMap::from([
+                (AUTOFIX_PATH.to_owned(), previous.as_bytes().to_vec()),
+                (PULL_REQUEST_PATH.to_owned(), pull_request),
+                (CALLER_PATH.to_owned(), workflow_call),
+            ]);
+            assert!(validate_previous_generation(&files, &"a".repeat(40)).is_ok());
             let migrated =
                 migrate_autofix(previous.as_bytes(), &"b".repeat(40), "v0.2.14").unwrap();
             assert!(String::from_utf8_lossy(&migrated).contains(
