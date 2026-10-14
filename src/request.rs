@@ -775,12 +775,26 @@ pub fn validate_pr_authorization(
         .flat_map(|f| [f["filename"].as_str(), f["previous_filename"].as_str()])
         .flatten()
         .collect::<Vec<_>>();
-    let sensitive = repo.sensitive(paths.iter().copied())?;
+    let matching_paths = repo.matching_sensitive_paths(paths.iter().copied())?;
+    let sensitive = !matching_paths.is_empty();
     if sensitive
         && !owner_requested
         && !sensitive_path_approval_exempt(policy, &pr["user"], &commits, &github_signed)
+        && let Err(error) = require_owner_marker(api, policy, repository, number, sha)
     {
-        require_owner_marker(api, policy, repository, number, sha)?;
+        let mut matching = Vec::new();
+        for path in matching_paths {
+            if !matching.contains(&path) {
+                matching.push(path);
+                if matching.len() == 10 {
+                    break;
+                }
+            }
+        }
+        return Err(error.context(format!(
+                "Owner authorization is required because this PR changes sensitive paths configured in policy.json and does not qualify for a sensitive-path exemption. Post /approve for the current PR head; authorization for earlier heads does not carry over after rebases or force-pushes. Matching sensitive paths (up to 10): {}",
+                serde_json::to_string(&matching)?
+            )));
     }
     Ok(sensitive)
 }
@@ -1385,24 +1399,35 @@ mod tests {
             ),
             Route::get(
                 "/repos/civitaspo/dbt-authorized-models/pulls/7/files?per_page=100&page=1",
-                json!([{"filename":"README.md","previous_filename":".github/workflows/ci.yml"}]),
+                json!([{"filename":"README.md","previous_filename":".github/workflows/ci.yml"}, {"filename":"Cargo.toml"}]),
             ),
             Route::get(
                 "/repos/civitaspo/dbt-authorized-models/issues/7/comments?per_page=100&page=1",
                 json!([]),
             ),
         ]);
-        assert!(
-            validate_pr_authorization(
-                &fixture.api,
-                &policy,
-                "civitaspo/dbt-authorized-models",
-                7,
-                &sha,
-                false
-            )
-            .is_err()
-        );
+        let error = validate_pr_authorization(
+            &fixture.api,
+            &policy,
+            "civitaspo/dbt-authorized-models",
+            7,
+            &sha,
+            false,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        for expected in [
+            "changes sensitive paths configured in policy.json",
+            "does not qualify for a sensitive-path exemption",
+            ".github/workflows/ci.yml",
+            "Cargo.toml",
+            "Post /approve for the current PR head",
+            "after rebases or force-pushes",
+            "owner authorization for this exact pull request head is missing",
+        ] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+        assert!(!message.contains("README.md"));
         fixture.finish();
     }
 

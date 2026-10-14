@@ -2069,7 +2069,18 @@ fn expect_owner_authorization_required(
     match result {
         Err(error) => {
             ensure!(
-                error.to_string() == expected_error,
+                error
+                    .chain()
+                    .any(|cause| cause.to_string() == expected_error)
+                    && error
+                        .to_string()
+                        .contains("changes sensitive paths configured in policy.json")
+                    && error
+                        .to_string()
+                        .contains("Post /approve for the current PR head")
+                    && error
+                        .to_string()
+                        .contains("Matching sensitive paths (up to 10):"),
                 "{scenario} failed for the wrong reason: {error}"
             );
             Ok(())

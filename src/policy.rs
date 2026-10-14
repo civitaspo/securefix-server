@@ -71,12 +71,22 @@ impl RepositoryPolicy {
     }
 
     pub fn sensitive<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Result<bool> {
+        Ok(!self.matching_sensitive_paths(paths)?.is_empty())
+    }
+
+    pub fn matching_sensitive_paths<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<&'a str>> {
         let mut builder = GlobSetBuilder::new();
         for pattern in &self.sensitive_paths {
             builder.add(Glob::new(pattern)?);
         }
         let patterns = builder.build()?;
-        Ok(paths.into_iter().any(|path| patterns.is_match(path)))
+        Ok(paths
+            .into_iter()
+            .filter(|path| patterns.is_match(path))
+            .collect())
     }
 }
 
