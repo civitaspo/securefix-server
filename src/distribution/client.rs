@@ -7,8 +7,10 @@ const CLIENT_ACTION_VERSIONS: [&str; 2] = [
     "11b2bfd2f4b7e1e02b63648fbe5d17e6273e515d",
 ];
 const TOKEN_ACTION: &str =
+    "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510";
+const TOKEN_ACTION_COMMENT: &str = "# v3.3.0";
+const PREVIOUS_TOKEN_ACTION: &str =
     "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1";
-const TOKEN_ACTION_COMMENT: &str = "# v3.2.0";
 
 pub(super) const AUTOFIX_PATH: &str = ".github/workflows/wc-autofix.yml";
 pub(super) const CALLER_PATH: &str = ".github/workflows/workflow_call_pr.yml";
@@ -32,8 +34,19 @@ pub(super) fn validate_previous_generation(
         .get(CALLER_PATH)
         .context("automation branch client workflow generation is incomplete")?;
     let migrated = migrate_autofix(autofix, runtime_sha, "v0.0.0")?;
-    let autofix_is_native =
-        serde_yaml::from_slice::<Value>(&migrated)? == serde_yaml::from_slice::<Value>(autofix)?;
+    // Compare a previously generated native workflow after normalizing only the
+    // audited token action pin. All token inputs were validated by migrate_autofix.
+    let mut previous: Value = serde_yaml::from_slice(autofix)?;
+    if let Some(steps) = previous["jobs"]["autofix"]["steps"].as_sequence_mut() {
+        for step in steps {
+            if step["id"].as_str() == Some("securefix-client-token")
+                && step["uses"].as_str() == Some(PREVIOUS_TOKEN_ACTION)
+            {
+                step["uses"] = Value::String(TOKEN_ACTION.to_owned());
+            }
+        }
+    }
+    let autofix_is_native = serde_yaml::from_slice::<Value>(&migrated)? == previous;
     if let Some(native_sha) = native_runtime_sha(autofix)? {
         ensure!(
             native_sha == runtime_sha && autofix_is_native,
@@ -416,7 +429,9 @@ fn is_native_step_pair(steps: &[Value], action_index: usize) -> Result<bool> {
     let token = &steps[action_index - 1];
     ensure!(
         token["name"].as_str() == Some("Create Securefix client token")
-            && token["uses"].as_str() == Some(TOKEN_ACTION),
+            && token["uses"]
+                .as_str()
+                .is_some_and(|uses| [TOKEN_ACTION, PREVIOUS_TOKEN_ACTION].contains(&uses)),
         "native Securefix token step is unsupported"
     );
     let with = token["with"]
@@ -776,5 +791,46 @@ mod tests {
         assert!(validate_previous_generation(&files, &"a".repeat(40)).is_err());
         files.insert(AUTOFIX_PATH.to_owned(), second);
         assert!(validate_previous_generation(&files, &"b".repeat(40)).is_ok());
+    }
+    #[test]
+    fn renovate_token_pin_updates_migrate_without_accepting_unknown_actions() {
+        let original = String::from_utf8(
+            migrate_autofix(legacy_autofix().as_bytes(), &"a".repeat(40), "v0.2.13").unwrap(),
+        )
+        .unwrap();
+        for pin in [
+            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510",
+        ] {
+            let previous = original.replace(TOKEN_ACTION, pin);
+            let (pull_request, workflow_call) = caller_chain();
+            let (pull_request, workflow_call) =
+                migrate_call_chain(&pull_request, &workflow_call).unwrap();
+            let files = std::collections::BTreeMap::from([
+                (AUTOFIX_PATH.to_owned(), previous.as_bytes().to_vec()),
+                (PULL_REQUEST_PATH.to_owned(), pull_request),
+                (CALLER_PATH.to_owned(), workflow_call),
+            ]);
+            assert!(validate_previous_generation(&files, &"a".repeat(40)).is_ok());
+            let migrated =
+                migrate_autofix(previous.as_bytes(), &"b".repeat(40), "v0.2.14").unwrap();
+            assert!(String::from_utf8_lossy(&migrated).contains(
+                "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0"
+            ));
+        }
+        for pin in [
+            "actions/create-github-app-token@main",
+            "actions/create-github-app-token@1111111111111111111111111111111111111111",
+            "attacker/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510",
+        ] {
+            assert!(
+                migrate_autofix(
+                    original.replace(TOKEN_ACTION, pin).as_bytes(),
+                    &"b".repeat(40),
+                    "v0.2.14"
+                )
+                .is_err()
+            );
+        }
     }
 }

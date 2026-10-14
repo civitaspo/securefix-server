@@ -71,3 +71,5 @@ Rust workflow tests independently require that exact producer checkout expressio
 Remove those narrow exceptions when actionlint supports them.
 Version comments on SHA-pinned actions remain because [Renovate uses them to follow action tags](https://docs.renovatebot.com/modules/manager/github-actions/); bare SHA references are disabled by its default update policy.
 The [previous live verification](archive/merge-verification-2026-10-08.md) is historical and does not certify this implementation.
+
+The managed client token step accepts the audited SHA pins for `actions/create-github-app-token` v3.2.0 and v3.3.0 and emits v3.3.0. Unknown revisions, other action repositories, and changed token inputs remain unsupported; a Renovate token-action upgrade outside this set requires an audited server update before caller migration.
