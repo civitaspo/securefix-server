@@ -77,3 +77,5 @@ A failed `securefix-policy-check` posts one English Server App comment with the 
 When sensitive-path changes require owner authorization, the rejection explains the policy requirement, lists up to ten matching changed paths (including previous paths for renames), and instructs the owner to post `/approve` for the current PR head. Rebases and force-pushes invalidate authorization for earlier heads. Sensitive-path exemptions and all other authorization checks remain unchanged.
 
 Policy failure comments use wrapping paragraphs and preserve explicit line breaks. Sensitive-path explanations separate the reason, the next action, and one matching file per line; they do not use a horizontally scrolling preformatted block. Error text and filenames remain HTML-escaped.
+
+Failure comments display matching filenames without JSON quotation marks in inline code, as well as standalone `/approve` and `/merge` commands. Filename text is decoded before HTML escaping so unusual characters remain safe.
