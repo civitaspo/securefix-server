@@ -640,9 +640,32 @@ fn current_report_target(
 }
 
 fn policy_failure_comment(repository: &str, sha: &str, summary: &str, run_url: &str) -> String {
-    let escaped: String = summary
+    let summary: String = summary.chars().take(6000).collect();
+    let paragraphs = summary
+        .split("\n\n")
+        .map(|paragraph| {
+            let lines = paragraph
+                .lines()
+                .map(policy_failure_line)
+                .collect::<Vec<_>>();
+            format!("<p>{}</p>", lines.join("<br>\n"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{COMMENT_MARKER}\n**Securefix policy check failed**\n\n{paragraphs}\n\n<sub><a href=\"{run_url}\">Server CI: policy decision</a> · <a href=\"https://github.com/{repository}/commit/{sha}\">Commit {}</a></sub>",
+        &sha[..12]
+    )
+}
+
+fn policy_failure_line(line: &str) -> String {
+    let filename = line
+        .strip_prefix("- ")
+        .and_then(|value| serde_json::from_str::<String>(value).ok());
+    let escaped: String = filename
+        .as_deref()
+        .unwrap_or(line)
         .chars()
-        .take(6000)
         .map(|c| match c {
             '&' => "&amp;".to_owned(),
             '<' => "&lt;".to_owned(),
@@ -651,15 +674,22 @@ fn policy_failure_comment(repository: &str, sha: &str, summary: &str, run_url: &
             _ => c.to_string(),
         })
         .collect();
-    let paragraphs = escaped
-        .split("\n\n")
-        .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br>\n")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "{COMMENT_MARKER}\n**Securefix policy check failed**\n\n{paragraphs}\n\n<sub><a href=\"{run_url}\">Server CI: policy decision</a> · <a href=\"https://github.com/{repository}/commit/{sha}\">Commit {}</a></sub>",
-        &sha[..12]
-    )
+    if filename.is_some() {
+        return format!("- <code>{escaped}</code>");
+    }
+    escaped
+        .split_inclusive(char::is_whitespace)
+        .map(|token| {
+            let word = token
+                .trim_end()
+                .trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            if matches!(word, "/approve" | "/merge") {
+                format!("<code>{word}</code>{}", &token[word.len()..])
+            } else {
+                token.to_owned()
+            }
+        })
+        .collect()
 }
 
 pub fn publish(
@@ -809,14 +839,13 @@ mod tests {
             existing_policy_comment(103, &format!("{COMMENT_MARKER}\nOwner report"));
         owner_report["user"] =
             json!({"id":trusted.owner_id,"login":trusted.deployment.owner_login,"type":"User"});
-        let summary =
-            "bad <script> @team & more\n\nNext step: /approve\n- Cargo.toml\n- Cargo.lock";
+        let summary = "bad <script> @team & more\n\nNext step: /approve or /merge.\n- \"Cargo.toml\"\n- \"<script> @team & file.rs\"";
         let expected_body = policy_failure_comment("civitaspo/example", &sha, summary, run_url);
         assert!(!expected_body.contains("<pre>"));
         assert!(expected_body.contains("bad &lt;script&gt; &#64;team &amp; more</p>"));
         assert!(
             expected_body
-                .contains("<p>Next step: /approve<br>\n- Cargo.toml<br>\n- Cargo.lock</p>")
+                .contains("<p>Next step: <code>/approve</code> or <code>/merge</code>.<br>\n- <code>Cargo.toml</code><br>\n- <code>&lt;script&gt; &#64;team &amp; file.rs</code></p>")
         );
         let gql = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
         let fixture = Fixture::new(vec![

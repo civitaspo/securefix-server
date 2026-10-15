@@ -2895,7 +2895,7 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
     let server_bot_id = trusted_config()?.server_bot_id;
     let mut failure_ids = Vec::new();
     for reason in [
-        "Integration probe: current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- Cargo.toml\n- Cargo.lock",
+        "Integration probe: current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- \"Cargo.toml\"\n- \"Cargo.lock\"",
         "Integration probe: policy rejection was superseded.",
     ] {
         policy_check::publish(api, repo, &fixture.head_sha, false, reason)?;
@@ -2919,7 +2919,9 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
             !body.contains("<pre>")
                 && body.contains("<p>")
                 && (!reason.contains('\n')
-                    || body.contains("<br>\n- Cargo.toml<br>\n- Cargo.lock</p>"))
+                    || body.contains(
+                        "<br>\n- <code>Cargo.toml</code><br>\n- <code>Cargo.lock</code></p>"
+                    ) && body.contains("<code>/approve</code>"))
                 && body.contains("<sub>")
                 && body.contains("/actions/runs/")
                 && body.contains(&fixture.head_sha),
