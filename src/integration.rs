@@ -1762,6 +1762,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     };
     validate_scenario(&state, candidate_sha, &state.published_runtime_sha)?;
     workflow::write_json(state_file, &state)?;
+    verify_policy_feedback(&server, &state.distribution)?;
     println!("Prepared Securefix scratch integration state.");
     println!(
         "Positive PR (post exact owner /approve and /merge; add a current-head review): {}",
@@ -2894,7 +2895,7 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
     let server_bot_id = trusted_config()?.server_bot_id;
     let mut failure_ids = Vec::new();
     for reason in [
-        "Integration probe: current-head approval is missing.",
+        "Integration probe: current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- Cargo.toml\n- Cargo.lock",
         "Integration probe: policy rejection was superseded.",
     ] {
         policy_check::publish(api, repo, &fixture.head_sha, false, reason)?;
@@ -2906,7 +2907,8 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
             .rev()
             .find(|comment| {
                 comment["body"].as_str().is_some_and(|body| {
-                    body.starts_with(policy_check::COMMENT_MARKER) && body.contains(reason)
+                    body.starts_with(policy_check::COMMENT_MARKER)
+                        && body.contains(reason.lines().next().unwrap_or_default())
                 }) && comment["user"]["id"].as_u64() == Some(server_bot_id)
             })
             .context("policy failure comment was not published")?;
@@ -2914,7 +2916,11 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
             .as_str()
             .context("missing policy failure body")?;
         ensure!(
-            body.contains("<sub>")
+            !body.contains("<pre>")
+                && body.contains("<p>")
+                && (!reason.contains('\n')
+                    || body.contains("<br>\n- Cargo.toml<br>\n- Cargo.lock</p>"))
+                && body.contains("<sub>")
                 && body.contains("/actions/runs/")
                 && body.contains(&fixture.head_sha),
             "policy comment does not identify its CI run and target commit"

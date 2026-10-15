@@ -792,8 +792,8 @@ pub fn validate_pr_authorization(
             }
         }
         return Err(error.context(format!(
-                "Owner authorization is required because this PR changes sensitive paths configured in policy.json and does not qualify for a sensitive-path exemption. Post /approve for the current PR head; authorization for earlier heads does not carry over after rebases or force-pushes. Matching sensitive paths (up to 10): {}",
-                serde_json::to_string(&matching)?
+                "Owner authorization is required because this PR changes sensitive paths configured in policy.json and does not qualify for a sensitive-path exemption.\n\nPost /approve for the current PR head; authorization for earlier heads does not carry over after rebases or force-pushes.\n\nMatching sensitive paths (up to 10):\n{}\n\nDetails",
+                matching.iter().map(|path| serde_json::to_string(path).map(|path| format!("- {path}"))).collect::<Result<Vec<_>, _>>()?.join("\n")
             )));
     }
     Ok(sensitive)
