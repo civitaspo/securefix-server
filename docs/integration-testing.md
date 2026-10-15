@@ -148,3 +148,5 @@ and provenance requirements. This verifies build, signing, and draft recovery;
 Terraform Registry ingestion still requires a published release.
 
 The candidate verify phase also exercises receipt reactions on both owner commands and the policy feedback lifecycle with scratch-scoped Server App credentials. It publishes two failure results, verifies only the latest failure comment is visible, then publishes success and verifies both failure comments are hidden. The comment bodies identify the server CI and target commit. No production PR is used for this probe.
+
+Prepare also exercises the shared policy feedback probe: wrapping multiline failure comments, superseding an older failure, and hiding failures after success. It preserves the server run and commit references and leaves no visible probe failure comment.

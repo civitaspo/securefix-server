@@ -651,8 +651,13 @@ fn policy_failure_comment(repository: &str, sha: &str, summary: &str, run_url: &
             _ => c.to_string(),
         })
         .collect();
+    let paragraphs = escaped
+        .split("\n\n")
+        .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br>\n")))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "{COMMENT_MARKER}\n**Securefix policy check failed**\n\n<pre>{escaped}</pre>\n\n<sub><a href=\"{run_url}\">Server CI: policy decision</a> · <a href=\"https://github.com/{repository}/commit/{sha}\">Commit {}</a></sub>",
+        "{COMMENT_MARKER}\n**Securefix policy check failed**\n\n{paragraphs}\n\n<sub><a href=\"{run_url}\">Server CI: policy decision</a> · <a href=\"https://github.com/{repository}/commit/{sha}\">Commit {}</a></sub>",
         &sha[..12]
     )
 }
@@ -804,8 +809,15 @@ mod tests {
             existing_policy_comment(103, &format!("{COMMENT_MARKER}\nOwner report"));
         owner_report["user"] =
             json!({"id":trusted.owner_id,"login":trusted.deployment.owner_login,"type":"User"});
-        let summary = "bad <script> @team & more";
+        let summary =
+            "bad <script> @team & more\n\nNext step: /approve\n- Cargo.toml\n- Cargo.lock";
         let expected_body = policy_failure_comment("civitaspo/example", &sha, summary, run_url);
+        assert!(!expected_body.contains("<pre>"));
+        assert!(expected_body.contains("bad &lt;script&gt; &#64;team &amp; more</p>"));
+        assert!(
+            expected_body
+                .contains("<p>Next step: /approve<br>\n- Cargo.toml<br>\n- Cargo.lock</p>")
+        );
         let gql = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
         let fixture = Fixture::new(vec![
             Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
