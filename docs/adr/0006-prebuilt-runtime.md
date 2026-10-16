@@ -13,7 +13,7 @@ Pushes and intermediate test revisions do not publish runtime Releases.
 The tag and Release name are both `v<package.version>` from `Cargo.toml` at the exact promoted source SHA, for example `v0.2.0-pre.1`.
 Versions follow SemVer without build metadata; a prerelease identifier makes the Release a prerelease.
 The single asset is `securefix-runtime-linux-x86_64.tar.gz`.
-A version identifies one immutable source revision. Bump `package.version` and the root lockfile before promoting a different revision; an existing version cannot be moved or reused.
+A version identifies one source revision. Bump `package.version` and the root lockfile before promoting a different revision; CI requires the candidate version to exceed the PR base and rejects an existing tag or Release.
 Publication remains an explicit promotion after testing, not a release on every commit.
 An existing release must have the exact tag commit, target SHA, asset name, uploaded state, and SHA256 digest.
 An empty draft may resume an upload, and a matching draft may be published.
@@ -21,7 +21,7 @@ Different bytes or extra assets fail; published assets are never overwritten.
 Every publication write uses the current-main guard.
 
 `load-cli.yml` has no checkout, compilation, or custom secrets.
-The runner's native `gh` reads the package version at the requested full SHA, requires the canonical tag to point directly to that SHA, and verifies the Release and archive before extraction.
+The shared `.github/actions/load-runtime` action uses native `gh` only to locate a release asset by its untrusted `target_commitish` hint. It scans at most ten pages of 100 releases and fails closed if the requested source has no unique locator in that window. After native attestation succeeds and the archive is extracted, the attested Rust runtime reads the source manifest and checks the canonical tag, release, and archive metadata before use.
 Verification fixes the repository, signer workflow path, signer digest, source digest, main ref, GitHub OIDC issuer, SLSA predicate type, and hosted-runner requirement.
 Source and signer digests must both equal the actual reusable job's `job.workflow_sha`.
 The CLI checks these identities against the signed certificate and matches the archive's digest to the attestation subject.

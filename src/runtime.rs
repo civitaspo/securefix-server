@@ -42,8 +42,16 @@ impl RuntimeVersion {
 
 /// Read the runtime version from Cargo.toml at the exact source commit.
 pub(crate) fn version_at_source(api: &GitHub, source_sha: &str) -> Result<RuntimeVersion> {
-    crate::policy::validate_sha(source_sha)?;
     let repository = &crate::config::trusted()?.deployment.server.repository;
+    version_at_repository_source(api, repository, source_sha)
+}
+
+fn version_at_repository_source(
+    api: &GitHub,
+    repository: &str,
+    source_sha: &str,
+) -> Result<RuntimeVersion> {
+    crate::policy::validate_sha(source_sha)?;
     let manifest: Value = api.get(&format!(
         "/repos/{repository}/contents/Cargo.toml?ref={source_sha}"
     ))?;
@@ -110,6 +118,20 @@ pub enum Command {
         #[arg(long)]
         archive: PathBuf,
     },
+    #[command(about = "Verify an attested published runtime archive")]
+    Verify {
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    #[command(about = "Require a runtime version bump over the pull request base")]
+    CheckVersion {
+        #[arg(long)]
+        base_manifest: PathBuf,
+    },
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -120,7 +142,80 @@ pub fn run(command: Command) -> Result<()> {
             let api = GitHub::from_env("GITHUB_TOKEN")?;
             publish(&api, &source_sha, &archive)
         }
+        Command::Verify {
+            source_sha,
+            repository,
+            archive,
+        } => {
+            crate::policy::validate_sha(&source_sha)?;
+            crate::policy::validate_repository(&repository)?;
+            let api = GitHub::from_env("GH_TOKEN")?;
+            verify_published_runtime(&api, &source_sha, &repository, &archive)
+        }
+        Command::CheckVersion { base_manifest } => {
+            let candidate = parse_source_manifest(&std::fs::read("Cargo.toml")?)?;
+            let base = parse_source_manifest(&std::fs::read(base_manifest)?)?;
+            require_version_bump(&candidate, &base)?;
+            let repository = &crate::config::trusted()?.deployment.server.repository;
+            let api = GitHub::from_env("GITHUB_TOKEN")?;
+            require_unused_version(&api, repository, &candidate)
+        }
     }
+}
+
+fn verify_published_runtime(
+    api: &GitHub,
+    source_sha: &str,
+    repository: &str,
+    archive_path: &Path,
+) -> Result<()> {
+    let version = version_at_repository_source(api, repository, source_sha)?;
+    ensure!(
+        version.as_semver().to_string() == env!("CARGO_PKG_VERSION"),
+        "compiled runtime version differs from source Cargo.toml"
+    );
+    let tag = version.tag();
+    let tag_ref: Value = api.get(&format!("/repos/{repository}/git/ref/tags/{tag}"))?;
+    validate_ref(&tag_ref, source_sha)?;
+    let release: Value = api.get(&format!("/repos/{repository}/releases/tags/{tag}"))?;
+    ensure!(
+        release["draft"] == false,
+        "runtime release is not published"
+    );
+    let (archive, digest) = read_archive(archive_path)?;
+    validate_release(
+        &release,
+        source_sha,
+        &tag,
+        !version.as_semver().pre.is_empty(),
+    )?;
+    let assets = release["assets"]
+        .as_array()
+        .context("release lacks asset list")?;
+    ensure!(
+        validate_assets(assets, &digest, archive.len() as u64, false)? == AssetState::Matching,
+        "runtime release asset mismatch"
+    );
+    Ok(())
+}
+
+fn require_version_bump(candidate: &RuntimeVersion, base: &RuntimeVersion) -> Result<()> {
+    ensure!(
+        candidate.as_semver() > base.as_semver(),
+        "runtime package version must increase over the pull request base"
+    );
+    Ok(())
+}
+
+fn require_unused_version(api: &GitHub, repository: &str, version: &RuntimeVersion) -> Result<()> {
+    let tag = version.tag();
+    for path in ["git/ref/tags", "releases/tags"] {
+        ensure!(
+            get_optional(api, &format!("/repos/{repository}/{path}/{tag}"))?.is_none(),
+            "runtime version {tag} is already reserved"
+        );
+    }
+    Ok(())
 }
 
 fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
@@ -444,6 +539,39 @@ mod tests {
     }
 
     #[test]
+    fn version_bump_requires_strictly_newer_semver() {
+        let base = RuntimeVersion::parse("0.2.19").unwrap();
+        assert!(require_version_bump(&RuntimeVersion::parse("0.2.20").unwrap(), &base).is_ok());
+        assert!(require_version_bump(&base, &base).is_err());
+        assert!(require_version_bump(&RuntimeVersion::parse("0.2.18").unwrap(), &base).is_err());
+    }
+
+    #[test]
+    fn version_reservation_checks_reject_collisions_and_api_errors() {
+        let repository = "example/runtime";
+        let tag_path = format!("/repos/{repository}/git/ref/tags/{}", tag());
+        let release_path = format!("/repos/{repository}/releases/tags/{}", tag());
+        let missing = |path: &str| Route::request("GET", path, 404, json!({"message":"missing"}));
+        let fixture = Fixture::new(vec![missing(&tag_path), missing(&release_path)]);
+        require_unused_version(&fixture.api, repository, &version()).unwrap();
+        fixture.finish();
+        for routes in [
+            vec![Route::get(&tag_path, json!({}))],
+            vec![missing(&tag_path), Route::get(&release_path, json!({}))],
+            vec![Route::request(
+                "GET",
+                &tag_path,
+                403,
+                json!({"message":"forbidden"}),
+            )],
+        ] {
+            let fixture = Fixture::new(routes);
+            assert!(require_unused_version(&fixture.api, repository, &version()).is_err());
+            fixture.finish();
+        }
+    }
+
+    #[test]
     fn stale_runtime_stops_before_release_lookup_or_write() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
@@ -496,6 +624,83 @@ mod tests {
         ]);
         publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
+    }
+
+    #[test]
+    fn verify_accepts_only_the_source_bound_published_archive() {
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"archive").unwrap();
+        let release_path = path(&format!("/releases/tags/{}", tag()));
+        let fixture = Fixture::new(vec![
+            Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
+            Route::get(
+                path(&format!("/git/ref/tags/{}", tag())),
+                json!({"object":{"type":"commit","sha":SHA}}),
+            ),
+            Route::get(release_path, release(false, json!([asset(b"archive")]))),
+        ]);
+        verify_published_runtime(
+            &fixture.api,
+            SHA,
+            "civitaspo/securefix-server",
+            archive.path(),
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn verify_rejects_wrong_tags_unpublished_releases_and_changed_archive_bytes() {
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"archive").unwrap();
+        let repository = "example/runtime";
+        let manifest_route = || {
+            Route::get(
+                format!("/repos/{repository}/contents/Cargo.toml?ref={SHA}"),
+                manifest(),
+            )
+        };
+        let tag_route = |object| {
+            Route::get(
+                format!("/repos/{repository}/git/ref/tags/{}", tag()),
+                object,
+            )
+        };
+        let release_route = |value| {
+            Route::get(
+                format!("/repos/{repository}/releases/tags/{}", tag()),
+                value,
+            )
+        };
+        for object in [
+            json!({"object":{"type":"tag","sha":SHA}}),
+            json!({"object":{"type":"commit","sha":"b".repeat(40)}}),
+        ] {
+            let fixture = Fixture::new(vec![manifest_route(), tag_route(object)]);
+            assert!(
+                verify_published_runtime(&fixture.api, SHA, repository, archive.path()).is_err()
+            );
+            fixture.finish();
+        }
+        let mut wrong_target = release(false, json!([asset(b"archive")]));
+        wrong_target["target_commitish"] = json!("b".repeat(40));
+        for value in [
+            release(true, json!([asset(b"archive")])),
+            wrong_target,
+            release(false, json!([asset(b"tampered")])),
+            release(false, json!([])),
+            release(false, json!([asset(b"archive"), asset(b"archive")])),
+        ] {
+            let fixture = Fixture::new(vec![
+                manifest_route(),
+                tag_route(json!({"object":{"type":"commit","sha":SHA}})),
+                release_route(value),
+            ]);
+            assert!(
+                verify_published_runtime(&fixture.api, SHA, repository, archive.path()).is_err()
+            );
+            fixture.finish();
+        }
     }
 
     #[test]

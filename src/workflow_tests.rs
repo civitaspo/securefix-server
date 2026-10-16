@@ -28,6 +28,133 @@ fn workflow(name: &str) -> Value {
 }
 
 #[test]
+#[cfg(unix)]
+fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    let action: Value =
+        serde_yaml::from_str(include_str!("../.github/actions/load-runtime/action.yml")).unwrap();
+    let script = action["runs"]["steps"][0]["run"].as_str().unwrap();
+    let release = serde_json::json!({
+        "target_commitish": "a".repeat(40),
+        "assets": [{"name":"securefix-runtime-linux-x86_64.tar.gz","id":7}]
+    });
+    for scenario in [
+        "success",
+        "missing",
+        "wrong-source",
+        "ambiguous",
+        "bad-id",
+        "api-error",
+        "oversized",
+        "bad-attestation",
+        "bad-metadata",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        // Mock native commands to exercise the checked-in script's fail-fast order.
+        for (name, body) in [
+            (
+                "gh",
+                r#"#!/bin/bash
+set -euo pipefail
+case "$1" in
+  api)
+    [[ "$SCENARIO" != api-error ]] || exit 1
+    if [[ "$2" == *"/releases?"* ]]; then
+      cat "$RELEASES"
+    else
+      [[ "$2" == repos/example/runtime/releases/assets/7 ]] || exit 1
+      echo download >> "$TRACE"
+      printf archive
+    fi ;;
+  attestation)
+    echo attestation >> "$TRACE"
+    [[ "$SCENARIO" != bad-attestation ]] ;;
+  *) exit 1 ;;
+esac
+"#,
+            ),
+            (
+                "stat",
+                r#"#!/bin/bash
+if [[ "$SCENARIO" == oversized ]]; then echo 134217729; else wc -c < "$3"; fi
+"#,
+            ),
+            (
+                "tar",
+                r#"#!/bin/bash
+set -euo pipefail
+echo extraction >> "$TRACE"
+cp "$VERIFIER" "$4/securefix"
+"#,
+            ),
+            (
+                "verifier",
+                r#"#!/bin/bash
+echo metadata >> "$TRACE"
+[[ "$SCENARIO" != bad-metadata ]]
+"#,
+            ),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut candidates = vec![release.clone()];
+        match scenario {
+            "missing" => candidates.clear(),
+            "wrong-source" => candidates[0]["target_commitish"] = "b".repeat(40).into(),
+            "ambiguous" => candidates.push(release.clone()),
+            "bad-id" => candidates[0]["assets"][0]["id"] = "../7".into(),
+            _ => {}
+        }
+        let releases = temp.path().join("releases.json");
+        fs::write(&releases, serde_json::to_vec(&candidates).unwrap()).unwrap();
+        let trace = temp.path().join("trace");
+        let output = temp.path().join("output");
+        fs::write(&trace, "").unwrap();
+        fs::write(&output, "").unwrap();
+        let result = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("RUNNER_TEMP", temp.path())
+            .env("GITHUB_OUTPUT", &output)
+            .env("SOURCE_SHA", "a".repeat(40))
+            .env("REPOSITORY", "example/runtime")
+            .env("DEFAULT_BRANCH", "main")
+            .env("SCENARIO", scenario)
+            .env("RELEASES", releases)
+            .env("TRACE", &trace)
+            .env("VERIFIER", bin.join("verifier"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            scenario == "success",
+            "{scenario}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let expected = match scenario {
+            "success" | "bad-metadata" => "download\nattestation\nextraction\nmetadata\n",
+            "bad-attestation" => "download\nattestation\n",
+            "oversized" => "download\n",
+            _ => "",
+        };
+        assert_eq!(fs::read_to_string(trace).unwrap(), expected, "{scenario}");
+        assert_eq!(
+            !fs::read(output).unwrap().is_empty(),
+            scenario == "success",
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
 fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
     for (path, workflow) in workflows() {
         assert!(
@@ -214,16 +341,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         })
     );
     let steps = load["steps"].as_array().unwrap();
-    assert!(
-        steps
-            .iter()
-            .filter(|step| {
-                step["run"].as_str().is_some_and(|run| {
-                    run.contains("gh release download") || run.contains("gh attestation verify")
-                })
-            })
-            .all(|step| step["env"]["SECUREFIX_SOURCE_SHA"] == "${{ job.workflow_sha }}")
-    );
+    assert_eq!(steps[0]["uses"], "$/.github/actions/load-runtime");
+    assert_eq!(steps[0]["with"]["source-sha"], "${{ job.workflow_sha }}");
+    assert_eq!(steps[0]["with"]["repository"], "civitaspo/securefix-server");
     assert_eq!(
         loader["on"]["workflow_call"]["outputs"]["source-sha"]["value"],
         "${{ jobs.load.outputs.source-sha }}"
@@ -233,95 +353,92 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         load["outputs"]["artifact-id"],
         "${{ steps.upload.outputs.artifact-id }}"
     );
-    let load_text = serde_json::to_string(load).unwrap();
+    let upload = steps
+        .iter()
+        .position(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("actions/upload-artifact@"))
+        })
+        .unwrap();
+    assert_eq!(
+        steps[upload]["with"]["path"],
+        "${{ steps.runtime.outputs.directory }}/"
+    );
+    let action: Value =
+        serde_yaml::from_slice(&fs::read(".github/actions/load-runtime/action.yml").unwrap())
+            .unwrap();
+    let load_text = format!("{load}{action}");
     for forbidden in [
         "secrets.",
         "actions/checkout",
         "setup-cli",
-        "cargo",
-        "rustup",
+        "cargo ",
+        "rustup ",
     ] {
         assert!(
             !load_text.contains(forbidden),
             "loader contains {forbidden}"
         );
     }
-    let index_of = |predicate: &dyn Fn(&Value) -> bool| {
-        steps
-            .iter()
-            .position(predicate)
-            .unwrap_or_else(|| panic!("required loader step is missing"))
-    };
-    let download = index_of(&|step| {
-        step["run"].as_str().is_some_and(|run| {
-            run.contains("gh release download")
-                && run.contains("--repo \"$repo\"")
-                && run.contains("--pattern securefix-runtime-linux-x86_64.tar.gz")
-        })
-    });
-    let resolver = steps[download]["run"].as_str().unwrap_or("");
+    assert_eq!(steps[upload]["with"]["retention-days"], 1);
+    assert!(steps[0].get("if").is_none());
+    assert_ne!(steps[0]["continue-on-error"], true);
+    assert!(action["runs"]["steps"][0].get("if").is_none());
+    assert_ne!(action["runs"]["steps"][0]["continue-on-error"], true);
+    let script = action["runs"]["steps"][0]["run"].as_str().unwrap();
     for required in [
-        "contents/Cargo.toml?ref=$SECUREFIX_SOURCE_SHA",
-        "gh release download \"$tag\" --repo \"$repo\"",
-        "version=\"$(awk",
-        "tag=\"v$version\"",
-        "git/ref/tags/$tag",
-        "releases/tags/$tag",
-        "test(\"^sha256:[0-9a-f]{64}$\")",
-    ] {
-        assert!(
-            resolver.contains(required),
-            "canonical runtime resolution lacks {required}"
-        );
-    }
-    assert!(!resolver.contains("securefix-runtime-$SECUREFIX_SOURCE_SHA"));
-    let verify = index_of(&|step| {
-        step["run"].as_str().is_some_and(|run| {
-            run.contains("gh attestation verify download/securefix-runtime-linux-x86_64.tar.gz")
-        })
-    });
-    let extract = index_of(&|step| {
-        step["run"]
-            .as_str()
-            .is_some_and(|run| run.contains("tar -xzf"))
-    });
-    let upload = index_of(&|step| {
-        step["uses"]
-            .as_str()
-            .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
-    });
-    assert!(download < verify && verify < extract && extract < upload);
-    let verification = steps[verify]["run"].as_str().unwrap();
-    for required in [
-        "--source-digest \"$SECUREFIX_SOURCE_SHA\"",
-        "--repo civitaspo/securefix-server",
-        "--source-ref refs/heads/main",
-        "--signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml",
-        "--signer-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "releases?per_page=100&page=$page",
+        "seq 1 10",
+        "-le 1024",
+        "gh attestation verify",
+        "--repo \"$REPOSITORY\"",
+        "--source-digest \"$SOURCE_SHA\"",
+        "--source-ref \"refs/heads/$DEFAULT_BRANCH\"",
+        "--signer-workflow \"$REPOSITORY/.github/workflows/publish-runtime.yml\"",
+        "--signer-digest \"$SOURCE_SHA\"",
         "--cert-oidc-issuer https://token.actions.githubusercontent.com",
         "--predicate-type https://slsa.dev/provenance/v1",
         "--deny-self-hosted-runners",
+        "tar -xzf",
+        "runtime verify --source-sha",
     ] {
         assert!(
-            verification.contains(required),
-            "missing attestation constraint: {required}"
+            script.contains(required),
+            "shared runtime loader lacks {required}"
         );
     }
-    for index in [verify, extract, upload] {
-        assert_ne!(steps[index]["continue-on-error"], true);
-        assert!(
-            steps[index].get("if").is_none(),
-            "attestation, extraction, and upload use fail-fast defaults"
-        );
-    }
-    assert_eq!(
-        steps[upload]["with"]["path"], "runtime/",
-        "only the verified runtime is re-uploaded"
+    let attestation = script.find("gh attestation verify").unwrap();
+    let extraction = script.find("tar -xzf").unwrap();
+    let verify_runtime = script.find("runtime verify --source-sha").unwrap();
+    assert!(attestation < extraction && extraction < verify_runtime);
+    assert!(
+        !script.contains("cargo ")
+            && !script.contains("rustup ")
+            && !script.contains("actions/checkout")
     );
-    assert_eq!(
-        steps[upload]["with"]["retention-days"], 1,
-        "verified workflow artifact has short retention"
-    );
+    let client = fs::read_to_string(".github/actions/client/action.yml").unwrap();
+    assert!(client.contains("uses: $/.github/actions/load-runtime"));
+    assert!(client.contains("INPUT_RUNTIME_DIRECTORY"));
+    assert!(client.contains("runtime_source=prebuilt-candidate"));
+    assert!(client.contains("runtime_source=attested-release"));
+    let ci = workflow("ci.yml");
+    let ci_steps = ci["jobs"]["workflows"]["steps"].as_array().unwrap();
+    let version_guard = ci_steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Require a runtime version bump over the pull request base"
+        })
+        .unwrap();
+    let build_cli = ci_steps
+        .iter()
+        .position(|step| step["id"] == "build-cli")
+        .unwrap();
+    let install_cli = ci_steps
+        .iter()
+        .position(|step| step["uses"] == "$/.github/actions/install-cli")
+        .unwrap();
+    assert!(build_cli < version_guard && version_guard < install_cli);
 
     let publisher = workflow("publish-runtime.yml");
     assert!(publisher["on"].get("workflow_dispatch").is_some());
@@ -1159,13 +1276,6 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("gh release")
                     && !run.contains("jq -e")
                     && !run.contains("jq -r '.content'");
-                let canonical_runtime_bootstrap = path == ".github/workflows/load-cli.yml"
-                    && job_id == "load"
-                    && run.contains("contents/Cargo.toml?ref=$SECUREFIX_SOURCE_SHA")
-                    && run.contains("gh release download \"$tag\"")
-                    && run.contains("expected_digest")
-                    && !run.contains("gh api -X")
-                    && !run.contains("--method");
                 let bounded_release_artifact_lookup = path
                     == ".github/workflows/testing-release-pr.yml"
                     && job_id == "execute"
@@ -1185,7 +1295,6 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && !run.contains("node ")
                         && (!run.contains("jq ")
                             || bounded_baseline_reads
-                            || canonical_runtime_bootstrap
                             || bounded_release_artifact_lookup)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
