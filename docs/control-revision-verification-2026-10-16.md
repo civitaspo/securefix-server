@@ -18,7 +18,7 @@ candidate binary. This narrow initial authority is explicitly documented and rev
 
 ## Local verification
 
-The assembled suite passed: **32 library, 233 binary, and 2 native integration tests**;
+The pre-merge assembled suite passed: **32 library, 233 binary, and 2 native integration tests**;
 2 binary tests were ignored. All **16 Python bootstrap tests**, formatting, Clippy,
 and pinned actionlint passed. The local suite covers all five requested scenarios at
 the boundaries below. Fixtures and workflow assertions do not establish live production
@@ -86,6 +86,42 @@ are enabled. These are the reviewed migration settings applied under the owner's
 merge authorization; they are not temporary exceptions. The earlier scratch cleanup
 record describes its original restored state before this permanent rollout.
 
+## Merge and first bootstrap gate
+
+The corrected source passed fresh [prepare](https://github.com/civitaspo/securefix-server/actions/runs/38884549807)
+and [verify](https://github.com/civitaspo/securefix-server/actions/runs/38885066101).
+All four artifact ZIP digests were checked against the artifact API. The final
+documentation-only head `230deb34925d30e8a68a8410b1fbab43d9a6b93e` passed CI,
+received owner `/approve` and `/merge`, a bot approval on that exact head, and both
+required checks. The [normal merge workflow](https://github.com/civitaspo/securefix-server/actions/runs/38885826777)
+succeeded. Signed main commit `5851ec5f7713357c0edd97355952aae03bdd0051` has the
+same tree as that reviewed head; its [push CI](https://github.com/civitaspo/securefix-server/actions/runs/38885945025)
+also passed.
+
+The first protected-main [bootstrap scratch gate](https://github.com/civitaspo/securefix-server/actions/runs/38885998261)
+failed in the scratch policy-feedback probe. Prepare and verify share one workflow
+run and fixture head in this mode. Prepare successfully minimized its synthetic
+failure comments on recovery; verify then generated identical bodies, so production
+comment deduplication reused those already minimized comments. The probe expected its
+latest synthetic failure to be visible and stopped. The API readback confirmed that
+both comments were minimized. The positive PR did not merge. The pinned legacy
+runtime verification, candidate build/tests, prepare, and scratch control probe had
+passed, but they do not satisfy the failed gate.
+
+The repair candidate gives each phase distinct synthetic failure summaries and keeps
+them deterministic within that phase. Production comment deduplication and the fixed
+bootstrap workflow/helper are unchanged. A regression test covers phase separation
+and retry stability. Local checks passed **32 library, 234 binary, and 2 native Rust
+tests**, formatting, and Clippy; 2 binary tests remain ignored. The repair procedure requires
+its own exact-head review, required CI, and bounded `repair-merge`, followed by a new
+protected-main bootstrap gate. No successful repaired bootstrap result is claimed.
+
+All disposable fixtures and refs from the failed run were cleaned, the four scratch
+handlers were restored, and native auto-merge remains disabled. Normal operation is
+paused because `control/active.json` is absent; the post-merge Policy Check failed
+closed with HTTP 404 in the loader. No production runtime publication, descriptor
+activation, or caller distribution occurred.
+
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent
@@ -95,8 +131,8 @@ head approval and required checks still apply.
 The permanent settings rollout described above is complete. Every operational lane
 checks this configuration before performing mutations.
 
-The protected-main `phase=bootstrap` scratch gate is necessarily post-merge and remains
-unexecuted. It must pass during the finite bootstrap pause before initial publication
+The protected-main `phase=bootstrap` scratch gate is necessarily post-merge. Its first
+attempt failed as recorded above; a repaired-source run must pass before initial publication
 or descriptor activation is proposed. The old v0.2.20 runtime is not claimed to remain
 available after that first main advance. The bounded repair lane excludes
 `control-bootstrap.yml` and `scripts/control-bootstrap.py`; a defect in that authority

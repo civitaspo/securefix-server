@@ -1808,6 +1808,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             .control
             .as_ref()
             .context("scratch policy control fixture missing")?,
+        Phase::Prepare,
     )?;
     println!("Prepared Securefix scratch integration state.");
     println!(
@@ -2738,6 +2739,7 @@ fn verify_inner(
             .control
             .as_ref()
             .context("scratch policy control fixture missing")?,
+        Phase::Verify,
     )?;
 
     request::validate_pr_authorization(
@@ -3045,20 +3047,26 @@ fn verify_inner(
     })
 }
 
+fn policy_feedback_probe_summaries(phase: Phase) -> [String; 2] {
+    [
+        "current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- \"Cargo.toml\"\n- \"Cargo.lock\"",
+        "policy rejection was superseded.",
+    ]
+    .map(|reason| format!("Integration {phase:?} probe: {reason}"))
+}
+
 fn verify_policy_feedback(
     api: &GitHub,
     fixture: &PullRequestFixture,
     control: &securefix::control::ControlRevision,
+    phase: Phase,
 ) -> Result<()> {
     let repo = integration_repository()?;
     let server_bot_id = trusted_config()?.server_bot_id;
     let mut failure_ids = Vec::new();
-    for reason in [
-        "Integration probe: current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- \"Cargo.toml\"\n- \"Cargo.lock\"",
-        "Integration probe: policy rejection was superseded.",
-    ] {
-        policy_check::publish(api, repo, &fixture.head_sha, false, reason, control)?;
-        policy_check::report_result(api, repo, fixture.number, &fixture.head_sha, false, reason)?;
+    for reason in policy_feedback_probe_summaries(phase) {
+        policy_check::publish(api, repo, &fixture.head_sha, false, &reason, control)?;
+        policy_check::report_result(api, repo, fixture.number, &fixture.head_sha, false, &reason)?;
         let comments =
             api.paginate(&format!("/repos/{repo}/issues/{}/comments", fixture.number))?;
         let comment = comments
@@ -4392,6 +4400,21 @@ impl RequestKind {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn feedback_probe_phases_do_not_reuse_same_run_comment_bodies() {
+        let prepare = policy_feedback_probe_summaries(Phase::Prepare);
+        let verify = policy_feedback_probe_summaries(Phase::Verify);
+        for (prepare, verify) in prepare.iter().zip(&verify) {
+            assert_ne!(prepare, verify);
+            assert_eq!(
+                prepare.split_once(" probe: ").unwrap().1,
+                verify.split_once(" probe: ").unwrap().1
+            );
+        }
+        assert_eq!(prepare, policy_feedback_probe_summaries(Phase::Prepare));
+        assert_eq!(verify, policy_feedback_probe_summaries(Phase::Verify));
+    }
 
     fn scratch_branch_api(branch: &str, delete_status: u16, follow_up: Option<Route>) -> Fixture {
         let config = crate::config::trusted().unwrap();
