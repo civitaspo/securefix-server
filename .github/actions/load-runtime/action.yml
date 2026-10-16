@@ -1,0 +1,34 @@
+name: Load verified runtime
+description: Locate, attest, and verify a source-bound published runtime
+inputs:
+  source-sha:
+    description: Full runtime source commit SHA
+    required: true
+  repository:
+    description: Repository that publishes the runtime
+    required: true
+  default-branch:
+    description: Publisher branch required by the attestation
+    required: true
+  token:
+    description: Read-only token for runtime contents and attestations
+    required: true
+outputs:
+  directory:
+    description: Directory containing the verified runtime
+    value: ${{ steps.load.outputs.directory }}
+  source-sha:
+    description: Verified source commit SHA
+    value: ${{ inputs.source-sha }}
+runs:
+  using: composite
+  steps:
+    - id: load
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.token }}
+        SOURCE_SHA: ${{ inputs.source-sha }}
+        REPOSITORY: ${{ inputs.repository }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+      run: bash "$ACTION_PATH/load.sh"

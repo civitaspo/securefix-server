@@ -2162,11 +2162,15 @@ fn cleanup_failed_sensitive_probe_creation(
 
 fn delete_scratch_branch(api: &GitHub, branch: &str) -> Result<()> {
     validate_branch(branch)?;
-    match api.delete(&format!(
-        "/repos/{}/git/refs/heads/{}",
-        integration_repository()?,
-        branch
-    )) {
+    let path = format!(
+        "/repos/{}/git/refs/heads/{branch}",
+        integration_repository()?
+    );
+    let ref_path = format!(
+        "/repos/{}/git/ref/heads/{branch}",
+        integration_repository()?
+    );
+    match api.delete(&path) {
         Ok(()) => Ok(()),
         Err(error)
             if error
@@ -2175,7 +2179,26 @@ fn delete_scratch_branch(api: &GitHub, branch: &str) -> Result<()> {
         {
             Ok(())
         }
-        Err(error) => Err(error).context("delete scratch sensitive-probe branch"),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == reqwest::StatusCode::UNPROCESSABLE_ENTITY) =>
+        {
+            match api.get::<Value>(&ref_path) {
+                Err(lookup_error)
+                    if lookup_error
+                        .downcast_ref::<ApiError>()
+                        .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) =>
+                {
+                    Ok(())
+                }
+                Ok(_) => Err(error).context("scratch branch still exists after delete conflict"),
+                Err(lookup_error) => {
+                    Err(lookup_error).context("verify scratch branch absence after delete conflict")
+                }
+            }
+        }
+        Err(error) => Err(error).context("delete scratch branch"),
     }
 }
 
@@ -3789,19 +3812,7 @@ fn cleanup(api: &GitHub, scenario: &Scenario) -> Result<()> {
                 &json!({"state":"closed"}),
             )?;
         }
-        validate_branch(&fixture.branch)?;
-        match api.delete(&format!(
-            "/repos/{}/git/refs/heads/{}",
-            integration_repository()?,
-            fixture.branch
-        )) {
-            Ok(()) => {}
-            Err(error)
-                if error
-                    .downcast_ref::<ApiError>()
-                    .is_some_and(|api| api.status == reqwest::StatusCode::NOT_FOUND) => {}
-            Err(error) => return Err(error).context("delete scratch integration branch"),
-        }
+        delete_scratch_branch(api, &fixture.branch)?;
     }
     Ok(())
 }
@@ -4096,6 +4107,81 @@ impl RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::{Fixture, Route};
+
+    fn scratch_branch_api(branch: &str, delete_status: u16, follow_up: Option<Route>) -> Fixture {
+        let config = crate::config::trusted().unwrap();
+        let repository = &config.deployment.integration.repository;
+        let path = format!("/repos/{repository}/git/refs/heads/{branch}");
+        let mut routes = vec![
+            Route::get(
+                format!(
+                    "/repos/{}/commits/{}",
+                    config.deployment.server.repository, config.deployment.server.default_branch
+                ),
+                json!({"sha":"a".repeat(40)}),
+            ),
+            Route::request("DELETE", path, delete_status, json!({})),
+        ];
+        if let Some(route) = follow_up {
+            routes.push(route);
+        }
+        Fixture::new(routes)
+    }
+
+    #[test]
+    fn scratch_branch_delete_accepts_success_and_not_found() {
+        let branch = "securefix-integration-cleanup-1234";
+        for status in [204, 404] {
+            let fixture = scratch_branch_api(branch, status, None);
+            assert!(delete_scratch_branch(&fixture.api, branch).is_ok());
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn scratch_branch_delete_conflict_is_idempotent_only_when_ref_is_absent() {
+        let branch = "securefix-integration-cleanup-1234";
+        let path = format!(
+            "/repos/{}/git/ref/heads/{branch}",
+            integration_repository().unwrap()
+        );
+        let absent = scratch_branch_api(
+            branch,
+            422,
+            Some(Route::request(
+                "GET",
+                path.clone(),
+                404,
+                json!({"message":"Not Found"}),
+            )),
+        );
+        assert!(delete_scratch_branch(&absent.api, branch).is_ok());
+        absent.finish();
+
+        for status in [200, 403] {
+            let follow_up = if status == 200 {
+                Route::get(path.clone(), json!({"ref":format!("refs/heads/{branch}")}))
+            } else {
+                Route::request("GET", path.clone(), status, json!({"message":"Forbidden"}))
+            };
+            let fixture = scratch_branch_api(branch, 422, Some(follow_up));
+            assert!(delete_scratch_branch(&fixture.api, branch).is_err());
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn scratch_branch_delete_rejects_permission_errors_and_invalid_names_without_io() {
+        let branch = "securefix-integration-cleanup-1234";
+        let denied = scratch_branch_api(branch, 403, None);
+        assert!(delete_scratch_branch(&denied.api, branch).is_err());
+        denied.finish();
+
+        let fixture = Fixture::new(vec![]);
+        assert!(delete_scratch_branch(&fixture.api, "../main").is_err());
+        fixture.finish();
+    }
 
     #[test]
     fn created_tag_read_waits_for_visibility_but_does_not_retry_permission_errors() {

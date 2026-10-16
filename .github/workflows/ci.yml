@@ -34,6 +34,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt
@@ -50,6 +51,16 @@ jobs:
       - uses: ./.github/actions/setup-cli
         id: build-cli
 
+      - name: Require a runtime version bump over the pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          base_manifest="$RUNNER_TEMP/securefix-base-Cargo.toml"
+          git show "$BASE_SHA:Cargo.toml" > "$base_manifest"
+          "${{ steps.build-cli.outputs.binary }}" runtime check-version --base-manifest "$base_manifest"
+
       - uses: $/.github/actions/install-cli
         with:
           binary: ${{ steps.build-cli.outputs.binary }}
@@ -63,7 +74,7 @@ jobs:
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           -shellcheck=
-          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/install-cli" in invalid format because ref is missing'
+          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/(install-cli|load-runtime)" in invalid format because ref is missing'
 
   status-check:
     runs-on: ubuntu-latest
