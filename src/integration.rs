@@ -3392,23 +3392,6 @@ fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Resu
     )?;
     files.insert(".github/workflows/ci.yml".to_owned(), ci.into_bytes());
 
-    for path in [
-        ".github/workflows/pull_request.yml",
-        ".github/workflows/workflow_call_pr.yml",
-    ] {
-        let bytes = files
-            .get_mut(path)
-            .context("scratch caller workflow is missing")?;
-        let text = std::str::from_utf8(bytes)?;
-        let text = replace_once(
-            text,
-            "    permissions:\n      contents: read\n",
-            "    permissions:\n      actions: read\n      contents: read\n",
-            path,
-        )?;
-        *bytes = text.into_bytes();
-    }
-
     let autofix_path = ".github/workflows/wc-autofix.yml";
     let bytes = files
         .get_mut(autofix_path)
@@ -3416,7 +3399,7 @@ fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Resu
     let text = std::str::from_utf8(bytes)?;
     let text = replace_once(
         text,
-        "      contents: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}\n      SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}\n",
+        "      contents: read\n      actions: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}\n      SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}\n",
         &format!(
             "      actions: read\n      contents: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: {}\n      SECUREFIX_SERVER_REPOSITORY: {}\n",
             trusted.deployment.client_app_id, scratch
@@ -4848,8 +4831,15 @@ mod tests {
             ".github/workflows/pull_request.yml",
             ".github/workflows/workflow_call_pr.yml",
         ] {
-            let workflow = std::str::from_utf8(files.get(path).unwrap()).unwrap();
-            assert!(workflow.contains("      actions: read\n      contents: read"));
+            let workflow: serde_yaml::Value =
+                serde_yaml::from_slice(files.get(path).unwrap()).unwrap();
+            let caller = workflow["jobs"]
+                .as_mapping()
+                .unwrap()
+                .values()
+                .find(|job| job["uses"].is_string())
+                .unwrap();
+            assert_eq!(caller["permissions"]["actions"], "read");
         }
         validate_rendered_files(&files).unwrap();
     }

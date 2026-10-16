@@ -21,6 +21,7 @@ jobs:
   tag:
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.event.pull_request.head.ref == '@RELEASE_BRANCH@' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
+      actions: read
       contents: write
       attestations: read
       pull-requests: read

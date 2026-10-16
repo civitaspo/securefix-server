@@ -128,7 +128,22 @@ identity, size, and digest checks remain. The bootstrap repair guard still exclu
 its workflow and helper, so this authority correction requires separate reviewed
 recovery. It cannot use the bounded repair lane to change its own trust root.
 
-The combined candidate passed local **32 library, 235 binary, and 2 native Rust
+Opening [repair PR #95](https://github.com/civitaspo/securefix-server/pull/95) exposed
+another independent failure: [Approve Request 38978227791](https://github.com/civitaspo/securefix-server/actions/runs/38978227791)
+failed at workflow validation, before any job ran. GitHub reported that the nested
+`build` job requested `actions: read` while its caller allowed `actions: none`.
+The server approval/merge entry workflows and five generated caller templates lacked
+that `GITHUB_TOKEN` grant; the policy-check template already had it. The combined
+candidate adds the required read grant, including the supported autofix call chain,
+and checks caller permissions against each called workflow's jobs. This permission
+lets the loader inspect publisher-run provenance; it does not grant repository
+Administration or change any GitHub App permission. Existing caller files still need
+reviewed distribution after activation. The PR's
+[Policy Check 38978227813](https://github.com/civitaspo/securefix-server/actions/runs/38978227813)
+failed at the current main's missing-descriptor loader boundary. A passing branch CI
+does not establish that these PR-target workflows have recovered on main.
+
+The combined candidate passed local **32 library, 236 binary, and 2 native Rust
 tests**; 2 binary tests remain ignored. All **15 Python bootstrap tests**, formatting,
 Clippy with warnings denied, and pinned actionlint passed. Strict API fixtures exercise
 repair qualification and publication without administrative settings reads, and runtime

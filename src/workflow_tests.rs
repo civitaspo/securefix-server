@@ -2466,3 +2466,55 @@ fn operational_workflows_do_not_request_administration_or_settings_credentials()
         );
     }
 }
+
+#[test]
+fn reusable_callers_grant_the_permissions_requested_by_their_jobs() {
+    let mut callers = workflows();
+    let server = &crate::config::trusted()
+        .unwrap()
+        .deployment
+        .server
+        .repository;
+    for (path, bytes) in
+        crate::distribution::caller::rendered_files(&"a".repeat(40), "v0.2.22", "main", true)
+            .unwrap()
+    {
+        let mut value: Value = serde_yaml::from_slice(&bytes).unwrap();
+        for job in value["jobs"].as_object_mut().unwrap().values_mut() {
+            let uses = job["uses"].as_str().unwrap();
+            let local = uses
+                .strip_prefix(&format!("{server}/"))
+                .unwrap()
+                .split('@')
+                .next()
+                .unwrap();
+            job["uses"] = Value::String(format!("./{local}"));
+        }
+        callers.push((format!("generated:{path}"), value));
+    }
+    for (path, value) in callers {
+        for (job_id, job) in value["jobs"].as_object().unwrap() {
+            let Some(callee) = job["uses"]
+                .as_str()
+                .and_then(|uses| uses.strip_prefix("./.github/workflows/"))
+            else {
+                continue;
+            };
+            let called = workflow(callee);
+            for (nested_id, nested) in called["jobs"].as_object().unwrap() {
+                for (permission, required) in nested["permissions"].as_object().unwrap() {
+                    let granted = job["permissions"][permission].as_str().unwrap_or("none");
+                    assert!(
+                        match required.as_str().unwrap() {
+                            "none" => true,
+                            "read" => matches!(granted, "read" | "write"),
+                            "write" => granted == "write",
+                            other => panic!("unsupported permission {other}"),
+                        },
+                        "{path} {job_id} grants {permission}:{granted}, but {callee} {nested_id} needs {required}"
+                    );
+                }
+            }
+        }
+    }
+}

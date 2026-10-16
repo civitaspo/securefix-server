@@ -26,6 +26,7 @@ jobs:
        contains(github.event.comment.body, '/approve'))
     uses: ./.github/workflows/reusable-approve-request.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
       issues: write
