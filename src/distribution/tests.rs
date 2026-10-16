@@ -897,9 +897,13 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
             "/repos/civitaspo/securefix-server/commits/main",
             json!({"sha":"a".repeat(40)}),
         ),
-        Route::request("PATCH", "/repos/civitaspo/herdr-linear-agent/pulls/4", 200, json!({})).with_request_body(
-            json!({"title":"chore: update Securefix caller workflows to v0.2.3"}),
-        ),
+        Route::request(
+            "PATCH",
+            "/repos/civitaspo/herdr-linear-agent/pulls/4",
+            200,
+            json!({}),
+        )
+        .with_request_body(json!({"title":"chore: update Securefix caller workflows to v0.2.3"})),
         Route::get(
             "/repos/civitaspo/herdr-linear-agent/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
             json!([{ "title": "chore: update Securefix caller workflows to v0.2.3", "user":pr["user"], "number":4, "head":pr["head"], "base":pr["base"] }]),
@@ -1200,9 +1204,7 @@ fn registry_is_exactly_the_eight_non_server_securefix_callers() {
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let names = caller_names(&policy).unwrap();
     assert_eq!(names.len(), 8);
-    assert!(
-        names.contains(&"civitaspo/herdr-linear-agent".to_owned())
-    );
+    assert!(names.contains(&"civitaspo/herdr-linear-agent".to_owned()));
     let mut changed = policy;
     changed
         .repositories
