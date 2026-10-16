@@ -126,7 +126,10 @@ def require_serialized_merge_settings(repo, policy):
                 f"{repository} controlled-merges ruleset is not scoped to exactly its default branch")
         checked(detail.get("bypass_actors") == [{"actor_id": server_app_id, "actor_type": "Integration", "bypass_mode": "pull_request"}],
                 f"{repository} controlled-merges must have only the Server App pull-request bypass")
-        checked(detail.get("rules") == [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}],
+        rules = detail.get("rules")
+        checked(rules == [{"type": "update"}] or (
+            rules == [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}]
+            and rules[0]["parameters"]["update_allows_fetch_and_merge"] is False),
                 f"{repository} controlled-merges rule set is not exact")
 
 

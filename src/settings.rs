@@ -510,8 +510,9 @@ fn validate_controlled_merges(ruleset: &Value, repository: &str, server_app_id: 
         .context("controlled-merges rules missing")?;
     ensure!(
         rules.len() == 1
-            && rules[0]["type"] == "update"
-            && rules[0]["parameters"]["update_allows_fetch_and_merge"] == false,
+            && (rules[0] == json!({"type":"update"})
+                || rules[0]
+                    == json!({"type":"update","parameters":{"update_allows_fetch_and_merge":false}})),
         "{repository} controlled-merges rule set is not exact"
     );
     Ok(())
@@ -1495,6 +1496,21 @@ mod tests {
             "rules":[{"type":"update","parameters":{"update_allows_fetch_and_merge":false}}]
         });
         assert!(validate_controlled_merges(&valid, "forge/example", 29).is_ok());
+
+        let mut omitted_default = valid.clone();
+        omitted_default["rules"] = json!([{"type":"update"}]);
+        assert!(validate_controlled_merges(&omitted_default, "forge/example", 29).is_ok());
+        for rules in [
+            json!([{"type":"update","parameters":{"update_allows_fetch_and_merge":true}}]),
+            json!([{"type":"update","parameters":{"update_allows_fetch_and_merge":0}}]),
+            json!([{"type":"update","parameters":null}]),
+            json!([{"type":"update","parameters":{}}]),
+            json!([{"type":"update","unexpected":false}]),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["rules"] = rules;
+            assert!(validate_controlled_merges(&invalid, "forge/example", 29).is_err());
+        }
 
         let mut extra_bypass = valid.clone();
         extra_bypass["bypass_actors"]

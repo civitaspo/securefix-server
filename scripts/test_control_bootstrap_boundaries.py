@@ -63,6 +63,22 @@ class BootstrapBoundaryTests(unittest.TestCase):
         self.assertEqual(request.call_count, 4)
         self.assertTrue(all(call.kwargs.get("token") == "read-only" for call in request.call_args_list))
 
+        responses[3]["rules"] = [{"type": "update"}]
+        with patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
+            control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
+        for rules in (
+            [{"type": "update", "parameters": {"update_allows_fetch_and_merge": True}}],
+            [{"type": "update", "parameters": {"update_allows_fetch_and_merge": 0}}],
+            [{"type": "update", "parameters": None}],
+            [{"type": "update", "parameters": {}}],
+            [{"type": "update", "unexpected": False}],
+        ):
+            responses[3]["rules"] = rules
+            with self.subTest(rules=rules), patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
+                with self.assertRaisesRegex(RuntimeError, "rule set is not exact"):
+                    control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
+        responses[3]["rules"] = [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}]
+
         responses[3]["bypass_actors"] = [{"actor_id": 3872533, "actor_type": "Integration", "bypass_mode": "always"}]
         with patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
             with self.assertRaisesRegex(RuntimeError, "pull-request bypass"):

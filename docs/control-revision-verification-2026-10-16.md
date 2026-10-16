@@ -37,9 +37,11 @@ publication or activation.
 ## Scratch evidence
 
 The executed source and workflow revision was
-`f540cd7dd5854298ff30c8b54356936e05a21ae7`. This record and the final added regression
-tests are a documentation/test-only successor; production files are unchanged from
-that tested revision.
+`f540cd7dd5854298ff30c8b54356936e05a21ae7`. The first documentation/test-only successor was
+`681a44a94e04a714fcc719cf1374929e14065b84`, whose production files were unchanged
+from that tested revision. The pre-merge compatibility correction described below
+subsequently changes the Rust and fixed bootstrap settings validators; later run
+identities and results are recorded in the PR description.
 
 - [Prepare 38881231411](https://github.com/civitaspo/securefix-server/actions/runs/38881231411): **success**. `scratch-fixtures` artifact **12037104874** and `control-probe` artifact **12038230883**.
 - [Verify 38881750974](https://github.com/civitaspo/securefix-server/actions/runs/38881750974): **success**, reusing that prepare state. `scratch-fixtures` artifact **12037723314** contains `state.json` and `verification.json`; `control-probe` artifact **12037783176** contains `control-verification.json`.
@@ -58,10 +60,29 @@ The guide and a regression test now require
 supersede those failed rehearsals. See the [integration guide](integration-testing.md)
 for artifact download paths and the owner commands.
 
-Production main remained `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483` throughout this work.
-No production merge, publication, activation, permanent settings rollout, or ruleset
-exception was performed. The existing completed nine-repository distribution was
-preserved.
+During the original unmerged proposal, production main remained
+`e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`; no production merge, publication,
+activation, permanent settings rollout, or ruleset exception was performed. The
+existing completed nine-repository distribution was preserved.
+
+## Pre-merge API compatibility correction
+
+After the owner authorized merge, live rollout preflight found that GitHub REST omits
+`parameters` from an update restriction even after writing an explicit
+`update_allows_fetch_and_merge=false`. An independent GraphQL read of that same rule
+reported `updateAllowsFetchAndMerge=false`. Both the Rust validator and the fixed
+bootstrap helper now accept exactly the omitted-default form or the explicit-false
+form. Regression cases reject true, numeric zero, null, empty parameters, unknown
+fields, extra rules, and alternate bypass actors or modes.
+
+This correction keeps the update restriction and the exact sole Server App PR bypass.
+The permanent merge prerequisites cover all ten policy repositories, including scratch;
+the nine existing production controlled-merges rulesets lose Renovate bypass, while
+scratch receives the same restriction. Native auto-merge is disabled, merge/rebase
+methods are disabled, queued native requests are absent, and server immutable releases
+are enabled. These are the reviewed migration settings applied under the owner's new
+merge authorization; they are not temporary exceptions. The earlier scratch cleanup
+record describes its original restored state before this permanent rollout.
 
 ## Review and remaining conditions
 
