@@ -21,7 +21,7 @@ Different bytes or extra assets fail; published assets are never overwritten.
 Every publication write uses the current-main guard.
 
 `load-cli.yml` has no checkout, compilation, or custom secrets.
-The shared `.github/actions/load-runtime` action uses native `gh` only to locate a release asset by its untrusted `target_commitish` hint. It scans at most ten pages of 100 releases and fails closed if the requested source has no unique locator in that window. After native attestation succeeds and the archive is extracted, the attested Rust runtime reads the source manifest and checks the canonical tag, release, and archive metadata before use.
+The shared `.github/actions/load-runtime/load.sh` bootstrap uses native `gh` only to locate a release asset by its untrusted `target_commitish` hint. The `load-runtime` composite wraps the script for `load-cli.yml`; the client action invokes the sibling script directly so candidate-mode calls do not eagerly load a nested action from an older workflow revision. It scans at most ten pages of 100 releases and fails closed if the requested source has no unique locator in that window. After native attestation succeeds and the archive is extracted, the attested Rust runtime reads the source manifest and checks the canonical tag, release, and archive metadata before use.
 Verification fixes the repository, signer workflow path, signer digest, source digest, main ref, GitHub OIDC issuer, SLSA predicate type, and hosted-runner requirement.
 Source and signer digests must both equal the actual reusable job's `job.workflow_sha`.
 The CLI checks these identities against the signed certificate and matches the archive's digest to the attestation subject.

@@ -32,9 +32,7 @@ fn workflow(name: &str) -> Value {
 fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
     use std::{os::unix::fs::PermissionsExt, process::Command};
 
-    let action: Value =
-        serde_yaml::from_str(include_str!("../.github/actions/load-runtime/action.yml")).unwrap();
-    let script = action["runs"]["steps"][0]["run"].as_str().unwrap();
+    let script = include_str!("../.github/actions/load-runtime/load.sh");
     let release = serde_json::json!({
         "target_commitish": "a".repeat(40),
         "assets": [{"name":"securefix-runtime-linux-x86_64.tar.gz","id":7}]
@@ -386,7 +384,15 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert_ne!(steps[0]["continue-on-error"], true);
     assert!(action["runs"]["steps"][0].get("if").is_none());
     assert_ne!(action["runs"]["steps"][0]["continue-on-error"], true);
-    let script = action["runs"]["steps"][0]["run"].as_str().unwrap();
+    let script = fs::read_to_string(".github/actions/load-runtime/load.sh").unwrap();
+    assert_eq!(
+        action["runs"]["steps"][0]["run"],
+        "bash \"$ACTION_PATH/load.sh\""
+    );
+    assert_eq!(
+        action["runs"]["steps"][0]["env"]["ACTION_PATH"],
+        "${{ github.action_path }}"
+    );
     for required in [
         "releases?per_page=100&page=$page",
         "seq 1 10",
@@ -418,7 +424,29 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             && !script.contains("actions/checkout")
     );
     let client = fs::read_to_string(".github/actions/client/action.yml").unwrap();
-    assert!(client.contains("uses: $/.github/actions/load-runtime"));
+    let client_action: Value = serde_yaml::from_slice(client.as_bytes()).unwrap();
+    let client_steps = client_action["runs"]["steps"].as_array().unwrap();
+    let published_loader = client_steps
+        .iter()
+        .find(|step| step["id"] == "published-runtime")
+        .unwrap();
+    assert_eq!(published_loader["if"], "inputs.runtime-directory == ''");
+    assert_eq!(
+        published_loader["run"],
+        "bash \"$ACTION_PATH/../load-runtime/load.sh\""
+    );
+    assert_eq!(
+        published_loader["env"]["ACTION_PATH"],
+        "${{ github.action_path }}"
+    );
+    assert_eq!(
+        published_loader["env"]["SOURCE_SHA"],
+        "${{ inputs.runtime-sha }}"
+    );
+    assert_eq!(
+        published_loader["env"]["GH_TOKEN"],
+        "${{ inputs.runtime-token || github.token }}"
+    );
     assert!(client.contains("INPUT_RUNTIME_DIRECTORY"));
     assert!(client.contains("runtime_source=prebuilt-candidate"));
     assert!(client.contains("runtime_source=attested-release"));

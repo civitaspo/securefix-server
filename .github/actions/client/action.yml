@@ -89,12 +89,14 @@ runs:
     - name: Load published runtime
       if: inputs.runtime-directory == ''
       id: published-runtime
-      uses: $/.github/actions/load-runtime
-      with:
-        source-sha: ${{ inputs.runtime-sha }}
-        repository: ${{ inputs.runtime-repository || inputs.server-repository }}
-        default-branch: ${{ inputs.runtime-default-branch }}
-        token: ${{ inputs.runtime-token || github.token }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.runtime-token || github.token }}
+        SOURCE_SHA: ${{ inputs.runtime-sha }}
+        REPOSITORY: ${{ inputs.runtime-repository || inputs.server-repository }}
+        DEFAULT_BRANCH: ${{ inputs.runtime-default-branch }}
+      run: bash "$ACTION_PATH/../load-runtime/load.sh"
     - name: Install verified runtime
       id: runtime
       shell: bash
