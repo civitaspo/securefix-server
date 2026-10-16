@@ -86,17 +86,6 @@
       "protect_tags": true
     },
     {
-      "repository": "civitaspo/nagi",
-      "capabilities": [
-        "approve",
-        "merge",
-        "securefix",
-        "settings"
-      ],
-      "release": null,
-      "protect_tags": false
-    },
-    {
       "repository": "civitaspo/herdr-linear-agent",
       "capabilities": [
         "approve",

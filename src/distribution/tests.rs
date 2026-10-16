@@ -65,7 +65,7 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
         b"reviewed workflow".to_vec(),
     )]);
     let migration = CallerMigration {
-        repository: "civitaspo/nagi".into(),
+        repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
         runtime_tag: "v0.2.3".into(),
@@ -108,7 +108,7 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
 fn runtime_update_auto_merge_requires_the_fresh_server_owned_pr_and_managed_files() {
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let migration = CallerMigration {
-        repository: "civitaspo/nagi".into(),
+        repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
         runtime_tag: "v0.2.3".into(),
@@ -121,8 +121,8 @@ fn runtime_update_auto_merge_requires_the_fresh_server_owned_pr_and_managed_file
         "state": "open",
         "draft": false,
         "user": {"id": policy.server_bot_id, "type": "Bot"},
-        "head": {"repo": {"full_name": "civitaspo/nagi"}, "ref": "automation/securefix-runtime", "sha": head},
-        "base": {"repo": {"full_name": "civitaspo/nagi"}, "ref": "main"}
+        "head": {"repo": {"full_name": "civitaspo/herdr-linear-agent"}, "ref": "automation/securefix-runtime", "sha": head},
+        "base": {"repo": {"full_name": "civitaspo/herdr-linear-agent"}, "ref": "main"}
     });
     assert!(validate_runtime_update_pull_request(&policy, &migration, 19, &pull, &head).is_ok());
     let mut bad = pull.clone();
@@ -873,7 +873,7 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
         .deployment
         .runtime_update_branch;
     let migration = CallerMigration {
-        repository: "civitaspo/nagi".into(),
+        repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
         runtime_tag: "v0.2.3".into(),
@@ -883,29 +883,29 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
         )]),
         default_current: false,
     };
-    let pr = json!({"state":"open","user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/nagi"},"ref":runtime_branch},"base":{"repo":{"full_name":"civitaspo/nagi"},"ref":"main"}});
+    let pr = json!({"state":"open","user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/herdr-linear-agent"},"ref":runtime_branch},"base":{"repo":{"full_name":"civitaspo/herdr-linear-agent"},"ref":"main"}});
     let fixture = Fixture::new(vec![
         Route::get(
-            "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
+            "/repos/civitaspo/herdr-linear-agent/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
             json!([pr.clone()]),
         ),
         Route::get(
-            "/repos/civitaspo/nagi/pulls/4/files?per_page=100&per_page=100&page=1",
+            "/repos/civitaspo/herdr-linear-agent/pulls/4/files?per_page=100&per_page=100&page=1",
             json!([{"filename":".github/workflows/approve-request.yml","status":"modified"}]),
         ),
         Route::get(
             "/repos/civitaspo/securefix-server/commits/main",
             json!({"sha":"a".repeat(40)}),
         ),
-        Route::request("PATCH", "/repos/civitaspo/nagi/pulls/4", 200, json!({})).with_request_body(
+        Route::request("PATCH", "/repos/civitaspo/herdr-linear-agent/pulls/4", 200, json!({})).with_request_body(
             json!({"title":"chore: update Securefix caller workflows to v0.2.3"}),
         ),
         Route::get(
-            "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
+            "/repos/civitaspo/herdr-linear-agent/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
             json!([{ "title": "chore: update Securefix caller workflows to v0.2.3", "user":pr["user"], "number":4, "head":pr["head"], "base":pr["base"] }]),
         ),
         Route::get(
-            "/repos/civitaspo/nagi/pulls/4/files?per_page=100&per_page=100&page=1",
+            "/repos/civitaspo/herdr-linear-agent/pulls/4/files?per_page=100&per_page=100&page=1",
             json!([{"filename":".github/workflows/approve-request.yml","status":"modified"}]),
         ),
     ]);
@@ -937,7 +937,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
         .deployment
         .runtime_update_branch
         .clone();
-    let repository = "civitaspo/nagi";
+    let repository = "civitaspo/herdr-linear-agent";
     let branch = format!("refs/heads/{runtime_branch}");
     let base_sha = "b".repeat(40);
     let source_sha = "a".repeat(40);
@@ -952,7 +952,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
         default_current: false,
     };
     let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":repository},"ref":runtime_branch},"base":{"repo":{"full_name":repository},"ref":"main"}});
-    let pull_path = "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1";
+    let pull_path = "/repos/civitaspo/herdr-linear-agent/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1";
     let commit_query = "mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid parents(first:2){nodes{oid}} signature{isValid state}}}}";
     let fixture = Fixture::new(vec![
         Route::request(
@@ -1018,7 +1018,7 @@ fn caller_pr_with_wrong_base_fails_before_reading_or_writing_files() {
         .deployment
         .runtime_update_branch;
     let migration = CallerMigration {
-        repository: "civitaspo/nagi".into(),
+        repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
         runtime_tag: "v0.2.3".into(),
@@ -1028,9 +1028,9 @@ fn caller_pr_with_wrong_base_fails_before_reading_or_writing_files() {
         )]),
         default_current: false,
     };
-    let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/nagi"},"ref":runtime_branch},"base":{"repo":{"full_name":"civitaspo/nagi"},"ref":"attacker-branch"}});
+    let pr = json!({"user":{"id":policy.server_bot_id},"number":4,"head":{"repo":{"full_name":"civitaspo/herdr-linear-agent"},"ref":runtime_branch},"base":{"repo":{"full_name":"civitaspo/herdr-linear-agent"},"ref":"attacker-branch"}});
     let fixture = Fixture::new(vec![Route::get(
-        "/repos/civitaspo/nagi/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
+        "/repos/civitaspo/herdr-linear-agent/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
         json!([pr]),
     )]);
     assert!(validate_existing_pull_request(&fixture.api, &policy, &migration).is_err());
@@ -1062,45 +1062,45 @@ fn canonical_bot_branch_accepts_current_or_prior_runtime_and_rejects_bad_commits
             .collect::<Vec<_>>();
         let mut routes = vec![
             Route::get(
-                "/repos/civitaspo/nagi/git/ref/heads/automation/securefix-runtime",
+                "/repos/civitaspo/herdr-linear-agent/git/ref/heads/automation/securefix-runtime",
                 json!({"object":{"sha":"c".repeat(40)}}),
             ),
             Route::get(
-                "/repos/civitaspo/nagi/commits/main",
+                "/repos/civitaspo/herdr-linear-agent/commits/main",
                 json!({"sha":"e".repeat(40)}),
             ),
             Route::get(
                 format!(
-                    "/repos/civitaspo/nagi/compare/{}...{}",
+                    "/repos/civitaspo/herdr-linear-agent/compare/{}...{}",
                     "e".repeat(40),
                     "c".repeat(40)
                 ),
                 json!({"status":status,"files":if status == "behind" {vec![]} else {diff},"total_commits":if status == "behind" {0} else {1},"commits":if status == "behind" {vec![]} else {vec![json!({"sha":"c".repeat(40)})]}}),
             ),
             Route::get(
-                "/repos/civitaspo/nagi/commits/cccccccccccccccccccccccccccccccccccccccc",
+                "/repos/civitaspo/herdr-linear-agent/commits/cccccccccccccccccccccccccccccccccccccccc",
                 json!({"author":{"id":author_id},"commit":{"verification":{"verified":verified}}}),
             ),
             Route::get(
-                "/repos/civitaspo/nagi/git/commits/cccccccccccccccccccccccccccccccccccccccc",
+                "/repos/civitaspo/herdr-linear-agent/git/commits/cccccccccccccccccccccccccccccccccccccccc",
                 json!({"tree":{"sha":"9".repeat(40)}}),
             ),
             Route::get(
-                "/repos/civitaspo/nagi/git/trees/9999999999999999999999999999999999999999?recursive=1",
+                "/repos/civitaspo/herdr-linear-agent/git/trees/9999999999999999999999999999999999999999?recursive=1",
                 json!({"truncated":false,"tree":tree}),
             ),
         ];
         for (path, bytes) in branch_files {
             use base64::Engine;
             routes.push(Route::get(
-                    format!("/repos/civitaspo/nagi/contents/{path}?ref={}", "c".repeat(40)),
+                    format!("/repos/civitaspo/herdr-linear-agent/contents/{path}?ref={}", "c".repeat(40)),
                     json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)}),
                 ));
         }
         routes
     };
     let migration = |files| CallerMigration {
-        repository: "civitaspo/nagi".into(),
+        repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
         source_sha: source_sha.clone(),
         runtime_tag: "v0.2.3".into(),
@@ -1180,7 +1180,7 @@ fn canonical_bot_branch_accepts_current_or_prior_runtime_and_rejects_bad_commits
 fn already_migrated_default_branch_is_a_noop_without_pull_request_api_calls() {
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let migration = CallerMigration {
-        repository: "civitaspo/nagi".into(),
+        repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
         source_sha: "a".repeat(40),
         runtime_tag: "v0.2.3".into(),
@@ -1196,32 +1196,32 @@ fn already_migrated_default_branch_is_a_noop_without_pull_request_api_calls() {
 }
 
 #[test]
-fn registry_is_exactly_the_nine_non_server_securefix_callers() {
+fn registry_is_exactly_the_eight_non_server_securefix_callers() {
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let names = caller_names(&policy).unwrap();
+    assert_eq!(names.len(), 8);
     assert!(
-        caller_names(&policy)
-            .unwrap()
-            .contains(&"civitaspo/nagi".to_owned())
+        names.contains(&"civitaspo/herdr-linear-agent".to_owned())
     );
     let mut changed = policy;
     changed
         .repositories
-        .retain(|entry| entry.repository != "civitaspo/nagi");
+        .retain(|entry| entry.repository != "civitaspo/herdr-linear-agent");
     assert!(
         !caller_names(&changed)
             .unwrap()
-            .contains(&"civitaspo/nagi".to_owned())
+            .contains(&"civitaspo/herdr-linear-agent".to_owned())
     );
 }
 
 #[test]
-fn actual_nine_caller_inventory_contains_only_supported_managed_workflow_shapes() {
+fn actual_eight_caller_inventory_contains_only_supported_managed_workflow_shapes() {
     let callers: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/distribution-callers.json"
     ))
     .unwrap();
     let callers = callers.as_array().unwrap();
-    assert_eq!(callers.len(), 9);
+    assert_eq!(callers.len(), 8);
     for caller in callers {
         let repository = caller["repository"].as_str().unwrap();
         let files = caller["files"].as_object().unwrap();
