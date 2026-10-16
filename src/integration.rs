@@ -1066,7 +1066,10 @@ fn cleanup_release_pr(
         tag_after_close["object"]["sha"] == tag_object,
         "stable fixture tag changed while the PR was being closed"
     );
-    let delete_branch = delete_scratch_branch(api, &state.release_branch);
+    let delete_branch = api.delete(&format!(
+        "/repos/{repo}/git/refs/heads/{}",
+        state.release_branch
+    ));
     let delete_tag = api.delete(&format!("/repos/{repo}/git/refs/tags/{}", state.stable_tag));
     let _ = std::process::Command::new("git")
         .args(["tag", "-d", &state.stable_tag])
