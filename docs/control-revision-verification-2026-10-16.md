@@ -40,8 +40,10 @@ The executed source and workflow revision was
 `f540cd7dd5854298ff30c8b54356936e05a21ae7`. The first documentation/test-only successor was
 `681a44a94e04a714fcc719cf1374929e14065b84`, whose production files were unchanged
 from that tested revision. The pre-merge compatibility correction described below
-subsequently changes the Rust and fixed bootstrap settings validators; later run
-identities and results are recorded in the PR description.
+subsequently changes the Rust and fixed bootstrap settings validators; the corrected runtime source is
+`5f2997bd59f2f06a260dfe353310d4fbc1d43a55`. Later documentation-only clarifications
+leave that production code unchanged; run identities and results are recorded in the
+PR description.
 
 - [Prepare 38881231411](https://github.com/civitaspo/securefix-server/actions/runs/38881231411): **success**. `scratch-fixtures` artifact **12037104874** and `control-probe` artifact **12038230883**.
 - [Verify 38881750974](https://github.com/civitaspo/securefix-server/actions/runs/38881750974): **success**, reusing that prepare state. `scratch-fixtures` artifact **12037723314** contains `state.json` and `verification.json`; `control-probe` artifact **12037783176** contains `control-verification.json`.
@@ -87,13 +89,11 @@ record describes its original restored state before this permanent rollout.
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent
-human security assurance. The PR remains unmerged for owner review.
+human security assurance. The owner subsequently authorized merge; the normal exact-
+head approval and required checks still apply.
 
-Before the first code merge, an owner must approve and complete the permanent settings
-rollout: remove Renovate bypass from all nine controlled rulesets, keep only the exact
-Server App pull-request bypass, disable native auto-merge and drain queued requests,
-and enable server immutable releases. The old runtime cannot apply these changes.
-Every operational lane checks this configuration before performing mutations.
+The permanent settings rollout described above is complete. Every operational lane
+checks this configuration before performing mutations.
 
 The protected-main `phase=bootstrap` scratch gate is necessarily post-merge and remains
 unexecuted. It must pass during the finite bootstrap pause before initial publication
