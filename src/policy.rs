@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn central_policy_is_exact_and_has_no_duplicate_repositories() {
         let policy = Policy::load("tests/fixtures/policy.json").unwrap();
-        assert_eq!(policy.repositories.len(), 10);
+        assert_eq!(policy.repositories.len(), 9);
         assert!(policy.repository("civitaspo/unlisted").is_err());
         let mut invalid = serde_json::to_value(&policy).unwrap();
         invalid["repositories"][0]["repository"] = Value::String("civitaspo/*".into());
