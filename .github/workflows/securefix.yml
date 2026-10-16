@@ -3,9 +3,6 @@ on:
   label:
     types: [created]
 permissions: {}
-concurrency:
-  group: securefix-${{ github.event.label.name }}
-  cancel-in-progress: false
 jobs:
   runtime:
     if: startsWith(github.event.label.name, 'securefix-')
@@ -26,6 +23,12 @@ jobs:
       pull-requests: read
     env:
       SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:

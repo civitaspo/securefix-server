@@ -1,8 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use securefix::{api, config, event, output, policy, workflow};
+#[cfg(test)]
+use securefix::control;
+use securefix::{api, config, event, hex_encode, output, policy, workflow};
 
 mod approval;
+mod control_commands;
 mod distribution;
 #[cfg(test)]
 mod fixtures;
@@ -65,6 +68,11 @@ enum Command {
         #[command(subcommand)]
         command: runtime::Command,
     },
+    #[command(about = "Prepare and propose a protected control revision activation")]
+    Control {
+        #[command(subcommand)]
+        command: control_commands::Command,
+    },
     #[command(about = "Distribute a published runtime through reviewed caller pull requests")]
     Distribute {
         #[command(subcommand)]
@@ -96,6 +104,7 @@ fn main() -> Result<()> {
         Command::Merge { command } => merge::run(command),
         Command::Release { command } => release::run(command),
         Command::Runtime { command } => runtime::run(command),
+        Command::Control { command } => control_commands::run(command),
         Command::Distribute { command } => distribution::run(command),
         Command::Settings { command } => settings::run(command),
         Command::Securefix { command } => securefix_gate::run(command),

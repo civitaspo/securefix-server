@@ -59,7 +59,9 @@ jobs:
         run: |
           base_manifest="$RUNNER_TEMP/securefix-base-Cargo.toml"
           git show "$BASE_SHA:Cargo.toml" > "$base_manifest"
-          "${{ steps.build-cli.outputs.binary }}" runtime check-version --base-manifest "$base_manifest"
+          changed_files="$RUNNER_TEMP/securefix-changed-files"
+          git diff --name-only -z --no-renames "$BASE_SHA" HEAD > "$changed_files"
+          "${{ steps.build-cli.outputs.binary }}" runtime check-version --base-manifest "$base_manifest" --changed-files "$changed_files"
 
       - uses: $/.github/actions/install-cli
         with:
@@ -74,6 +76,7 @@ jobs:
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           -shellcheck=
+          -ignore 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
           -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/(install-cli|load-runtime)" in invalid format because ref is missing'
 
   status-check:

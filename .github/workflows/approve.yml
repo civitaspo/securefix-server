@@ -8,10 +8,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: approve-${{ github.event.label.name }}
-  cancel-in-progress: false
-
 jobs:
   build:
     if: startsWith(github.event.label.name, 'approve-request-')
@@ -33,6 +29,12 @@ jobs:
     timeout-minutes: 15
     env:
       SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -88,6 +90,8 @@ jobs:
     timeout-minutes: 5
     env:
       SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:

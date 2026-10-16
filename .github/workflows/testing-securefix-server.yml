@@ -410,6 +410,33 @@ jobs:
           SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           SECUREFIX_PUBLISHED_RUNTIME_TAG: ${{ steps.runtime.outputs.published_runtime_tag }}
         run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase "$TEST_PHASE" --state-file fixtures/state.json
+      - name: Probe scratch control descriptor generation and CAS
+        id: control-probe
+        if: steps.validate-outputs.outcome == 'success'
+        env:
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_TEST_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha || needs.reuse.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p control-probe
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /control-probe \
+            --mount "type=bind,source=$PWD/candidate-runtime,target=/candidate,readonly" \
+            --mount "type=bind,source=$PWD/control-probe,target=/control-probe" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e CANDIDATE_SHA \
+            -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            /candidate/securefix integration control-probe --candidate-sha "$CANDIDATE_SHA" --state-file control-verification.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.control-probe.outcome == 'success'
+        with:
+          name: control-probe
+          path: control-probe/control-verification.json
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && steps.validate-outputs.outcome == 'success'
         with:

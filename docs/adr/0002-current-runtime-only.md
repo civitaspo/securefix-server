@@ -1,5 +1,9 @@
 # Accept exactly the current server runtime
 
+Status: superseded by [ADR 0009](0009-active-control-revision.md).
+
+This decision describes the previous current-main runtime contract. The active control revision now selects which source-bound runtime and policy snapshot may perform privileged operations.
+
 Client workflows pin a full server commit SHA.
 The server accepts only the current protected `main` revision, including the Rust executable.
 An older revision being an ancestor of `main` does not make it acceptable.

@@ -44,7 +44,9 @@ jobs:
         id: resolve
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           RELEASE_PR_NUMBER: ${{ inputs.release_pr_number || github.event.pull_request.number }}
         run: |
           securefix release resolve-pr --release-pr-number "$RELEASE_PR_NUMBER"
@@ -79,7 +81,9 @@ jobs:
       - name: Build fixed provider target matrix
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
         run: securefix release build-provider --release-pr-number "$RELEASE_PR_NUMBER"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -111,7 +115,9 @@ jobs:
         id: manifest
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           PROVIDER_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id || '0' }}
         run: securefix release tag-pr --release-pr-number "$RELEASE_PR_NUMBER" --artifact-id "$PROVIDER_ARTIFACT_ID"
@@ -134,5 +140,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.server-token.outputs.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
         run: securefix release request-server

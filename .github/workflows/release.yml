@@ -29,6 +29,10 @@ jobs:
       repository: ${{ steps.parse.outputs.repository }}
       repo_name: ${{ steps.parse.outputs.repo_name }}
     timeout-minutes: 10
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -42,7 +46,7 @@ jobs:
         id: parse
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
         run: securefix release parse-request
 
   preflight:
@@ -58,6 +62,10 @@ jobs:
       tag: ${{ steps.preflight.outputs.tag }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     timeout-minutes: 10
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -83,7 +91,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.client-token.outputs.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
         run: securefix release preflight
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
@@ -102,6 +110,10 @@ jobs:
       contents: read
       actions: read
     timeout-minutes: 15
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -125,7 +137,7 @@ jobs:
       - name: Sign canonical provider checksums
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
           GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
         run: securefix release sign
@@ -148,6 +160,10 @@ jobs:
       contents: read
       actions: read
     timeout-minutes: 15
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -177,7 +193,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.client-token.outputs.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
         run: securefix release publish
 
   cleanup:
@@ -188,6 +204,10 @@ jobs:
       contents: read
       actions: read
       issues: write
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         if: needs.cli.result == 'success'
@@ -203,4 +223,4 @@ jobs:
         run: securefix release cleanup
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}

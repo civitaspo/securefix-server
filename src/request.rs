@@ -29,6 +29,7 @@ pub struct RequestManifest {
     pub run_attempt: u32,
     pub workflow_sha: String,
     pub caller_workflow_sha: String,
+    pub control: securefix::control::ControlRevision,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,6 +97,11 @@ impl RequestManifest {
         validate_sha(&self.pull_request.head_sha)?;
         validate_sha(&self.workflow_sha)?;
         validate_sha(&self.caller_workflow_sha)?;
+        self.control.validate()?;
+        ensure!(
+            self.workflow_sha == self.control.source_sha,
+            "request runtime source differs from its control revision"
+        );
         ensure!(
             self.repository.id > 0 && self.pull_request.number > 0,
             "invalid request identity"
@@ -288,6 +294,10 @@ fn capture(kind: RequestKind) -> Result<()> {
         run_attempt: std::env::var("GITHUB_RUN_ATTEMPT")?.parse()?,
         workflow_sha: source_sha,
         caller_workflow_sha,
+        control: policy
+            .control
+            .clone()
+            .context("active control revision is missing")?,
     };
     manifest.validate()?;
     write_json("request/manifest.json", &manifest)?;
@@ -355,6 +365,7 @@ fn dispatch() -> Result<()> {
     let policy = Policy::active(&read)?;
     let manifest: RequestManifest = serde_json::from_slice(&fs::read("request/manifest.json")?)?;
     manifest.validate()?;
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     ensure!(
         manifest.workflow_sha == policy.revision,
         "request was captured by a stale server revision"
@@ -397,12 +408,15 @@ pub fn load_source_request(
 ) -> Result<RequestManifest> {
     validate_repository(repository)?;
     ensure!(run_id > 0, "invalid source run ID");
-    let current = Policy::latest_revision(api, ".github/workflows/ci.yml")?;
+    let active_control = policy
+        .control
+        .as_ref()
+        .context("active control revision is missing")?;
     let trusted = config::trusted()?;
     let server = trusted.deployment.server.repository.as_str();
     ensure!(
-        policy.revision == current,
-        "policy/runtime revision is stale"
+        policy.revision == active_control.source_sha,
+        "policy/runtime revision differs from its active control revision"
     );
     let run = successful_source_run(api, repository, run_id)?;
     ensure!(
@@ -443,7 +457,9 @@ pub fn load_source_request(
         RequestKind::Approve => ".github/workflows/reusable-approve-request.yml",
         RequestKind::Merge => ".github/workflows/reusable-merge-request.yml",
     };
-    workflow::referenced_revision(&refs, reusable_path, &policy.revision)?;
+    let expected_reusable_revision =
+        reusable_source_revision(repository == server, source_sha, &policy.revision);
+    workflow::referenced_revision(&refs, reusable_path, expected_reusable_revision)?;
 
     let artifacts: Value = api.get(&format!(
         "/repos/{repository}/actions/runs/{run_id}/artifacts"
@@ -482,6 +498,7 @@ pub fn load_source_request(
                 .eq_ignore_ascii_case(repository)
             && manifest.run_id == run_id
             && manifest.workflow_sha == policy.revision
+            && manifest.control == *active_control
             && manifest.pull_request.number > 0,
         "source request artifact does not match its run"
     );
@@ -532,6 +549,34 @@ pub fn load_source_request(
         ) => {
             let comment: Value =
                 api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
+            let commits: Value = api.get(&format!(
+                "/repos/{server}/commits?path=control/active.json&per_page=1"
+            ))?;
+            let activation = commits
+                .as_array()
+                .and_then(|items| items.first())
+                .context("active control file has no activation commit")?;
+            let activation_sha = activation["sha"]
+                .as_str()
+                .context("control activation commit has no SHA")?;
+            validate_sha(activation_sha)?;
+            let activated_control: securefix::control::ControlRevision = serde_json::from_slice(
+                &api.content(server, "control/active.json", activation_sha)?,
+            )?;
+            ensure!(
+                &activated_control == active_control,
+                "latest control activation commit differs from active control"
+            );
+            let activated_at = DateTime::parse_from_rfc3339(
+                activation["commit"]["committer"]["date"]
+                    .as_str()
+                    .context("control activation commit has no committer date")?,
+            )?;
+            let comment_updated = DateTime::parse_from_rfc3339(
+                comment["updated_at"]
+                    .as_str()
+                    .context("owner command has no update time")?,
+            )?;
             matches_principal(
                 &comment["user"],
                 trusted.owner_id,
@@ -540,6 +585,7 @@ pub fn load_source_request(
             ) && comment["issue_url"].as_str().is_some_and(|url| {
                 url.ends_with(&format!("/issues/{}", manifest.pull_request.number))
             }) && kind.matches_comment_body(&comment["body"])
+                && comment_updated > activated_at
                 && comment["updated_at"]
                     .as_str()
                     .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
@@ -585,6 +631,18 @@ pub fn load_source_request(
         );
     }
     Ok(manifest)
+}
+
+fn reusable_source_revision<'a>(
+    server_repository: bool,
+    caller_revision: &'a str,
+    active_runtime_revision: &'a str,
+) -> &'a str {
+    if server_repository {
+        caller_revision
+    } else {
+        active_runtime_revision
+    }
 }
 
 fn require_exact_reusable_pin(
@@ -674,6 +732,101 @@ pub fn has_current_head_approval(
         .context("pull request author has no ID")?;
     let reviews = api.paginate(&format!("/repos/{repository}/pulls/{number}/reviews"))?;
     Ok(current_review_approval(&reviews, sha, author_id))
+}
+
+pub fn has_current_head_approval_for_control(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    sha: &str,
+    control: &securefix::control::ControlRevision,
+) -> Result<bool> {
+    let reviewer = &crate::config::trusted()?.deployment.approval_reviewer;
+    has_current_head_approval_for_reviewer(api, repository, number, sha, control, reviewer, "User")
+}
+
+pub fn has_current_head_approval_for_reviewer(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    sha: &str,
+    control: &securefix::control::ControlRevision,
+    reviewer: &crate::config::Principal,
+    reviewer_type: &str,
+) -> Result<bool> {
+    control.validate()?;
+    validate_repository(repository)?;
+    validate_sha(sha)?;
+    ensure!(
+        reviewer.id > 0 && !reviewer.login.is_empty(),
+        "invalid reviewer identity"
+    );
+    ensure!(
+        matches!(reviewer_type, "User" | "Bot"),
+        "invalid reviewer type"
+    );
+    let pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    ensure!(
+        pr["state"] == "open" && pr["head"]["sha"] == sha,
+        "pull request changed while checking its review"
+    );
+    let author_id = pr["user"]["id"]
+        .as_u64()
+        .context("pull request author has no ID")?;
+    let reviews = api.paginate(&format!("/repos/{repository}/pulls/{number}/reviews"))?;
+    let marker = format!("<!-- securefix:control-review:{} -->", control.identity()?);
+    Ok(current_review_approval_with_marker(
+        &reviews,
+        sha,
+        author_id,
+        &marker,
+        reviewer.id,
+        &reviewer.login,
+        reviewer_type,
+    ))
+}
+
+fn current_review_approval_with_marker(
+    reviews: &[Value],
+    head_sha: &str,
+    author_id: u64,
+    marker: &str,
+    reviewer_id: u64,
+    reviewer_login: &str,
+    reviewer_type: &str,
+) -> bool {
+    let mut latest = std::collections::HashMap::<u64, &Value>::new();
+    for review in reviews.iter().filter(|review| {
+        matches!(
+            review["state"].as_str(),
+            Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
+        )
+    }) {
+        let Some(user_id) = review["user"]["id"].as_u64().filter(|id| *id > 0) else {
+            return false;
+        };
+        if user_id == author_id
+            || !matches_principal(&review["user"], reviewer_id, reviewer_login, reviewer_type)
+        {
+            continue;
+        }
+        let Some(order) = review_order(review) else {
+            return false;
+        };
+        if latest
+            .get(&user_id)
+            .is_none_or(|previous| order > review_order(previous).expect("stored valid review"))
+        {
+            latest.insert(user_id, review);
+        }
+    }
+    latest.values().any(|review| {
+        review["state"] == "APPROVED"
+            && review["commit_id"] == head_sha
+            && review["body"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line == marker))
+    })
 }
 
 pub(crate) fn review_order(review: &Value) -> Option<(chrono::DateTime<chrono::FixedOffset>, u64)> {
@@ -921,7 +1074,12 @@ pub fn require_owner_marker(
     validate_repository(repository)?;
     validate_sha(head_sha)?;
     let comments = api.paginate(&format!("/repos/{repository}/issues/{number}/comments"))?;
-    let prefix = format!("<!-- securefix:v2:owner:{head_sha}:");
+    let control_id = policy
+        .control
+        .as_ref()
+        .context("active control revision is missing")?
+        .identity()?;
+    let prefix = format!("<!-- securefix:v3:owner:{head_sha}:{control_id}:");
     ensure!(
         comments.iter().any(|comment| {
             matches_principal(
@@ -950,13 +1108,16 @@ pub fn post_owner_marker(
     number: u64,
     head_sha: &str,
     comment_id: u64,
+    control: &securefix::control::ControlRevision,
 ) -> Result<()> {
+    let control_id = control.identity()?;
     let run_id: u64 = std::env::var("GITHUB_RUN_ID")?.parse()?;
     let run_attempt: u32 = std::env::var("GITHUB_RUN_ATTEMPT")?.parse()?;
     let body = render_owner_marker(
         repository,
         number,
         head_sha,
+        &control_id,
         comment_id,
         run_id,
         run_attempt,
@@ -972,12 +1133,20 @@ fn render_owner_marker(
     repository: &str,
     number: u64,
     head_sha: &str,
+    control_id: &str,
     comment_id: u64,
     run_id: u64,
     run_attempt: u32,
 ) -> Result<String> {
     validate_repository(repository)?;
     validate_sha(head_sha)?;
+    ensure!(
+        control_id.len() == 64
+            && control_id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+        "invalid control identity"
+    );
     ensure!(
         number > 0 && comment_id > 0,
         "invalid pull request or comment ID"
@@ -987,7 +1156,7 @@ fn render_owner_marker(
         "invalid workflow run identity"
     );
     Ok(format!(
-        "Owner authorization verified for this commit.\n\n<!-- securefix:v2:owner:{head_sha}:{comment_id} -->\n\n<sub><a href=\"https://github.com/{repository}/pull/{number}#issuecomment-{comment_id}\">Owner request</a> · <a href=\"https://github.com/{repository}/commit/{head_sha}\">Commit {}</a> · <a href=\"https://github.com/{}/actions/runs/{run_id}/attempts/{run_attempt}\">Server CI run {run_id}, attempt {run_attempt}</a></sub>",
+        "Owner authorization verified for this commit.\n\n<!-- securefix:v3:owner:{head_sha}:{control_id}:{comment_id} -->\n\n<sub><a href=\"https://github.com/{repository}/pull/{number}#issuecomment-{comment_id}\">Owner request</a> · <a href=\"https://github.com/{repository}/commit/{head_sha}\">Commit {}</a> · <a href=\"https://github.com/{}/actions/runs/{run_id}/attempts/{run_attempt}\">Server CI run {run_id}, attempt {run_attempt}</a></sub>",
         &head_sha[..7],
         config::trusted()?.deployment.server.repository
     ))
@@ -1003,7 +1172,6 @@ mod tests {
         let repository = "civitaspo/dbt-authorized-models";
         let number = 7;
         let comment_id = 19;
-        let server = &config::trusted().unwrap().deployment.server;
         let reaction = json!({"id":91,"content":"rocket"});
         let fixture = Fixture::new(vec![
             Route::get(
@@ -1014,13 +1182,7 @@ mod tests {
                     "issue_url":format!("https://api.github.com/repos/{repository}/issues/{number}")
                 }),
             ),
-            Route::get(
-                format!(
-                    "/repos/{}/commits/{}",
-                    server.repository, server.default_branch
-                ),
-                json!({"sha":"a".repeat(40)}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST",
                 format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
@@ -1159,28 +1321,105 @@ mod tests {
             run_attempt: 1,
             workflow_sha: "b".repeat(40),
             caller_workflow_sha: "c".repeat(40),
+            control: test_control(),
+        }
+    }
+
+    fn test_control() -> securefix::control::ControlRevision {
+        securefix::control::ControlRevision {
+            version: 1,
+            generation: 1,
+            source_sha: "b".repeat(40),
+            policy_sha256: "1".repeat(64),
+            archive_sha256: "2".repeat(64),
+            release_id: 3,
+            asset_id: 4,
+            publisher_run_id: 5,
+            verification_run_id: 6,
+            previous: "0".repeat(64),
+        }
+    }
+
+    #[test]
+    fn server_reusable_workflow_tracks_caller_commit_when_runtime_is_older() {
+        let caller_commit = "a".repeat(40);
+        let active_runtime = "b".repeat(40);
+        assert_eq!(
+            reusable_source_revision(true, &caller_commit, &active_runtime),
+            caller_commit
+        );
+        assert_eq!(
+            reusable_source_revision(false, &caller_commit, &active_runtime),
+            active_runtime
+        );
+    }
+
+    #[test]
+    fn control_approval_is_bound_to_the_supplied_bot_and_generation() {
+        let reviewer = crate::config::Principal {
+            id: 501,
+            login: "scratch-reviewer[bot]".into(),
+        };
+        let previous = test_control();
+        let mut current = previous.clone();
+        current.generation = 2;
+        current.previous = previous.identity().unwrap();
+        current.release_id += 1;
+        let head = "a".repeat(40);
+        let marker = format!(
+            "<!-- securefix:control-review:{} -->",
+            current.identity().unwrap()
+        );
+        let pull_path = "/repos/civitaspo/example/pulls/7";
+        let reviews_path = "/repos/civitaspo/example/pulls/7/reviews?per_page=100&page=1";
+
+        for (reviewer_user, body) in [
+            (
+                json!({"id":502,"login":"other-reviewer[bot]","type":"Bot"}),
+                marker.clone(),
+            ),
+            (
+                json!({"id":reviewer.id,"login":reviewer.login,"type":"Bot"}),
+                format!(
+                    "<!-- securefix:control-review:{} -->",
+                    previous.identity().unwrap()
+                ),
+            ),
+        ] {
+            let review = json!({"id":1,"user":reviewer_user,"state":"APPROVED",
+                "commit_id":head,"body":body,"submitted_at":"2026-01-01T00:00:00Z"});
+            let fixture = Fixture::new(vec![
+                Route::get(
+                    pull_path,
+                    json!({"state":"open","head":{"sha":head},"user":{"id":7}}),
+                ),
+                Route::get(reviews_path, json!([review])),
+            ]);
+            assert!(
+                !has_current_head_approval_for_reviewer(
+                    &fixture.api,
+                    "civitaspo/example",
+                    7,
+                    &head,
+                    &current,
+                    &reviewer,
+                    "Bot",
+                )
+                .unwrap()
+            );
+            fixture.finish();
         }
     }
 
     fn source_run_fixture(run: Value) -> (Fixture, Policy) {
         let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let revision = "b".repeat(40);
-        let server = &policy.deployment.server;
         policy.revision = revision.clone();
-        let fixture = Fixture::new(vec![
-            Route::get(
-                format!("/repos/{}", server.repository),
-                json!({"id":server.id,"default_branch":server.default_branch}),
-            ),
-            Route::get(
-                format!(
-                    "/repos/{}/commits/{}",
-                    server.repository, server.default_branch
-                ),
-                json!({"sha":revision}),
-            ),
-            Route::get("/repos/civitaspo/example/actions/runs/4", run),
-        ]);
+        policy.control = Some(test_control());
+        let fixture = Fixture::new(vec![Route::get(
+            "/repos/civitaspo/example/actions/runs/4",
+            run,
+        )]);
         (fixture, policy)
     }
 
@@ -1223,20 +1462,9 @@ mod tests {
         failed["conclusion"] = json!("failure");
         let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let revision = "b".repeat(40);
-        let server = &policy.deployment.server;
-        policy.revision = revision.clone();
+        policy.revision = revision;
+        policy.control = Some(test_control());
         let fixture = Fixture::new(vec![
-            Route::get(
-                format!("/repos/{}", server.repository),
-                json!({"id":server.id,"default_branch":server.default_branch}),
-            ),
-            Route::get(
-                format!(
-                    "/repos/{}/commits/{}",
-                    server.repository, server.default_branch
-                ),
-                json!({"sha":revision}),
-            ),
             Route::get("/repos/civitaspo/example/actions/runs/4", running),
             Route::get("/repos/civitaspo/example/actions/runs/4", failed),
         ]);
@@ -1389,7 +1617,8 @@ mod tests {
 
     #[test]
     fn rename_out_of_sensitive_path_still_requires_owner_marker() {
-        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.control = Some(test_control());
         let sha = "a".repeat(40);
         let fixture = Fixture::new(vec![
             authorization_route(&sha),
@@ -1568,14 +1797,16 @@ mod tests {
 
     #[test]
     fn owner_marker_must_be_from_server_bot_and_match_the_exact_head() {
-        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.control = Some(test_control());
         let head = "a".repeat(40);
         let wrong_head = "b".repeat(40);
+        let control_id = test_control().identity().unwrap();
         let human_text = "Owner authorization verified for this commit.\n\n";
         let cases = [
-            json!({"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{wrong_head}:12 -->")}),
-            json!({"user":{"id":crate::config::trusted().unwrap().client_bot_id,"login":crate::config::trusted().unwrap().deployment.client_bot_login,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
-            json!({"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"User"},"body":format!("{human_text}<!-- securefix:v2:owner:{head}:12 -->")}),
+            json!({"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v3:owner:{wrong_head}:{control_id}:12 -->")}),
+            json!({"user":{"id":crate::config::trusted().unwrap().client_bot_id,"login":crate::config::trusted().unwrap().deployment.client_bot_login,"type":"Bot"},"body":format!("{human_text}<!-- securefix:v3:owner:{head}:{control_id}:12 -->")}),
+            json!({"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"User"},"body":format!("{human_text}<!-- securefix:v3:owner:{head}:{control_id}:12 -->")}),
         ];
         for comment in cases {
             let fixture = Fixture::new(vec![Route::get(
@@ -1592,15 +1823,18 @@ mod tests {
     #[test]
     fn rendered_owner_authorization_comment_is_readable_and_accepted() {
         let head = "a".repeat(40);
-        let body = render_owner_marker("civitaspo/example", 7, &head, 12, 345, 2).unwrap();
+        let control_id = test_control().identity().unwrap();
+        let body =
+            render_owner_marker("civitaspo/example", 7, &head, &control_id, 12, 345, 2).unwrap();
         assert_eq!(
             body,
             format!(
-                "Owner authorization verified for this commit.\n\n<!-- securefix:v2:owner:{head}:12 -->\n\n<sub><a href=\"https://github.com/civitaspo/example/pull/7#issuecomment-12\">Owner request</a> · <a href=\"https://github.com/civitaspo/example/commit/{head}\">Commit aaaaaaa</a> · <a href=\"https://github.com/civitaspo/securefix-server/actions/runs/345/attempts/2\">Server CI run 345, attempt 2</a></sub>"
+                "Owner authorization verified for this commit.\n\n<!-- securefix:v3:owner:{head}:{control_id}:12 -->\n\n<sub><a href=\"https://github.com/civitaspo/example/pull/7#issuecomment-12\">Owner request</a> · <a href=\"https://github.com/civitaspo/example/commit/{head}\">Commit aaaaaaa</a> · <a href=\"https://github.com/civitaspo/securefix-server/actions/runs/345/attempts/2\">Server CI run 345, attempt 2</a></sub>"
             )
         );
 
-        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.control = Some(test_control());
         let fixture = Fixture::new(vec![Route::get(
             "/repos/civitaspo/example/issues/7/comments?per_page=100&page=1",
             json!([{"user":{"id":crate::config::trusted().unwrap().server_bot_id,"login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"Bot"},"body":body}]),

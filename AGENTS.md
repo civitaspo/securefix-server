@@ -34,9 +34,10 @@ helpers and keep the change focused; do not add speculative abstractions.
 
 - Fail closed at trust boundaries. Validate repository and actor identities,
   capabilities, source workflow/run provenance, artifact identity and contents,
-  signatures, and current runtime revision before privileged writes.
+  signatures, and the active control identity before privileged writes.
 - Bind owner commands, reviews, policy results, and mutations to the accepted PR
-  head. Reject stale heads and replayed requests; preserve expected-head checks.
+  head and full active control identity. Reject stale heads, changed control
+  revisions, and replayed requests; preserve expected-head checks.
 - `trusted_committers` alone does not exempt sensitive paths. Exemptions require
   the configured author and every effective committer to match; retain all other
   signature, provenance, approval, and required-check conditions.
@@ -46,12 +47,36 @@ helpers and keep the change focused; do not add speculative abstractions.
   hooks in jobs with signing or publishing credentials. Never log secret values.
 - Keep repository-scoped installation tokens and the candidate sandbox. Never
   give a candidate production write tokens, personal approval tokens, or keys.
-- Ordinary operations load the source-bound, attested published runtime and use
-  `.github/actions/install-cli` to put it on PATH. A missing or invalid release
-  must stop execution; do not introduce a build fallback or unverified binary.
-- Automatic caller migration is restricted to exact generated workflows in the
-  validated server-owned PR. Preserve ownership, exact-file, expected-head, and
-  resulting-default-branch checks; do not extend this bypass to ordinary PRs.
+- Ordinary operations read `control/active.json` from protected main, load the
+  source-bound, attested published runtime named by that descriptor, and use
+  `.github/actions/install-cli` to put it on PATH. The descriptor's policy
+  digest is checked against the policy bundled with that runtime; ordinary
+  operations do not substitute the live `policy.json` from main. A missing or
+  invalid descriptor or release must stop execution; do not introduce a build
+  fallback or unverified binary.
+- Treat a control activation as a new protected-main revision. The descriptor
+  records its generation, source SHA, policy and archive digests, immutable
+  release and asset IDs, publisher and scratch-verification run IDs, and the
+  previous descriptor identity. Its identity is the SHA-256 of its canonical
+  serialized fields. Candidate publication alone never changes active control.
+- Publish candidates through the currently active published controller. The
+  candidate executable and build artifact never receive production write
+  credentials. Keep any release-writing token in the trusted host publisher
+  step and never expose it to candidate code. After publication and scratch
+  verification, an owner-dispatched active-controller command may open a signed
+  activation PR. The owner reviews and merges that PR through the normal server
+  Actions lane.
+- Protected-main mutation workflows use the shared `securefix-control`
+  concurrency group with `queue: max`. Do not add a ruleset bypass actor or
+  mode beyond the exact Server App pull-request bypass required by the
+  controlled merge rulesets. Do not use that ruleset entry outside the
+  validated server Actions lane or add direct Contents API writes, native
+  auto-merge, or another path that avoids the lane. Every accepted owner
+  command and completion marker carries both the exact PR head and full control
+  identity.
+- Caller migration is restricted to exact generated workflows in a reviewable
+  server-owned PR. Preserve ownership, exact-file, expected-head, and resulting
+  default-branch checks. Distribution must not merge caller PRs automatically.
 - Release publication requires immutable releases and validates final immutable
   state. Preserve merged-release-PR identity and idempotent recovery checks.
 
@@ -95,22 +120,28 @@ and merge flow. `/approve` and `/merge` must be posted only within existing user
 authorization; they are exact-head commands, not arbitrary bypasses. Existing
 authorization permits an agent to post them without asking the user to do it.
 
-Every protected-main revision, including documentation-only revisions, needs a
-matching source-bound runtime release before ordinary operations resume. Update
-`Cargo.toml` and the package entry in `Cargo.lock` consistently when preparing a
-new publication. Use SemVer tags `vX.Y.Z`; prereleases use `vX.Y.Z-pre.N`. Do not
-publish a release for each test candidate or intermediate SHA.
+Ordinary protected-main changes do not activate a new runtime. The active
+published runtime and its bundled policy digest remain in force until a reviewed
+activation PR advances `control/active.json`. Runtime publication is a separate
+step and does not automatically distribute callers. After activation, explicitly
+dispatch distribution for the verified publisher run and review the resulting
+caller PRs. Use SemVer tags `vX.Y.Z`; prereleases use `vX.Y.Z-pre.N`. Never
+overwrite a published version or fabricate release provenance.
 
-Run `Publish Runtime` on protected main only after its revision is ready for
-promotion. A successful publication automatically triggers `Distribute Runtime`
-for callers configured in policy. Confirm publication and all caller jobs rather
-than manually merging generated caller updates or weakening required checks.
-For recovery, follow `docs/migration.md` and retry the successful publisher run;
-never fabricate release provenance or repoint an existing version tag.
+The first activation is a bootstrap boundary. The currently deployed v0.2.20
+loader accepts only its exact pinned workflow provenance and policy, and it
+cannot publish a different version. The current publisher uses a production
+contents-write token that can also update repository content. A proposed main
+revision is therefore not a safe migration path by itself: do not merge it as
+though the old runtime can remain operative, and do not treat a post-merge
+recovery as a completed safe transition. Keep the proposal unmerged until a
+separately trusted bootstrap publication path is established and reviewed.
 
-Renovate manages dependency updates. Keep signed platform commits, non-major
-updates and lockfile maintenance eligible for checked automerge, and major
-updates manual. Do not add overlapping Dependabot version-update configuration.
+Renovate remains a PR author. Native Renovate auto-merge is incompatible with
+the sole-controller model and is removed. Non-major and lockfile PRs now require
+an explicit owner `/merge` command after required checks; major updates also
+remain explicit. Do not add overlapping Dependabot version-update
+configuration.
 
 Keep completion reports precise: what changed, what passed, and any remaining
 unverified condition. Reuse saved evidence and clean up disposable test fixtures.

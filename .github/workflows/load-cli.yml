@@ -6,8 +6,14 @@ on:
         description: Immutable artifact ID of the verified runtime
         value: ${{ jobs.load.outputs.artifact-id }}
       source-sha:
-        description: Immutable commit of the trusted runtime
+        description: Active source commit of the trusted runtime
         value: ${{ jobs.load.outputs.source-sha }}
+      control-id:
+        description: Canonical identity of the active control descriptor
+        value: ${{ jobs.load.outputs.control-id }}
+      workflow-sha:
+        description: Immutable commit that defines this workflow job
+        value: ${{ jobs.load.outputs.workflow-sha }}
 permissions: {}
 defaults:
   run:
@@ -23,13 +29,14 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      source-sha: ${{ job.workflow_sha }}
+      source-sha: ${{ steps.runtime.outputs.source-sha }}
+      control-id: ${{ steps.runtime.outputs.control-id }}
+      workflow-sha: ${{ job.workflow_sha }}
     steps:
       - name: Load source-bound attested runtime
         id: runtime
         uses: $/.github/actions/load-runtime
         with:
-          source-sha: ${{ job.workflow_sha }}
           repository: civitaspo/securefix-server
           default-branch: main
           token: ${{ github.token }}

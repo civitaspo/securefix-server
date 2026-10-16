@@ -46,20 +46,37 @@ it is used. The validator selects the candidate binary by its immutable artifact
 Only the validator receives the server repository read token; the candidate receives
 only installation tokens scoped to the scratch repository. The candidate
 SHA remains an independent state binding. It then checks commit signatures, current-head
-authorization, merge readiness, native GitHub auto-merge, stale-head rejection, replay
+authorization, merge readiness, rejection of native GitHub auto-merge, stale-head rejection, replay
 rejection, and exact distribution workflow bytes. The distribution PR runs actual
 `pinact run --verify-comment` and must have a successful Actions `status-check`.
-The positive PR queues auto-merge while its required policy check is absent, proves
-it remains open, publishes that check, and waits for GitHub to merge it. The stale
-PR advances after auto-merge is queued and must reject the old accepted head.
+The positive PR first proves it is not merge-ready while its required policy check is
+absent. After publishing the check and confirming all merge gates, the harness requires
+GitHub to reject a native auto-merge request and verifies that no request was queued.
+The scratch Server App then merges the ready PR directly with the accepted head SHA.
+For stale-head rejection, the other PR advances after its head was accepted; a direct
+Server App merge using that old SHA must fail and leave the PR open and unmerged.
 The harness closes any remaining test
 PRs and deletes all three test branches after collecting evidence.
+
+After candidate output validation succeeds, the verify workflow runs the separate
+`control-probe` and uploads an artifact containing only `control-verification.json`. The probe creates three scratch control generations,
+checks that an unrelated source advance leaves the active descriptor bytes unchanged,
+and confirms that a stale expected-head update is rejected without changing the
+branch tip or descriptor. It then changes the source identity and restores the first
+source identity in generation three, proving that the resulting control identity is
+new rather than replayed. The strict schema contains `version`, `repository`,
+`candidate_sha`, `branch`, `base_sha`, the three generation commit SHAs, the three
+generation identities, and booleans `source_advance_kept_descriptor`,
+`expected_head_conflict_rejected`, and `stale_identity_rejected_after_aba`. Its
+`production_publication_verified`, `production_activation_verified`, and
+`distribution_verified` fields are all `false`: this scratch-only probe does not
+publish or activate a production runtime and does not exercise distribution.
 
 The harness invokes production PR authorization, merge-state, readiness, and
 distribution rendering/validation functions. It does not claim that a scratch
 workflow is a production request source: the source-run and reusable-workflow
 artifact provenance chain is tested by its own fixtures because the scratch
-caller is not the production caller workflow. The auto-merge mutation binds the
+caller is not the production caller workflow. The direct merge mutation binds the
 accepted head SHA and uses squash merge, but does not publish a runtime tag/release.
 The native repair apply core runs against GitHub with a verified signed commit,
 exact contents and an idempotent retry. Release tagging uses the production annotated-tag
@@ -111,8 +128,8 @@ Candidate testing uses `client_runtime: candidate-artifact`. After stable public
 repeat prepare and verify with `client_runtime: published-release`; that leaves the
 Action's candidate-directory override empty and exercises Release download,
 attestation verification, preparation, upload and dispatch. Completion requires this
-published-runtime client test, successful consumer pinact CI and actual scratch
-auto-merge. Fixture preparation and distribution success alone are insufficient.
+published-runtime client test, successful consumer pinact CI and the Server App
+scratch merge path. Fixture preparation and distribution success alone are insufficient.
 
 The distribution fixture also migrates the three-file autofix workflow call chain.
 Its scratch-only job deliberately changes a tracked workflow, requires the native

@@ -33,25 +33,28 @@ fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
     use std::{os::unix::fs::PermissionsExt, process::Command};
 
     let script = include_str!("../.github/actions/load-runtime/load.sh");
-    let release = serde_json::json!({
-        "target_commitish": "a".repeat(40),
-        "assets": [{"name":"securefix-runtime-linux-x86_64.tar.gz","id":7}]
-    });
+    let source_sha = "a".repeat(40);
+    let policy_sha = "b".repeat(64);
+    let archive_sha = "c".repeat(64);
+    let control_id = "d".repeat(64);
     for scenario in [
         "success",
+        "success-no-pin",
         "missing",
         "wrong-source",
+        "malformed-pin",
         "ambiguous",
         "bad-id",
         "api-error",
+        "wrong-immutable",
         "oversized",
+        "bad-digest",
         "bad-attestation",
         "bad-metadata",
     ] {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("bin");
         fs::create_dir(&bin).unwrap();
-        // Mock native commands to exercise the checked-in script's fail-fast order.
         for (name, body) in [
             (
                 "gh",
@@ -60,16 +63,21 @@ set -euo pipefail
 case "$1" in
   api)
     [[ "$SCENARIO" != api-error ]] || exit 1
-    if [[ "$2" == *"/releases?"* ]]; then
-      cat "$RELEASES"
-    else
-      [[ "$2" == repos/example/runtime/releases/assets/7 ]] || exit 1
+    case "$2" in
+      repos/example/runtime) cat "$REPOSITORY_JSON" ;;
+      repos/example/runtime/commits/main) printf '%s\n' "$ACTIVE_SOURCE_SHA" ;;
+      repos/example/runtime/contents/control/active.json\?ref=*)
+        [[ "$SCENARIO" != missing ]] || exit 1
+        cat "$CONTENT_RESPONSE" ;;
+      repos/example/runtime/releases/7) cat "$RELEASE_JSON" ;;
+      repos/example/runtime/releases/assets/8)
       echo download >> "$TRACE"
-      printf archive
-    fi ;;
+        printf archive ;;
+      *) exit 1 ;;
+    esac ;;
   attestation)
     echo attestation >> "$TRACE"
-    [[ "$SCENARIO" != bad-attestation ]] ;;
+    [[ "$SCENARIO" != bad-attestation && "$SCENARIO" != wrong-source ]] ;;
   *) exit 1 ;;
 esac
 "#,
@@ -77,7 +85,14 @@ esac
             (
                 "stat",
                 r#"#!/bin/bash
-if [[ "$SCENARIO" == oversized ]]; then echo 134217729; else wc -c < "$3"; fi
+if [[ "$SCENARIO" == oversized && "$3" == *runtime-archive* ]]; then echo 134217729; else wc -c < "$3"; fi
+"#,
+            ),
+            (
+                "sha256sum",
+                r#"#!/bin/bash
+if [[ "$1" == *policy.json ]]; then digest="$POLICY_SHA"; else digest="$ARCHIVE_SHA"; fi
+printf '%s  %s\n' "$digest" "$1"
 "#,
             ),
             (
@@ -89,10 +104,20 @@ cp "$VERIFIER" "$4/securefix"
 "#,
             ),
             (
-                "verifier",
+                "securefix-mock",
                 r#"#!/bin/bash
-echo metadata >> "$TRACE"
-[[ "$SCENARIO" != bad-metadata ]]
+set -euo pipefail
+if [[ "$1 $2" == "runtime verify" ]]; then
+  echo runtime-verify >> "$TRACE"
+elif [[ "$1 $2" == "control identify" ]]; then
+  echo control-identify >> "$TRACE"
+  source_sha="$ACTIVE_SOURCE_SHA"
+  [[ "$SCENARIO" != bad-metadata ]] || source_sha="$(printf 'e%.0s' {1..40})"
+  printf 'source-sha=%s\ngeneration=1\npolicy-sha256=%s\narchive-sha256=%s\nrelease-id=7\nasset-id=8\n' "$source_sha" "$POLICY_SHA" "$ARCHIVE_SHA"
+  printf 'control-id=%s\n' "$CONTROL_ID"
+else
+  exit 1
+fi
 "#,
             ),
         ] {
@@ -100,21 +125,58 @@ echo metadata >> "$TRACE"
             fs::write(&path, body).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let mut candidates = vec![release.clone()];
-        match scenario {
-            "missing" => candidates.clear(),
-            "wrong-source" => candidates[0]["target_commitish"] = "b".repeat(40).into(),
-            "ambiguous" => candidates.push(release.clone()),
-            "bad-id" => candidates[0]["assets"][0]["id"] = "../7".into(),
-            _ => {}
+        let mut descriptor = serde_json::json!({
+            "version": 1,
+            "generation": 1,
+            "source_sha": source_sha,
+            "policy_sha256": policy_sha,
+            "archive_sha256": archive_sha,
+            "release_id": 7,
+            "asset_id": 8,
+            "publisher_run_id": 9,
+            "verification_run_id": 10,
+            "previous": "0".repeat(64)
+        });
+        if scenario == "bad-id" {
+            descriptor["asset_id"] = 0.into();
         }
-        let releases = temp.path().join("releases.json");
-        fs::write(&releases, serde_json::to_vec(&candidates).unwrap()).unwrap();
+        let descriptor_bytes = serde_json::to_vec(&descriptor).unwrap();
+        use base64::Engine;
+        let content_response = serde_json::json!({
+            "encoding":"base64",
+            "content":base64::engine::general_purpose::STANDARD.encode(descriptor_bytes)
+        });
+        let content_path = temp.path().join("content.json");
+        fs::write(
+            &content_path,
+            serde_json::to_vec(&content_response).unwrap(),
+        )
+        .unwrap();
+        let repository_path = temp.path().join("repository.json");
+        fs::write(
+            &repository_path,
+            serde_json::to_vec(&serde_json::json!({"default_branch":"main"})).unwrap(),
+        )
+        .unwrap();
+        let mut release = serde_json::json!({
+            "id":7,"draft":false,"immutable":true,
+            "assets":[{"id":8,"name":"securefix-runtime-linux-x86_64.tar.gz"}]
+        });
+        if scenario == "ambiguous" {
+            let asset = release["assets"][0].clone();
+            release["assets"].as_array_mut().unwrap().push(asset);
+        }
+        if scenario == "wrong-immutable" {
+            release["immutable"] = false.into();
+        }
+        let release_path = temp.path().join("release.json");
+        fs::write(&release_path, serde_json::to_vec(&release).unwrap()).unwrap();
         let trace = temp.path().join("trace");
         let output = temp.path().join("output");
         fs::write(&trace, "").unwrap();
         fs::write(&output, "").unwrap();
-        let result = Command::new("bash")
+        let mut command = Command::new("bash");
+        command
             .args(["-euo", "pipefail", "-c", script])
             .env(
                 "PATH",
@@ -122,31 +184,60 @@ echo metadata >> "$TRACE"
             )
             .env("RUNNER_TEMP", temp.path())
             .env("GITHUB_OUTPUT", &output)
-            .env("SOURCE_SHA", "a".repeat(40))
+            .env("ACTIVE_SOURCE_SHA", &source_sha)
+            .env("POLICY_SHA", &policy_sha)
+            .env(
+                "ARCHIVE_SHA",
+                if scenario == "bad-digest" {
+                    "f".repeat(64)
+                } else {
+                    archive_sha.clone()
+                },
+            )
+            .env("CONTROL_ID", &control_id)
             .env("REPOSITORY", "example/runtime")
             .env("DEFAULT_BRANCH", "main")
             .env("SCENARIO", scenario)
-            .env("RELEASES", releases)
+            .env("CONTENT_RESPONSE", content_path)
+            .env("REPOSITORY_JSON", repository_path)
+            .env("RELEASE_JSON", release_path)
             .env("TRACE", &trace)
-            .env("VERIFIER", bin.join("verifier"))
-            .output()
-            .unwrap();
+            .env("VERIFIER", bin.join("securefix-mock"));
+        match scenario {
+            "wrong-source" => {
+                command.env("SOURCE_SHA", "f".repeat(40));
+            }
+            "malformed-pin" => {
+                command.env("SOURCE_SHA", "not-a-sha");
+            }
+            "success-no-pin" => {}
+            _ => {
+                command.env("SOURCE_SHA", &source_sha);
+            }
+        }
+        let result = command.output().unwrap();
         assert_eq!(
             result.status.success(),
-            scenario == "success",
+            matches!(scenario, "success" | "success-no-pin"),
             "{scenario}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
         let expected = match scenario {
-            "success" | "bad-metadata" => "download\nattestation\nextraction\nmetadata\n",
+            "success" | "success-no-pin" => {
+                "download\nattestation\nextraction\nruntime-verify\ncontrol-identify\n"
+            }
+            "bad-metadata" => {
+                "download\nattestation\nextraction\nruntime-verify\ncontrol-identify\n"
+            }
             "bad-attestation" => "download\nattestation\n",
-            "oversized" => "download\n",
+            "wrong-source" | "malformed-pin" => "",
+            "oversized" | "bad-digest" => "download\n",
             _ => "",
         };
         assert_eq!(fs::read_to_string(trace).unwrap(), expected, "{scenario}");
         assert_eq!(
             !fs::read(output).unwrap().is_empty(),
-            scenario == "success",
+            matches!(scenario, "success" | "success-no-pin"),
             "{scenario}"
         );
     }
@@ -340,13 +431,25 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     );
     let steps = load["steps"].as_array().unwrap();
     assert_eq!(steps[0]["uses"], "$/.github/actions/load-runtime");
-    assert_eq!(steps[0]["with"]["source-sha"], "${{ job.workflow_sha }}");
+    assert!(steps[0]["with"].get("source-sha").is_none());
     assert_eq!(steps[0]["with"]["repository"], "civitaspo/securefix-server");
     assert_eq!(
         loader["on"]["workflow_call"]["outputs"]["source-sha"]["value"],
         "${{ jobs.load.outputs.source-sha }}"
     );
-    assert_eq!(load["outputs"]["source-sha"], "${{ job.workflow_sha }}");
+    assert_eq!(
+        load["outputs"]["source-sha"],
+        "${{ steps.runtime.outputs.source-sha }}"
+    );
+    assert_eq!(
+        load["outputs"]["control-id"],
+        "${{ steps.runtime.outputs.control-id }}"
+    );
+    assert_eq!(load["outputs"]["workflow-sha"], "${{ job.workflow_sha }}");
+    assert_eq!(
+        loader["on"]["workflow_call"]["outputs"]["control-id"]["value"],
+        "${{ jobs.load.outputs.control-id }}"
+    );
     assert_eq!(
         load["outputs"]["artifact-id"],
         "${{ steps.upload.outputs.artifact-id }}"
@@ -394,15 +497,19 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         "${{ github.action_path }}"
     );
     for required in [
-        "releases?per_page=100&page=$page",
-        "seq 1 10",
-        "-le 1024",
+        "control/active.json?ref=$main_sha",
+        "releases/$release_id",
+        "releases/assets/$asset_id",
+        ".immutable",
+        "archive_sha256",
+        "-le 16384",
+        "control-id",
         "gh attestation verify",
         "--repo \"$REPOSITORY\"",
-        "--source-digest \"$SOURCE_SHA\"",
+        "--source-digest \"$source_sha\"",
         "--source-ref \"refs/heads/$DEFAULT_BRANCH\"",
         "--signer-workflow \"$REPOSITORY/.github/workflows/publish-runtime.yml\"",
-        "--signer-digest \"$SOURCE_SHA\"",
+        "--signer-digest \"$source_sha\"",
         "--cert-oidc-issuer https://token.actions.githubusercontent.com",
         "--predicate-type https://slsa.dev/provenance/v1",
         "--deny-self-hosted-runners",
@@ -447,6 +554,55 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         published_loader["env"]["GH_TOKEN"],
         "${{ inputs.runtime-token || github.token }}"
     );
+    let install_runtime = client_steps
+        .iter()
+        .find(|step| step["id"] == "runtime")
+        .unwrap();
+    assert_eq!(
+        install_runtime["env"]["SECUREFIX_RUNTIME_SHA"],
+        "${{ inputs.runtime-sha }}"
+    );
+    assert_eq!(
+        install_runtime["env"]["VERIFIED_CONTROL_ID"],
+        "${{ steps.published-runtime.outputs.control-id }}"
+    );
+    let prepare = client_steps
+        .iter()
+        .find(|step| step["id"] == "prepare")
+        .unwrap();
+    let dispatch = client_steps
+        .iter()
+        .find(|step| step["id"] == "dispatch")
+        .unwrap();
+    for step in [prepare, dispatch] {
+        assert_eq!(
+            step["env"]["SECUREFIX_SOURCE_SHA"],
+            "${{ steps.runtime.outputs.source-sha }}"
+        );
+        assert_eq!(
+            step["env"]["SECUREFIX_CONTROL_ID"],
+            "${{ steps.runtime.outputs.control-id }}"
+        );
+        let script = step["run"].as_str().unwrap();
+        assert!(script.contains("unset SECUREFIX_SOURCE_SHA"));
+        assert!(script.contains("unset SECUREFIX_CONTROL_ID"));
+    }
+    assert_eq!(
+        client_action["outputs"]["runtime-control-id"]["value"],
+        "${{ steps.runtime.outputs.control-id }}"
+    );
+    let install_script = install_runtime["run"].as_str().unwrap();
+    let candidate_branch = install_script
+        .find("runtime_source=prebuilt-candidate")
+        .unwrap();
+    let published_branch = install_script
+        .find("runtime_source=attested-release")
+        .unwrap();
+    let control_copy = install_script
+        .find("install -m 644 \"$runtime_dir/control.json\" \"$bin_dir/control.json\"")
+        .unwrap();
+    assert!(candidate_branch < published_branch && published_branch < control_copy);
+    assert!(install_script.contains("if [[ -n \"$control_id\" ]]; then"));
     assert!(client.contains("INPUT_RUNTIME_DIRECTORY"));
     assert!(client.contains("runtime_source=prebuilt-candidate"));
     assert!(client.contains("runtime_source=attested-release"));
@@ -458,6 +614,10 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             step["name"] == "Require a runtime version bump over the pull request base"
         })
         .unwrap();
+    let version_guard_run = ci_steps[version_guard]["run"].as_str().unwrap();
+    assert!(version_guard_run.contains("git diff --name-only -z --no-renames"));
+    assert!(version_guard_run.contains("runtime check-version"));
+    assert!(version_guard_run.contains("--changed-files \"$changed_files\""));
     let build_cli = ci_steps
         .iter()
         .position(|step| step["id"] == "build-cli")
@@ -524,8 +684,11 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             .ends_with(".tar.gz")
     );
 
+    let controller = &publisher["jobs"]["controller"];
+    assert_eq!(controller["uses"], "./.github/workflows/load-cli.yml");
+    assert_eq!(controller["if"], build["if"]);
     let publish = &publisher["jobs"]["publish"];
-    assert_eq!(publish["needs"], "build");
+    assert_eq!(publish["needs"], serde_json::json!(["build", "controller"]));
     assert_eq!(
         publish["permissions"],
         serde_json::json!({"contents":"write", "attestations":"read"})
@@ -539,6 +702,10 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     }
     assert_eq!(
         publish["env"]["SECUREFIX_SOURCE_SHA"],
+        "${{ needs.controller.outputs.source-sha }}"
+    );
+    assert_eq!(
+        publish["env"]["CANDIDATE_SOURCE_SHA"],
         "${{ needs.build.outputs.source-sha }}"
     );
     assert!(publish["steps"].as_array().unwrap().iter().any(|step| {
@@ -546,6 +713,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             .as_str()
             .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
             && step["with"]["artifact-ids"] == "${{ needs.build.outputs.artifact-id }}"
+            && step["with"]["path"] == "distribution"
     }));
     let publish_steps = publish["steps"].as_array().unwrap();
     let publish_index = |predicate: &dyn Fn(&Value) -> bool| {
@@ -565,27 +733,46 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             run.contains("gh attestation verify distribution/securefix-runtime-linux-x86_64.tar.gz")
         })
     });
-    let staged = publish_index(&|step| {
-        step["run"]
-            .as_str()
-            .is_some_and(|run| run.contains("tar -xzf"))
+    let controller_downloaded = publish_index(&|step| {
+        step["uses"].as_str().is_some_and(|uses| {
+            uses.starts_with("actions/download-artifact@")
+                && step["with"]["artifact-ids"] == "${{ needs.controller.outputs.artifact-id }}"
+                && step["with"]["path"] == "${{ runner.temp }}/controller"
+        })
     });
     let invoked = publish_index(&|step| {
         step["run"].as_str().is_some_and(|run| {
-            run.contains("securefix runtime publish --archive distribution/securefix-runtime-linux-x86_64.tar.gz")
+            run.contains("securefix runtime publish --source-sha \"$CANDIDATE_SOURCE_SHA\" --archive distribution/securefix-runtime-linux-x86_64.tar.gz")
         })
     });
     let installed = publish_index(&|step| step["uses"] == "$/.github/actions/install-cli");
     assert!(
-        downloaded < verified && verified < staged && staged < installed && installed < invoked
+        downloaded < controller_downloaded
+            && controller_downloaded < verified
+            && verified < installed
+            && installed < invoked
+    );
+    assert_eq!(
+        publish_steps[installed]["with"]["binary"],
+        "${{ runner.temp }}/controller/securefix"
+    );
+    assert!(
+        publish_steps.iter().all(|step| !step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("tar -xzf"))),
+        "credentialed publication must not extract the candidate archive"
+    );
+    assert!(
+        !publish_text.contains("candidate-runtime/securefix")
+            && !publish_text.contains("./.github/actions/setup-cli")
     );
     let verification = publish_steps[verified]["run"].as_str().unwrap();
     for required in [
         "--repo civitaspo/securefix-server",
-        "--source-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "--source-digest \"$CANDIDATE_SOURCE_SHA\"",
         "--source-ref refs/heads/main",
         "--signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml",
-        "--signer-digest \"$SECUREFIX_SOURCE_SHA\"",
+        "--signer-digest \"$CANDIDATE_SOURCE_SHA\"",
         "--cert-oidc-issuer https://token.actions.githubusercontent.com",
         "--predicate-type https://slsa.dev/provenance/v1",
         "--deny-self-hosted-runners",
@@ -595,7 +782,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             "publisher missing attestation constraint: {required}"
         );
     }
-    for index in [verified, staged, invoked] {
+    for index in [verified, invoked] {
         assert_ne!(publish_steps[index]["continue-on-error"], true);
         assert!(publish_steps[index].get("if").is_none());
     }
@@ -683,6 +870,88 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert!(install.contains("install -D -m 755"));
     assert!(install.contains("$GITHUB_PATH"));
     assert!(installer["inputs"].get("binary").is_some());
+}
+
+#[test]
+fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
+    for (name, loader_job, consumer_jobs) in [
+        ("securefix.yml", "runtime", vec!["fix"]),
+        ("approve.yml", "build", vec!["approve", "cleanup"]),
+        (
+            "merge.yml",
+            "build",
+            vec!["authorize", "wait", "apply", "cleanup"],
+        ),
+        ("policy-check.yml", "cli", vec!["request"]),
+    ] {
+        let value = workflow(name);
+        let loader = &value["jobs"][loader_job];
+        assert_eq!(loader["uses"], "./.github/workflows/load-cli.yml", "{name}");
+        assert_eq!(loader["permissions"]["contents"], "read", "{name}");
+        assert_eq!(loader["permissions"]["attestations"], "read", "{name}");
+        for consumer_id in consumer_jobs {
+            let consumer = &value["jobs"][consumer_id];
+            assert_eq!(
+                consumer["env"]["SECUREFIX_SOURCE_SHA"],
+                format!("${{{{ needs.{loader_job}.outputs.source-sha }}}}"),
+                "{name}/{consumer_id}: runtime source must come from active descriptor"
+            );
+            assert_eq!(
+                consumer["env"]["SECUREFIX_CONTROL_ID"],
+                format!("${{{{ needs.{loader_job}.outputs.control-id }}}}"),
+                "{name}/{consumer_id}: control identity must come from active descriptor"
+            );
+        }
+    }
+
+    let merge = workflow("merge.yml");
+    let wait = &merge["jobs"]["wait"];
+    assert_eq!(wait["runs-on"], "ubuntu-latest");
+    assert_eq!(wait["needs"], serde_json::json!(["build", "authorize"]));
+    assert_eq!(wait["timeout-minutes"], 70);
+    assert_eq!(wait["permissions"]["checks"], "read");
+    assert_eq!(wait["permissions"]["statuses"], "read");
+    for permission in ["contents", "issues", "pull-requests", "checks", "statuses"] {
+        assert_ne!(
+            wait["permissions"][permission], "write",
+            "merge wait is read-only"
+        );
+    }
+    assert!(
+        wait["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| { step["run"] == "securefix merge wait" })
+    );
+    let apply = &merge["jobs"]["apply"];
+    assert!(
+        apply["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job == "wait")
+    );
+    let merge_token = apply["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "merge-token")
+        .unwrap();
+    assert_eq!(merge_token["if"], "needs.wait.result == 'success'");
+
+    let distribution = workflow("distribute-runtime.yml");
+    let dispatch = &distribution["on"]["workflow_dispatch"]["inputs"]["publisher_run_id"];
+    assert_eq!(dispatch["required"], true);
+    assert!(distribution["on"].get("workflow_run").is_none());
+    assert!(distribution["jobs"].get("caller").is_some());
+    let publisher = workflow("publish-runtime.yml");
+    assert!(publisher["on"].get("workflow_run").is_none());
+    assert!(
+        !serde_json::to_string(&publisher["jobs"]["publish"])
+            .unwrap()
+            .contains("distribute-runtime")
+    );
 }
 
 #[test]
@@ -1474,10 +1743,11 @@ fn merge_workflow_prefilter_allows_whitespace_for_rust_command_validation() {
 #[test]
 fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
     let merge = workflow("merge.yml");
-    let job = &merge["jobs"]["merge"];
+    let authorize = &merge["jobs"]["authorize"];
+    let job = &merge["jobs"]["apply"];
     assert_eq!(
         job["outputs"]["self_merged"],
-        "${{ steps.validate.outputs.repository == 'civitaspo/securefix-server' && steps.apply.outcome == 'success' }}"
+        "${{ needs.authorize.outputs.repository == 'civitaspo/securefix-server' && steps.apply.outcome == 'success' }}"
     );
     let steps = job["steps"].as_array().unwrap();
     let position = |id: &str| {
@@ -1486,7 +1756,6 @@ fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
             .position(|step| step["id"] == id)
             .unwrap_or_else(|| panic!("missing merge step {id}"))
     };
-    let wait = position("wait");
     let merge_token = position("merge-token");
     let token = position("self-cleanup-token");
     let preclean = position("self-cleanup");
@@ -1496,11 +1765,11 @@ fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
         .iter()
         .position(|step| step["name"] == "Report the terminal result")
         .unwrap();
-    assert!(wait < merge_token && merge_token < token && token < preclean && preclean < apply);
-    assert_eq!(steps[merge_token]["if"], "steps.wait.outcome == 'success'");
+    assert!(merge_token < token && token < preclean && preclean < apply);
+    assert_eq!(steps[merge_token]["if"], "needs.wait.result == 'success'");
     assert_eq!(
         steps[token]["if"],
-        "steps.wait.outcome == 'success' && steps.validate.outputs.repository == 'civitaspo/securefix-server'"
+        "needs.wait.result == 'success' && needs.authorize.outputs.repository == 'civitaspo/securefix-server'"
     );
     assert_eq!(steps[token]["with"]["repositories"], "securefix-server");
     assert_eq!(steps[token]["with"]["permission-issues"], "write");
@@ -1517,18 +1786,25 @@ fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
     );
     assert_eq!(
         steps[apply]["if"],
-        "steps.wait.outcome == 'success' && (steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.self-cleanup.outcome == 'success')"
+        "needs.wait.result == 'success' && (needs.authorize.outputs.repository != 'civitaspo/securefix-server' || steps.self-cleanup.outcome == 'success')"
     );
     for index in [notify_token, notify] {
-        assert!(steps[index]["if"].as_str().unwrap().contains(
-            "(steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.apply.outcome != 'success')"
-        ));
+        assert!(
+            steps[index]["if"]
+                .as_str()
+                .unwrap()
+                .contains("(needs.wait.result != 'success' || steps.apply.outcome != 'success')")
+        );
     }
+    assert_eq!(
+        authorize["outputs"]["repository"],
+        "${{ steps.validate.outputs.repository }}"
+    );
     assert!(
         merge["jobs"]["cleanup"]["if"]
             .as_str()
             .unwrap()
-            .contains("needs.merge.outputs.self_merged != 'true'")
+            .contains("needs.apply.outputs.self_merged != 'true'")
     );
 }
 

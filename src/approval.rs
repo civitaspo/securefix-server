@@ -32,6 +32,11 @@ fn validate() -> Result<()> {
     let policy = Policy::active(&api)?;
     let source_sha =
         securefix::workflow::require_current_runtime(&api, ".github/workflows/approve.yml")?;
+    let control = policy
+        .control
+        .as_ref()
+        .context("active control revision is missing")?;
+    securefix::control::ControlRevision::require_current(&api, control)?;
     let payload = event()?;
     ensure!(
         std::env::var("GITHUB_REPOSITORY")? == server
@@ -115,6 +120,7 @@ fn apply() -> Result<()> {
         manifest.kind == RequestKind::Approve && manifest.workflow_sha == policy.revision,
         "approval manifest is invalid or stale"
     );
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let source = request::load_source_request(
         &read,
         &policy,
@@ -160,6 +166,7 @@ fn apply() -> Result<()> {
             manifest.pull_request.number,
             &manifest.pull_request.head_sha,
             *comment_id,
+            &manifest.control,
         )?;
     }
     let approve = GitHub::from_env("SECUREFIX_APPROVE_TOKEN")?;
@@ -176,14 +183,15 @@ fn apply() -> Result<()> {
         repository,
         manifest.pull_request.number,
         &manifest.pull_request.head_sha,
-        &deployment.approval_reviewer,
-        "User",
+        (&deployment.approval_reviewer, "User"),
+        &manifest.control,
     )?;
     let current_policy = Policy::active(&read)?;
     ensure!(
         current_policy.revision == manifest.workflow_sha,
         "server policy revision changed before policy check publication"
     );
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let current_pr: Value = read.get(&format!(
         "/repos/{repository}/pulls/{}",
         manifest.pull_request.number
@@ -211,6 +219,7 @@ fn apply() -> Result<()> {
         } else {
             "Changes passed signature and review checks."
         },
+        &manifest.control,
     )?;
     crate::policy_check::report_result(
         &write,
@@ -229,9 +238,10 @@ pub(crate) fn approve_current_head(
     repository: &str,
     pull_number: u64,
     expected_head: &str,
-    reviewer: &config::Principal,
-    reviewer_type: &str,
+    reviewer: (&config::Principal, &str),
+    control: &securefix::control::ControlRevision,
 ) -> Result<()> {
+    let (reviewer, reviewer_type) = reviewer;
     securefix::policy::validate_repository(repository)?;
     securefix::policy::validate_sha(expected_head)?;
     ensure!(
@@ -245,22 +255,48 @@ pub(crate) fn approve_current_head(
     let pull: Value = read.get(&format!("/repos/{repository}/pulls/{pull_number}"))?;
     validate_review_target(&pull, expected_head, reviewer.id)?;
     let path = format!("/repos/{repository}/pulls/{pull_number}/reviews");
+    control.validate()?;
+    let marker = format!("<!-- securefix:control-review:{} -->", control.identity()?);
     let reviews = read.paginate(&path)?;
-    if !latest_reviewer_approval(&reviews, reviewer, reviewer_type, expected_head) {
-        let response: Value =
-            review_api.post(&path, &json!({"event":"APPROVE","commit_id":expected_head}))?;
+    let control_review_exists = reviews.iter().any(|review| {
+        expected_approval(review, reviewer, reviewer_type, expected_head)
+            && review["body"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line == marker))
+    });
+    if !latest_reviewer_approval(&reviews, reviewer, reviewer_type, expected_head)
+        || !control_review_exists
+    {
+        let response: Value = review_api.post(
+            &path,
+            &json!({"event":"APPROVE","commit_id":expected_head,"body":marker}),
+        )?;
         ensure!(
             expected_approval(&response, reviewer, reviewer_type, expected_head),
             "GitHub returned an approval for a different reviewer or head"
         );
     }
     ensure!(
-        request::has_current_head_approval(read, repository, pull_number, expected_head)?,
+        request::has_current_head_approval_for_reviewer(
+            read,
+            repository,
+            pull_number,
+            expected_head,
+            control,
+            reviewer,
+            reviewer_type,
+        )?,
         "no non-author approval is attached to the accepted head"
     );
     let reviews = read.paginate(&path)?;
     ensure!(
-        latest_reviewer_approval(&reviews, reviewer, reviewer_type, expected_head),
+        latest_reviewer_approval(&reviews, reviewer, reviewer_type, expected_head)
+            && reviews.iter().any(|review| {
+                expected_approval(review, reviewer, reviewer_type, expected_head)
+                    && review["body"]
+                        .as_str()
+                        .is_some_and(|body| body.lines().any(|line| line == marker))
+            }),
         "expected reviewer approval is not attached to the accepted head"
     );
     Ok(())
@@ -357,6 +393,10 @@ mod tests {
             login: "securefix-reviewer[bot]".into(),
             id: 42,
         }
+    }
+
+    fn test_control() -> securefix::control::ControlRevision {
+        crate::fixtures::Fixture::control_revision()
     }
 
     fn review(user: Value, state: &str, head: &str, id: u64) -> Value {
@@ -555,7 +595,7 @@ mod tests {
         let deployment = &config::trusted().unwrap().deployment;
         let repository = &deployment.integration.repository;
         let number = 23;
-        let reviewer = reviewer();
+        let reviewer = deployment.approval_reviewer.clone();
         let head = "a".repeat(40);
         let pull_path = format!("/repos/{repository}/pulls/{number}");
         let reviews_path = format!("{pull_path}/reviews");
@@ -565,20 +605,20 @@ mod tests {
             "head":{"sha":head},
             "user":{"id":7}
         });
-        let approval = reviewer_response("Bot", reviewer.id, &reviewer.login, &head);
+        let control = test_control();
+        let marker = format!(
+            "<!-- securefix:control-review:{} -->",
+            control.identity().unwrap()
+        );
+        let mut approval = reviewer_response("User", reviewer.id, &reviewer.login, &head);
+        approval["body"] = json!(marker);
 
         let fixture = Fixture::new(vec![
             Route::get(&pull_path, pull.clone()),
             Route::get(&page_path, json!([])),
-            Route::get(
-                format!(
-                    "/repos/{}/commits/{}",
-                    deployment.server.repository, deployment.server.default_branch
-                ),
-                json!({"sha":head}),
-            ),
+            Route::active_control(&control),
             Route::request("POST", &reviews_path, 200, approval.clone())
-                .with_request_body(json!({"event":"APPROVE","commit_id":head})),
+                .with_request_body(json!({"event":"APPROVE","commit_id":head,"body":marker})),
             Route::get(&pull_path, pull.clone()),
             Route::get(&page_path, json!([approval.clone()])),
             Route::get(&page_path, json!([approval.clone()])),
@@ -595,8 +635,8 @@ mod tests {
             repository,
             number,
             &head,
-            &reviewer,
-            "Bot",
+            (&reviewer, "User"),
+            &control,
         )
         .unwrap();
         approve_current_head(
@@ -605,8 +645,53 @@ mod tests {
             repository,
             number,
             &head,
-            &reviewer,
-            "Bot",
+            (&reviewer, "User"),
+            &control,
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn approve_current_head_accepts_a_control_bound_bot_reviewer() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repository = &config::trusted().unwrap().deployment.integration.repository;
+        let number = 23;
+        let reviewer = config::Principal {
+            id: 50_001,
+            login: "scratch-reviewer[bot]".into(),
+        };
+        let head = "a".repeat(40);
+        let pull_path = format!("/repos/{repository}/pulls/{number}");
+        let reviews_path = format!("{pull_path}/reviews");
+        let page_path = format!("{reviews_path}?per_page=100&page=1");
+        let pull = json!({"state":"open","head":{"sha":head},"user":{"id":7}});
+        let control = test_control();
+        let marker = format!(
+            "<!-- securefix:control-review:{} -->",
+            control.identity().unwrap()
+        );
+        let mut approval = reviewer_response("Bot", reviewer.id, &reviewer.login, &head);
+        approval["body"] = json!(marker);
+        let fixture = Fixture::new(vec![
+            Route::get(&pull_path, pull.clone()),
+            Route::get(&page_path, json!([])),
+            Route::active_control(&control),
+            Route::request("POST", &reviews_path, 200, approval.clone())
+                .with_request_body(json!({"event":"APPROVE","commit_id":head,"body":marker})),
+            Route::get(&pull_path, pull),
+            Route::get(&page_path, json!([approval.clone()])),
+            Route::get(&page_path, json!([approval])),
+        ]);
+        approve_current_head(
+            &fixture.api,
+            &fixture.api,
+            repository,
+            number,
+            &head,
+            (&reviewer, "Bot"),
+            &control,
         )
         .unwrap();
         fixture.finish();
@@ -638,8 +723,8 @@ mod tests {
                 repository,
                 number,
                 &head,
-                &reviewer,
-                "Bot",
+                (&reviewer, "Bot"),
+                &test_control(),
             )
             .is_err()
         );

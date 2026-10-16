@@ -68,6 +68,9 @@ outputs:
   runtime-source:
     description: Runtime installation source (attested-release or prebuilt-candidate)
     value: ${{ steps.runtime.outputs.source }}
+  runtime-control-id:
+    description: Canonical active control descriptor identity for an attested runtime
+    value: ${{ steps.runtime.outputs.control-id }}
   artifact-name:
     description: Uploaded Securefix artifact name, empty when there were no files
     value: ${{ steps.prepare.outputs.artifact_name }}
@@ -104,6 +107,7 @@ runs:
         SECUREFIX_RUNTIME_SHA: ${{ inputs.runtime-sha }}
         INPUT_RUNTIME_DIRECTORY: ${{ inputs.runtime-directory }}
         VERIFIED_RUNTIME_DIRECTORY: ${{ steps.published-runtime.outputs.directory }}
+        VERIFIED_CONTROL_ID: ${{ steps.published-runtime.outputs.control-id }}
       run: |
         if [[ -n "$INPUT_RUNTIME_DIRECTORY" ]]; then
           [[ "$INPUT_RUNTIME_DIRECTORY" =~ ^[A-Za-z0-9._/-]+$ && "$INPUT_RUNTIME_DIRECTORY" != /* ]] || { echo 'runtime-directory must be workspace-relative' >&2; exit 1; }
@@ -120,17 +124,28 @@ runs:
             [[ -f "$runtime_dir/$file" && ! -L "$runtime_dir/$file" ]] || { echo "runtime-directory must contain a regular, non-symlink $file" >&2; exit 1; }
           done
           runtime_source=prebuilt-candidate
+          control_id=''
+          source_sha=''
         else
           runtime_dir="$VERIFIED_RUNTIME_DIRECTORY"
           [[ -d "$runtime_dir" ]] || { echo 'verified runtime directory is missing' >&2; exit 1; }
+          [[ -f "$runtime_dir/control.json" && ! -L "$runtime_dir/control.json" ]] || { echo 'verified runtime descriptor is missing or unsafe' >&2; exit 1; }
+          control_id="$VERIFIED_CONTROL_ID"
+          [[ "$control_id" =~ ^[0-9a-f]{64}$ ]] || { echo 'verified runtime control identity is missing or invalid' >&2; exit 1; }
+          source_sha="$SECUREFIX_RUNTIME_SHA"
           runtime_source=attested-release
         fi
         bin_dir="$(mktemp -d "$RUNNER_TEMP/securefix-bin.XXXXXX")"
         install -m 755 "$runtime_dir/securefix" "$bin_dir/securefix"
         install -m 644 "$runtime_dir/policy.json" "$bin_dir/policy.json"
+        if [[ -n "$control_id" ]]; then
+          install -m 644 "$runtime_dir/control.json" "$bin_dir/control.json"
+        fi
         echo "$bin_dir" >> "$GITHUB_PATH"
         echo "bin=$bin_dir" >> "$GITHUB_OUTPUT"
         echo "source=$runtime_source" >> "$GITHUB_OUTPUT"
+        echo "control-id=$control_id" >> "$GITHUB_OUTPUT"
+        echo "source-sha=$source_sha" >> "$GITHUB_OUTPUT"
     - name: Validate trusted policy path
       id: policy
       shell: bash
@@ -160,7 +175,15 @@ runs:
         INPUT_PR_BASE: ${{ inputs.pull-request-base }}
         INPUT_CUSTOM_JSON: ${{ inputs.custom-json }}
         SECUREFIX_POLICY_PATH_INPUT: ${{ steps.policy.outputs.path }}
+        SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source-sha }}
+        SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control-id }}
       run: |
+        if [[ -z "$SECUREFIX_SOURCE_SHA" ]]; then
+          unset SECUREFIX_SOURCE_SHA
+        fi
+        if [[ -z "$SECUREFIX_CONTROL_ID" ]]; then
+          unset SECUREFIX_CONTROL_ID
+        fi
         if [[ -n "$SECUREFIX_POLICY_PATH_INPUT" ]]; then
           export SECUREFIX_POLICY_PATH="$SECUREFIX_POLICY_PATH_INPUT"
         else
@@ -197,7 +220,15 @@ runs:
         SECUREFIX_ARTIFACT_NAME: ${{ steps.prepare.outputs.artifact_name }}
         SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server-repository }}
         SECUREFIX_POLICY_PATH_INPUT: ${{ steps.policy.outputs.path }}
+        SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source-sha }}
+        SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control-id }}
       run: |
+        if [[ -z "$SECUREFIX_SOURCE_SHA" ]]; then
+          unset SECUREFIX_SOURCE_SHA
+        fi
+        if [[ -z "$SECUREFIX_CONTROL_ID" ]]; then
+          unset SECUREFIX_CONTROL_ID
+        fi
         if [[ -n "$SECUREFIX_POLICY_PATH_INPUT" ]]; then
           export SECUREFIX_POLICY_PATH="$SECUREFIX_POLICY_PATH_INPUT"
         else

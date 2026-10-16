@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod control;
 #[cfg(test)]
 mod fixtures;
 pub mod policy;

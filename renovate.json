@@ -15,11 +15,11 @@
   "platformAutomerge": false,
   "lockFileMaintenance": {
     "enabled": true,
-    "automerge": true
+    "automerge": false
   },
   "packageRules": [
     {
-      "description": "Automerge non-major updates after required checks and policy approval",
+      "description": "Require owner merge commands for non-major updates",
       "matchUpdateTypes": [
         "minor",
         "patch",
@@ -27,7 +27,7 @@
         "pinDigest",
         "digest"
       ],
-      "automerge": true
+      "automerge": false
     },
     {
       "description": "Review major updates manually",

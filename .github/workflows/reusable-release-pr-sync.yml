@@ -33,5 +33,7 @@ jobs:
       - name: Sync release PR title and summary
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
         run: securefix release sync-pr

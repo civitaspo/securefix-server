@@ -27,6 +27,7 @@ struct Manifest {
     run_id: u64,
     run_attempt: u32,
     source_sha: String,
+    control: securefix::control::ControlRevision,
     accepted_at: DateTime<Utc>,
 }
 
@@ -54,6 +55,11 @@ impl Manifest {
         );
         validate_repository(&self.repository)?;
         validate_sha(&self.source_sha)?;
+        self.control.validate()?;
+        ensure!(
+            self.source_sha == self.control.source_sha,
+            "policy runtime source differs from its control revision"
+        );
         let age = Utc::now() - self.accepted_at;
         ensure!(
             age >= chrono::Duration::zero() && age < chrono::Duration::hours(1),
@@ -121,6 +127,11 @@ fn capture() -> Result<()> {
     let policy = Policy::active(&api)?;
     policy.repository(&repository)?.require(Capability::Merge)?;
     let source_sha = workflow::require_current_runtime(&api, REUSABLE)?;
+    let control = policy
+        .control
+        .clone()
+        .context("active control revision is missing")?;
+    securefix::control::ControlRevision::require_current(&api, &control)?;
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
     ensure!(
         repo["id"] == payload["repository"]["id"]
@@ -207,6 +218,7 @@ fn capture() -> Result<()> {
         run_id: std::env::var("GITHUB_RUN_ID")?.parse()?,
         run_attempt: std::env::var("GITHUB_RUN_ATTEMPT")?.parse()?,
         source_sha,
+        control,
         accepted_at: Utc::now(),
     };
     manifest.validate()?;
@@ -227,6 +239,7 @@ fn dispatch() -> Result<()> {
         policy.revision == manifest.source_sha,
         "policy request runtime is stale"
     );
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     policy
         .repository(&manifest.repository)?
         .require(Capability::Merge)?;
@@ -348,7 +361,8 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
         manifest.repository == repository
             && manifest.repository_id == repo["id"].as_u64().context("missing repo ID")?
             && manifest.run_id == run_id
-            && manifest.source_sha == policy.revision,
+            && manifest.source_sha == policy.revision
+            && policy.control.as_ref() == Some(&manifest.control),
         "policy manifest is not bound to its source"
     );
     let caller_sha = caller_revision(&run, manifest.repository_id, branch, &manifest.target)?;
@@ -366,17 +380,9 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
             serde_json::from_value(run["referenced_workflows"].clone())?;
         workflow::referenced_revision(&referenced, REUSABLE, &policy.revision)?;
     } else {
-        ensure!(
-            caller_sha == policy.revision,
-            "server policy workflow source is stale"
-        );
         let referenced: Vec<workflow::ReferencedWorkflow> =
             serde_json::from_value(run["referenced_workflows"].clone())?;
-        workflow::referenced_revision(
-            &referenced,
-            ".github/workflows/load-cli.yml",
-            &policy.revision,
-        )?;
+        workflow::referenced_revision(&referenced, ".github/workflows/load-cli.yml", caller_sha)?;
     }
     match &manifest.target {
         Target::PullRequest { base_ref, .. } => ensure!(
@@ -464,6 +470,7 @@ fn validate() -> Result<()> {
     let policy = Policy::active(&api)?;
     workflow::require_current_runtime(&api, WRAPPER)?;
     let manifest = source(&api, &policy)?;
+    securefix::control::ControlRevision::require_current(&api, &manifest.control)?;
     workflow::write_json("policy-check/manifest.json", &manifest)?;
     output(
         "repository_name",
@@ -480,6 +487,7 @@ fn apply() -> Result<()> {
     let policy = Policy::active(&read)?;
     workflow::require_current_runtime(&read, WRAPPER)?;
     let manifest = source(&read, &policy)?;
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let result: Result<()> = (|| match &manifest.target {
         Target::PullRequest {
             number,
@@ -495,11 +503,12 @@ fn apply() -> Result<()> {
                 head_sha,
             )?;
             ensure!(
-                crate::request::has_current_head_approval(
+                crate::request::has_current_head_approval_for_control(
                     &read,
                     &manifest.repository,
                     *number,
-                    head_sha
+                    head_sha,
+                    &manifest.control,
                 )?,
                 "approval for the current PR head is missing"
             );
@@ -514,12 +523,14 @@ fn apply() -> Result<()> {
         .unwrap_or_else(|| "Current head passed the active Securefix policy.".into());
     let write = GitHub::from_env("SECUREFIX_WRITE_TOKEN")?;
     workflow::require_current_runtime(&read, WRAPPER)?;
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     publish(
         &write,
         &manifest.repository,
         manifest.sha(),
         success,
         &summary,
+        &manifest.control,
     )?;
     if let Target::PullRequest {
         number, head_sha, ..
@@ -698,6 +709,7 @@ pub fn publish(
     sha: &str,
     success: bool,
     summary: &str,
+    control: &securefix::control::ControlRevision,
 ) -> Result<()> {
     let policy_app_id = config::trusted()?.deployment.checks.policy_app_id;
     validate_repository(repository)?;
@@ -717,7 +729,9 @@ pub fn publish(
         .filter(|c| c["name"] == CHECK && c["app"]["id"] == policy_app_id)
         .collect();
     ensure!(matches.len() <= 1, "duplicate policy check source");
-    let mut body = json!({"name":CHECK,"head_sha":sha,"status":"completed","conclusion":if success {"success"} else {"failure"},"output":{"title":if success {"Policy accepted"} else {"Policy rejected"},"summary":summary}});
+    control.validate()?;
+    let external_id = format!("{sha}:{}", control.identity()?);
+    let mut body = json!({"name":CHECK,"head_sha":sha,"external_id":external_id,"status":"completed","conclusion":if success {"success"} else {"failure"},"output":{"title":if success {"Policy accepted"} else {"Policy rejected"},"summary":summary}});
     if std::env::var_os("GITHUB_RUN_ID").is_some() {
         body["details_url"] = json!(server_run_url()?);
     }
@@ -775,6 +789,21 @@ fn require_current_target(
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    fn test_control() -> securefix::control::ControlRevision {
+        securefix::control::ControlRevision {
+            version: 1,
+            generation: 1,
+            source_sha: "b".repeat(40),
+            policy_sha256: "1".repeat(64),
+            archive_sha256: "2".repeat(64),
+            release_id: 3,
+            asset_id: 4,
+            publisher_run_id: 5,
+            verification_run_id: 6,
+            previous: "0".repeat(64),
+        }
+    }
 
     fn report_pr(sha: &str) -> Value {
         json!({"state":"open","head":{"sha":sha}})
@@ -854,10 +883,7 @@ mod tests {
                 existing_policy_comment(old_id, &old_body), unmarked, owner_report
             ])),
             Route::get("/repos/civitaspo/example/pulls/7", report_pr(&sha)),
-            Route::get(
-                format!("/repos/{}/commits/{}", trusted.deployment.server.repository, trusted.deployment.server.default_branch),
-                json!({"sha":sha}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST", "/repos/civitaspo/example/issues/7/comments", 201,
                 json!({"id":104,"body":expected_body}),
@@ -867,10 +893,7 @@ mod tests {
                 format!("/repos/civitaspo/example/issues/comments/{old_id}"),
                 existing_policy_comment(old_id, &old_body),
             ),
-            Route::get(
-                format!("/repos/{}/commits/{}", trusted.deployment.server.repository, trusted.deployment.server.default_branch),
-                json!({"sha":sha}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST", "/graphql", 200,
                 json!({"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}),
@@ -892,7 +915,6 @@ mod tests {
     #[test]
     fn successful_policy_report_posts_nothing_and_hides_prior_failure() {
         let sha = "a".repeat(40);
-        let trusted = config::trusted().unwrap();
         let id = 101;
         let body = format!("{COMMENT_MARKER}\nOld failure");
         let gql = "mutation($input:MinimizeCommentInput!){minimizeComment(input:$input){minimizedComment{isMinimized}}}";
@@ -906,10 +928,7 @@ mod tests {
                 format!("/repos/civitaspo/example/issues/comments/{id}"),
                 existing_policy_comment(id, &body),
             ),
-            Route::get(
-                format!("/repos/{}/commits/{}", trusted.deployment.server.repository, trusted.deployment.server.default_branch),
-                json!({"sha":sha}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST", "/graphql", 200,
                 json!({"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}),
@@ -1062,7 +1081,8 @@ mod tests {
         let check_path = format!(
             "/repos/civitaspo/example/commits/{sha}/check-runs?per_page=100&filter=latest&check_name={CHECK}&app_id={policy_app_id}"
         );
-        let mut body = json!({"name":CHECK,"status":"completed","conclusion":"failure","output":{"title":"Policy rejected","summary":"Changed head"}});
+        let control = test_control();
+        let mut body = json!({"name":CHECK,"external_id":format!("{sha}:{}", control.identity().unwrap()),"status":"completed","conclusion":"failure","output":{"title":"Policy rejected","summary":"Changed head"}});
         if std::env::var_os("GITHUB_RUN_ID").is_some() {
             body["details_url"] = json!(server_run_url().unwrap());
         }
@@ -1071,10 +1091,7 @@ mod tests {
                 check_path,
                 json!({"total_count":2,"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":99}}]}),
             ),
-            Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                json!({"sha":sha}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "PATCH",
                 "/repos/civitaspo/example/check-runs/17",
@@ -1089,6 +1106,7 @@ mod tests {
             &sha,
             false,
             "Changed head",
+            &control,
         )
         .unwrap();
         fixture.finish();
@@ -1108,7 +1126,17 @@ mod tests {
             ),
             json!({"total_count":2,"check_runs":[{"id":17,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}},{"id":18,"name":CHECK,"app":{"id":crate::config::trusted().unwrap().deployment.checks.policy_app_id}}]}),
         )]);
-        assert!(publish(&fixture.api, "civitaspo/example", &sha, true, "Accepted").is_err());
+        assert!(
+            publish(
+                &fixture.api,
+                "civitaspo/example",
+                &sha,
+                true,
+                "Accepted",
+                &test_control()
+            )
+            .is_err()
+        );
         fixture.finish();
     }
 
@@ -1126,7 +1154,17 @@ mod tests {
             ),
             json!({"total_count":101,"check_runs":[]}),
         )]);
-        assert!(publish(&fixture.api, "forge/example", &sha, true, "Accepted").is_err());
+        assert!(
+            publish(
+                &fixture.api,
+                "forge/example",
+                &sha,
+                true,
+                "Accepted",
+                &test_control()
+            )
+            .is_err()
+        );
         fixture.finish();
     }
     #[test]
@@ -1143,6 +1181,18 @@ mod tests {
             run_id: 1,
             run_attempt: 1,
             source_sha: "b".repeat(40),
+            control: securefix::control::ControlRevision {
+                version: 1,
+                generation: 1,
+                source_sha: "b".repeat(40),
+                policy_sha256: "1".repeat(64),
+                archive_sha256: "2".repeat(64),
+                release_id: 3,
+                asset_id: 4,
+                publisher_run_id: 5,
+                verification_run_id: 6,
+                previous: "0".repeat(64),
+            },
             accepted_at: Utc::now(),
         };
         assert!(manifest.validate().is_ok());

@@ -8,10 +8,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: merge-${{ github.event.label.description }}
-  cancel-in-progress: false
-
 jobs:
   build:
     if: startsWith(github.event.label.name, 'merge-request-')
@@ -20,11 +16,15 @@ jobs:
       contents: read
       attestations: read
 
-  merge:
+  authorize:
     needs: build
     if: needs.build.result == 'success' && startsWith(github.event.label.name, 'merge-request-')
     runs-on: ubuntu-latest
     environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       issues: read
@@ -32,11 +32,15 @@ jobs:
       actions: read
       checks: read
       statuses: read
-    timeout-minutes: 70
+    timeout-minutes: 15
     outputs:
-      self_merged: ${{ steps.validate.outputs.repository == 'civitaspo/securefix-server' && steps.apply.outcome == 'success' }}
+      repository: ${{ steps.validate.outputs.repository }}
+      repository_name: ${{ steps.validate.outputs.repository_name }}
+      manifest_artifact_id: ${{ steps.upload.outputs.artifact-id }}
     env:
       SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -81,24 +85,125 @@ jobs:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_AUTHORIZATION_TOKEN: ${{ steps.authorization-token.outputs.token }}
         run: securefix merge authorize
-      - name: Wait for current checks and review approval
-        id: wait
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
         if: steps.authorize.outcome == 'success'
+        with:
+          name: merge-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: merge/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  wait:
+    needs: [build, authorize]
+    if: needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    timeout-minutes: 70
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.manifest_artifact_id }}
+          path: merge
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Wait for current checks and review approval
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
         run: securefix merge wait
+
+  apply:
+    needs: [build, authorize, wait]
+    if: always() && needs.authorize.result == 'success' && needs.wait.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    timeout-minutes: 15
+    outputs:
+      self_merged: ${{ needs.authorize.outputs.repository == 'civitaspo/securefix-server' && steps.apply.outcome == 'success' }}
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.manifest_artifact_id }}
+          path: merge
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        if: steps.wait.outcome == 'success'
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          permission-actions: read
+          permission-administration: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: needs.wait.result == 'success'
         id: merge-token
         with:
           app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ steps.validate.outputs.repository_name }}
+          repositories: ${{ needs.authorize.outputs.repository_name }}
           permission-contents: write
           permission-pull-requests: write
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        if: steps.wait.outcome == 'success' && steps.validate.outputs.repository == 'civitaspo/securefix-server'
+        if: needs.wait.result == 'success' && needs.authorize.outputs.repository == 'civitaspo/securefix-server'
         id: self-cleanup-token
         with:
           app-id: '3872533'
@@ -108,44 +213,46 @@ jobs:
           permission-issues: write
       - name: Consume the self-target request label before apply
         id: self-cleanup
-        if: steps.wait.outcome == 'success' && steps.validate.outputs.repository == 'civitaspo/securefix-server'
+        if: needs.wait.result == 'success' && needs.authorize.outputs.repository == 'civitaspo/securefix-server'
         env:
           GITHUB_TOKEN: ${{ steps.self-cleanup-token.outputs.token }}
         run: securefix merge cleanup
       - name: Merge the accepted SHA
         id: apply
-        if: steps.wait.outcome == 'success' && (steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.self-cleanup.outcome == 'success')
+        if: needs.wait.result == 'success' && (needs.authorize.outputs.repository != 'civitaspo/securefix-server' || steps.self-cleanup.outcome == 'success')
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
         run: securefix merge apply
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        if: always() && steps.validate.outcome == 'success' && (steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.apply.outcome != 'success')
+        if: always() && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
         id: notify-token
         with:
           app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
-          repositories: ${{ steps.validate.outputs.repository_name }}
+          repositories: ${{ needs.authorize.outputs.repository_name }}
           permission-issues: write
           permission-pull-requests: write
       - name: Report the terminal result
-        if: always() && steps.validate.outcome == 'success' && steps.notify-token.outcome == 'success' && (steps.validate.outputs.repository != 'civitaspo/securefix-server' || steps.apply.outcome != 'success')
+        if: always() && steps.notify-token.outcome == 'success' && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
         env:
           SECUREFIX_NOTIFY_TOKEN: ${{ steps.notify-token.outputs.token }}
-          SECUREFIX_MERGE_RESULT: ${{ steps.apply.outcome }}
+          SECUREFIX_MERGE_RESULT: ${{ needs.wait.result == 'success' && steps.apply.outcome || 'wait-failed' }}
           SECUREFIX_MERGE_SHA: ${{ steps.apply.outputs.merge_sha }}
         run: securefix merge notify
 
   cleanup:
-    needs: [build, merge]
-    if: always() && needs.build.result == 'success' && startsWith(github.event.label.name, 'merge-request-') && needs.merge.outputs.self_merged != 'true'
+    needs: [build, apply]
+    if: always() && needs.build.result == 'success' && startsWith(github.event.label.name, 'merge-request-') && needs.apply.outputs.self_merged != 'true'
     runs-on: ubuntu-latest
     permissions:
       issues: write
     timeout-minutes: 5
     env:
       SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
