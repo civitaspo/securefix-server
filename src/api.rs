@@ -12,12 +12,6 @@ use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
 #[cfg(test)]
 const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
 
-const MAX_API_ATTEMPTS: usize = 3;
-
-fn api_retry_delay(attempt: usize) -> Duration {
-    Duration::from_secs((attempt + 1) as u64)
-}
-
 pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check -->";
 
 #[derive(Clone)]
@@ -83,13 +77,37 @@ impl GitHub {
 
     pub fn new(base: &str, token: String) -> Result<Self> {
         let base = base.trim_end_matches('/').to_string();
-        let _ = reqwest::Url::parse(&base)?
+        let retry_host = reqwest::Url::parse(&base)?
             .host_str()
-            .context("GitHub API base URL has no host")?;
+            .context("GitHub API base URL has no host")?
+            .to_owned();
         Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
                 .redirect(Policy::none())
+                .retry(
+                    reqwest::retry::for_host(retry_host)
+                        .max_retries_per_request(2)
+                        .classify_fn(|request| {
+                            // POST /graphql is read-only because request() rejects mutations.
+                            let read_only =
+                                matches!(request.method(), &Method::GET | &Method::HEAD)
+                                    || (request.method() == &Method::POST
+                                        && request.uri().path().ends_with("/graphql"));
+                            let transport_error = request
+                                .error()
+                                .and_then(|error| error.downcast_ref::<reqwest::Error>())
+                                .is_some_and(|error| error.is_request() || error.is_connect());
+                            let server_error = request
+                                .status()
+                                .is_some_and(|status| status.is_server_error());
+                            if read_only && (transport_error || server_error) {
+                                request.retryable()
+                            } else {
+                                request.success()
+                            }
+                        }),
+                )
                 .build()?,
             base,
             token,
@@ -189,60 +207,27 @@ impl GitHub {
             self.require_write_target(path)?;
             self.require_current_revision()?;
         }
-        // A 5xx may follow a committed write, so retry only idempotent reads.
-        let retryable = matches!(&method, &Method::GET | &Method::HEAD) || read_only_graphql;
-        for attempt in 0..MAX_API_ATTEMPTS {
-            let mut request = self.builder(method.clone(), path)?;
-            if let Some(body) = body {
-                request = request.json(body);
-            }
-            let response = match request.send() {
-                Ok(response) => response,
-                Err(error)
-                    if retryable
-                        && attempt + 1 < MAX_API_ATTEMPTS
-                        && (error.is_request() || error.is_connect()) =>
-                {
-                    eprintln!(
-                        "GitHub {method} request failed; retrying attempt {}/{} after {}s",
-                        attempt + 2,
-                        MAX_API_ATTEMPTS,
-                        attempt + 1
-                    );
-                    std::thread::sleep(api_retry_delay(attempt));
-                    continue;
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| format!("GitHub {method} {path}"));
-                }
-            };
-            let status = response.status();
-            if retryable && status.is_server_error() && attempt + 1 < MAX_API_ATTEMPTS {
-                eprintln!(
-                    "GitHub {method} returned {status}; retrying attempt {}/{} after {}s",
-                    attempt + 2,
-                    MAX_API_ATTEMPTS,
-                    attempt + 1
-                );
-                drop(response);
-                std::thread::sleep(api_retry_delay(attempt));
-                continue;
-            }
-            if !status.is_success() {
-                return Err(ApiError {
-                    status,
-                    method,
-                    path: path.to_string(),
-                }
-                .into());
-            }
-            let bytes = bounded_read(response, 16 * 1024 * 1024)?;
-            if bytes.is_empty() {
-                return Ok(Value::Null);
-            }
-            return serde_json::from_slice(&bytes).context("invalid GitHub JSON");
+        let mut request = self.builder(method.clone(), path)?;
+        if let Some(body) = body {
+            request = request.json(body);
         }
-        unreachable!("the final API attempt cannot be retried")
+        let response = request
+            .send()
+            .with_context(|| format!("GitHub {method} {path}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ApiError {
+                status,
+                method,
+                path: path.to_string(),
+            }
+            .into());
+        }
+        let bytes = bounded_read(response, 16 * 1024 * 1024)?;
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_slice(&bytes).context("invalid GitHub JSON")
     }
 
     fn require_current_revision(&self) -> Result<()> {
