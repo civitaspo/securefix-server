@@ -3,6 +3,8 @@
 Status: accepted.
 Supersedes ADR 0005's upstream implementation dependency.
 
+The current-server-revision checks below describe the runtime-selection contract that preceded ADR 0009. The native protocol, candidate API boundary, and artifact rules remain the context for that decision.
+
 The Rust executable owns artifact creation and validation, signed repair commits, pull request reconciliation and runtime distribution. Workflows isolate credentials and invoke the executable. The external metadata and fixed-file artifact envelope remains readable so existing clients can migrate without a simultaneous fleet deployment.
 
 `policy.json` is the only repository capability registry. The duplicated upstream configuration is removed. Same-branch repairs bind the destination to the source run's exact head. GitHub's `createCommitOnBranch` compares that expected head atomically and supplies a verified signature. A release branch has its own validated destination tip; its source default head and pinned workflow provenance are checked independently before applying the destination CAS.

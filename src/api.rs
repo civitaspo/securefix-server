@@ -17,9 +17,16 @@ pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check 
 #[derive(Clone)]
 enum WriteContext {
     ReadOnly,
-    ClientLabel { server: String },
-    Production(Option<String>),
-    Scratch { candidate_sha: String },
+    ClientLabel {
+        server: String,
+    },
+    Production {
+        revision: Option<String>,
+        control_id: Option<String>,
+    },
+    Scratch {
+        candidate_sha: String,
+    },
 }
 
 #[derive(Debug)]
@@ -67,7 +74,10 @@ impl GitHub {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
         let mut api = Self::new("https://api.github.com", token)?;
-        api.writes = WriteContext::Production(std::env::var("SECUREFIX_SOURCE_SHA").ok());
+        api.writes = WriteContext::Production {
+            revision: std::env::var("SECUREFIX_SOURCE_SHA").ok(),
+            control_id: std::env::var("SECUREFIX_CONTROL_ID").ok(),
+        };
         Ok(api)
     }
 
@@ -114,7 +124,21 @@ impl GitHub {
 
     pub fn with_runtime_revision(mut self, revision: &str) -> Result<Self> {
         crate::policy::validate_sha(revision)?;
-        self.writes = WriteContext::Production(Some(revision.to_owned()));
+        self.writes = WriteContext::Production {
+            revision: Some(revision.to_owned()),
+            control_id: std::env::var("SECUREFIX_CONTROL_ID").ok(),
+        };
+        Ok(self)
+    }
+
+    pub fn with_control_revision(
+        mut self,
+        control: &crate::control::ControlRevision,
+    ) -> Result<Self> {
+        self.writes = WriteContext::Production {
+            revision: Some(control.source_sha.clone()),
+            control_id: Some(control.identity()?),
+        };
         Ok(self)
     }
 
@@ -228,23 +252,42 @@ impl GitHub {
     }
 
     fn require_current_revision(&self) -> Result<()> {
-        let expected = match &self.writes {
+        let (expected, expected_control) = match &self.writes {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
             WriteContext::ClientLabel { .. } => return Ok(()),
             WriteContext::Scratch { .. } => return Ok(()),
-            WriteContext::Production(revision) => revision
-                .as_deref()
-                .context("missing trusted runtime revision before write")?,
+            WriteContext::Production {
+                revision,
+                control_id,
+            } => (
+                revision
+                    .as_deref()
+                    .context("missing trusted runtime revision before write")?,
+                control_id
+                    .as_deref()
+                    .context("missing trusted control identity before write")?,
+            ),
         };
         crate::policy::validate_sha(expected)?;
         let server = &crate::config::trusted()?.deployment.server;
-        let commit: Value = self.get(&format!(
-            "/repos/{}/commits/{}",
-            server.repository, server.default_branch
-        ))?;
+        let bytes = self.content(
+            &server.repository,
+            "control/active.json",
+            &server.default_branch,
+        )?;
         ensure!(
-            commit["sha"] == expected,
-            "runtime is no longer current; write denied"
+            bytes.len() <= 16 * 1024,
+            "control descriptor exceeds size limit"
+        );
+        let active: crate::control::ControlRevision = serde_json::from_slice(&bytes)?;
+        use sha2::Digest;
+        let policy_sha =
+            crate::hex_encode(sha2::Sha256::digest(crate::config::trusted_policy_bytes()?));
+        ensure!(
+            active.source_sha == expected
+                && active.identity()? == expected_control
+                && active.policy_sha256 == policy_sha,
+            "control revision is no longer current; write denied"
         );
         Ok(())
     }
@@ -310,7 +353,7 @@ impl GitHub {
         ensure!(
             matches!(
                 self.writes,
-                WriteContext::Production(_) | WriteContext::Scratch { .. }
+                WriteContext::Production { .. } | WriteContext::Scratch { .. }
             ),
             "policy comments can only be minimized by the server"
         );
@@ -791,10 +834,7 @@ mod tests {
                     "user":{"id":policy.server_bot_id,"login":policy.deployment.server_bot_login,"type":"Bot"}
                 }),
             ),
-            Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                serde_json::json!({"sha":"a".repeat(40)}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST",
                 "/graphql",
@@ -805,7 +845,10 @@ mod tests {
                 "query":query,"variables":{"input":{"subjectId":node_id,"classifier":"OUTDATED"}}
             })),
         ]);
-        fixture.api.writes = WriteContext::Production(Some("a".repeat(40)));
+        fixture.api.writes = WriteContext::Production {
+            revision: Some("a".repeat(40)),
+            control_id: Some(Fixture::control_revision().identity().unwrap()),
+        };
         fixture
             .api
             .minimize_policy_comment(repository, number, comment_id)
@@ -834,7 +877,10 @@ mod tests {
                 format!("/repos/{repository}/issues/comments/{comment_id}"),
                 comment,
             )]);
-            fixture.api.writes = WriteContext::Production(Some("a".repeat(40)));
+            fixture.api.writes = WriteContext::Production {
+                revision: Some("a".repeat(40)),
+                control_id: Some(Fixture::control_revision().identity().unwrap()),
+            };
             assert!(
                 fixture
                     .api
@@ -862,12 +908,15 @@ mod tests {
                     "user":{"id":policy.server_bot_id,"login":policy.deployment.server_bot_login,"type":"Bot"}
                 }),
             ),
-            Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                serde_json::json!({"sha":"b".repeat(40)}),
-            ),
+            Route::active_control(&crate::control::ControlRevision {
+                source_sha: "b".repeat(40),
+                ..Fixture::control_revision()
+            }),
         ]);
-        fixture.api.writes = WriteContext::Production(Some("a".repeat(40)));
+        fixture.api.writes = WriteContext::Production {
+            revision: Some("a".repeat(40)),
+            control_id: Some(Fixture::control_revision().identity().unwrap()),
+        };
         assert!(
             fixture
                 .api
@@ -1031,21 +1080,18 @@ mod tests {
         for (signed, parent, expected_ok) in
             [(true, 'a', true), (false, 'a', false), (true, 'c', false)]
         {
-            let fixture = Fixture::new(vec![
-                Route::get(
-                    "/repos/civitaspo/securefix-server/commits/main",
-                    serde_json::json!({"sha":"a".repeat(40)}),
-                ),
-                Route::request(
-                    "POST",
-                    "/graphql",
-                    200,
-                    serde_json::json!({"data":{"createCommitOnBranch":{"commit":{
-                        "oid":"b".repeat(40), "parents":{"nodes":[{"oid":parent.to_string().repeat(40)}]},
-                        "signature":{"isValid":signed,"state":"VALID"}
-                    }}}}),
-                ),
-            ]);
+            let mut fixture = Fixture::new(vec![Route::request(
+                "POST",
+                "/graphql",
+                200,
+                serde_json::json!({"data":{"createCommitOnBranch":{"commit":{
+                    "oid":"b".repeat(40), "parents":{"nodes":[{"oid":parent.to_string().repeat(40)}]},
+                    "signature":{"isValid":signed,"state":"VALID"}
+                }}}}),
+            )]);
+            fixture.api.writes = WriteContext::Scratch {
+                candidate_sha: "a".repeat(40),
+            };
             let result = fixture.api.create_commit(
                 SCRATCH_REPOSITORY,
                 "fixture",
@@ -1101,10 +1147,7 @@ mod tests {
             (Method::DELETE, "DELETE"),
         ] {
             let fixture = Fixture::new(vec![
-                Route::get(
-                    "/repos/civitaspo/securefix-server/commits/main",
-                    serde_json::json!({"sha":"a".repeat(40)}),
-                ),
+                Route::active_control(&Fixture::control_revision()),
                 Route::disconnect(method_name, path),
             ]);
 
@@ -1136,9 +1179,11 @@ mod tests {
     fn every_write_rejects_a_stale_runtime_before_sending_the_mutation() {
         use crate::fixtures::{Fixture, Route};
         for method in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {
-            let fixture = Fixture::new(vec![Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                serde_json::json!({"sha":"b".repeat(40)}),
+            let fixture = Fixture::new(vec![Route::active_control(
+                &crate::control::ControlRevision {
+                    source_sha: "b".repeat(40),
+                    ..Fixture::control_revision()
+                },
             )]);
             assert!(
                 fixture
@@ -1154,13 +1199,10 @@ mod tests {
         }
     }
     #[test]
-    fn a_current_runtime_can_write_and_read_only_connections_cannot() {
+    fn unchanged_active_control_allows_write_without_a_main_tip_lookup() {
         use crate::fixtures::{Fixture, Route};
         let fixture = Fixture::new(vec![
-            Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                serde_json::json!({"sha":"a".repeat(40)}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST",
                 "/repos/civitaspo/example/labels",
@@ -1182,6 +1224,44 @@ mod tests {
         assert!(
             read.post::<Value>("/repos/civitaspo/example/labels", &serde_json::json!({}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn same_source_with_a_new_control_generation_is_stale_before_write() {
+        use crate::fixtures::{Fixture, Route};
+        let captured = Fixture::control_revision();
+        let active = crate::control::ControlRevision {
+            generation: 2,
+            previous: captured.identity().unwrap(),
+            ..captured
+        };
+        let fixture = Fixture::new(vec![Route::active_control(&active)]);
+        assert!(
+            fixture
+                .api
+                .post::<Value>(
+                    "/repos/civitaspo/example/labels",
+                    &serde_json::json!({"name":"request"})
+                )
+                .is_err()
+        );
+        fixture.finish();
+    }
+
+    #[test]
+    fn production_write_without_captured_control_identity_fails_closed() {
+        let mut api = GitHub::new("http://127.0.0.1:1", "fixture-token".into()).unwrap();
+        api.writes = WriteContext::Production {
+            revision: Some("a".repeat(40)),
+            control_id: None,
+        };
+        assert!(
+            api.post::<Value>(
+                "/repos/civitaspo/example/labels",
+                &serde_json::json!({"name":"request"})
+            )
+            .is_err()
         );
     }
 }

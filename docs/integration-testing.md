@@ -30,13 +30,32 @@ first SemVer cutover; production consumers require canonical `v<version>` tags.
 The baseline build does not download or attest the published Release asset.
 Production loading and the separate published-client test verify archive bytes
 and attestation. This test creates no candidate Release.
-The prepare run uploads its `state.json` as the
-`scratch-fixtures` artifact.
+The prepare run uploads `fixtures/state.json` as `scratch-fixtures` and uploads
+`control-probe/control-verification.json` separately as `control-probe`. Download both
+artifacts from the completed prepare run:
 
-Post an exact owner `/approve` and `/merge` comment to the positive PR, plus an
-exact owner `/merge` comment to the stale-head PR. The positive PR also needs a
-current non-author review approval and the required checks. Run the workflow's
-verify phase with the successful prepare run ID. A validator built from the captured current default-branch source fetches state
+```sh
+gh run download <prepare-run-id> --name scratch-fixtures --dir fixtures
+gh run download <prepare-run-id> --name control-probe --dir control-probe
+```
+
+Read the generation-one control ID from `control-probe/control-verification.json` at
+`.generation_one`. Read the positive and stale PR numbers and exact heads from
+`fixtures/state.json` at `.positive.number`, `.positive.head_sha`, `.stale.number`, and
+`.stale.head_sha`. The configured repository owner (`deployment.owner_login`) must
+submit an `APPROVED` review on the positive PR at its current head. The scratch
+harness uses that owner as its User reviewer. Its body must include this exact marker line, replacing the placeholder
+with `.generation_one` from the control-probe artifact:
+
+```text
+<!-- securefix:control-review:<control-id> -->
+```
+
+The PR review's `commit_id` binds that approval to the current head; the marker binds it
+to the control generation. A plain UI approval without the marker is rejected. Then post
+exact owner `/approve` and `/merge` comments on the positive PR, plus exact owner `/merge` on the stale-head
+PR. Run the workflow's verify phase with the successful prepare run ID. A validator
+built from the captured current default-branch source fetches state
 only from that exact successful owner-run `workflow_dispatch`, validates the
 server repository ID, owner actor, workflow path, producer SHA, the configured default branch or
 SHA-named frozen integration branch, and single bounded artifact. Prepare also
@@ -46,20 +65,66 @@ it is used. The validator selects the candidate binary by its immutable artifact
 Only the validator receives the server repository read token; the candidate receives
 only installation tokens scoped to the scratch repository. The candidate
 SHA remains an independent state binding. It then checks commit signatures, current-head
-authorization, merge readiness, native GitHub auto-merge, stale-head rejection, replay
+authorization, merge readiness, rejection of native GitHub auto-merge, stale-head rejection, replay
 rejection, and exact distribution workflow bytes. The distribution PR runs actual
 `pinact run --verify-comment` and must have a successful Actions `status-check`.
-The positive PR queues auto-merge while its required policy check is absent, proves
-it remains open, publishes that check, and waits for GitHub to merge it. The stale
-PR advances after auto-merge is queued and must reject the old accepted head.
+The positive PR first proves it is not merge-ready while its required policy check is
+absent. After publishing the check and confirming all merge gates, the harness requires
+GitHub to reject a native auto-merge request and verifies that no request was queued.
+The scratch Server App then merges the ready PR directly with the accepted head SHA.
+For stale-head rejection, the other PR advances after its head was accepted; a direct
+Server App merge using that old SHA must fail and leave the PR open and unmerged.
 The harness closes any remaining test
 PRs and deletes all three test branches after collecting evidence.
+
+After candidate output validation succeeds, both the prepare and verify workflows run
+the separate `control-probe` and upload an artifact containing only
+`control-verification.json`. A prepare run's `scratch-fixtures` artifact contains only
+`state.json`; a successful verify run also contains `verification.json`. The probe
+creates three scratch control generations,
+checks that an unrelated source advance leaves the active descriptor bytes unchanged,
+and confirms that a stale expected-head update is rejected without changing the
+branch tip or descriptor. It then changes the source identity and restores the first
+source identity in generation three, proving that the resulting control identity is
+new rather than replayed. The strict schema contains `version`, `repository`,
+`candidate_sha`, `branch`, `base_sha`, the three generation commit SHAs, the three
+generation identities, and booleans `source_advance_kept_descriptor`,
+`expected_head_conflict_rejected`, and `stale_identity_rejected_after_aba`. Its
+`production_publication_verified`, `production_activation_verified`, and
+`distribution_verified` fields are all `false`: this scratch-only probe does not
+publish or activate a production runtime and does not exercise distribution.
+
+For the initial descriptor rehearsal, dispatch `testing-securefix-server.yml` with
+`phase=bootstrap` from protected `main`. This mode cannot use the usual current-main
+`validate-producer` baseline because that would make the proposed runtime validate its
+own initial trust chain. It instead downloads the pinned v0.2.20 baseline (release ID
+`414653308`, asset ID `646481902`, size `3964894`, archive SHA-256
+`1f0f991e766e287b1ff55cf8cbda05982c0ddb90295f988081bf5b85a480d96c`) and checks its
+GitHub attestation and runtime identity against source
+`e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`. Before minting scratch App tokens, the
+fixed bootstrap helper checks the owner dispatch, current main SHA, and absent active
+descriptor. The candidate runtime prepares and verifies the integration fixtures; the
+pinned runtime validates their output files. The candidate also runs the scratch-only
+`control-probe`. This test mode does not publish or activate production control, and a
+green result does not establish production distribution or the published client loader.
+The initial bootstrap proposal's archive qualification separately treats the candidate
+archive as data and never executes it.
+
+In `phase=bootstrap`, the same instructions apply while the run is in progress: the
+workflow uploads `control-probe` and the state-only `bootstrap-fixture-heads` artifact,
+then prints both JSON files in the run summary before candidate verification waits for
+the review and owner commands. Download them from that run into explicit directories:
+`gh run download <run-id> --name control-probe --dir control-probe` and
+`gh run download <run-id> --name bootstrap-fixture-heads --dir fixtures`. The paths
+and fields are then `control-probe/control-verification.json` `.generation_one` and
+`fixtures/state.json` fixture PR numbers/heads. The required review marker and owner
+comments are scratch fixture controls, not production activation approval.
 
 The harness invokes production PR authorization, merge-state, readiness, and
 distribution rendering/validation functions. It does not claim that a scratch
 workflow is a production request source: the source-run and reusable-workflow
 artifact provenance chain is tested by its own fixtures because the scratch
-caller is not the production caller workflow. The auto-merge mutation binds the
+caller is not the production caller workflow. The direct merge mutation binds the
 accepted head SHA and uses squash merge, but does not publish a runtime tag/release.
 The native repair apply core runs against GitHub with a verified signed commit,
 exact contents and an idempotent retry. Release tagging uses the production annotated-tag
@@ -107,12 +172,7 @@ and creates its request label in scratch. The trusted verifier independently rea
 the source artifact and scratch label, checks exact metadata and file bytes, and
 uploads `client-verification.json`.
 
-Candidate testing uses `client_runtime: candidate-artifact`. After stable publication,
-repeat prepare and verify with `client_runtime: published-release`; that leaves the
-Action's candidate-directory override empty and exercises Release download,
-attestation verification, preparation, upload and dispatch. Completion requires this
-published-runtime client test, successful consumer pinact CI and actual scratch
-auto-merge. Fixture preparation and distribution success alone are insufficient.
+Candidate testing uses `client_runtime: candidate-artifact`; that path skips published descriptor and release loading. The live `published-release` loader path cannot be verified until the initial active descriptor exists. After bootstrap, run a published-release prepare and verify to cover descriptor selection, publisher-run validation, Release download, attestation verification, preparation, upload, and dispatch. Record that run separately; candidate-artifact smoke results do not stand in for it. The bootstrap and published-loader end-to-end gate remain unverified.
 
 The distribution fixture also migrates the three-file autofix workflow call chain.
 Its scratch-only job deliberately changes a tracked workflow, requires the native

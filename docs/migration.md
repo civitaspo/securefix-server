@@ -5,6 +5,8 @@ There is one execution path for each operation; old inline scripts and legacy al
 [`policy.json`](../policy.json) grants exact repository capabilities for release, settings, approval, merge, and Securefix.
 Rust applies branch and source-provenance validation directly; there is no second allowlist or upstream runtime configuration.
 
+The contract table below records the earlier Rust migration. Its current-main runtime selection was superseded by the active-control proposal in [ADR 0009](adr/0009-active-control-revision.md); the operational sequence later in this document is the proposed lifecycle and is not evidence of deployment.
+
 ## Contract changes
 
 | Previous contract | New contract |
@@ -24,40 +26,113 @@ PR CI repairs stay on their source non-default branch. A pinned release-PR sourc
 
 The Securefix client may dispatch a request from a CI run that will deliberately conclude failure. Approval, merge and release publication retain their separate successful-source-run requirement. See the [native protocol decision](adr/0008-native-securefix.md).
 
-## Deployment sequence
+## Active control lifecycle
 
-1. Run the [scratch verification CI](testing.md) on the reviewed candidate without publishing a Release. Review and land this runtime while privileged processing is stopped. Disable the schedule and controlled-merges activation during staging; the automatic schedule cannot reactivate a disabled restriction. Once the current main revision is stable, manually dispatch `Publish Runtime` on main to build, attest, and publish that SHA before privileged lifecycle testing or updating client pins. Confirm `Load CLI` verifies the resulting Release without compilation. No operational fallback build is available.
-2. Configure the existing secrets and confirm both Apps' repository installations and requested permissions. Enable immutable releases for every release-capable repository through settings reconciliation before staging publication. Provider signing uses the existing GPG secrets in `main`; the signing job references no Server App key and receives no client write token.
-3. Run candidate integration against the fixed scratch repository using its scoped test context before production merge. No policy edit or candidate Release is required. Stable runtime publication starts caller distribution and the server default-head Policy Check. The distributor validates and automatically merges its exact canonical caller PRs under the upgrade procedure below. The PRs add `policy-check.yml` with PR-target and default-branch push triggers, minimum caller permissions, the full runtime SHA, and the release PR-number retry contract. Confirm `SECUREFIX_CLIENT_PRIVATE_KEY` is present in each caller.
-4. Exercise the runtime on scratch before making checks mandatory. Verify valid signed approval/merge, unauthorized and edited commands, reruns/replays, changed heads, force-push-and-return, wrong source workflow/pin, malformed artifacts, unsigned parents, failed/pending CI, and natural fixed-deadline timeout. For a non-exempt actor, authorize head A, update to sensitive B, and verify that direct merge is rejected until B gets new owner authorization. For an exempt Renovate update, the new head must still obtain its own approval and successful required checks.
-5. Stage both release strategies. Confirm a merged release PR produces the expected annotated tag and release. For Sigma, compare all 13 ZIP names and four archive entries, Terraform manifest, checksum names, GPG signature and Registry import. Test a matching partial draft retry and rejection of different bytes or extra assets. Confirm client hooks never run in sign/publish.
-6. Reconcile default protections and read back the App-bound check sources, stale-review dismissal, signed commits, linear history, squash settings, bot collaborator access, and tag protection. Obtain successful default-head checks for every configured repository at the current wrapper pins.
-7. Dispatch settings with an empty repository input and `merge_controls_ready: true` only after those staging checks. The CLI checks the entire capability set and current operational state, applies clients first, and applies the server last. Read back each resulting ruleset and test ordinary Renovate automerge without widening its existing exclusions.
-8. Clean up test fixtures and any one-time frozen bootstrap branch/environment allowance, promote the stable revision, confirm its generated caller updates were applied, and resume processing. Each subsequent server commit also requires new client pins.
+The active control proposal separates the protected-main source tree from the runtime currently authorized to perform privileged work. `control/active.json` identifies the source SHA and bundled policy digest, the published archive digest and immutable release and asset IDs, the publisher and scratch-verification run IDs, its generation, and the previous control identity. Ordinary main commits leave this descriptor unchanged. The runtime uses the policy snapshot in its attested archive and does not fetch live `policy.json` from main.
 
-GitHub deployment, token issuance, real merges, signing, publication, and fleet activation are not performed by local implementation checks.
-The readiness input records operator attestation; API preflight does not prove those lifecycle tests occurred.
+The proposed activation sequence is:
 
-## Subsequent server upgrades
+1. Merge ordinary changes through the normal protected-main checks. They do not activate or publish a runtime automatically.
+2. Build, attest, and publish a candidate runtime from protected main using the trusted publisher path. Candidate code and artifacts receive no production write credentials.
+3. Verify the candidate against the fixed scratch repository and retain the successful publisher and verification run IDs.
+4. Dispatch the active published controller with those run IDs and the expected full active control identity. It revalidates the current protected-main source, successful CI, source signature, immutable release, archive attestation, policy digest, and scratch evidence before opening a signed activation PR.
+5. Review and merge the activation PR through the server Actions lane. It changes only the active descriptor, uses the exact PR head and control identity, and advances the generation with the prior control identity as predecessor.
+6. After activation, explicitly dispatch caller distribution using the successful publisher run ID. Review each resulting caller PR. Publication alone does not trigger caller updates.
 
-Merge the server change while the old current runtime can still authorize its PR.
-After that merge, old client wrappers deliberately fail closed.
-After staging the stable main revision, manually dispatch `Publish Runtime` on main and wait for it to succeed before resuming operations.
-Rerun a failed dispatch at that same current revision; main pushes do not create runtime Releases automatically.
-Successful publication starts `Distribute Runtime` and a new server default-head `Policy Check`.
-Distribution uses the Rust expected-head commit API to create signed commits on `automation/securefix-runtime` and opens or updates one PR per configured caller.
-Distribution automatically merges only its exact canonical, server-owned workflow update PRs. It validates branch ownership, signed history, changed paths and contents, the current publisher/runtime, and the expected PR head before squash merging. It then verifies the resulting default-branch workflow files. It does not change branch protections. The separate review/check ruleset grants the Server App pull-request-only bypass for this controlled path; default-branch integrity protections remain active. Ordinary PRs retain their normal Rust approval and check gates.
+Callers with the previous source pin are unavailable between activation and their migration merge. Treat completion of every caller migration as part of the rollout. The server's exact generated-workflow migration path can merge these PRs without invoking the old caller workflow; the server's own repair path remains available. A failed or delayed distribution leaves affected callers paused and requires a retry of that verified publisher run.
 
-No per-caller manual merge or temporary removal of required checks is needed for the normal upgrade path. Wait for every distribution job to finish successfully. If a caller contains unexpected managed-workflow changes, ownership, or a concurrent head update, investigate that specific failure before retrying. An owner-dispatched `Distribute Runtime` retry takes the successful `publisher_run_id`; it revalidates the current publication and caller state.
+Protected-main mutation workflows share `securefix-control` concurrency with `queue: max`. The controlled-merge rulesets retain only the configured Server App pull-request bypass, which does not replace the server Actions lane's owner, exact-head, approval, check, and expected-head validation. Activation adds no new bypass actor or mode. Native Renovate auto-merge is disabled under this sole-controller model; non-major, lockfile, and major Renovate PRs all need an explicit owner `/merge` command after checks.
 
-PR-target workflows read the wrapper on the caller's default branch, so the pin-update PR itself cannot switch the runtime used to check that PR. The validated distribution path resolves that transition. A server main push alone does not publish a runtime, and a main revision without its matching published release leaves ordinary operations unavailable. This requirement also applies to documentation-only main commits.
+Activation fails closed when the active control identity changes, the candidate is not an ancestor of current protected main, source signature or required CI fails, publication is mutable or unverifiable, the archive or bundled policy digest differs, publisher or scratch evidence is invalid, or prepared activation metadata and PR head no longer match. Those failures leave the active descriptor unchanged. A missing descriptor, release, attestation, or policy match also stops ordinary operations rather than selecting a runtime from live main.
 
-See [the runtime rollout decision](adr/0007-published-runtime-rollout.md) for the source and destination checks; the native implementation replaces the historical upstream commit limitation.
+After activation, a later main commit does not select its own runtime or policy. The previous published control remains usable if the descriptor and trusted workflow path remain available. To repair a later failing runtime, publish and verify a repair candidate and activate it as the next generation. Rollback also creates a new generation whose payload may identify an earlier verified runtime; it records the current descriptor as its predecessor rather than rewinding history.
+
+### One-time bootstrap and first activation
+
+The first protected-main revision needs a separate trusted bootstrap route. Before its
+first code pull request is merged, an owner must explicitly approve and complete the
+permanent live-settings rollout: remove the Renovate bypass from all nine controlled-
+merge rulesets while retaining the sole Server App `pull_request` bypass, disable
+native auto-merge and confirm that no requests remain queued, and enable immutable
+releases for `civitaspo/securefix-server`. The currently deployed v0.2.20 runtime
+cannot make those changes. They require the existing repository administrator UI or
+API. No temporary ruleset exception is part of this migration, and no production
+settings change has been made as part of this proposal.
+
+The one-time `control-bootstrap.yml` path is an explicitly reviewed protected-main
+authority. Its fixed Python helper independently checks the source and workflow runs,
+candidate artifact ID, attestation, archive and bundled policy, scratch proof, current
+main, absent descriptor, and pull request before a write. Qualification treats the
+candidate archive as data and never executes its binary. App-token jobs use the
+protected `main` environment. The workflow has separate `propose` and `merge` phases:
+the first revalidates and publishes the verified initial archive, then opens a
+descriptor PR; the second requires a separate owner-reviewed dispatch and rechecks the
+expected main SHA, exact PR head, descriptor identity, and required CI before merging
+with expected-head CAS. If publication succeeded but a later step failed, a retry may
+reuse the reserved release only when it is already immutable and published and the
+helper re-downloads the bounded asset, verifies its GitHub size and digest, checks the
+archive policy against the exact source, and verifies the fixed bootstrap attestation.
+A draft with mismatched asset metadata fails closed. This fixed producer never runs
+again after generation one. A later rollback can select the same archive in a new normal
+successor descriptor, using the recorded bootstrap publisher run and fixed trusted signer
+path. Other generations use the regular runtime publication path. There is no fallback
+loader. Once generation one is required, a missing or invalid active descriptor
+permanently disables operations until an authorized control revision is restored.
+
+Bootstrap publication and activation are separate phases. First, the bootstrap path
+publishes and proposes an exact descriptor change. An owner reviews the resulting
+activation PR. A separate dispatch then merges only after it rechecks the owner,
+expected protected-main SHA, exact PR head SHA, full proposed descriptor identity,
+and required CI through the serialized server Actions lane. Normal candidate
+publication and scratch verification do not alter active control; after this bootstrap,
+normal activations and later rollbacks use the same reviewed descriptor-PR fence.
+
+The bootstrap scratch rehearsal has its own `phase=bootstrap` in
+`testing-securefix-server.yml`. It verifies the pinned v0.2.20 legacy runtime by
+release ID `414653308`, asset ID `646481902`, archive digest, GitHub attestation, and
+runtime verification against source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`.
+Before minting scratch App tokens, the fixed helper checks that the dispatch came from
+current protected main and that `control/active.json` is absent. The pinned runtime
+validates the fixture output files. The candidate runtime prepares and verifies the
+scratch integration fixtures and runs the scratch-only control probe. This avoids using
+the current-main `validate-producer` path as its own initial trust baseline. It verifies
+the bootstrap test path, not production publication, activation, or distribution.
+
+While `control/active.json` is absent, recovery is split into `repair-propose` and
+`repair-merge`. Before `repair-propose`, dispatch the `CI` workflow on the signed repair
+branch and wait for its required `status-check` to pass; CI runs automatically for PRs
+and pushes to `main`, but not for an arbitrary repair branch. The first phase verifies
+the exact expected main, signed descendant commits, successful required checks, and
+allowed changed paths, then asks the Server App to open a PR. It does not require owner
+review because the PR does not yet exist. The owner reviews the newly opened PR at its
+exact head. The separate `repair-merge` phase repeats qualification, including the
+latest owner review for that exact head, and merges by expected-head CAS. Repair cannot change
+`control/active.json`, `.github/workflows/control-bootstrap.yml`, or
+`scripts/control-bootstrap.py`; a defect in the bootstrap trust root needs a separately
+reviewed recovery. This bounded lane allows reviewed code repairs during the finite
+pre-generation-one pause, does not restore v0.2.20 availability, and stops once the
+descriptor exists.
+
+The bootstrap producer, first activation sequence, and failure behavior remain
+unverified. Before merging the first code PR, compile the implementation, pass the normal
+candidate scratch verification on a frozen integration branch, review the fixed
+bootstrap path and operator procedure, and explicitly approve and complete the permanent
+live-settings rollout. The protected-main `phase=bootstrap` scratch gate cannot run
+before that merge. After the first code PR merges, run that gate during the deliberate
+finite pause; it must pass before bootstrap publication or descriptor activation is
+proposed. The bounded repair phase can land reviewed fixes during this pause, but it is
+not an alternate runtime or a bypass. No claim is made that v0.2.20 remains available
+after the first protected-main advance.
+
+The deployment and verification reports dated before this proposal document evidence for the earlier runtime contract only. They do not establish that this lifecycle, bootstrap path, or proposed code has been deployed or verified.
 
 ## Emergency stop and retry
 
-Disable the relevant processing workflows and controlled-merges restrictions manually if a server change needs immediate containment.
-An already-successful check on an unchanged head is not automatically revoked when policy changes.
+Disable the relevant processing workflows for immediate containment while retaining
+controlled-merges restrictions. Recover through the active runtime or the bounded
+reviewed repair path as applicable; any change to enforcement authority or rulesets
+requires separate explicit administrator review. An already-successful check on an
+unchanged head is not automatically revoked when policy changes.
 Scheduled reconciliation preserves a disabled restriction and retains tag protection when a policy entry stops requesting it.
 Retry pending work from the latest runtime and current client pins; incompatible or stale manifests fail closed.
 Existing published releases and assets are never overwritten.
@@ -66,7 +141,7 @@ Existing published releases and assets are never overwritten.
 
 Run locked Rust tests, formatting, Clippy, and pinned actionlint as in CI.
 `job.workflow_sha` identifies the actual workflow defining a reusable job, introduced in the [September 2026 GitHub Actions update](https://github.blog/changelog/2026-09-03-github-actions-early-september-2026-updates/).
-Actionlint v1.7.12 does not yet recognize this field or GitHub's native `$/` action self-reference; CI ignores only those specific diagnostics for the supported field and installer path.
+Actionlint v1.7.12 does not yet recognize this field, GitHub's native `$/` action self-reference, or queued concurrency. CI ignores only those specific diagnostics; structural tests require `queue: max` and `cancel-in-progress: false` on each shared mutation lane.
 Rust workflow tests independently require that exact producer checkout expression and consumer verification SHA, empty top-level permissions, immutable artifact IDs, verification before extraction, and release credential separation.
 Remove those narrow exceptions when actionlint supports them.
 Version comments on SHA-pinned actions remain because [Renovate uses them to follow action tags](https://docs.renovatebot.com/modules/manager/github-actions/); bare SHA references are disabled by its default update policy.

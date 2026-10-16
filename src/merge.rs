@@ -54,6 +54,11 @@ fn validate() -> Result<()> {
     let api = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&api)?;
     let source_sha = workflow::require_current_runtime(&api, ".github/workflows/merge.yml")?;
+    let control = policy
+        .control
+        .as_ref()
+        .context("active control revision is missing")?;
+    securefix::control::ControlRevision::require_current(&api, control)?;
     ensure!(
         std::env::var("GITHUB_REPOSITORY")? == server,
         "merge processor must run in the server repository"
@@ -133,6 +138,7 @@ fn authorize() -> Result<()> {
         manifest.kind == RequestKind::Merge && manifest.workflow_sha == policy.revision,
         "merge manifest is invalid or stale"
     );
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let source = request::load_source_request(
         &read,
         &policy,
@@ -164,12 +170,14 @@ fn authorize() -> Result<()> {
             manifest.pull_request.number,
             &manifest.pull_request.head_sha,
             *comment_id,
+            &manifest.control,
         )?;
-        if request::has_current_head_approval(
+        if request::has_current_head_approval_for_control(
             &read,
             &manifest.repository.full_name,
             manifest.pull_request.number,
             &manifest.pull_request.head_sha,
+            &manifest.control,
         )? {
             crate::policy_check::publish(
                 &write,
@@ -177,6 +185,7 @@ fn authorize() -> Result<()> {
                 &manifest.pull_request.head_sha,
                 true,
                 "Changes passed signature, owner authorization, and current-head review checks.",
+                &manifest.control,
             )?;
         }
     }
@@ -191,8 +200,10 @@ fn wait() -> Result<()> {
         manifest.kind == RequestKind::Merge && manifest.workflow_sha == policy.revision,
         "merge manifest is invalid or stale"
     );
+    securefix::control::ControlRevision::require_current(&api, &manifest.control)?;
     let deadline = manifest.accepted_at + chrono::Duration::seconds(MAX_WAIT_SECONDS);
     loop {
+        securefix::control::ControlRevision::require_current(&api, &manifest.control)?;
         validate_state(&api, &policy, &manifest)?;
         request::validate_pr_policy(
             &api,
@@ -222,59 +233,73 @@ fn apply() -> Result<()> {
         manifest.kind == RequestKind::Merge && manifest.workflow_sha == policy.revision,
         "merge manifest is invalid or stale"
     );
+    securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
+    let source = request::load_source_request(
+        &read,
+        &policy,
+        &manifest.repository.full_name,
+        manifest.run_id,
+        RequestKind::Merge,
+    )?;
+    ensure!(source == manifest, "source request changed before merge");
+    validate_state(&read, &policy, &manifest)?;
+    request::validate_pr_policy(
+        &read,
+        &policy,
+        &manifest.repository.full_name,
+        manifest.pull_request.number,
+        &manifest.pull_request.head_sha,
+    )?;
+    ensure!(
+        ready(&read, &manifest)?,
+        "merge prerequisites are not ready; retry outside the protected apply lane"
+    );
+    crate::settings::require_serialized_merges(&read, &policy)?;
+    crate::control_commands::validate_activation_merge(&read, &manifest)?;
+    let commits = read.paginate(&format!(
+        "/repos/{}/pulls/{}/commits",
+        manifest.repository.full_name, manifest.pull_request.number
+    ))?;
+    ensure!(
+        !commits.is_empty()
+            && commits.len() < 250
+            && commits.last().and_then(|c| c["sha"].as_str())
+                == Some(&manifest.pull_request.head_sha),
+        "commit list is incomplete or does not end at the accepted head"
+    );
+    let message = merge_message(&read, &manifest, &commits)?;
     let write = GitHub::from_env("SECUREFIX_MERGE_TOKEN")?;
-    let deadline = manifest.accepted_at + chrono::Duration::seconds(MAX_WAIT_SECONDS);
-    loop {
-        let policy = Policy::active(&read)?;
-        ensure!(
-            policy.revision == manifest.workflow_sha,
-            "server policy revision changed before merge"
-        );
-        let source = request::load_source_request(
-            &read,
-            &policy,
-            &manifest.repository.full_name,
-            manifest.run_id,
-            RequestKind::Merge,
-        )?;
-        ensure!(source == manifest, "source request changed before merge");
-        validate_state(&read, &policy, &manifest)?;
-        request::validate_pr_policy(
-            &read,
-            &policy,
-            &manifest.repository.full_name,
-            manifest.pull_request.number,
-            &manifest.pull_request.head_sha,
-        )?;
-        if !ready(&read, &manifest)? {
-            sleep_until_retry(deadline)?;
-            continue;
-        }
-        let commits = read.paginate(&format!(
-            "/repos/{}/pulls/{}/commits",
+    match write.put::<Value>(
+        &format!(
+            "/repos/{}/pulls/{}/merge",
             manifest.repository.full_name, manifest.pull_request.number
-        ))?;
-        ensure!(
-            !commits.is_empty()
-                && commits.len() < 250
-                && commits.last().and_then(|c| c["sha"].as_str())
-                    == Some(&manifest.pull_request.head_sha),
-            "commit list is incomplete or does not end at the accepted head"
-        );
-        let message = merge_message(&read, &manifest, &commits)?;
-        match write.put::<Value>(&format!("/repos/{}/pulls/{}/merge", manifest.repository.full_name, manifest.pull_request.number), &json!({
+        ),
+        &json!({
             "sha":manifest.pull_request.head_sha, "merge_method":"squash", "commit_message":message
-        })) {
-            Ok(result) => {
-                ensure!(result["merged"] == true, "GitHub did not confirm the squash merge");
-                let merge_sha = result["sha"].as_str().context("merge response has no SHA")?;
-                ensure!(merge_sha.len() == 40 && merge_sha.bytes().all(|b|b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "merge response contains an invalid SHA");
-                output("merge_sha", merge_sha)?;
-                return Ok(());
-            }
-            Err(error) if retryable_merge_error(&error) => sleep_until_retry(deadline)?,
-            Err(error) => return Err(error),
+        }),
+    ) {
+        Ok(result) => {
+            ensure!(
+                result["merged"] == true,
+                "GitHub did not confirm the squash merge"
+            );
+            let merge_sha = result["sha"]
+                .as_str()
+                .context("merge response has no SHA")?;
+            ensure!(
+                merge_sha.len() == 40
+                    && merge_sha
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "merge response contains an invalid SHA"
+            );
+            output("merge_sha", merge_sha)?;
+            Ok(())
         }
+        Err(error) if retryable_merge_error(&error) => {
+            Err(error.context("merge API is not ready; retry outside the protected apply lane"))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -282,16 +307,6 @@ fn retryable_merge_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<securefix::api::ApiError>()
         .is_some_and(|api| matches!(api.status.as_u16(), 405 | 422 | 503))
-}
-
-fn sleep_until_retry(deadline: DateTime<Utc>) -> Result<()> {
-    let remaining = deadline.signed_duration_since(Utc::now()).num_seconds();
-    ensure!(
-        remaining > 0,
-        "GitHub did not accept the merge before the fixed 60-minute deadline"
-    );
-    thread::sleep(Duration::from_secs(remaining.min(30) as u64));
-    Ok(())
 }
 
 fn read_manifest() -> Result<RequestManifest> {
@@ -305,6 +320,10 @@ pub(crate) fn validate_state(
     policy: &Policy,
     manifest: &RequestManifest,
 ) -> Result<()> {
+    ensure!(
+        policy.control.as_ref() == Some(&manifest.control),
+        "merge manifest control revision differs from supplied policy"
+    );
     ensure!(
         manifest.run_attempt == 1 && manifest.kind == RequestKind::Merge,
         "invalid or replayed merge request"
@@ -387,6 +406,20 @@ fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool 
 }
 
 pub(crate) fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
+    let reviewer = &config::trusted()?.deployment.approval_reviewer;
+    ready_with_reviewer(api, manifest, (reviewer, "User"))
+}
+
+pub(crate) fn ready_with_reviewer(
+    api: &GitHub,
+    manifest: &RequestManifest,
+    reviewer: (&config::Principal, &str),
+) -> Result<bool> {
+    let expected_external_id = format!(
+        "{}:{}",
+        manifest.pull_request.head_sha,
+        manifest.control.identity()?
+    );
     let deployment_checks = &config::trusted()?.deployment.checks;
     let repository = &manifest.repository.full_name;
     let mut checks = Vec::new();
@@ -422,18 +455,21 @@ pub(crate) fn ready(api: &GitHub, manifest: &RequestManifest) -> Result<bool> {
         policy_checks.len() <= 1,
         "duplicate Securefix policy checks for the accepted head"
     );
-    let policy_ok = policy_checks
-        .first()
-        .is_some_and(|check| exact_completed_success(check));
+    let policy_ok = policy_checks.first().is_some_and(|check| {
+        check["external_id"] == expected_external_id && exact_completed_success(check)
+    });
     let review = api.graphql("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}", json!({
         "owner":repository.split('/').next().unwrap_or_default(), "name":repository.split('/').nth(1).unwrap_or_default(), "number":manifest.pull_request.number
     }))?;
     let approved = review["repository"]["pullRequest"]["reviewDecision"] == "APPROVED"
-        && request::has_current_head_approval(
+        && request::has_current_head_approval_for_reviewer(
             api,
             repository,
             manifest.pull_request.number,
             &manifest.pull_request.head_sha,
+            &manifest.control,
+            reviewer.0,
+            reviewer.1,
         )?;
     Ok(check_ok && policy_ok && approved)
 }
@@ -608,6 +644,18 @@ mod tests {
             run_attempt: 1,
             workflow_sha: "b".repeat(40),
             caller_workflow_sha: "c".repeat(40),
+            control: securefix::control::ControlRevision {
+                version: 1,
+                generation: 1,
+                source_sha: "b".repeat(40),
+                policy_sha256: "1".repeat(64),
+                archive_sha256: "2".repeat(64),
+                release_id: 3,
+                asset_id: 4,
+                publisher_run_id: 5,
+                verification_run_id: 6,
+                previous: "0".repeat(64),
+            },
         }
     }
 
@@ -629,8 +677,10 @@ mod tests {
 
     fn validate_state_with(api_routes: Vec<Route>) -> Result<()> {
         let fixture = Fixture::new(api_routes);
-        let policy = Policy::load("tests/fixtures/policy.json")?;
-        let result = validate_state(&fixture.api, &policy, &state_manifest());
+        let mut policy = Policy::load("tests/fixtures/policy.json")?;
+        let manifest = state_manifest();
+        policy.control = Some(manifest.control.clone());
+        let result = validate_state(&fixture.api, &policy, &manifest);
         fixture.finish();
         result
     }
@@ -699,8 +749,10 @@ mod tests {
                 "/repos/civitaspo/dbt-authorized-models/issues/7/timeline?per_page=100&page=1";
             routes.push(Route::get(timeline, json!([])));
             let fixture = Fixture::new(routes);
-            let policy = Policy::load("tests/fixtures/policy.json").unwrap();
-            let result = validate_state(&fixture.api, &policy, &state_manifest());
+            let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+            let manifest = state_manifest();
+            policy.control = Some(manifest.control.clone());
+            let result = validate_state(&fixture.api, &policy, &manifest);
             if result.is_err() {
                 let _: Value = fixture.api.get(timeline).unwrap();
             }

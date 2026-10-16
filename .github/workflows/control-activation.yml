@@ -1,0 +1,110 @@
+name: Prepare Control Activation
+run-name: Prepare Control Activation (${{ inputs.source_sha }})
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Published and scratch-verified candidate source SHA
+        required: true
+        type: string
+      publisher_run_id:
+        description: Successful Publish Runtime run ID for the candidate
+        required: true
+        type: string
+      verification_run_id:
+        description: Successful scratch verification run ID for the candidate
+        required: true
+        type: string
+      expected_control_id:
+        description: Full identity of the currently active control descriptor
+        required: true
+        type: string
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  controller:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+  propose:
+    needs: controller
+    runs-on: ubuntu-24.04
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      statuses: read
+      attestations: read
+    timeout-minutes: 15
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.controller.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.controller.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.controller.outputs.workflow-sha }}
+      CANDIDATE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
+      VERIFICATION_RUN_ID: ${{ inputs.verification_run_id }}
+      EXPECTED_CONTROL_ID: ${{ inputs.expected_control_id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.controller.outputs.artifact-id }}
+          path: ${{ runner.temp }}/controller
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/controller/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          permission-actions: read
+          permission-administration: read
+          permission-checks: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Verify publication, scratch evidence, and expected active revision
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ steps.read-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          securefix control prepare
+          --source-sha "$CANDIDATE_SOURCE_SHA"
+          --publisher-run-id "$PUBLISHER_RUN_ID"
+          --verification-run-id "$VERIFICATION_RUN_ID"
+          --expected-control-id "$EXPECTED_CONTROL_ID"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: steps.prepare.outcome == 'success'
+        id: write-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Revalidate and open the signed activation pull request
+        if: steps.prepare.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ steps.read-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          SECUREFIX_CONTROL_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
+        run: >-
+          securefix control propose
+          --source-sha "$CANDIDATE_SOURCE_SHA"
+          --publisher-run-id "$PUBLISHER_RUN_ID"
+          --verification-run-id "$VERIFICATION_RUN_ID"
+          --expected-control-id "$EXPECTED_CONTROL_ID"

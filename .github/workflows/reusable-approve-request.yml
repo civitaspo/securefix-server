@@ -12,6 +12,7 @@ jobs:
   build:
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
 
@@ -27,6 +28,8 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:

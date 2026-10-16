@@ -1,7 +1,4 @@
-use crate::{
-    api::GitHub,
-    policy::{Policy, validate_sha},
-};
+use crate::api::GitHub;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::{
@@ -52,14 +49,8 @@ pub fn successful_source_run(
 }
 
 pub fn require_current_runtime(api: &GitHub, workflow_path: &str) -> Result<String> {
-    let source =
-        std::env::var("SECUREFIX_SOURCE_SHA").context("missing trusted runtime revision")?;
-    validate_sha(&source)?;
-    ensure!(
-        source == Policy::latest_revision(api, workflow_path)?,
-        "runtime revision is no longer current"
-    );
-    Ok(source)
+    let _ = workflow_path;
+    Ok(crate::control::ControlRevision::require_runtime(api)?.source_sha)
 }
 
 pub fn write_json(path: impl AsRef<Path>, value: &impl serde::Serialize) -> Result<()> {

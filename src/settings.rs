@@ -242,7 +242,9 @@ fn reconcile_one(
 }
 
 fn ensure_immutable_releases(api: &GitHub, repo_policy: &RepositoryPolicy) -> Result<()> {
-    if !repo_policy.capabilities.contains(&Capability::Release) {
+    if repo_policy.repository != config::trusted()?.deployment.server.repository
+        && !repo_policy.capabilities.contains(&Capability::Release)
+    {
         return Ok(());
     }
     let path = format!("/repos/{}/immutable-releases", repo_policy.repository);
@@ -263,6 +265,16 @@ fn ensure_immutable_releases(api: &GitHub, repo_policy: &RepositoryPolicy) -> Re
     ensure!(
         state["enabled"] == true,
         "immutable releases did not become enabled"
+    );
+    Ok(())
+}
+
+pub(crate) fn require_server_immutable_releases(api: &GitHub) -> Result<()> {
+    let server = &config::trusted()?.deployment.server.repository;
+    let state: Value = api.get(&format!("/repos/{server}/immutable-releases"))?;
+    ensure!(
+        state["enabled"] == true,
+        "server immutable releases must be enabled before runtime publication or activation"
     );
     Ok(())
 }
@@ -308,6 +320,7 @@ fn activation_preflight() -> Result<()> {
 }
 
 fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
+    require_server_immutable_releases(api)?;
     let trusted = config::trusted()?;
     let deployment = &trusted.deployment;
     let repositories = merge_repositories(policy, &deployment.server.repository)?;
@@ -316,6 +329,7 @@ fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
     validate_server_app_installation(&repositories, deployment.repository_owner.id)?;
     for repository in &repositories {
         validate_repo_identity(api, repository)?;
+        validate_native_merge_settings(api, repository)?;
         validate_default_branch_ruleset(api, repository)?;
         validate_review_and_checks_ruleset(
             api,
@@ -323,6 +337,7 @@ fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
             deployment.server_app_id,
             &deployment.checks,
         )?;
+        validate_existing_controlled_merges(api, repository, deployment.server_app_id)?;
         validate_current_policy_check(api, repository, &deployment.checks)?;
         validate_collaborator(api, repository, &deployment.approval_reviewer.login)?;
         if repository != &deployment.server.repository {
@@ -337,6 +352,28 @@ fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_serialized_merges(api: &GitHub, policy: &Policy) -> Result<()> {
+    let server = &config::trusted()?.deployment.server.repository;
+    let server_app_id = config::trusted()?.deployment.server_app_id;
+    let merge_repositories = merge_repositories(policy, server)?;
+    let repositories = policy
+        .repositories
+        .iter()
+        .map(|repository| repository.repository.as_str())
+        .chain(std::iter::once(server.as_str()))
+        .collect::<BTreeSet<_>>();
+    for repository in repositories {
+        validate_native_merge_settings(api, repository)?;
+    }
+    for repository in merge_repositories {
+        ensure!(
+            validate_existing_controlled_merges(api, &repository, server_app_id)?,
+            "{repository} has no active controlled-merges ruleset"
+        );
     }
     Ok(())
 }
@@ -365,19 +402,26 @@ fn reconcile_existing_controlled_merges(ruleset: &Value) -> bool {
 }
 
 fn activate_controls(api: &GitHub, policy: &Policy) -> Result<()> {
-    let ruleset = read_json(&format!("{RULESET_DIR}/controlled-merges.json"))?;
+    let ruleset = desired_controlled_merges_ruleset()?;
     let server = &config::trusted()?.deployment.server.repository;
     for repository in merge_repositories(policy, server)? {
         validate_repo_identity(api, &repository)?;
+        validate_native_merge_settings(api, &repository)?;
         upsert_ruleset(api, &repository, &ruleset)?;
+        validate_existing_controlled_merges(
+            api,
+            &repository,
+            config::trusted()?.deployment.server_app_id,
+        )?;
     }
     Ok(())
 }
 
 fn reconcile_active_controls(api: &GitHub, policy: &Policy) -> Result<()> {
-    let ruleset = read_json(&format!("{RULESET_DIR}/controlled-merges.json"))?;
+    let ruleset = desired_controlled_merges_ruleset()?;
     let server = &config::trusted()?.deployment.server.repository;
     for repository in merge_repositories(policy, server)? {
+        validate_native_merge_settings(api, &repository)?;
         let matches = repository_rulesets(api, &repository, "controlled-merges")?;
         ensure!(
             matches.len() <= 1,
@@ -391,6 +435,11 @@ fn reconcile_active_controls(api: &GitHub, policy: &Policy) -> Result<()> {
         }
         let id = existing["id"].as_u64().context("ruleset ID missing")?;
         api.put::<Value>(&format!("/repos/{repository}/rulesets/{id}"), &ruleset)?;
+        validate_existing_controlled_merges(
+            api,
+            &repository,
+            config::trusted()?.deployment.server_app_id,
+        )?;
     }
     Ok(())
 }
@@ -408,6 +457,92 @@ fn validate_repo_identity(api: &GitHub, repository: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_native_merge_settings(api: &GitHub, repository: &str) -> Result<()> {
+    let repo: Value = api.get(&format!("/repos/{repository}"))?;
+    validate_repository_merge_settings(&repo, repository)?;
+    let pull_requests = api.paginate(&format!("/repos/{repository}/pulls?state=open"))?;
+    ensure!(
+        pull_requests
+            .iter()
+            .all(|pull| pull["auto_merge"].is_null()),
+        "{repository} has an outstanding native auto-merge request"
+    );
+    Ok(())
+}
+
+fn validate_repository_merge_settings(repo: &Value, repository: &str) -> Result<()> {
+    ensure!(
+        repo["allow_auto_merge"] == false
+            && repo["allow_squash_merge"] == true
+            && repo["allow_merge_commit"] == false
+            && repo["allow_rebase_merge"] == false,
+        "{repository} native auto-merge or merge methods are not controlled"
+    );
+    Ok(())
+}
+
+fn desired_controlled_merges_ruleset() -> Result<Value> {
+    let mut ruleset = read_json(&format!("{RULESET_DIR}/controlled-merges.json"))?;
+    let server_app_id = config::trusted()?.deployment.server_app_id;
+    let actors = ruleset["bypass_actors"]
+        .as_array_mut()
+        .context("controlled-merges bypass actors missing")?;
+    ensure!(
+        actors.len() == 1,
+        "controlled-merges must name one bypass actor"
+    );
+    actors[0]["actor_id"] = json!(server_app_id);
+    validate_controlled_merges(&ruleset, "configured repository", server_app_id)?;
+    Ok(ruleset)
+}
+
+fn validate_controlled_merges(ruleset: &Value, repository: &str, server_app_id: u64) -> Result<()> {
+    validate_ruleset_scope(ruleset, repository, "controlled-merges")?;
+    ensure!(
+        ruleset["bypass_actors"]
+            == json!([{"actor_id":server_app_id,"actor_type":"Integration","bypass_mode":"pull_request"}]),
+        "{repository} controlled-merges must have only the configured Server App PR bypass"
+    );
+    let rules = ruleset["rules"]
+        .as_array()
+        .context("controlled-merges rules missing")?;
+    ensure!(
+        rules.len() == 1
+            && (rules[0] == json!({"type":"update"})
+                || rules[0]
+                    == json!({"type":"update","parameters":{"update_allows_fetch_and_merge":false}})),
+        "{repository} controlled-merges rule set is not exact"
+    );
+    Ok(())
+}
+
+fn validate_existing_controlled_merges(
+    api: &GitHub,
+    repository: &str,
+    server_app_id: u64,
+) -> Result<bool> {
+    let matches = repository_rulesets(api, repository, "controlled-merges")?;
+    ensure!(
+        matches.len() <= 1,
+        "multiple controlled-merges rulesets on {repository}"
+    );
+    let Some(listed) = matches.first() else {
+        return Ok(false);
+    };
+    let id = listed["id"].as_u64().context("ruleset ID missing")?;
+    let detail: Value = api.get(&format!("/repos/{repository}/rulesets/{id}"))?;
+    ensure!(
+        detail["id"].as_u64() == Some(id)
+            && detail["source_type"] == "Repository"
+            && detail["source"] == repository
+            && detail["name"] == "controlled-merges"
+            && detail["target"] == "branch",
+        "{repository} controlled-merges ruleset identity changed"
+    );
+    validate_controlled_merges(&detail, repository, server_app_id)?;
+    Ok(true)
 }
 
 fn ensure_owner(repo: &Value, expected: &str, owner_id: u64) -> Result<()> {
@@ -919,12 +1054,7 @@ fn accept_reviewer_invitation(
 
 fn validate_desired_settings() -> Result<()> {
     let repository = read_json("repo-settings/repository.json")?;
-    ensure!(
-        repository["allow_squash_merge"] == true
-            && repository["allow_merge_commit"] == false
-            && repository["allow_rebase_merge"] == false,
-        "repository.json must enforce squash-only merges"
-    );
+    validate_repository_merge_settings(&repository, "repository.json")?;
     let collaborator = read_json("repo-settings/collaborator.json")?;
     ensure!(
         collaborator["permission"] == "push",
@@ -948,11 +1078,7 @@ fn validate_desired_settings() -> Result<()> {
                 .is_some_and(Vec::is_empty),
         "invalid default-branch ruleset"
     );
-    let controlled = read_json(&format!("{RULESET_DIR}/controlled-merges.json"))?;
-    ensure!(
-        controlled["name"] == "controlled-merges" && controlled["target"] == "branch",
-        "invalid controlled-merges ruleset"
-    );
+    desired_controlled_merges_ruleset()?;
     let tags = read_json(&format!("{RULESET_DIR}/all-tags.json"))?;
     ensure!(
         tags["name"] == "all-tags"
@@ -1239,7 +1365,6 @@ mod tests {
             login: "reviewer".into(),
             id: 100,
         };
-        let server = &config::trusted().unwrap().deployment.server;
         let owner = Fixture::new(vec![Route::get(
             "/repos/forge/example/collaborators/reviewer/permission",
             json!({"permission":"write"}),
@@ -1253,13 +1378,7 @@ mod tests {
                     {"id":2,"repository":{"full_name":"forge/example"}}
                 ]),
             ),
-            Route::get(
-                format!(
-                    "/repos/{}/commits/{}",
-                    server.repository, server.default_branch
-                ),
-                json!({"sha":"a".repeat(40)}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request("PATCH", "/user/repository_invitations/2", 204, Value::Null),
         ]);
         accept_reviewer_invitation(&owner.api, &token.api, "forge/example", &reviewer).unwrap();
@@ -1364,6 +1483,73 @@ mod tests {
         assert!(!reconcile_existing_controlled_merges(
             &json!({"enforcement":"evaluate"})
         ));
+    }
+
+    #[test]
+    fn controlled_merges_requires_exact_server_app_pr_bypass() {
+        let valid = json!({
+            "name":"controlled-merges",
+            "target":"branch",
+            "enforcement":"active",
+            "bypass_actors":[{"actor_id":29,"actor_type":"Integration","bypass_mode":"pull_request"}],
+            "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
+            "rules":[{"type":"update","parameters":{"update_allows_fetch_and_merge":false}}]
+        });
+        assert!(validate_controlled_merges(&valid, "forge/example", 29).is_ok());
+
+        let mut omitted_default = valid.clone();
+        omitted_default["rules"] = json!([{"type":"update"}]);
+        assert!(validate_controlled_merges(&omitted_default, "forge/example", 29).is_ok());
+        for rules in [
+            json!([{"type":"update","parameters":{"update_allows_fetch_and_merge":true}}]),
+            json!([{"type":"update","parameters":{"update_allows_fetch_and_merge":0}}]),
+            json!([{"type":"update","parameters":null}]),
+            json!([{"type":"update","parameters":{}}]),
+            json!([{"type":"update","unexpected":false}]),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["rules"] = rules;
+            assert!(validate_controlled_merges(&invalid, "forge/example", 29).is_err());
+        }
+
+        let mut extra_bypass = valid.clone();
+        extra_bypass["bypass_actors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "actor_id":2740,"actor_type":"Integration","bypass_mode":"pull_request"
+            }));
+        assert!(validate_controlled_merges(&extra_bypass, "forge/example", 29).is_err());
+        let mut always = valid.clone();
+        always["bypass_actors"][0]["bypass_mode"] = json!("always");
+        assert!(validate_controlled_merges(&always, "forge/example", 29).is_err());
+        let mut extra_rule = valid;
+        extra_rule["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"deletion"}));
+        assert!(validate_controlled_merges(&extra_rule, "forge/example", 29).is_err());
+    }
+
+    #[test]
+    fn native_auto_merge_and_alternate_merge_methods_are_rejected() {
+        let settings = json!({
+            "allow_auto_merge":false,
+            "allow_squash_merge":true,
+            "allow_merge_commit":false,
+            "allow_rebase_merge":false
+        });
+        assert!(validate_repository_merge_settings(&settings, "forge/example").is_ok());
+        for (field, value) in [
+            ("allow_auto_merge", json!(true)),
+            ("allow_merge_commit", json!(true)),
+            ("allow_rebase_merge", json!(true)),
+            ("allow_squash_merge", json!(false)),
+        ] {
+            let mut unsafe_settings = settings.clone();
+            unsafe_settings[field] = value;
+            assert!(validate_repository_merge_settings(&unsafe_settings, "forge/example").is_err());
+        }
     }
 
     #[test]
@@ -1657,6 +1843,45 @@ mod tests {
         )]);
         ensure_immutable_releases(&fixture.api, &repository).unwrap();
         fixture.finish();
+
+        let server = RepositoryPolicy {
+            repository: config::trusted()
+                .unwrap()
+                .deployment
+                .server
+                .repository
+                .clone(),
+            capabilities: vec![Capability::Settings],
+            release: None,
+            sensitive_paths: vec![".github/**".into()],
+            protect_tags: false,
+        };
+        let path = format!("/repos/{}/immutable-releases", server.repository);
+        let fixture = Fixture::new(vec![Route::get(
+            path,
+            json!({"enabled":true,"enforced_by_owner":false}),
+        )]);
+        ensure_immutable_releases(&fixture.api, &server).unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn runtime_publication_requires_server_immutable_releases() {
+        let server = &config::trusted().unwrap().deployment.server.repository;
+        let path = format!("/repos/{server}/immutable-releases");
+        let enabled = Fixture::new(vec![Route::get(
+            &path,
+            json!({"enabled":true,"enforced_by_owner":false}),
+        )]);
+        require_server_immutable_releases(&enabled.api).unwrap();
+        enabled.finish();
+
+        let disabled = Fixture::new(vec![Route::get(
+            path,
+            json!({"enabled":false,"enforced_by_owner":false}),
+        )]);
+        assert!(require_server_immutable_releases(&disabled.api).is_err());
+        disabled.finish();
     }
 
     #[test]
@@ -1671,10 +1896,7 @@ mod tests {
         let path = "/repos/civitaspo/example/immutable-releases";
         let fixture = Fixture::new(vec![
             Route::request("GET", path, 404, json!({"message":"Not Found"})),
-            Route::get(
-                "/repos/civitaspo/securefix-server/commits/main",
-                json!({"sha":"a".repeat(40)}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request("PUT", path, 204, Value::Null),
             Route::get(path, json!({"enabled":true,"enforced_by_owner":false})),
         ]);

@@ -18,6 +18,7 @@ jobs:
   cli:
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
 
@@ -52,7 +53,9 @@ jobs:
         id: release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           INPUT_VERSION: ${{ inputs.version }}
         run: securefix release prepare --version "$INPUT_VERSION"
       - name: Prepare native Securefix client artifact
@@ -60,6 +63,8 @@ jobs:
         if: steps.release.outputs.releasable == 'true'
         env:
           SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           FILES: ${{ steps.release.outputs.files }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           PULL_REQUEST_TITLE: "chore(release): v${{ steps.release.outputs.version }}"
@@ -102,6 +107,8 @@ jobs:
         if: steps.request.outcome == 'success' && steps.request.outputs.artifact_name != ''
         env:
           SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           SECUREFIX_CLIENT_TOKEN: ${{ steps.client-token.outputs.token }}
           ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
         run: securefix securefix client-dispatch --artifact-name "$ARTIFACT_NAME" --server-repository civitaspo/securefix-server

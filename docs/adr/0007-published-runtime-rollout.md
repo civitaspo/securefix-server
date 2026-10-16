@@ -1,5 +1,9 @@
 # Distribute a published runtime through reviewed caller PRs
 
+Status: superseded by [ADR 0009](0009-active-control-revision.md).
+
+This record describes the prior automatic rollout contract. Caller distribution now follows explicit control activation and is separately dispatched; the active lifecycle is described in ADR 0009.
+
 The server accepts only its current main revision for privileged operations.
 Publishing that revision and updating callers are therefore one deployment sequence.
 The original sequence left every caller update to the operator and ran the server's default-head Policy Check before its runtime existed.

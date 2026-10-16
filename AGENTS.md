@@ -7,7 +7,16 @@ boundaries when changing approval, merge, repair, release, or repository setting
 The Rust `securefix` CLI owns validation and business logic. Workflows orchestrate
 events, verified runtime loading, credential isolation, and CLI invocation; keep
 shell steps limited to this orchestration. Do not restore upstream Securefix
-Actions or implement policy decisions in Bash, Python, or github-script.
+Actions or implement policy decisions in Bash, Python, or github-script, except in
+the fixed `control-bootstrap.yml` workflow and its `scripts/control-bootstrap.py`
+helper while the active descriptor is absent. The helper independently qualifies the
+bootstrap source, publisher run, archive, attestation, policy, scratch proof, and
+reviewed PR because no verified active Rust runtime exists for the first migration.
+The candidate archive is data during this qualification; the candidate executable is
+never run. Repair is split into `repair-propose` and `repair-merge`; both validate the
+bounded repair PR contract. Repair cannot change the bootstrap workflow or helper.
+This exception ends once the active descriptor exists and must not be generalized to
+normal operations or other workflows.
 
 Keep Rust suitable for reuse outside this deployment. Account names, repository
 identities, GitHub App identities, branch names, capabilities, trusted actors, and
@@ -34,9 +43,10 @@ helpers and keep the change focused; do not add speculative abstractions.
 
 - Fail closed at trust boundaries. Validate repository and actor identities,
   capabilities, source workflow/run provenance, artifact identity and contents,
-  signatures, and current runtime revision before privileged writes.
+  signatures, and the active control identity before privileged writes.
 - Bind owner commands, reviews, policy results, and mutations to the accepted PR
-  head. Reject stale heads and replayed requests; preserve expected-head checks.
+  head and full active control identity. Reject stale heads, changed control
+  revisions, and replayed requests; preserve expected-head checks.
 - `trusted_committers` alone does not exempt sensitive paths. Exemptions require
   the configured author and every effective committer to match; retain all other
   signature, provenance, approval, and required-check conditions.
@@ -46,12 +56,39 @@ helpers and keep the change focused; do not add speculative abstractions.
   hooks in jobs with signing or publishing credentials. Never log secret values.
 - Keep repository-scoped installation tokens and the candidate sandbox. Never
   give a candidate production write tokens, personal approval tokens, or keys.
-- Ordinary operations load the source-bound, attested published runtime and use
-  `.github/actions/install-cli` to put it on PATH. A missing or invalid release
-  must stop execution; do not introduce a build fallback or unverified binary.
-- Automatic caller migration is restricted to exact generated workflows in the
-  validated server-owned PR. Preserve ownership, exact-file, expected-head, and
-  resulting-default-branch checks; do not extend this bypass to ordinary PRs.
+- Ordinary operations read `control/active.json` from protected main, load the
+  source-bound, attested published runtime named by that descriptor, and use
+  `.github/actions/install-cli` to put it on PATH. The descriptor's policy
+  digest is checked against the policy bundled with that runtime; ordinary
+  operations do not substitute the live `policy.json` from main. A missing or
+  invalid descriptor or release must stop execution; do not introduce a build
+  fallback or unverified binary.
+- Treat a control activation as a new protected-main revision. The descriptor
+  records its generation, source SHA, policy and archive digests, immutable
+  release and asset IDs, publisher and scratch-verification run IDs, and the
+  previous descriptor identity. Its identity is the SHA-256 of its canonical
+  serialized fields. Candidate publication alone never changes active control.
+- Publish normal candidates through the currently active published controller. The
+  candidate executable and build artifact never receive production write
+  credentials. Keep any release-writing token in the trusted host publisher
+  step and never expose it to candidate code. The one-time initial publication
+  uses only the separately reviewed fixed `control-bootstrap.yml` authority. Its
+  host-side qualification is read-only, and its separate writer does not execute the
+  candidate binary.
+  After publication and scratch verification, propose a signed descriptor PR, then
+  merge it only through the separately dispatched owner, expected-main, exact-head,
+  descriptor-identity, and required-CI fence.
+- Protected-main mutation workflows use the shared `securefix-control`
+  concurrency group with `queue: max`. Do not add a ruleset bypass actor or
+  mode beyond the exact Server App pull-request bypass required by the
+  controlled merge rulesets. Do not use that ruleset entry outside the
+  validated server Actions lane or add direct Contents API writes, native
+  auto-merge, or another path that avoids the lane. Every accepted owner
+  command and completion marker carries both the exact PR head and full control
+  identity.
+- Caller migration is restricted to exact generated workflows in a reviewable
+  server-owned PR. Preserve ownership, exact-file, expected-head, and resulting
+  default-branch checks. Distribution must not merge caller PRs automatically.
 - Release publication requires immutable releases and validates final immutable
   state. Preserve merged-release-PR identity and idempotent recovery checks.
 
@@ -95,22 +132,67 @@ and merge flow. `/approve` and `/merge` must be posted only within existing user
 authorization; they are exact-head commands, not arbitrary bypasses. Existing
 authorization permits an agent to post them without asking the user to do it.
 
-Every protected-main revision, including documentation-only revisions, needs a
-matching source-bound runtime release before ordinary operations resume. Update
-`Cargo.toml` and the package entry in `Cargo.lock` consistently when preparing a
-new publication. Use SemVer tags `vX.Y.Z`; prereleases use `vX.Y.Z-pre.N`. Do not
-publish a release for each test candidate or intermediate SHA.
+Ordinary protected-main changes do not activate a new runtime. The active
+published runtime and its bundled policy digest remain in force until a reviewed
+activation PR advances `control/active.json`. Runtime publication is a separate
+step and does not automatically distribute callers. After activation, explicitly
+dispatch distribution for the verified publisher run and review the resulting
+caller PRs. Use SemVer tags `vX.Y.Z`; prereleases use `vX.Y.Z-pre.N`. Never
+overwrite a published version or fabricate release provenance.
 
-Run `Publish Runtime` on protected main only after its revision is ready for
-promotion. A successful publication automatically triggers `Distribute Runtime`
-for callers configured in policy. Confirm publication and all caller jobs rather
-than manually merging generated caller updates or weakening required checks.
-For recovery, follow `docs/migration.md` and retry the successful publisher run;
-never fabricate release provenance or repoint an existing version tag.
+The first protected-main code PR has an explicit permanent-settings gate. Before it
+merges, an owner must approve and complete removal of Renovate bypass from all nine
+controlled-merge rulesets (retaining only the Server App `pull_request` bypass),
+disable native auto-merge and confirm no queued requests, and enable immutable
+releases for the server. The deployed v0.2.20 runtime cannot apply these changes;
+use the repository administrator UI or API. Do not use a temporary exception.
 
-Renovate manages dependency updates. Keep signed platform commits, non-major
-updates and lockfile maintenance eligible for checked automerge, and major
-updates manual. Do not add overlapping Dependabot version-update configuration.
+The one-time bootstrap is handled only by the reviewed fixed `control-bootstrap.yml`
+workflow. Its narrowly scoped Python helper performs host-side qualification only
+because no verified active Rust runtime exists for the first migration. It treats the
+candidate archive as data and never executes its binary. It publishes only the verified
+initial archive and never runs again after generation one. A later normal successor may select that same archive for rollback
+using its recorded bootstrap publisher run and fixed signer path; other generations
+use the normal publisher. There is no fallback runtime.
+After generation one is required, a missing or invalid descriptor disables operations
+until a valid control revision is restored. Publish and propose first, obtain owner
+review of the exact descriptor PR, then separately dispatch merge with owner,
+expected-main SHA, exact PR head, full descriptor identity, and required CI checks.
+Every job that mints a Server App token uses the protected `main` environment. The
+bootstrap scratch rehearsal uses a pinned v0.2.20 read baseline because the current
+main runtime cannot validate its own initial bootstrap producer. In that rehearsal the
+candidate prepares and verifies scratch fixtures, while v0.2.20 validates their output
+files. This baseline does not replace the fixed helper's qualification or establish
+production publication.
+
+While `control/active.json` is absent, dispatch the `CI` workflow on a signed repair
+branch and wait for its required `status-check` before `repair-propose`; arbitrary
+repair branches do not receive CI automatically. `repair-propose` checks the exact
+expected main, signed repair head, successful required checks, and allowed paths before
+the Server App opens a PR. Owner review happens after PR creation. `repair-merge`
+requires the latest owner review on that exact PR head, repeats the checks, and merges
+with expected-head CAS. The repair lane rejects changes to `control/active.json`,
+`.github/workflows/control-bootstrap.yml`, and `scripts/control-bootstrap.py`. A defect
+in either bootstrap authority file needs a separately reviewed recovery; the bounded
+repair lane cannot rewrite its own trust root. Repair does not restore old-runtime
+availability and permanently stops once generation one exists.
+
+The bootstrap workflow, initial activation and failure handling remain unverified.
+Before merging the first code PR, compile the implementation, pass the normal candidate
+scratch verification on a frozen integration branch, review the fixed bootstrap path and
+operator procedure, and explicitly approve and complete the permanent live-settings
+rollout. The protected-main `phase=bootstrap` scratch gate cannot run before that merge;
+after the first code PR merges, it must pass during the finite pause before bootstrap
+publication or descriptor activation is proposed. The old v0.2.20 runtime is only
+expected to remain available before the first protected-main advance; no availability
+claim applies after the first code PR merges. No production settings changes are
+authorized by the proposal.
+
+Renovate remains a PR author. Native Renovate auto-merge is incompatible with
+the sole-controller model and is removed. Non-major and lockfile PRs now require
+an explicit owner `/merge` command after required checks; major updates also
+remain explicit. Do not add overlapping Dependabot version-update
+configuration.
 
 Keep completion reports precise: what changed, what passed, and any remaining
 unverified condition. Reuse saved evidence and clean up disposable test fixtures.

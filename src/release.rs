@@ -4016,6 +4016,7 @@ mod tests {
     fn provenance_test_policy() -> Policy {
         let mut policy = Policy::parse(include_bytes!("../policy.json")).unwrap();
         policy.revision = "a".repeat(40);
+        policy.control = Some(crate::fixtures::Fixture::control_revision());
         policy
     }
 
@@ -4369,7 +4370,7 @@ mod tests {
                         "login":trusted.deployment.server_bot_login,
                         "type":"Bot"
                     },
-                    "body":format!("<!-- securefix:v2:owner:{head}:101 -->")
+                    "body":format!("<!-- securefix:v3:owner:{head}:{}:101 -->", crate::fixtures::Fixture::control_revision().identity().unwrap())
                 }]),
             ),
             Route::get(
@@ -4434,7 +4435,7 @@ mod tests {
     #[test]
     fn merged_pr_provenance_rejects_mismatched_version_repository_and_run_sha() {
         let mut wrong_version_routes = successful_pr_provenance_routes("1.2.4");
-        wrong_version_routes.truncate(6);
+        wrong_version_routes.truncate(7);
         let api = crate::fixtures::Fixture::new(wrong_version_routes);
         let policy = provenance_test_policy();
         let repo = Repository::parse("civitaspo/terraform-provider-sigma").unwrap();

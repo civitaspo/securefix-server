@@ -1,5 +1,9 @@
 # Promote a verified runtime after staging
 
+Status: superseded by [ADR 0009](0009-active-control-revision.md).
+
+This record describes the prior runtime-promotion contract. Its requirement to publish every protected-main revision and its automatic rollout step are historical; the active control lifecycle is described in ADR 0009.
+
 The previous reusable builder compiled Rust for every operation, then passed a same-run artifact to execution jobs.
 Normal operations now load a prebuilt runtime; candidate validation uses a separate scratch CI artifact and creates no Release.
 

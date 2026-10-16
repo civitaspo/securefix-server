@@ -113,8 +113,10 @@ fn parse_source_manifest(bytes: &[u8]) -> Result<RuntimeVersion> {
 
 #[derive(Subcommand)]
 pub enum Command {
-    #[command(about = "Publish the current trusted runtime archive")]
+    #[command(about = "Publish a candidate runtime archive from protected main")]
     Publish {
+        #[arg(long)]
+        source_sha: String,
         #[arg(long)]
         archive: PathBuf,
     },
@@ -131,16 +133,21 @@ pub enum Command {
     CheckVersion {
         #[arg(long)]
         base_manifest: PathBuf,
+        #[arg(long)]
+        changed_files: Option<PathBuf>,
     },
 }
 
 pub fn run(command: Command) -> Result<()> {
     match command {
-        Command::Publish { archive } => {
-            let source_sha =
-                std::env::var("SECUREFIX_SOURCE_SHA").context("missing SECUREFIX_SOURCE_SHA")?;
+        Command::Publish {
+            source_sha,
+            archive,
+        } => {
             let api = GitHub::from_env("GITHUB_TOKEN")?;
-            publish(&api, &source_sha, &archive)
+            let preflight_api = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
+            securefix::control::require_runtime(&api)?;
+            publish(&api, &preflight_api, &source_sha, &archive).map(|_| ())
         }
         Command::Verify {
             source_sha,
@@ -152,9 +159,19 @@ pub fn run(command: Command) -> Result<()> {
             let api = GitHub::from_env("GH_TOKEN")?;
             verify_published_runtime(&api, &source_sha, &repository, &archive)
         }
-        Command::CheckVersion { base_manifest } => {
+        Command::CheckVersion {
+            base_manifest,
+            changed_files,
+        } => {
             let candidate = parse_source_manifest(&std::fs::read("Cargo.toml")?)?;
             let base = parse_source_manifest(&std::fs::read(base_manifest)?)?;
+            if let Some(path) = changed_files {
+                let bytes = read_changed_files(&path)?;
+                if !changed_files_require_runtime(&bytes)? {
+                    println!("No runtime input changes; runtime version bump is not required.");
+                    return Ok(());
+                }
+            }
             require_version_bump(&candidate, &base)?;
             let repository = &crate::config::trusted()?.deployment.server.repository;
             let api = GitHub::from_env("GITHUB_TOKEN")?;
@@ -169,26 +186,48 @@ fn verify_published_runtime(
     repository: &str,
     archive_path: &Path,
 ) -> Result<()> {
+    verify_publication(api, source_sha, repository, archive_path)?;
     let version = version_at_repository_source(api, repository, source_sha)?;
     ensure!(
         version.as_semver().to_string() == env!("CARGO_PKG_VERSION"),
         "compiled runtime version differs from source Cargo.toml"
     );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Publication {
+    pub source_sha: String,
+    pub archive_sha256: String,
+    pub release_id: u64,
+    pub asset_id: u64,
+}
+
+/// Verify the immutable release and return the identifiers needed to record its provenance.
+pub(crate) fn verify_publication(
+    api: &GitHub,
+    source_sha: &str,
+    repository: &str,
+    archive_path: &Path,
+) -> Result<Publication> {
+    crate::policy::validate_sha(source_sha)?;
+    crate::policy::validate_repository(repository)?;
+    let version = version_at_repository_source(api, repository, source_sha)?;
     let tag = version.tag();
     let tag_ref: Value = api.get(&format!("/repos/{repository}/git/ref/tags/{tag}"))?;
     validate_ref(&tag_ref, source_sha)?;
     let release: Value = api.get(&format!("/repos/{repository}/releases/tags/{tag}"))?;
-    ensure!(
-        release["draft"] == false,
-        "runtime release is not published"
-    );
-    let (archive, digest) = read_archive(archive_path)?;
     validate_release(
         &release,
         source_sha,
         &tag,
         !version.as_semver().pre.is_empty(),
     )?;
+    ensure!(
+        release["draft"] == false,
+        "runtime release is not published"
+    );
+    let (archive, digest) = read_archive(archive_path)?;
     let assets = release["assets"]
         .as_array()
         .context("release lacks asset list")?;
@@ -196,7 +235,16 @@ fn verify_published_runtime(
         validate_assets(assets, &digest, archive.len() as u64, false)? == AssetState::Matching,
         "runtime release asset mismatch"
     );
-    Ok(())
+    Ok(Publication {
+        source_sha: source_sha.to_owned(),
+        archive_sha256: digest,
+        release_id: release["id"]
+            .as_u64()
+            .context("runtime release ID missing")?,
+        asset_id: assets[0]["id"]
+            .as_u64()
+            .context("runtime asset ID missing")?,
+    })
 }
 
 fn require_version_bump(candidate: &RuntimeVersion, base: &RuntimeVersion) -> Result<()> {
@@ -205,6 +253,61 @@ fn require_version_bump(candidate: &RuntimeVersion, base: &RuntimeVersion) -> Re
         "runtime package version must increase over the pull request base"
     );
     Ok(())
+}
+
+const MAX_CHANGED_FILES: usize = 1024 * 1024;
+
+fn read_changed_files(path: &Path) -> Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path).context("read changed-files metadata")?;
+    ensure!(
+        metadata.len() <= MAX_CHANGED_FILES as u64,
+        "changed-files list exceeds size limit"
+    );
+    let bytes = std::fs::read(path).context("read changed-files list")?;
+    ensure!(
+        bytes.len() <= MAX_CHANGED_FILES,
+        "changed-files list exceeds size limit"
+    );
+    Ok(bytes)
+}
+
+fn changed_files_require_runtime(bytes: &[u8]) -> Result<bool> {
+    ensure!(
+        bytes.len() <= MAX_CHANGED_FILES,
+        "changed-files list exceeds size limit"
+    );
+    if bytes.is_empty() {
+        return Ok(false);
+    }
+    ensure!(
+        bytes.last() == Some(&0),
+        "changed-files list must be NUL terminated"
+    );
+    let mut requires_runtime = false;
+    for raw_path in bytes[..bytes.len() - 1].split(|byte| *byte == 0) {
+        ensure!(
+            !raw_path.is_empty(),
+            "changed-files list contains an empty path"
+        );
+        let path = std::str::from_utf8(raw_path).context("changed file path is not UTF-8")?;
+        ensure!(
+            !path.starts_with('/')
+                && !path.contains('\\')
+                && path.split('/').all(|component| !component.is_empty()
+                    && component != "."
+                    && component != ".."),
+            "changed-files list contains an invalid repository path"
+        );
+        requires_runtime |= matches!(
+            path,
+            "Cargo.toml" | "Cargo.lock" | "rust-toolchain.toml" | "policy.json"
+        ) || path.starts_with(".cargo/")
+            || path.starts_with("src/")
+            || path.starts_with("repo-settings/")
+            || path.starts_with(".github/actions/setup-cli/")
+            || path == ".github/workflows/publish-runtime.yml";
+    }
+    Ok(requires_runtime)
 }
 
 fn require_unused_version(api: &GitHub, repository: &str, version: &RuntimeVersion) -> Result<()> {
@@ -218,26 +321,22 @@ fn require_unused_version(api: &GitHub, repository: &str, version: &RuntimeVersi
     Ok(())
 }
 
-fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
+fn publish(
+    api: &GitHub,
+    preflight_api: &GitHub,
+    source_sha: &str,
+    archive_path: &Path,
+) -> Result<Publication> {
+    crate::settings::require_server_immutable_releases(preflight_api)?;
     let trusted = crate::config::trusted()?;
     let repository = trusted.deployment.server.repository.as_str();
-    let default_branch = trusted.deployment.server.default_branch.as_str();
     crate::policy::validate_sha(source_sha)?;
-    let current_main: Value = api.get(&format!("/repos/{repository}/commits/{default_branch}"))?;
-    ensure!(
-        current_main["sha"] == source_sha,
-        "runtime is no longer current; publication denied"
-    );
+    require_current_candidate(api, source_sha)?;
+    verify_candidate_commit(api, repository, source_sha)?;
     let version = version_at_source(api, source_sha)?;
-    ensure!(
-        version.as_semver().to_string() == env!("CARGO_PKG_VERSION"),
-        "compiled runtime version differs from source Cargo.toml"
-    );
     let (archive, digest) = read_archive(archive_path)?;
     let archive_size = archive.len() as u64;
     let tag = version.tag();
-    let ref_path = format!("/repos/{repository}/git/ref/tags/{tag}");
-
     let release_path = format!("/repos/{repository}/releases/tags/{tag}");
     let prerelease = !version.as_semver().pre.is_empty();
     let existing_release = get_optional(api, &release_path)?;
@@ -249,31 +348,25 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
         validate_assets(assets, &digest, archive_size, release["draft"] == true)?;
     }
 
-    match get_optional(api, &ref_path)? {
-        Some(tag_ref) => validate_ref(&tag_ref, source_sha)?,
-        None => {
-            let created: Value = api.post(
-                &format!("/repos/{repository}/git/refs"),
-                &json!({"ref": format!("refs/tags/{tag}"), "sha": source_sha}),
-            )?;
-            validate_ref(&created, source_sha)?;
-        }
-    }
+    ensure_version_tag(api, source_sha, &version)?;
 
     let release = match existing_release {
         Some(release) => release,
-        None => api.post(
-            &format!("/repos/{repository}/releases"),
-            &json!({
-                "tag_name": tag,
-                "name": tag,
-                "target_commitish": source_sha,
-                "draft": true,
-                "prerelease": !version.as_semver().pre.is_empty(),
-                "make_latest": "false",
-                "generate_release_notes": false
-            }),
-        )?,
+        None => {
+            require_current_candidate(api, source_sha)?;
+            api.post(
+                &format!("/repos/{repository}/releases"),
+                &json!({
+                    "tag_name": tag,
+                    "name": tag,
+                    "target_commitish": source_sha,
+                    "draft": true,
+                    "prerelease": !version.as_semver().pre.is_empty(),
+                    "make_latest": "false",
+                    "generate_release_notes": false
+                }),
+            )?
+        }
     };
     validate_release(&release, source_sha, &tag, prerelease)?;
     let release_id = release["id"]
@@ -284,6 +377,7 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
         .context("release lacks asset list")?;
     match validate_assets(assets, &digest, archive_size, release["draft"] == true)? {
         AssetState::EmptyDraft => {
+            require_current_candidate(api, source_sha)?;
             let upload_url = format!(
                 "https://uploads.github.com/repos/{repository}/releases/{release_id}/assets?name={ASSET}"
             );
@@ -303,6 +397,7 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
         "uploaded runtime asset does not match the local archive"
     );
     if current["draft"] == true {
+        require_current_candidate(api, source_sha)?;
         let _: Value = api.patch(
             &format!("/repos/{repository}/releases/{release_id}"),
             &json!({"draft": false}),
@@ -321,7 +416,54 @@ fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<()> {
         validate_assets(assets, &digest, archive_size, false)? == AssetState::Matching,
         "published runtime asset does not match the local archive"
     );
-    ensure_version_tag(api, source_sha, &version)
+    require_current_candidate(api, source_sha)?;
+    verify_publication(api, source_sha, repository, archive_path)
+}
+
+fn require_current_candidate(api: &GitHub, source_sha: &str) -> Result<()> {
+    ensure!(
+        securefix::control::development_revision(api)? == source_sha,
+        "candidate source is not the current protected-main revision"
+    );
+    Ok(())
+}
+
+fn verify_candidate_commit(api: &GitHub, repository: &str, source_sha: &str) -> Result<()> {
+    let commit: Value = api.get(&format!("/repos/{repository}/commits/{source_sha}"))?;
+    ensure!(
+        commit["sha"] == source_sha,
+        "candidate commit identity mismatch"
+    );
+    ensure!(
+        commit["commit"]["verification"]["verified"] == true,
+        "candidate source commit signature is not verified"
+    );
+    let status: Value = api.get(&format!("/repos/{repository}/commits/{source_sha}/status"))?;
+    let status_count = status["total_count"]
+        .as_u64()
+        .context("candidate combined status count missing")?;
+    if status_count > 0 {
+        ensure!(
+            status["state"] == "success",
+            "candidate commit has a failing or pending status context"
+        );
+    }
+    let status_app_id = crate::config::trusted()?.deployment.checks.status_app_id;
+    let checks: Value = api.get(&format!(
+        "/repos/{repository}/commits/{source_sha}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"
+    ))?;
+    let matches = checks["check_runs"]
+        .as_array()
+        .context("candidate check runs malformed")?;
+    ensure!(
+        matches.len() == 1
+            && matches[0]["name"] == "status-check"
+            && matches[0]["app"]["id"] == status_app_id
+            && matches[0]["status"] == "completed"
+            && matches[0]["conclusion"] == "success",
+        "candidate CI status-check is not a unique successful check"
+    );
+    Ok(())
 }
 
 pub(crate) fn version_tag(version: &RuntimeVersion) -> String {
@@ -411,8 +553,8 @@ fn validate_release(release: &Value, source_sha: &str, tag: &str, prerelease: bo
         "runtime release prerelease state mismatch"
     );
     ensure!(
-        release["id"].as_u64().is_some(),
-        "runtime release ID missing"
+        release["id"].as_u64().is_some_and(|id| id > 0),
+        "runtime release ID missing or invalid"
     );
     Ok(())
 }
@@ -429,6 +571,10 @@ fn validate_assets(assets: &[Value], digest: &str, size: u64, draft: bool) -> Re
     }
     ensure!(assets.len() == 1, "runtime release has unexpected assets");
     let asset = &assets[0];
+    ensure!(
+        asset["id"].as_u64().is_some_and(|id| id > 0),
+        "runtime asset ID missing or invalid"
+    );
     ensure!(
         asset["name"] == ASSET,
         "runtime release asset name mismatch"
@@ -465,8 +611,12 @@ mod tests {
     }
 
     fn manifest() -> Value {
+        manifest_for(env!("CARGO_PKG_VERSION"))
+    }
+
+    fn manifest_for(version: &str) -> Value {
         use base64::Engine;
-        let bytes = format!("[package]\nversion = \"{}\"\n", env!("CARGO_PKG_VERSION"));
+        let bytes = format!("[package]\nversion = \"{version}\"\n");
         json!({"path":"Cargo.toml","type":"file","size":bytes.len(),"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)})
     }
 
@@ -490,13 +640,66 @@ mod tests {
             .clone()
     }
 
+    fn repository_route() -> Route {
+        let server = &crate::config::trusted().unwrap().deployment.server;
+        Route::get(
+            format!("/repos/{}", server.repository),
+            json!({"id":server.id,"default_branch":server.default_branch}),
+        )
+    }
+
+    fn main_route(sha: &str) -> Route {
+        Route::get(
+            path(&format!("/commits/{}", default_branch())),
+            json!({"sha":sha}),
+        )
+    }
+
+    fn immutable_releases_route() -> Route {
+        Route::get(path("/immutable-releases"), json!({"enabled":true}))
+    }
+
+    fn candidate_checks_routes() -> Vec<Route> {
+        let repository = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let status_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .status_app_id;
+        vec![
+            Route::get(
+                format!("/repos/{repository}/commits/{SHA}"),
+                json!({"sha":SHA,"commit":{"verification":{"verified":true}}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{SHA}/status"),
+                json!({"state":"success","total_count":0}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{repository}/commits/{SHA}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"
+                ),
+                json!({"check_runs":[{"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"success"}]}),
+            ),
+        ]
+    }
+
     fn release(draft: bool, assets: Value) -> Value {
         json!({"id":7,"tag_name":tag(),"name":tag(),"target_commitish":SHA,"draft":draft,"prerelease":!version().as_semver().pre.is_empty(),"assets":assets})
     }
 
+    fn release_for(version: &str, draft: bool, assets: Value) -> Value {
+        let parsed = RuntimeVersion::parse(version).unwrap();
+        json!({"id":7,"tag_name":parsed.tag(),"name":parsed.tag(),"target_commitish":SHA,"draft":draft,"prerelease":!parsed.as_semver().pre.is_empty(),"assets":assets})
+    }
+
     fn asset(bytes: &[u8]) -> Value {
         let digest = securefix::hex_encode(Sha256::digest(bytes));
-        json!({"name":ASSET,"state":"uploaded","size":bytes.len(),"digest":format!("sha256:{digest}")})
+        json!({"id":8,"name":ASSET,"state":"uploaded","size":bytes.len(),"digest":format!("sha256:{digest}")})
     }
 
     #[test]
@@ -547,6 +750,44 @@ mod tests {
     }
 
     #[test]
+    fn changed_files_require_publication_only_for_runtime_inputs() {
+        for input in [
+            b"README.md\0docs/migration.md\0.github/workflows/ci.yml\0".as_slice(),
+            b".github/workflows/release.yml\0docs/testing.md\0",
+            b"",
+        ] {
+            assert!(!changed_files_require_runtime(input).unwrap());
+        }
+        for input in [
+            b"Cargo.toml\0".as_slice(),
+            b"Cargo.lock\0",
+            b"rust-toolchain.toml\0",
+            b".cargo/config.toml\0",
+            b"src/main.rs\0",
+            b"policy.json\0",
+            b"repo-settings/rulesets/base.json\0",
+            b".github/actions/setup-cli/action.yml\0",
+            b".github/workflows/publish-runtime.yml\0",
+        ] {
+            assert!(changed_files_require_runtime(input).unwrap());
+        }
+    }
+
+    #[test]
+    fn changed_files_list_requires_bounded_nul_terminated_repository_paths() {
+        for invalid in [
+            &b"docs/readme.md"[..],
+            &b"docs//readme.md\0"[..],
+            &b"../Cargo.toml\0"[..],
+            &b"/etc/passwd\0"[..],
+            &[0xff, 0],
+        ] {
+            assert!(changed_files_require_runtime(invalid).is_err());
+        }
+        assert!(changed_files_require_runtime(&vec![b'a'; MAX_CHANGED_FILES + 1]).is_err());
+    }
+
+    #[test]
     fn version_reservation_checks_reject_collisions_and_api_errors() {
         let repository = "example/runtime";
         let tag_path = format!("/repos/{repository}/git/ref/tags/{}", tag());
@@ -575,12 +816,26 @@ mod tests {
     fn stale_runtime_stops_before_release_lookup_or_write() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
-        let main = path(&format!("/commits/{}", default_branch()));
+        let fixture = Fixture::new(vec![
+            immutable_releases_route(),
+            repository_route(),
+            main_route("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        ]);
+        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn mutable_server_release_setting_stops_publication_before_any_write() {
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"archive").unwrap();
         let fixture = Fixture::new(vec![Route::get(
-            main,
-            json!({"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}),
+            path("/immutable-releases"),
+            json!({"enabled":false}),
         )]);
-        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
+
+        let error = publish(&fixture.api, &fixture.api, SHA, archive.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("immutable releases must be enabled"));
         fixture.finish();
     }
 
@@ -601,28 +856,37 @@ mod tests {
     fn matching_published_release_is_an_idempotent_read_only_retry() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
-        let main = path(&format!("/commits/{}", default_branch()));
         let reference = path(&format!("/git/ref/tags/{}", tag()));
         let release_path = path(&format!("/releases/tags/{}", tag()));
         let numbered_release = path("/releases/7");
         let existing = release(false, json!([asset(b"archive")]));
-        let fixture = Fixture::new(vec![
-            Route::get(main, json!({"sha":SHA})),
+        let mut routes = vec![
+            immutable_releases_route(),
+            repository_route(),
+            main_route(SHA),
+        ];
+        routes.extend(candidate_checks_routes());
+        routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
-            Route::get(release_path, existing.clone()),
+            Route::get(release_path.clone(), existing.clone()),
+            main_route(SHA),
             Route::get(
                 reference.clone(),
                 json!({"object":{"type":"commit","sha":SHA}}),
             ),
             Route::get(numbered_release.clone(), existing.clone()),
-            Route::get(numbered_release, existing),
+            Route::get(numbered_release, existing.clone()),
+            repository_route(),
+            main_route(SHA),
+            Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
             Route::get(
-                path(&format!("/commits/{}", default_branch())),
-                json!({"sha":SHA}),
+                reference.clone(),
+                json!({"object":{"type":"commit","sha":SHA}}),
             ),
-            Route::get(reference, json!({"object":{"type":"commit","sha":SHA}})),
+            Route::get(release_path, existing),
         ]);
-        publish(&fixture.api, SHA, archive.path()).unwrap();
+        let fixture = Fixture::new(routes);
+        publish(&fixture.api, &fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
     }
 
@@ -639,13 +903,189 @@ mod tests {
             ),
             Route::get(release_path, release(false, json!([asset(b"archive")]))),
         ]);
-        verify_published_runtime(
+        let publication = verify_publication(
             &fixture.api,
             SHA,
             "civitaspo/securefix-server",
             archive.path(),
         )
         .unwrap();
+        assert_eq!(publication.source_sha, SHA);
+        assert_eq!(
+            publication.archive_sha256,
+            securefix::hex_encode(Sha256::digest(b"archive"))
+        );
+        assert_eq!((publication.release_id, publication.asset_id), (7, 8));
+        fixture.finish();
+    }
+
+    #[test]
+    fn candidate_publication_verification_uses_source_version_not_controller_version() {
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"archive").unwrap();
+        let source_version = "9.8.7";
+        let tag = RuntimeVersion::parse(source_version).unwrap().tag();
+        let repository = "civitaspo/securefix-server";
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/contents/Cargo.toml?ref={SHA}"),
+                manifest_for(source_version),
+            ),
+            Route::get(
+                format!("/repos/{repository}/git/ref/tags/{tag}"),
+                json!({"object":{"type":"commit","sha":SHA}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/releases/tags/{tag}"),
+                release_for(source_version, false, json!([asset(b"archive")])),
+            ),
+        ]);
+        let publication =
+            verify_publication(&fixture.api, SHA, repository, archive.path()).unwrap();
+        assert_eq!(publication.source_sha, SHA);
+        assert_eq!(publication.release_id, 7);
+        assert_eq!(publication.asset_id, 8);
+        fixture.finish();
+    }
+
+    #[test]
+    fn rejected_candidate_status_stops_before_release_lookup() {
+        let repository = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let server = &crate::config::trusted().unwrap().deployment.server;
+        let status_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .status_app_id;
+        let routes = vec![
+            immutable_releases_route(),
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"id":server.id,"default_branch":server.default_branch}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{}", server.default_branch),
+                json!({"sha":SHA}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{SHA}"),
+                json!({"sha":SHA,"commit":{"verification":{"verified":true}}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{SHA}/status"),
+                json!({"state":"success","total_count":0}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{repository}/commits/{SHA}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"
+                ),
+                json!({"check_runs":[{"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"failure"}]}),
+            ),
+        ];
+        let fixture = Fixture::new(routes);
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"archive").unwrap();
+        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn failed_candidate_publication_does_not_block_repair_with_unchanged_active_runtime() {
+        let repository = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let server = &crate::config::trusted().unwrap().deployment.server;
+        let status_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .status_app_id;
+        let candidate_sha = "b".repeat(40);
+        let repair_path = format!("/repos/{repository}/issues/17/comments");
+        let repair_body = json!({"body":"repair under the still-active runtime"});
+        let fixture = Fixture::new(vec![
+            immutable_releases_route(),
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"id":server.id,"default_branch":server.default_branch}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{}", server.default_branch),
+                json!({"sha":candidate_sha}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{candidate_sha}"),
+                json!({"sha":candidate_sha,"commit":{"verification":{"verified":true}}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{candidate_sha}/status"),
+                json!({"state":"success","total_count":0}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{repository}/commits/{candidate_sha}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"
+                ),
+                json!({"check_runs":[{"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"failure"}]}),
+            ),
+            Route::active_control(&Fixture::control_revision()),
+            Route::request(
+                "POST",
+                repair_path.clone(),
+                201,
+                json!({"id":19,"user":{"type":"Bot"}}),
+            )
+            .with_request_body(repair_body.clone()),
+        ]);
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"candidate archive").unwrap();
+
+        let error =
+            publish(&fixture.api, &fixture.api, &candidate_sha, archive.path()).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("candidate CI status-check is not a unique successful check")
+        );
+
+        let repair: Value = fixture.api.post(&repair_path, &repair_body).unwrap();
+        assert_eq!(repair["id"], 19);
+        fixture.finish();
+    }
+
+    #[test]
+    fn candidate_status_check_suffices_when_commit_statuses_are_absent() {
+        let repository = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let status_app_id = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .checks
+            .status_app_id;
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/commits/{SHA}"),
+                json!({"sha":SHA,"commit":{"verification":{"verified":true}}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{SHA}/status"),
+                json!({"state":"pending","total_count":0}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{repository}/commits/{SHA}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"
+                ),
+                json!({"check_runs":[{"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"success"}]}),
+            ),
+        ]);
+        verify_candidate_commit(&fixture.api, repository, SHA).unwrap();
         fixture.finish();
     }
 
@@ -707,32 +1147,43 @@ mod tests {
     fn matching_draft_resumes_and_publishes_without_reupload() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
-        let main = path(&format!("/commits/{}", default_branch()));
         let reference = path(&format!("/git/ref/tags/{}", tag()));
         let release_path = path(&format!("/releases/tags/{}", tag()));
         let numbered_release = path("/releases/7");
         let draft = release(true, json!([asset(b"archive")]));
         let published = release(false, json!([asset(b"archive")]));
-        let fixture = Fixture::new(vec![
-            Route::get(main.clone(), json!({"sha":SHA})),
+        let mut routes = vec![
+            immutable_releases_route(),
+            repository_route(),
+            main_route(SHA),
+        ];
+        routes.extend(candidate_checks_routes());
+        routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
-            Route::get(release_path, draft.clone()),
+            Route::get(release_path.clone(), draft.clone()),
+            main_route(SHA),
             Route::get(
                 reference.clone(),
                 json!({"object":{"type":"commit","sha":SHA}}),
             ),
             Route::get(numbered_release.clone(), draft),
-            Route::get(main, json!({"sha":SHA})),
+            repository_route(),
+            main_route(SHA),
+            Route::active_control(&Fixture::control_revision()),
             Route::request("PATCH", numbered_release.clone(), 200, published.clone())
                 .with_request_body(json!({"draft":false})),
-            Route::get(numbered_release, published),
+            Route::get(numbered_release, published.clone()),
+            repository_route(),
+            main_route(SHA),
+            Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
             Route::get(
-                path(&format!("/commits/{}", default_branch())),
-                json!({"sha":SHA}),
+                reference.clone(),
+                json!({"object":{"type":"commit","sha":SHA}}),
             ),
-            Route::get(reference, json!({"object":{"type":"commit","sha":SHA}})),
+            Route::get(release_path, published),
         ]);
-        publish(&fixture.api, SHA, archive.path()).unwrap();
+        let fixture = Fixture::new(routes);
+        publish(&fixture.api, &fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
     }
 
@@ -740,15 +1191,20 @@ mod tests {
     fn asset_mismatch_fails_before_any_write() {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
-        let main = path(&format!("/commits/{}", default_branch()));
         let release_path = path(&format!("/releases/tags/{}", tag()));
         let mismatch = release(true, json!([asset(b"different bytes")]));
-        let fixture = Fixture::new(vec![
-            Route::get(main, json!({"sha":SHA})),
+        let mut routes = vec![
+            immutable_releases_route(),
+            repository_route(),
+            main_route(SHA),
+        ];
+        routes.extend(candidate_checks_routes());
+        routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
             Route::get(release_path, mismatch),
         ]);
-        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
+        let fixture = Fixture::new(routes);
+        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
         fixture.finish();
     }
 
@@ -758,20 +1214,14 @@ mod tests {
         let tag = version_tag(&version);
         let reference = path(&format!("/git/ref/tags/{tag}"));
         let fixture = Fixture::new(vec![
-            Route::get(
-                path(&format!("/commits/{}", default_branch())),
-                json!({"sha":SHA}),
-            ),
+            main_route(SHA),
             Route::request(
                 "GET",
                 reference.clone(),
                 404,
                 json!({"message":"Not Found"}),
             ),
-            Route::get(
-                path(&format!("/commits/{}", default_branch())),
-                json!({"sha":SHA}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request(
                 "POST",
                 path("/git/refs"),
@@ -847,15 +1297,18 @@ mod tests {
         std::fs::write(archive.path(), b"archive").unwrap();
         let mut old_release = release(false, json!([asset(b"archive")]));
         old_release["target_commitish"] = json!("b".repeat(40));
-        let fixture = Fixture::new(vec![
-            Route::get(
-                path(&format!("/commits/{}", default_branch())),
-                json!({"sha":SHA}),
-            ),
+        let mut routes = vec![
+            immutable_releases_route(),
+            repository_route(),
+            main_route(SHA),
+        ];
+        routes.extend(candidate_checks_routes());
+        routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
             Route::get(path(&format!("/releases/tags/{}", tag())), old_release),
         ]);
-        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
+        let fixture = Fixture::new(routes);
+        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
         fixture.finish();
     }
 }

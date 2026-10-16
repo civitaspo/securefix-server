@@ -15,6 +15,7 @@ use caller::{prepare_caller, rendered_files, validate_migration_files, write_mig
 
 const DISTRIBUTOR_WORKFLOW: &str = ".github/workflows/distribute-runtime.yml";
 const PUBLISHER_WORKFLOW: &str = ".github/workflows/publish-runtime.yml";
+const BOOTSTRAP_WORKFLOW: &str = ".github/workflows/control-bootstrap.yml";
 const RUNTIME_ASSET: &str = "securefix-runtime-linux-x86_64.tar.gz";
 
 #[derive(Subcommand)]
@@ -84,7 +85,7 @@ pub fn run(command: Command) -> Result<()> {
             let promotion = validate_promotion(&api, &policy, publisher_run_id)?;
             ensure!(
                 std::env::var("SECUREFIX_SOURCE_SHA")? == promotion.source_sha,
-                "runtime distributor does not match the published current main"
+                "runtime distributor does not match the active control revision"
             );
             let migration = prepare_caller(&api, &policy, &repository, &promotion.source_sha)?;
             validate_migration_files(Path::new(&directory), &migration)?;
@@ -192,28 +193,39 @@ fn caller_names(policy: &Policy) -> Result<Vec<String>> {
 
 pub(crate) fn validate_promotion(
     api: &GitHub,
-    _policy: &Policy,
+    policy: &Policy,
     publisher_run_id: u64,
 ) -> Result<PublishedRuntime> {
     let trusted = crate::config::trusted()?;
     let server_repository = trusted.deployment.server.repository.as_str();
     let default_branch = trusted.deployment.server.default_branch.as_str();
     ensure!(publisher_run_id > 0, "invalid publisher run ID");
+    let control = policy
+        .control
+        .as_ref()
+        .context("active control revision is missing")?;
+    control.validate()?;
+    ensure!(
+        control.publisher_run_id == publisher_run_id,
+        "publisher run does not match the active control revision"
+    );
     let run: Value = api.get(&format!(
         "/repos/{server_repository}/actions/runs/{publisher_run_id}"
     ))?;
+    let run_attempt = run["run_attempt"].as_u64();
+    let bootstrap_publisher = workflow_path(&run["path"], BOOTSTRAP_WORKFLOW, default_branch);
     ensure!(
         run["id"].as_u64() == Some(publisher_run_id)
             && run["repository"]["full_name"] == server_repository
             && run["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
             && run["head_repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
             && run["head_repository"]["full_name"] == server_repository
-            && workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)
+            && (workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)
+                || bootstrap_publisher)
             && run["event"] == "workflow_dispatch"
             && run["head_branch"] == default_branch
-            && run["run_attempt"]
-                .as_u64()
-                .is_some_and(|attempt| attempt >= 1)
+            && run_attempt
+                .is_some_and(|attempt| { attempt >= 1 && (!bootstrap_publisher || attempt == 1) })
             && run["status"] == "completed"
             && run["conclusion"] == "success"
             && run["actor"]["id"].as_u64() == Some(trusted.owner_id)
@@ -224,6 +236,10 @@ pub(crate) fn validate_promotion(
         .as_str()
         .context("publisher source SHA missing")?;
     validate_sha(source_sha)?;
+    ensure!(
+        source_sha == control.source_sha,
+        "publisher source does not match the active control revision"
+    );
     let repository: Value = api.get(&format!("/repos/{server_repository}"))?;
     ensure!(
         repository["full_name"] == server_repository
@@ -231,21 +247,16 @@ pub(crate) fn validate_promotion(
             && repository["owner"]["id"].as_u64() == Some(trusted.deployment.repository_owner.id),
         "unexpected server owner"
     );
-    let main: Value = api.get(&format!(
-        "/repos/{server_repository}/commits/{default_branch}"
-    ))?;
-    ensure!(
-        main["sha"] == source_sha,
-        "publisher is not the current server main revision"
-    );
     let version = crate::runtime::version_at_source(api, source_sha)?;
     let tag = version.tag();
     let release: Value = api.get(&format!("/repos/{server_repository}/releases/tags/{tag}"))?;
     ensure!(
         release["tag_name"] == tag
             && release["name"] == tag
+            && release["id"].as_u64() == Some(control.release_id)
             && release["target_commitish"] == source_sha
             && release["draft"] == false
+            && release["immutable"] == true
             && release["prerelease"] == !version.as_semver().pre.is_empty(),
         "exact runtime release is not published"
     );
@@ -255,14 +266,11 @@ pub(crate) fn validate_promotion(
     ensure!(assets.len() == 1, "runtime release has unexpected assets");
     ensure!(
         assets[0]["name"] == RUNTIME_ASSET
+            && assets[0]["id"].as_u64() == Some(control.asset_id)
             && assets[0]["state"] == "uploaded"
             && assets[0]["size"].as_u64().is_some_and(|size| size > 0)
-            && assets[0]["digest"].as_str().is_some_and(|digest| digest
-                .strip_prefix("sha256:")
-                .is_some_and(|hex| hex.len() == 64
-                    && hex
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))),
+            && assets[0]["digest"].as_str()
+                == Some(format!("sha256:{}", control.archive_sha256).as_str()),
         "published runtime asset is invalid"
     );
     let version_tag = tag;

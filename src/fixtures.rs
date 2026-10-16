@@ -24,6 +24,22 @@ enum Response {
 }
 
 impl Route {
+    pub fn active_control(control: &crate::control::ControlRevision) -> Self {
+        use base64::Engine;
+        let server = &crate::config::trusted().unwrap().deployment.server;
+        let path = format!(
+            "/repos/{}/contents/control/active.json?ref={}",
+            server.repository, server.default_branch
+        );
+        let bytes = serde_json::to_vec(control).unwrap();
+        Self::get(
+            path,
+            serde_json::json!({
+                "encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(bytes)
+            }),
+        )
+    }
     pub fn get(path: impl Into<String>, body: Value) -> Self {
         Self {
             method: "GET",
@@ -87,18 +103,37 @@ pub struct Fixture {
     thread: JoinHandle<()>,
 }
 impl Fixture {
+    pub fn control_revision() -> crate::control::ControlRevision {
+        use sha2::Digest;
+        let policy_sha256 = crate::hex_encode(sha2::Sha256::digest(
+            crate::config::trusted_policy_bytes().unwrap(),
+        ));
+        crate::control::ControlRevision {
+            version: 1,
+            generation: 1,
+            source_sha: "a".repeat(40),
+            policy_sha256,
+            archive_sha256: "2".repeat(64),
+            release_id: 3,
+            asset_id: 4,
+            publisher_run_id: 5,
+            verification_run_id: 6,
+            previous: "0".repeat(64),
+        }
+    }
     pub fn new(routes: Vec<Route>) -> Self {
         let monitor_extra_requests = routes
             .iter()
             .any(|route| matches!(route.response, Response::Disconnect));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
+        let control = Self::control_revision();
         let api = GitHub::new(
             &format!("http://{}", listener.local_addr().unwrap()),
             "fixture-token".into(),
         )
         .unwrap()
-        .with_runtime_revision(&"a".repeat(40))
+        .with_control_revision(&control)
         .unwrap();
         let thread = thread::spawn(move || {
             for route in routes {

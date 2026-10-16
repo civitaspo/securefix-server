@@ -1,8 +1,5 @@
 name: Distribute Runtime
 on:
-  workflow_run:
-    workflows: [Publish Runtime]
-    types: [completed]
   workflow_dispatch:
     inputs:
       publisher_run_id:
@@ -10,14 +7,12 @@ on:
         required: true
         type: string
 permissions: {}
-concurrency:
-  group: runtime-distribution-${{ github.event.workflow_run.id || inputs.publisher_run_id }}
-  cancel-in-progress: false
 jobs:
   runtime:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
   gate:
@@ -45,7 +40,9 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_ACTOR_ID: ${{ github.actor_id }}
           SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
-          PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id || inputs.publisher_run_id }}
+          SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
         run: securefix distribute validate-promotion "$PUBLISHER_RUN_ID"
   caller:
     needs: [runtime, gate]
@@ -55,6 +52,10 @@ jobs:
         repository: ${{ fromJSON(needs.gate.outputs.callers) }}
     runs-on: ubuntu-latest
     environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
     permissions:
       actions: read
       contents: read
@@ -72,6 +73,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
         run: securefix distribute prepare-caller "${{ matrix.repository }}" "caller-migration"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: server-write-token
@@ -91,7 +94,9 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_ACTOR_ID: ${{ github.actor_id }}
           SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
-          PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id || inputs.publisher_run_id }}
+          SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
         run: >-
           securefix distribute apply-caller
           --repository "${{ matrix.repository }}"

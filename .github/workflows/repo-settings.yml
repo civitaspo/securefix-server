@@ -17,13 +17,11 @@ on:
         type: boolean
         default: false
 permissions: {}
-concurrency:
-  group: repo-settings
-  cancel-in-progress: false
 jobs:
   build:
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
   prepare:
@@ -56,6 +54,8 @@ jobs:
           INPUT_MERGE_CONTROLS_READY: ${{ inputs.merge_controls_ready }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ job.workflow_sha }}
         working-directory: ${{ runner.temp }}/securefix-runtime
         run: securefix settings prepare
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -80,12 +80,18 @@ jobs:
           INPUT_REPOSITORY: ${{ inputs.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ job.workflow_sha }}
         working-directory: ${{ runner.temp }}/securefix-runtime
         run: securefix settings activation-preflight
   reconcile:
     needs: [build, prepare]
     runs-on: ubuntu-latest
     environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
     strategy:
@@ -109,6 +115,8 @@ jobs:
           INPUT_CREATE_IF_MISSING: ${{ inputs.create_if_missing }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ job.workflow_sha }}
         working-directory: ${{ runner.temp }}/securefix-runtime
         run: securefix settings reconcile --repository "$REPOSITORY"
   controlled-merges:
@@ -116,6 +124,10 @@ jobs:
     if: needs.prepare.outputs.activate == 'true' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
     steps:
@@ -147,5 +159,7 @@ jobs:
           INPUT_REPOSITORY: ${{ inputs.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ job.workflow_sha }}
         working-directory: ${{ runner.temp }}/securefix-runtime
         run: securefix settings controlled-merges

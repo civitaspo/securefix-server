@@ -4,6 +4,7 @@ use clap::Subcommand;
 use globset::{Glob, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 use std::{collections::HashSet, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -106,6 +107,8 @@ pub struct Policy {
     pub repositories: Vec<RepositoryPolicy>,
     #[serde(skip)]
     pub revision: String,
+    #[serde(skip)]
+    pub control: Option<crate::control::ControlRevision>,
 }
 
 impl Policy {
@@ -173,12 +176,13 @@ impl Policy {
         Ok(policy)
     }
     pub fn active(api: &GitHub) -> Result<Self> {
-        let revision = latest_revision(api, ".github/workflows/ci.yml")?;
-        let bytes = api.content(
-            &crate::config::trusted()?.deployment.server.repository,
-            "policy.json",
-            &revision,
-        )?;
+        let control = crate::control::ControlRevision::require_runtime(api)?;
+        let bytes = crate::config::trusted_policy_bytes()?;
+        let digest = crate::hex_encode(sha2::Sha256::digest(&bytes));
+        ensure!(
+            digest == control.policy_sha256,
+            "bundled policy digest mismatch"
+        );
         let mut policy = Self::parse(&bytes)?;
         let trusted = crate::config::trusted()?;
         ensure!(
@@ -188,7 +192,8 @@ impl Policy {
                 && policy.server_bot_id == trusted.server_bot_id,
             "active policy identity differs from trusted runtime"
         );
-        policy.revision = revision;
+        policy.revision = control.source_sha.clone();
+        policy.control = Some(control);
         Ok(policy)
     }
     pub fn repository(&self, full_name: &str) -> Result<&RepositoryPolicy> {
@@ -198,7 +203,8 @@ impl Policy {
             .with_context(|| format!("repository is not allowed: {full_name}"))
     }
     pub fn latest_revision(api: &GitHub, workflow_path: &str) -> Result<String> {
-        latest_revision(api, workflow_path)
+        let _ = workflow_path;
+        Ok(crate::control::ControlRevision::require_runtime(api)?.source_sha)
     }
 }
 

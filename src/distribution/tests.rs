@@ -1,6 +1,24 @@
 use super::caller::validate_existing;
 use super::*;
 
+fn promotion_control(
+    publisher_run_id: u64,
+    source_sha: &str,
+) -> securefix::control::ControlRevision {
+    securefix::control::ControlRevision {
+        version: 1,
+        generation: 1,
+        source_sha: source_sha.to_owned(),
+        policy_sha256: "1".repeat(64),
+        archive_sha256: "a".repeat(64),
+        release_id: 31,
+        asset_id: 32,
+        publisher_run_id,
+        verification_run_id: 33,
+        previous: "0".repeat(64),
+    }
+}
+
 #[test]
 fn legacy_approval_rejects_changed_conditions_permissions_and_inputs() {
     let templates = caller::legacy_approval_templates().unwrap();
@@ -255,17 +273,7 @@ fn runtime_update_auto_merge_sha_pins_the_merge_and_verifies_default_branch_cont
             format!("/repos/{repository}/git/ref/heads/{branch}"),
             json!({"object":{"sha":head}}),
         ),
-        Route::get(
-            format!(
-                "/repos/{}/commits/main",
-                crate::config::trusted()
-                    .unwrap()
-                    .deployment
-                    .server
-                    .repository
-            ),
-            json!({"sha":source_sha}),
-        ),
+        Route::active_control(&Fixture::control_revision()),
         Route::request(
             "PUT",
             format!("/repos/{repository}/pulls/19/merge"),
@@ -421,7 +429,7 @@ fn caller_migration_requires_repository_owner_identity_not_human_owner_identity(
 }
 
 #[test]
-fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() {
+fn publisher_gate_accepts_only_successful_owner_run_for_active_control_revision() {
     use crate::fixtures::{Fixture, Route};
     let trusted = crate::config::trusted().unwrap();
     let server = &trusted.deployment.server.repository;
@@ -429,8 +437,9 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
     let owner_id = trusted.owner_id;
     let sha = "a".repeat(40);
     let publisher = json!({"id":17,"repository":{"full_name":server,"id":trusted.deployment.server.id},"head_repository":{"full_name":server,"id":trusted.deployment.server.id},"path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),"event":"workflow_dispatch","head_branch":branch,"head_sha":sha,"run_attempt":2,"status":"completed","conclusion":"success","actor":{"id":owner_id},"triggering_actor":{"id":owner_id}});
-    let release = json!({"id":31,"tag_name":"v0.2.0-pre.1","name":"v0.2.0-pre.1","target_commitish":sha,"draft":false,"prerelease":true,"assets":[{"name":RUNTIME_ASSET,"state":"uploaded","size":9,"digest":format!("sha256:{}", "a".repeat(64))}]});
-    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let release = json!({"id":31,"tag_name":"v0.2.0-pre.1","name":"v0.2.0-pre.1","target_commitish":sha,"draft":false,"immutable":true,"prerelease":true,"assets":[{"id":32,"name":RUNTIME_ASSET,"state":"uploaded","size":9,"digest":format!("sha256:{}", "a".repeat(64))}]});
+    let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    policy.control = Some(promotion_control(17, &sha));
     let fixture = Fixture::new(vec![
         Route::get(
             format!("/repos/{server}/actions/runs/17"),
@@ -445,16 +454,12 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
             }),
         ),
         Route::get(
-            format!("/repos/{server}/commits/{branch}"),
-            json!({"sha":sha}),
-        ),
-        Route::get(
             format!("/repos/{server}/contents/Cargo.toml?ref={sha}"),
             json!({"type":"file","path":"Cargo.toml","size":34,"encoding":"base64","content":"W3BhY2thZ2VdCnZlcnNpb24gPSAiMC4yLjAtcHJlLjEiCg=="}),
         ),
         Route::get(
             format!("/repos/{server}/releases/tags/v0.2.0-pre.1"),
-            release,
+            release.clone(),
         ),
         Route::get(
             format!("/repos/{server}/git/ref/tags/{}", "v0.2.0-pre.1"),
@@ -467,6 +472,53 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
             .source_sha,
         sha
     );
+    fixture.finish();
+
+    let mut bootstrap_publisher = publisher.clone();
+    bootstrap_publisher["path"] = json!(format!(
+        ".github/workflows/control-bootstrap.yml@refs/heads/{branch}"
+    ));
+    bootstrap_publisher["run_attempt"] = json!(1);
+    let fixture = Fixture::new(vec![
+        Route::get(
+            format!("/repos/{server}/actions/runs/17"),
+            bootstrap_publisher.clone(),
+        ),
+        Route::get(
+            format!("/repos/{server}"),
+            json!({
+                "full_name":server,
+                "id":trusted.deployment.server.id,
+                "owner":{"id":trusted.deployment.repository_owner.id}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/contents/Cargo.toml?ref={sha}"),
+            json!({"type":"file","path":"Cargo.toml","size":34,"encoding":"base64","content":"W3BhY2thZ2VdCnZlcnNpb24gPSAiMC4yLjAtcHJlLjEiCg=="}),
+        ),
+        Route::get(
+            format!("/repos/{server}/releases/tags/v0.2.0-pre.1"),
+            release.clone(),
+        ),
+        Route::get(
+            format!("/repos/{server}/git/ref/tags/{}", "v0.2.0-pre.1"),
+            json!({"ref":"refs/tags/v0.2.0-pre.1","object":{"type":"commit","sha":sha}}),
+        ),
+    ]);
+    assert_eq!(
+        validate_promotion(&fixture.api, &policy, 17)
+            .unwrap()
+            .source_sha,
+        sha
+    );
+    fixture.finish();
+
+    bootstrap_publisher["run_attempt"] = json!(2);
+    let fixture = Fixture::new(vec![Route::get(
+        format!("/repos/{server}/actions/runs/17"),
+        bootstrap_publisher,
+    )]);
+    assert!(validate_promotion(&fixture.api, &policy, 17).is_err());
     fixture.finish();
 
     let fixture = Fixture::new(vec![
@@ -529,6 +581,196 @@ fn publisher_gate_accepts_only_successful_owner_run_for_current_published_sha() 
 }
 
 #[test]
+fn verified_publication_can_be_carried_into_promotion_validation() {
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let trusted = crate::config::trusted().unwrap();
+    let server = &trusted.deployment.server.repository;
+    let branch = &trusted.deployment.server.default_branch;
+    let owner_id = trusted.owner_id;
+    let source_sha = "b".repeat(40);
+    let version = env!("CARGO_PKG_VERSION");
+    let tag = format!("v{version}");
+    let prerelease = !crate::runtime::RuntimeVersion::parse(version)
+        .unwrap()
+        .as_semver()
+        .pre
+        .is_empty();
+    let manifest = format!("[package]\nversion = \"{version}\"\n");
+    let manifest_content = base64::engine::general_purpose::STANDARD.encode(manifest.as_bytes());
+    let archive = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(archive.path(), b"verified runtime archive").unwrap();
+    let archive_sha256 = crate::hex_encode(Sha256::digest(b"verified runtime archive"));
+    let release = json!({
+        "id":71,"tag_name":tag,"name":tag,"target_commitish":source_sha,
+        "draft":false,"immutable":true,"prerelease":prerelease,
+        "assets":[{"id":72,"name":RUNTIME_ASSET,"state":"uploaded",
+            "size":b"verified runtime archive".len(),"digest":format!("sha256:{archive_sha256}")}]
+    });
+    let runtime_fixture = Fixture::new(vec![
+        Route::get(
+            format!("/repos/{server}/contents/Cargo.toml?ref={source_sha}"),
+            json!({
+                "type":"file","path":"Cargo.toml","size":manifest.len(),"encoding":"base64","content":manifest_content
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/git/ref/tags/{tag}"),
+            json!({
+                "ref":format!("refs/tags/{tag}"),"object":{"type":"commit","sha":source_sha}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/releases/tags/{tag}"),
+            release.clone(),
+        ),
+    ]);
+    let publication = crate::runtime::verify_publication(
+        &runtime_fixture.api,
+        &source_sha,
+        server,
+        archive.path(),
+    )
+    .unwrap();
+    runtime_fixture.finish();
+
+    let mut next = Fixture::control_revision();
+    next.generation = 2;
+    next.source_sha = publication.source_sha.clone();
+    next.policy_sha256 = crate::hex_encode(Sha256::digest(
+        crate::config::trusted_policy_bytes().unwrap(),
+    ));
+    next.archive_sha256 = publication.archive_sha256.clone();
+    next.release_id = publication.release_id;
+    next.asset_id = publication.asset_id;
+    next.publisher_run_id = 17;
+    next.verification_run_id = 23;
+    next.previous = Fixture::control_revision().identity().unwrap();
+    Fixture::control_revision()
+        .validate_successor(&next)
+        .unwrap();
+
+    let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    policy.control = Some(next.clone());
+    let publisher = json!({
+        "id":17,
+        "repository":{"full_name":server,"id":trusted.deployment.server.id},
+        "head_repository":{"full_name":server,"id":trusted.deployment.server.id},
+        "path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),
+        "event":"workflow_dispatch","head_branch":branch,"head_sha":source_sha,
+        "run_attempt":1,"status":"completed","conclusion":"success",
+        "actor":{"id":owner_id},"triggering_actor":{"id":owner_id}
+    });
+    let distribution_fixture = Fixture::new(vec![
+        Route::get(format!("/repos/{server}/actions/runs/17"), publisher),
+        Route::get(
+            format!("/repos/{server}"),
+            json!({
+                "full_name":server,"id":trusted.deployment.server.id,
+                "owner":{"id":trusted.deployment.repository_owner.id}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/contents/Cargo.toml?ref={source_sha}"),
+            json!({
+                "type":"file","path":"Cargo.toml","size":manifest.len(),"encoding":"base64","content":manifest_content
+            }),
+        ),
+        Route::get(format!("/repos/{server}/releases/tags/{tag}"), release),
+        Route::get(
+            format!("/repos/{server}/git/ref/tags/{tag}"),
+            json!({
+                "ref":format!("refs/tags/{tag}"),"object":{"type":"commit","sha":source_sha}
+            }),
+        ),
+    ]);
+    let published = validate_promotion(&distribution_fixture.api, &policy, 17).unwrap();
+    assert_eq!(published.publisher_run_id, next.publisher_run_id);
+    assert_eq!(published.source_sha, publication.source_sha);
+    assert_eq!(next.source_sha, publication.source_sha);
+    assert_eq!(next.archive_sha256, publication.archive_sha256);
+    assert_eq!(
+        (next.release_id, next.asset_id),
+        (publication.release_id, publication.asset_id)
+    );
+    assert_eq!(
+        next.policy_sha256,
+        crate::hex_encode(Sha256::digest(
+            crate::config::trusted_policy_bytes().unwrap(),
+        ))
+    );
+    distribution_fixture.finish();
+}
+
+#[test]
+fn publisher_gate_requires_the_active_control_provenance_before_network_access() {
+    use crate::fixtures::Fixture;
+
+    let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let missing_control = Fixture::new(vec![]);
+    assert!(validate_promotion(&missing_control.api, &policy, 17).is_err());
+    missing_control.finish();
+
+    policy.control = Some(promotion_control(18, &"a".repeat(40)));
+    let mismatched_publisher = Fixture::new(vec![]);
+    assert!(validate_promotion(&mismatched_publisher.api, &policy, 17).is_err());
+    mismatched_publisher.finish();
+}
+
+#[test]
+fn publisher_gate_rejects_release_identity_digest_or_immutability_mismatches() {
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+
+    let trusted = crate::config::trusted().unwrap();
+    let server = &trusted.deployment.server.repository;
+    let branch = &trusted.deployment.server.default_branch;
+    let sha = "a".repeat(40);
+    let publisher = json!({"id":17,"repository":{"full_name":server,"id":trusted.deployment.server.id},"head_repository":{"full_name":server,"id":trusted.deployment.server.id},"path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),"event":"workflow_dispatch","head_branch":branch,"head_sha":sha,"run_attempt":1,"status":"completed","conclusion":"success","actor":{"id":trusted.owner_id},"triggering_actor":{"id":trusted.owner_id}});
+    let manifest = "[package]\nversion = \"0.2.0-pre.1\"\n";
+    for (field, value) in [
+        ("id", json!(99)),
+        ("immutable", json!(false)),
+        ("asset_id", json!(99)),
+        ("digest", json!(format!("sha256:{}", "b".repeat(64)))),
+    ] {
+        let mut release = json!({"id":31,"tag_name":"v0.2.0-pre.1","name":"v0.2.0-pre.1","target_commitish":sha,"draft":false,"immutable":true,"prerelease":true,"assets":[{"id":32,"name":RUNTIME_ASSET,"state":"uploaded","size":9,"digest":format!("sha256:{}", "a".repeat(64))}]});
+        if field == "asset_id" || field == "digest" {
+            release["assets"][0][if field == "asset_id" { "id" } else { "digest" }] = value;
+        } else {
+            release[field] = value;
+        }
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.control = Some(promotion_control(17, &sha));
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{server}/actions/runs/17"),
+                publisher.clone(),
+            ),
+            Route::get(
+                format!("/repos/{server}"),
+                json!({"full_name":server,"id":trusted.deployment.server.id,"owner":{"id":trusted.deployment.repository_owner.id}}),
+            ),
+            Route::get(
+                format!("/repos/{server}/contents/Cargo.toml?ref={sha}"),
+                json!({
+                    "type":"file","path":"Cargo.toml","size":manifest.len(),"encoding":"base64",
+                    "content":base64::engine::general_purpose::STANDARD.encode(manifest)
+                }),
+            ),
+            Route::get(
+                format!("/repos/{server}/releases/tags/v0.2.0-pre.1"),
+                release,
+            ),
+        ]);
+        assert!(validate_promotion(&fixture.api, &policy, 17).is_err());
+        fixture.finish();
+    }
+}
+
+#[test]
 fn promotion_gate_binds_manifest_version_release_identity_and_direct_ref() {
     use crate::fixtures::{Fixture, Route};
     use base64::Engine;
@@ -558,10 +800,6 @@ fn promotion_gate_binds_manifest_version_release_identity_and_direct_ref() {
                 json!({"full_name":server,"id":trusted.deployment.server.id,"owner":{"id":trusted.deployment.repository_owner.id}}),
             ),
             Route::get(
-                format!("/repos/{server}/commits/{branch}"),
-                json!({"sha":sha}),
-            ),
-            Route::get(
                 format!("/repos/{server}/contents/Cargo.toml?ref={sha}"),
                 json!({
                     "type":"file",
@@ -579,8 +817,9 @@ fn promotion_gate_binds_manifest_version_release_identity_and_direct_ref() {
                     "name":release_tag,
                     "target_commitish":release_target,
                     "draft":false,
+                    "immutable":true,
                     "prerelease":release_prerelease,
-                    "assets":[{"name":RUNTIME_ASSET,"state":"uploaded","size":9,"digest":format!("sha256:{}", "a".repeat(64))}]
+                    "assets":[{"id":32,"name":RUNTIME_ASSET,"state":"uploaded","size":9,"digest":format!("sha256:{}", "a".repeat(64))}]
                 }),
             ),
         ];
@@ -592,7 +831,8 @@ fn promotion_gate_binds_manifest_version_release_identity_and_direct_ref() {
         }
         routes
     };
-    let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    policy.control = Some(promotion_control(17, &sha));
 
     let fixture = Fixture::new(make_routes(
         "0.2.0-pre.2",
@@ -640,42 +880,6 @@ fn promotion_gate_binds_manifest_version_release_identity_and_direct_ref() {
         true,
     ));
     assert!(validate_promotion(&fixture.api, &policy, 17).is_err());
-    fixture.finish();
-}
-
-#[test]
-fn promotion_gate_stops_on_stale_main_before_manifest_or_release_lookup() {
-    use crate::fixtures::{Fixture, Route};
-
-    let trusted = crate::config::trusted().unwrap();
-    let server = &trusted.deployment.server.repository;
-    let branch = &trusted.deployment.server.default_branch;
-    let owner_id = trusted.owner_id;
-    let sha = "a".repeat(40);
-    let publisher = json!({"id":17,"repository":{"full_name":server,"id":trusted.deployment.server.id},"head_repository":{"full_name":server,"id":trusted.deployment.server.id},"path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),"event":"workflow_dispatch","head_branch":branch,"head_sha":sha,"run_attempt":2,"status":"completed","conclusion":"success","actor":{"id":owner_id},"triggering_actor":{"id":owner_id}});
-    let fixture = Fixture::new(vec![
-        Route::get(format!("/repos/{server}/actions/runs/17"), publisher),
-        Route::get(
-            format!("/repos/{server}"),
-            json!({"full_name":server,"id":trusted.deployment.server.id,"owner":{"id":trusted.deployment.repository_owner.id}}),
-        ),
-        Route::get(
-            format!("/repos/{server}/commits/{branch}"),
-            json!({"sha":"b".repeat(40)}),
-        ),
-    ]);
-    let error = validate_promotion(
-        &fixture.api,
-        &Policy::load("tests/fixtures/policy.json").unwrap(),
-        17,
-    )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("publisher is not the current server main revision"),
-        "stale publisher should stop at the main SHA guard: {error:#}"
-    );
     fixture.finish();
 }
 
@@ -893,10 +1097,7 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
             "/repos/civitaspo/herdr-linear-agent/pulls/4/files?per_page=100&per_page=100&page=1",
             json!([{"filename":".github/workflows/approve-request.yml","status":"modified"}]),
         ),
-        Route::get(
-            "/repos/civitaspo/securefix-server/commits/main",
-            json!({"sha":"a".repeat(40)}),
-        ),
+        Route::active_control(&Fixture::control_revision()),
         Route::request(
             "PATCH",
             "/repos/civitaspo/herdr-linear-agent/pulls/4",
@@ -930,12 +1131,6 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
     use base64::Engine;
 
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
-    let server = crate::config::trusted()
-        .unwrap()
-        .deployment
-        .server
-        .repository
-        .clone();
     let runtime_branch = crate::config::trusted()
         .unwrap()
         .deployment
@@ -967,7 +1162,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
         ),
         Route::get(pull_path, json!([])),
         Route::get(format!("/repos/{repository}/commits/main"), json!({"sha":base_sha})),
-        Route::get(format!("/repos/{server}/commits/main"), json!({"sha":source_sha})),
+        Route::active_control(&Fixture::control_revision()),
         Route::request(
             "POST",
             format!("/repos/{repository}/git/refs"),
@@ -975,7 +1170,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
             json!({"ref":branch,"object":{"sha":base_sha}}),
         )
         .with_request_body(json!({"ref":branch,"sha":base_sha})),
-        Route::get(format!("/repos/{server}/commits/main"), json!({"sha":source_sha})),
+        Route::active_control(&Fixture::control_revision()),
         Route::request(
             "POST",
             "/graphql",
@@ -992,7 +1187,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
             }}
         })),
         Route::get(pull_path, json!([])),
-        Route::get(format!("/repos/{server}/commits/main"), json!({"sha":source_sha})),
+        Route::active_control(&Fixture::control_revision()),
         Route::request(
             "POST",
             format!("/repos/{repository}/pulls"),

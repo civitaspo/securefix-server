@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Digest;
 use std::{
     collections::BTreeMap,
     fs,
@@ -123,6 +124,13 @@ pub enum Command {
         #[arg(long, default_value = "0.1.1")]
         version: String,
     },
+    /// Exercise scratch-scoped control descriptor CAS and generation binding.
+    ControlProbe {
+        #[arg(long)]
+        candidate_sha: String,
+        #[arg(long)]
+        state_file: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -211,6 +219,28 @@ struct ReleasePrState {
     historical_changelog: String,
     stable_tag: String,
     stable_base_sha: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ControlProbeVerification {
+    version: u32,
+    repository: String,
+    candidate_sha: String,
+    branch: String,
+    base_sha: String,
+    generation_one_commit_sha: String,
+    generation_two_commit_sha: String,
+    generation_three_commit_sha: String,
+    generation_one: String,
+    generation_two: String,
+    generation_three: String,
+    source_advance_kept_descriptor: bool,
+    expected_head_conflict_rejected: bool,
+    stale_identity_rejected_after_aba: bool,
+    production_publication_verified: bool,
+    production_activation_verified: bool,
+    distribution_verified: bool,
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -314,6 +344,15 @@ pub fn run(command: Command) -> Result<()> {
                 prepare_run_id,
                 &version,
             )
+        }
+        Command::ControlProbe {
+            candidate_sha,
+            state_file,
+        } => {
+            validate_sha(&candidate_sha)?;
+            validate_state_path(&state_file)?;
+            let state_path = std::env::current_dir()?.join(state_file);
+            control_probe(&candidate_sha, &state_path)
         }
     }
 }
@@ -1762,7 +1801,14 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     };
     validate_scenario(&state, candidate_sha, &state.published_runtime_sha)?;
     workflow::write_json(state_file, &state)?;
-    verify_policy_feedback(&server, &state.distribution)?;
+    verify_policy_feedback(
+        &server,
+        &state.distribution,
+        scratch_policy
+            .control
+            .as_ref()
+            .context("scratch policy control fixture missing")?,
+    )?;
     println!("Prepared Securefix scratch integration state.");
     println!(
         "Positive PR (post exact owner /approve and /merge; add a current-head review): {}",
@@ -2525,12 +2571,24 @@ fn approve_owner_fixture(
     let comment_id = comment["id"]
         .as_u64()
         .context("approval fixture comment ID missing")?;
-    request::post_owner_marker(api, repository, number, &head, comment_id)?;
+    let control = policy
+        .control
+        .as_ref()
+        .context("scratch policy control fixture missing")?;
+    request::post_owner_marker(api, repository, number, &head, comment_id, control)?;
     let reviewer = crate::config::Principal {
         login: trusted.deployment.server_bot_login.clone(),
         id: trusted.server_bot_id,
     };
-    crate::approval::approve_current_head(api, api, repository, number, &head, &reviewer, "Bot")?;
+    crate::approval::approve_current_head(
+        api,
+        api,
+        repository,
+        number,
+        &head,
+        (&reviewer, "Bot"),
+        control,
+    )?;
     request::validate_pr_authorization(api, &policy, repository, number, &head, true)?;
     println!("Verified the shared approval core on owner-authored scratch PR {number} at {head}.");
     Ok(())
@@ -2592,7 +2650,7 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
                 &verification,
             )?;
             println!(
-                "Verified native scratch integration; GitHub auto-merge and pinact consumer CI passed."
+                "Verified scratch integration; server-app merge and pinact consumer CI passed."
             );
             println!("{}", serde_json::to_string(&verification)?);
             Ok(())
@@ -2673,7 +2731,14 @@ fn verify_inner(
             "owner request did not receive a receipt reaction"
         );
     }
-    verify_policy_feedback(api, &scenario.distribution)?;
+    verify_policy_feedback(
+        api,
+        &scenario.distribution,
+        policy
+            .control
+            .as_ref()
+            .context("scratch policy control fixture missing")?,
+    )?;
 
     request::validate_pr_authorization(
         api,
@@ -2686,12 +2751,17 @@ fn verify_inner(
     let approve_comment_id = approve_comment["id"]
         .as_u64()
         .context("owner approval comment has no ID")?;
+    let control = policy
+        .control
+        .as_ref()
+        .context("scratch policy control fixture missing")?;
     request::post_owner_marker(
         api,
         integration_repository()?,
         scenario.positive.number,
         &scenario.positive.head_sha,
         approve_comment_id,
+        control,
     )?;
     request::require_owner_marker(
         api,
@@ -2735,6 +2805,10 @@ fn verify_inner(
         &positive_merge_comment,
         &scenario.candidate_sha,
     )?;
+    let scratch_reviewer = crate::config::Principal {
+        id: trusted_config()?.owner_id,
+        login: trusted_config()?.deployment.owner_login.clone(),
+    };
     merge::validate_state(api, policy, &positive_manifest)?;
     ensure!(
         !policy_check_exists(api, &scenario.positive.head_sha)?,
@@ -2742,15 +2816,9 @@ fn verify_inner(
     );
     wait_for_merge_gates_except_policy(api, &scenario.positive, deadline)?;
     ensure!(
-        !merge::ready(api, &positive_manifest)?,
+        !merge::ready_with_reviewer(api, &positive_manifest, (&scratch_reviewer, "User"))?,
         "scratch positive PR became merge-ready without the Securefix policy check"
     );
-    api.enable_scratch_auto_merge(
-        integration_repository()?,
-        scenario.positive.number,
-        &scenario.positive.head_sha,
-    )?;
-    wait_for_auto_merge_pending(api, &scenario.positive, deadline)?;
     ensure!(
         !policy_check_exists(api, &scenario.positive.head_sha)?,
         "positive policy check appeared before it was published by the integration harness"
@@ -2761,13 +2829,92 @@ fn verify_inner(
         &scenario.positive.head_sha,
         true,
         "Integration fixture passed production PR authorization checks.",
+        control,
     )?;
     wait_for_policy_check_success(api, &scenario.positive, deadline)?;
     ensure!(
-        merge::ready(api, &positive_manifest)?,
+        merge::ready_with_reviewer(api, &positive_manifest, (&scratch_reviewer, "User"))?,
         "scratch positive PR lacks required checks or approved review after policy check"
     );
-    let merged_sha = wait_for_auto_merge(api, &scenario.positive, deadline)?;
+    ensure!(
+        request::has_current_head_approval_for_reviewer(
+            api,
+            integration_repository()?,
+            scenario.positive.number,
+            &scenario.positive.head_sha,
+            control,
+            &scratch_reviewer,
+            "User",
+        )?,
+        "scratch owner approval is not bound to the current control identity"
+    );
+    let next_control = securefix::control::ControlRevision {
+        generation: control.generation + 1,
+        previous: control.identity()?,
+        verification_run_id: control.verification_run_id + 1,
+        ..control.clone()
+    };
+    control.validate_successor(&next_control)?;
+    ensure!(
+        !request::has_current_head_approval_for_reviewer(
+            api,
+            integration_repository()?,
+            scenario.positive.number,
+            &scenario.positive.head_sha,
+            &next_control,
+            &scratch_reviewer,
+            "User",
+        )?,
+        "old scratch approval was reused across control generations"
+    );
+    let mut next_manifest = positive_manifest.clone();
+    next_manifest.control = next_control;
+    ensure!(
+        !merge::ready_with_reviewer(api, &next_manifest, (&scratch_reviewer, "User"))?,
+        "old scratch check and approval made the next control generation merge-ready"
+    );
+    println!(
+        "Verified that the same live PR head cannot reuse its scratch review and policy check in a new control generation."
+    );
+    ensure!(
+        api.enable_scratch_auto_merge(
+            integration_repository()?,
+            scenario.positive.number,
+            &scenario.positive.head_sha,
+        )
+        .is_err(),
+        "GitHub native auto-merge unexpectedly accepted a PR under server-controlled merge rules"
+    );
+    let auto_merge_pull: Value = api.get(&format!(
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    ensure!(
+        auto_merge_pull["auto_merge"].is_null(),
+        "GitHub exposed a queued native auto-merge request"
+    );
+    let merged: Value = api.put(
+        &format!(
+            "/repos/{}/pulls/{}/merge",
+            integration_repository()?,
+            scenario.positive.number
+        ),
+        &json!({
+            "sha":scenario.positive.head_sha,
+            "merge_method":"squash",
+            "commit_title":"test: controlled Securefix scratch merge"
+        }),
+    )?;
+    ensure!(
+        merged["merged"] == true,
+        "server app did not merge the ready scratch PR"
+    );
+    let merged_sha = merged["sha"]
+        .as_str()
+        .context("scratch merge response has no commit SHA")?
+        .to_owned();
+    validate_sha(&merged_sha)?;
     ensure!(
         merge::validate_state(api, policy, &positive_manifest).is_err(),
         "replayed merge manifest unexpectedly remained valid after merge"
@@ -2803,12 +2950,6 @@ fn verify_inner(
         )? && !policy_check_exists(api, &scenario.stale.head_sha)?,
         "stale-head fixture unexpectedly has current review or policy check before its probe"
     );
-    api.enable_scratch_auto_merge(
-        integration_repository()?,
-        scenario.stale.number,
-        &scenario.stale.head_sha,
-    )?;
-    wait_for_auto_merge_pending(api, &scenario.stale, deadline)?;
     let stale_head_sha = api.create_commit(
         integration_repository()?,
         &scenario.stale.branch,
@@ -2857,15 +2998,6 @@ fn verify_inner(
         )? && !policy_check_exists(api, &stale_head_sha)?,
         "advanced stale-head fixture unexpectedly has current review or policy check"
     );
-    ensure!(
-        api.enable_scratch_auto_merge(
-            integration_repository()?,
-            scenario.stale.number,
-            &scenario.stale.head_sha,
-        )
-        .is_err(),
-        "native auto-merge accepted the owner authorization's stale head"
-    );
     let stale_merge = api.put::<Value>(
         &format!(
             "/repos/{}/pulls/{}/merge",
@@ -2913,7 +3045,11 @@ fn verify_inner(
     })
 }
 
-fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<()> {
+fn verify_policy_feedback(
+    api: &GitHub,
+    fixture: &PullRequestFixture,
+    control: &securefix::control::ControlRevision,
+) -> Result<()> {
     let repo = integration_repository()?;
     let server_bot_id = trusted_config()?.server_bot_id;
     let mut failure_ids = Vec::new();
@@ -2921,7 +3057,7 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
         "Integration probe: current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- \"Cargo.toml\"\n- \"Cargo.lock\"",
         "Integration probe: policy rejection was superseded.",
     ] {
-        policy_check::publish(api, repo, &fixture.head_sha, false, reason)?;
+        policy_check::publish(api, repo, &fixture.head_sha, false, reason, control)?;
         policy_check::report_result(api, repo, fixture.number, &fixture.head_sha, false, reason)?;
         let comments =
             api.paginate(&format!("/repos/{repo}/issues/{}/comments", fixture.number))?;
@@ -2979,6 +3115,7 @@ fn verify_policy_feedback(api: &GitHub, fixture: &PullRequestFixture) -> Result<
         &fixture.head_sha,
         true,
         "Integration feedback recovery succeeded.",
+        control,
     )?;
     policy_check::report_result(
         api,
@@ -3476,40 +3613,6 @@ fn wait_for_merge_gates_except_policy(
     }
 }
 
-fn wait_for_auto_merge_pending(
-    api: &GitHub,
-    fixture: &PullRequestFixture,
-    deadline: Instant,
-) -> Result<()> {
-    loop {
-        let pull: Value = api.get(&format!(
-            "/repos/{}/pulls/{}",
-            integration_repository()?,
-            fixture.number
-        ))?;
-        ensure!(
-            pull["number"].as_u64() == Some(fixture.number)
-                && pull["head"]["repo"]["full_name"] == integration_repository()?
-                && pull["head"]["ref"] == fixture.branch
-                && pull["head"]["sha"] == fixture.head_sha
-                && pull["base"]["repo"]["full_name"] == integration_repository()?
-                && pull["state"] == "open"
-                && pull["merged"] == false,
-            "scratch auto-merge PR changed or merged before its required gate"
-        );
-        if pull["auto_merge"].is_object() {
-            return Ok(());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        ensure!(
-            !remaining.is_zero(),
-            "GitHub did not expose queued auto-merge for {}",
-            fixture.url
-        );
-        thread::sleep(remaining.min(Duration::from_secs(5)));
-    }
-}
-
 fn wait_for_policy_check_success(
     api: &GitHub,
     fixture: &PullRequestFixture,
@@ -3559,47 +3662,6 @@ fn wait_for_actions_status_check(
         ensure!(
             !remaining.is_zero(),
             "timed out waiting for the real consumer {check_name} on {}",
-            fixture.url
-        );
-        thread::sleep(remaining.min(Duration::from_secs(5)));
-    }
-}
-
-fn wait_for_auto_merge(
-    api: &GitHub,
-    fixture: &PullRequestFixture,
-    deadline: Instant,
-) -> Result<String> {
-    loop {
-        let pull: Value = api.get(&format!(
-            "/repos/{}/pulls/{}",
-            integration_repository()?,
-            fixture.number
-        ))?;
-        ensure!(
-            pull["number"].as_u64() == Some(fixture.number)
-                && pull["head"]["repo"]["full_name"] == integration_repository()?
-                && pull["head"]["ref"] == fixture.branch
-                && pull["head"]["sha"] == fixture.head_sha
-                && pull["base"]["repo"]["full_name"] == integration_repository()?,
-            "scratch auto-merge PR identity changed while waiting"
-        );
-        if pull["merged"] == true {
-            ensure!(pull["state"] == "closed", "GitHub merged PR remains open");
-            let sha = pull["merge_commit_sha"]
-                .as_str()
-                .context("merged scratch PR has no merge commit SHA")?;
-            validate_sha(sha)?;
-            return Ok(sha.to_owned());
-        }
-        ensure!(
-            pull["state"] == "open",
-            "GitHub closed the scratch auto-merge PR without merging"
-        );
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        ensure!(
-            !remaining.is_zero(),
-            "timed out waiting for GitHub native auto-merge of {}",
             fixture.url
         );
         thread::sleep(remaining.min(Duration::from_secs(5)));
@@ -3696,9 +3758,230 @@ fn manifest(
         run_attempt: 1,
         workflow_sha: candidate_sha.to_owned(),
         caller_workflow_sha: candidate_sha.to_owned(),
+        // This descriptor is a structural fixture for the legacy scratch merge
+        // scenarios. It does not claim that this candidate was published or
+        // activated; ControlProbe records those facts separately.
+        control: scratch_manifest_control(candidate_sha)?,
     };
     manifest.validate()?;
     Ok(manifest)
+}
+
+fn scratch_manifest_control(candidate_sha: &str) -> Result<securefix::control::ControlRevision> {
+    validate_sha(candidate_sha)?;
+    let policy_sha256 =
+        crate::hex_encode(sha2::Sha256::digest(crate::config::trusted_policy_bytes()?));
+    let control = securefix::control::ControlRevision {
+        version: 1,
+        generation: 1,
+        source_sha: candidate_sha.to_owned(),
+        policy_sha256,
+        archive_sha256: "0".repeat(64),
+        release_id: 1,
+        asset_id: 1,
+        publisher_run_id: 1,
+        verification_run_id: 1,
+        previous: "0".repeat(64),
+    };
+    control.validate()?;
+    Ok(control)
+}
+
+fn control_probe(candidate_sha: &str, state_file: &Path) -> Result<()> {
+    let api = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
+    crate::settings::validate_installation_scope(
+        &api,
+        &[integration_repository()?.to_owned()],
+        trusted_config()?.deployment.repository_owner.id,
+    )?;
+    let repo: Value = api.get(&format!("/repos/{}", integration_repository()?))?;
+    ensure!(
+        repo["id"].as_u64() == Some(integration_repository_id()?),
+        "control probe scratch repository identity changed"
+    );
+    let default_branch = repo["default_branch"]
+        .as_str()
+        .context("scratch default branch missing")?;
+    let base: Value = api.get(&format!(
+        "/repos/{}/commits/{default_branch}",
+        integration_repository()?
+    ))?;
+    let base_sha = base["sha"]
+        .as_str()
+        .context("scratch default branch SHA missing")?
+        .to_owned();
+    validate_sha(&base_sha)?;
+
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let branch = format!("{BRANCH_PREFIX}control-{nonce}");
+    validate_branch(&branch)?;
+    let _: Value = api.post(
+        &format!("/repos/{}/git/refs", integration_repository()?),
+        &json!({"ref":format!("refs/heads/{branch}"),"sha":base_sha}),
+    )?;
+
+    let result = (|| -> Result<ControlProbeVerification> {
+        let first = scratch_manifest_control(candidate_sha)?;
+        let first_bytes = serde_json::to_vec_pretty(&first)?;
+        let first_sha = api.create_commit(
+            integration_repository()?,
+            &branch,
+            &base_sha,
+            "test: create scratch control descriptor generation one",
+            BTreeMap::from([("control/active.json".into(), first_bytes.clone())]),
+            Vec::new(),
+        )?;
+
+        // Advance the scratch branch through a separate signed commit. The active
+        // descriptor bytes must remain identical while an unrelated main revision
+        // is introduced, as they would during ordinary source changes.
+        let advanced_sha = api.create_commit(
+            integration_repository()?,
+            &branch,
+            &first_sha,
+            "test: advance scratch source without changing control",
+            BTreeMap::from([(
+                "control/source-advance.txt".into(),
+                b"source advanced; control remains pinned\n".to_vec(),
+            )]),
+            Vec::new(),
+        )?;
+        let preserved = api.content(
+            integration_repository()?,
+            "control/active.json",
+            &advanced_sha,
+        )?;
+        ensure!(
+            preserved == first_bytes,
+            "unrelated source advance changed the active control descriptor"
+        );
+
+        // A stale expected head is rejected by GitHub's signed commit mutation;
+        // the branch tip and descriptor must both remain unchanged.
+        let conflict = api.create_commit(
+            integration_repository()?,
+            &branch,
+            &first_sha,
+            "test: stale scratch control update must conflict",
+            BTreeMap::from([(
+                "control/stale-update.txt".into(),
+                b"must not be applied\n".to_vec(),
+            )]),
+            Vec::new(),
+        );
+        ensure!(
+            conflict.is_err(),
+            "stale expected-head update unexpectedly succeeded"
+        );
+        let branch_tip: Value = api.get(&format!(
+            "/repos/{}/git/ref/heads/{branch}",
+            integration_repository()?
+        ))?;
+        ensure!(
+            branch_tip["object"]["sha"] == advanced_sha,
+            "conflicting descriptor update changed the scratch branch tip"
+        );
+        ensure!(
+            api.content(
+                integration_repository()?,
+                "control/active.json",
+                &advanced_sha,
+            )? == first_bytes,
+            "conflicting descriptor update partially changed the active descriptor"
+        );
+
+        let alternate_source = if candidate_sha == "b".repeat(40) {
+            "c".repeat(40)
+        } else {
+            "b".repeat(40)
+        };
+        let second = securefix::control::ControlRevision {
+            generation: 2,
+            source_sha: alternate_source,
+            previous: first.identity()?,
+            ..first.clone()
+        };
+        first.validate_successor(&second)?;
+        let second_bytes = serde_json::to_vec_pretty(&second)?;
+        let second_sha = api.create_commit(
+            integration_repository()?,
+            &branch,
+            &advanced_sha,
+            "test: activate scratch control generation two",
+            BTreeMap::from([("control/active.json".into(), second_bytes)]),
+            Vec::new(),
+        )?;
+        let third = securefix::control::ControlRevision {
+            generation: 3,
+            source_sha: first.source_sha.clone(),
+            previous: second.identity()?,
+            ..first.clone()
+        };
+        second.validate_successor(&third)?;
+        let third_sha = api.create_commit(
+            integration_repository()?,
+            &branch,
+            &second_sha,
+            "test: restore scratch source in a new control generation",
+            BTreeMap::from([(
+                "control/active.json".into(),
+                serde_json::to_vec_pretty(&third)?,
+            )]),
+            Vec::new(),
+        )?;
+        let active_bytes =
+            api.content(integration_repository()?, "control/active.json", &third_sha)?;
+        let active: securefix::control::ControlRevision = serde_json::from_slice(&active_bytes)?;
+        ensure!(
+            active == third,
+            "scratch control descriptor did not reach generation three"
+        );
+        ensure!(
+            first.identity()? != third.identity()?,
+            "ABA source switch replayed the original control identity"
+        );
+        Ok(ControlProbeVerification {
+            version: 1,
+            repository: integration_repository()?.to_owned(),
+            candidate_sha: candidate_sha.to_owned(),
+            branch: branch.clone(),
+            base_sha: base_sha.clone(),
+            generation_one_commit_sha: first_sha,
+            generation_two_commit_sha: second_sha,
+            generation_three_commit_sha: third_sha,
+            generation_one: first.identity()?,
+            generation_two: second.identity()?,
+            generation_three: third.identity()?,
+            source_advance_kept_descriptor: true,
+            expected_head_conflict_rejected: true,
+            stale_identity_rejected_after_aba: true,
+            production_publication_verified: false,
+            production_activation_verified: false,
+            distribution_verified: false,
+        })
+    })();
+    let cleanup = delete_scratch_branch(&api, &branch);
+    match (result, cleanup) {
+        (Ok(verification), Ok(())) => {
+            workflow::write_json(state_file, &verification)?;
+            println!(
+                "Verified scratch-only control descriptor generation and expected-head behavior."
+            );
+            println!(
+                "Production publication, activation, and distribution were not exercised by this probe."
+            );
+            Ok(())
+        }
+        (Err(error), Ok(())) => {
+            Err(error.context("scratch control probe failed; fixture branch was cleaned up"))
+        }
+        (Ok(_), Err(error)) => {
+            Err(error.context("scratch control probe passed but fixture cleanup failed"))
+        }
+        (Err(error), Err(cleanup_error)) => {
+            Err(error.context(format!("fixture cleanup also failed: {cleanup_error:#}")))
+        }
+    }
 }
 
 fn parse_time(value: &Value) -> Result<DateTime<Utc>> {
@@ -4071,6 +4354,7 @@ fn scratch_policy(candidate_sha: &str) -> Result<Policy> {
         protect_tags: false,
     }];
     policy.revision = candidate_sha.to_owned();
+    policy.control = Some(scratch_manifest_control(candidate_sha)?);
     ensure!(
         policy
             .repository(integration_repository()?)?
@@ -4114,13 +4398,7 @@ mod tests {
         let repository = &config.deployment.integration.repository;
         let path = format!("/repos/{repository}/git/refs/heads/{branch}");
         let mut routes = vec![
-            Route::get(
-                format!(
-                    "/repos/{}/commits/{}",
-                    config.deployment.server.repository, config.deployment.server.default_branch
-                ),
-                json!({"sha":"a".repeat(40)}),
-            ),
+            Route::active_control(&Fixture::control_revision()),
             Route::request("DELETE", path, delete_status, json!({})),
         ];
         if let Some(route) = follow_up {
@@ -4564,6 +4842,27 @@ mod tests {
         );
         assert_eq!(policy.revision, revision);
         assert!(policy.repository(server_repository().unwrap()).is_err());
+    }
+
+    #[test]
+    fn simulated_control_identity_invalidates_a_stale_request_after_aba_switch() {
+        let first = scratch_manifest_control(&"a".repeat(40)).unwrap();
+        let second = securefix::control::ControlRevision {
+            generation: 2,
+            source_sha: "b".repeat(40),
+            previous: first.identity().unwrap(),
+            ..first.clone()
+        };
+        first.validate_successor(&second).unwrap();
+        let third = securefix::control::ControlRevision {
+            generation: 3,
+            source_sha: first.source_sha.clone(),
+            previous: second.identity().unwrap(),
+            ..first.clone()
+        };
+        second.validate_successor(&third).unwrap();
+        assert_ne!(first.identity().unwrap(), third.identity().unwrap());
+        assert_ne!(first, third);
     }
 
     #[test]
