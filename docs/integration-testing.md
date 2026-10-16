@@ -30,13 +30,32 @@ first SemVer cutover; production consumers require canonical `v<version>` tags.
 The baseline build does not download or attest the published Release asset.
 Production loading and the separate published-client test verify archive bytes
 and attestation. This test creates no candidate Release.
-The prepare run uploads its `state.json` as the
-`scratch-fixtures` artifact.
+The prepare run uploads `fixtures/state.json` as `scratch-fixtures` and uploads
+`control-probe/control-verification.json` separately as `control-probe`. Download both
+artifacts from the completed prepare run:
 
-Post an exact owner `/approve` and `/merge` comment to the positive PR, plus an
-exact owner `/merge` comment to the stale-head PR. The positive PR also needs a
-current non-author review approval and the required checks. Run the workflow's
-verify phase with the successful prepare run ID. A validator built from the captured current default-branch source fetches state
+```sh
+gh run download <prepare-run-id> --name scratch-fixtures --dir fixtures
+gh run download <prepare-run-id> --name control-probe --dir control-probe
+```
+
+Read the generation-one control ID from `control-probe/control-verification.json` at
+`.generation_one`. Read the positive and stale PR numbers and exact heads from
+`fixtures/state.json` at `.positive.number`, `.positive.head_sha`, `.stale.number`, and
+`.stale.head_sha`. The configured repository owner (`deployment.owner_login`) must
+submit an `APPROVED` review on the positive PR at its current head. The scratch
+harness uses that owner as its User reviewer. Its body must include this exact marker line, replacing the placeholder
+with `.generation_one` from the control-probe artifact:
+
+```text
+<!-- securefix:control-review:<control-id> -->
+```
+
+The PR review's `commit_id` binds that approval to the current head; the marker binds it
+to the control generation. A plain UI approval without the marker is rejected. Then post
+exact owner `/approve` and `/merge` comments on the positive PR, plus exact owner `/merge` on the stale-head
+PR. Run the workflow's verify phase with the successful prepare run ID. A validator
+built from the captured current default-branch source fetches state
 only from that exact successful owner-run `workflow_dispatch`, validates the
 server repository ID, owner actor, workflow path, producer SHA, the configured default branch or
 SHA-named frozen integration branch, and single bounded artifact. Prepare also
@@ -58,8 +77,11 @@ Server App merge using that old SHA must fail and leave the PR open and unmerged
 The harness closes any remaining test
 PRs and deletes all three test branches after collecting evidence.
 
-After candidate output validation succeeds, the verify workflow runs the separate
-`control-probe` and uploads an artifact containing only `control-verification.json`. The probe creates three scratch control generations,
+After candidate output validation succeeds, both the prepare and verify workflows run
+the separate `control-probe` and upload an artifact containing only
+`control-verification.json`. A prepare run's `scratch-fixtures` artifact contains only
+`state.json`; a successful verify run also contains `verification.json`. The probe
+creates three scratch control generations,
 checks that an unrelated source advance leaves the active descriptor bytes unchanged,
 and confirms that a stale expected-head update is rejected without changing the
 branch tip or descriptor. It then changes the source identity and restores the first
@@ -88,23 +110,15 @@ green result does not establish production distribution or the published client 
 The initial bootstrap proposal's archive qualification separately treats the candidate
 archive as data and never executes it.
 
-
-In `phase=bootstrap`, the workflow uploads the `control-probe` artifact and the
-`bootstrap-fixture-heads` artifact, then prints both JSON files in the run summary
-before candidate verification waits for reviews and owner commands. Download them
-from that in-progress Actions run with `gh run download <run-id> --name control-probe`
-and `gh run download <run-id> --name bootstrap-fixture-heads`. Read the control ID
-from `control-probe/control-verification.json` at `.generation_one`; read the positive
-and stale PR numbers and exact heads from `fixtures/state.json` at
-`.positive.number`, `.positive.head_sha`, `.stale.number`, and `.stale.head_sha`.
-The configured User reviewer must submit an `APPROVED` review on the positive PR whose
-body includes this exact marker line, with the values replaced by the positive head and
-generation-one control ID:
-`<!-- securefix:v3:approval:<positive-head-sha>:<generation-one-control-id> -->`.
-A plain UI approval without that marker is rejected. Then post exact owner `/approve`
-and `/merge` comments on the positive PR, and `/merge` on the stale PR; each command
-must bind to the corresponding current head. These are scratch fixture controls, not
-production activation approval.
+In `phase=bootstrap`, the same instructions apply while the run is in progress: the
+workflow uploads `control-probe` and the state-only `bootstrap-fixture-heads` artifact,
+then prints both JSON files in the run summary before candidate verification waits for
+the review and owner commands. Download them from that run into explicit directories:
+`gh run download <run-id> --name control-probe --dir control-probe` and
+`gh run download <run-id> --name bootstrap-fixture-heads --dir fixtures`. The paths
+and fields are then `control-probe/control-verification.json` `.generation_one` and
+`fixtures/state.json` fixture PR numbers/heads. The required review marker and owner
+comments are scratch fixture controls, not production activation approval.
 
 The harness invokes production PR authorization, merge-state, readiness, and
 distribution rendering/validation functions. It does not claim that a scratch

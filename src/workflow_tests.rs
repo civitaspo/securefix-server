@@ -2456,3 +2456,18 @@ fn policy_feedback_token_can_comment_on_pull_requests_without_contents_write() {
     assert!(write.get("permission-contents").is_none());
     assert_eq!(token("read")["with"]["permission-pull-requests"], "read");
 }
+
+#[test]
+fn integration_testing_documents_the_active_control_review_marker() {
+    let docs = fs::read_to_string("docs/integration-testing.md").unwrap();
+    assert!(docs.contains("<!-- securefix:control-review:<control-id> -->"));
+    assert!(!docs.contains("securefix:v3:approval:"));
+
+    for source in ["src/request.rs", "src/approval.rs"] {
+        let source = fs::read_to_string(source).unwrap();
+        assert!(
+            source.contains("<!-- securefix:control-review:{} -->"),
+            "the documented review marker must match the production marker template"
+        );
+    }
+}

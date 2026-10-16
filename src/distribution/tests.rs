@@ -581,6 +581,130 @@ fn publisher_gate_accepts_only_successful_owner_run_for_active_control_revision(
 }
 
 #[test]
+fn verified_publication_can_be_carried_into_promotion_validation() {
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let trusted = crate::config::trusted().unwrap();
+    let server = &trusted.deployment.server.repository;
+    let branch = &trusted.deployment.server.default_branch;
+    let owner_id = trusted.owner_id;
+    let source_sha = "b".repeat(40);
+    let version = env!("CARGO_PKG_VERSION");
+    let tag = format!("v{version}");
+    let prerelease = !crate::runtime::RuntimeVersion::parse(version)
+        .unwrap()
+        .as_semver()
+        .pre
+        .is_empty();
+    let manifest = format!("[package]\nversion = \"{version}\"\n");
+    let manifest_content = base64::engine::general_purpose::STANDARD.encode(manifest.as_bytes());
+    let archive = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(archive.path(), b"verified runtime archive").unwrap();
+    let archive_sha256 = crate::hex_encode(Sha256::digest(b"verified runtime archive"));
+    let release = json!({
+        "id":71,"tag_name":tag,"name":tag,"target_commitish":source_sha,
+        "draft":false,"immutable":true,"prerelease":prerelease,
+        "assets":[{"id":72,"name":RUNTIME_ASSET,"state":"uploaded",
+            "size":b"verified runtime archive".len(),"digest":format!("sha256:{archive_sha256}")}]
+    });
+    let runtime_fixture = Fixture::new(vec![
+        Route::get(
+            format!("/repos/{server}/contents/Cargo.toml?ref={source_sha}"),
+            json!({
+                "type":"file","path":"Cargo.toml","size":manifest.len(),"encoding":"base64","content":manifest_content
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/git/ref/tags/{tag}"),
+            json!({
+                "ref":format!("refs/tags/{tag}"),"object":{"type":"commit","sha":source_sha}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/releases/tags/{tag}"),
+            release.clone(),
+        ),
+    ]);
+    let publication = crate::runtime::verify_publication(
+        &runtime_fixture.api,
+        &source_sha,
+        server,
+        archive.path(),
+    )
+    .unwrap();
+    runtime_fixture.finish();
+
+    let mut next = Fixture::control_revision();
+    next.generation = 2;
+    next.source_sha = publication.source_sha.clone();
+    next.policy_sha256 = crate::hex_encode(Sha256::digest(
+        crate::config::trusted_policy_bytes().unwrap(),
+    ));
+    next.archive_sha256 = publication.archive_sha256.clone();
+    next.release_id = publication.release_id;
+    next.asset_id = publication.asset_id;
+    next.publisher_run_id = 17;
+    next.verification_run_id = 23;
+    next.previous = Fixture::control_revision().identity().unwrap();
+    Fixture::control_revision()
+        .validate_successor(&next)
+        .unwrap();
+
+    let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+    policy.control = Some(next.clone());
+    let publisher = json!({
+        "id":17,
+        "repository":{"full_name":server,"id":trusted.deployment.server.id},
+        "head_repository":{"full_name":server,"id":trusted.deployment.server.id},
+        "path":format!(".github/workflows/publish-runtime.yml@refs/heads/{branch}"),
+        "event":"workflow_dispatch","head_branch":branch,"head_sha":source_sha,
+        "run_attempt":1,"status":"completed","conclusion":"success",
+        "actor":{"id":owner_id},"triggering_actor":{"id":owner_id}
+    });
+    let distribution_fixture = Fixture::new(vec![
+        Route::get(format!("/repos/{server}/actions/runs/17"), publisher),
+        Route::get(
+            format!("/repos/{server}"),
+            json!({
+                "full_name":server,"id":trusted.deployment.server.id,
+                "owner":{"id":trusted.deployment.repository_owner.id}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/contents/Cargo.toml?ref={source_sha}"),
+            json!({
+                "type":"file","path":"Cargo.toml","size":manifest.len(),"encoding":"base64","content":manifest_content
+            }),
+        ),
+        Route::get(format!("/repos/{server}/releases/tags/{tag}"), release),
+        Route::get(
+            format!("/repos/{server}/git/ref/tags/{tag}"),
+            json!({
+                "ref":format!("refs/tags/{tag}"),"object":{"type":"commit","sha":source_sha}
+            }),
+        ),
+    ]);
+    let published = validate_promotion(&distribution_fixture.api, &policy, 17).unwrap();
+    assert_eq!(published.publisher_run_id, next.publisher_run_id);
+    assert_eq!(published.source_sha, publication.source_sha);
+    assert_eq!(next.source_sha, publication.source_sha);
+    assert_eq!(next.archive_sha256, publication.archive_sha256);
+    assert_eq!(
+        (next.release_id, next.asset_id),
+        (publication.release_id, publication.asset_id)
+    );
+    assert_eq!(
+        next.policy_sha256,
+        crate::hex_encode(Sha256::digest(
+            crate::config::trusted_policy_bytes().unwrap(),
+        ))
+    );
+    distribution_fixture.finish();
+}
+
+#[test]
 fn publisher_gate_requires_the_active_control_provenance_before_network_access() {
     use crate::fixtures::Fixture;
 
