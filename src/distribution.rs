@@ -15,6 +15,7 @@ use caller::{prepare_caller, rendered_files, validate_migration_files, write_mig
 
 const DISTRIBUTOR_WORKFLOW: &str = ".github/workflows/distribute-runtime.yml";
 const PUBLISHER_WORKFLOW: &str = ".github/workflows/publish-runtime.yml";
+const BOOTSTRAP_WORKFLOW: &str = ".github/workflows/control-bootstrap.yml";
 const RUNTIME_ASSET: &str = "securefix-runtime-linux-x86_64.tar.gz";
 
 #[derive(Subcommand)]
@@ -211,18 +212,20 @@ pub(crate) fn validate_promotion(
     let run: Value = api.get(&format!(
         "/repos/{server_repository}/actions/runs/{publisher_run_id}"
     ))?;
+    let run_attempt = run["run_attempt"].as_u64();
+    let bootstrap_publisher = workflow_path(&run["path"], BOOTSTRAP_WORKFLOW, default_branch);
     ensure!(
         run["id"].as_u64() == Some(publisher_run_id)
             && run["repository"]["full_name"] == server_repository
             && run["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
             && run["head_repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
             && run["head_repository"]["full_name"] == server_repository
-            && workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)
+            && (workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)
+                || bootstrap_publisher)
             && run["event"] == "workflow_dispatch"
             && run["head_branch"] == default_branch
-            && run["run_attempt"]
-                .as_u64()
-                .is_some_and(|attempt| attempt >= 1)
+            && run_attempt
+                .is_some_and(|attempt| { attempt >= 1 && (!bootstrap_publisher || attempt == 1) })
             && run["status"] == "completed"
             && run["conclusion"] == "success"
             && run["actor"]["id"].as_u64() == Some(trusted.owner_id)

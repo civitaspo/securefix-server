@@ -12,6 +12,7 @@ jobs:
     if: github.event_name != 'label' || startsWith(github.event.label.name, 'policy-request-')
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
   request:

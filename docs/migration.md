@@ -47,16 +47,91 @@ Activation fails closed when the active control identity changes, the candidate 
 
 After activation, a later main commit does not select its own runtime or policy. The previous published control remains usable if the descriptor and trusted workflow path remain available. To repair a later failing runtime, publish and verify a repair candidate and activate it as the next generation. Rollback also creates a new generation whose payload may identify an earlier verified runtime; it records the current descriptor as its predecessor rather than rewinding history.
 
-### Bootstrap blocker
+### One-time bootstrap and first activation
 
-The first activation is not yet safely deployable. The currently deployed v0.2.20 loader accepts only its exact pinned workflow SHA and runtime policy, and its publisher cannot publish a different runtime version. The current publisher uses a production contents-write token that can also update repository content. The new control revision is an unmerged proposal; merging it and depending on a post-merge failure recovery would not preserve v0.2.20 as an operative control. Do not add a bypass actor or ruleset exception to bridge this gap. A separately trusted bootstrap publication path must be established and reviewed before this proposal can be deployed.
+The first protected-main revision needs a separate trusted bootstrap route. Before its
+first code pull request is merged, an owner must explicitly approve and complete the
+permanent live-settings rollout: remove the Renovate bypass from all nine controlled-
+merge rulesets while retaining the sole Server App `pull_request` bypass, disable
+native auto-merge and confirm that no requests remain queued, and enable immutable
+releases for `civitaspo/securefix-server`. The currently deployed v0.2.20 runtime
+cannot make those changes. They require the existing repository administrator UI or
+API. No temporary ruleset exception is part of this migration, and no production
+settings change has been made as part of this proposal.
+
+The one-time `control-bootstrap.yml` path is an explicitly reviewed protected-main
+authority. Its fixed Python helper independently checks the source and workflow runs,
+candidate artifact ID, attestation, archive and bundled policy, scratch proof, current
+main, absent descriptor, and pull request before a write. Qualification treats the
+candidate archive as data and never executes its binary. App-token jobs use the
+protected `main` environment. The workflow has separate `propose` and `merge` phases:
+the first revalidates and publishes the verified initial archive, then opens a
+descriptor PR; the second requires a separate owner-reviewed dispatch and rechecks the
+expected main SHA, exact PR head, descriptor identity, and required CI before merging
+with expected-head CAS. If publication succeeded but a later step failed, a retry may
+reuse the reserved release only when it is already immutable and published and the
+helper re-downloads the bounded asset, verifies its GitHub size and digest, checks the
+archive policy against the exact source, and verifies the fixed bootstrap attestation.
+A draft with mismatched asset metadata fails closed. This fixed producer never runs
+again after generation one. A later rollback can select the same archive in a new normal
+successor descriptor, using the recorded bootstrap publisher run and fixed trusted signer
+path. Other generations use the regular runtime publication path. There is no fallback
+loader. Once generation one is required, a missing or invalid active descriptor
+permanently disables operations until an authorized control revision is restored.
+
+Bootstrap publication and activation are separate phases. First, the bootstrap path
+publishes and proposes an exact descriptor change. An owner reviews the resulting
+activation PR. A separate dispatch then merges only after it rechecks the owner,
+expected protected-main SHA, exact PR head SHA, full proposed descriptor identity,
+and required CI through the serialized server Actions lane. Normal candidate
+publication and scratch verification do not alter active control; after this bootstrap,
+normal activations and later rollbacks use the same reviewed descriptor-PR fence.
+
+The bootstrap scratch rehearsal has its own `phase=bootstrap` in
+`testing-securefix-server.yml`. It verifies the pinned v0.2.20 legacy runtime by
+release ID `414653308`, asset ID `646481902`, archive digest, GitHub attestation, and
+runtime verification against source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`.
+Before minting scratch App tokens, the fixed helper checks that the dispatch came from
+current protected main and that `control/active.json` is absent. The pinned runtime
+validates the fixture output files. The candidate runtime prepares and verifies the
+scratch integration fixtures and runs the scratch-only control probe. This avoids using
+the current-main `validate-producer` path as its own initial trust baseline. It verifies
+the bootstrap test path, not production publication, activation, or distribution.
+
+While `control/active.json` is absent, recovery is split into `repair-propose` and
+`repair-merge`. Before `repair-propose`, dispatch the `CI` workflow on the signed repair
+branch and wait for its required `status-check` to pass; CI runs automatically for PRs
+and pushes to `main`, but not for an arbitrary repair branch. The first phase verifies
+the exact expected main, signed descendant commits, successful required checks, and
+allowed changed paths, then asks the Server App to open a PR. It does not require owner
+review because the PR does not yet exist. The owner reviews the newly opened PR at its
+exact head. The separate `repair-merge` phase repeats qualification, including the
+latest owner review for that exact head, and merges by expected-head CAS. Repair cannot change
+`control/active.json`, `.github/workflows/control-bootstrap.yml`, or
+`scripts/control-bootstrap.py`; a defect in the bootstrap trust root needs a separately
+reviewed recovery. This bounded lane allows reviewed code repairs during the finite
+pre-generation-one pause, does not restore v0.2.20 availability, and stops once the
+descriptor exists.
+
+The bootstrap producer, the first activation sequence, and its failure behavior are
+not yet verified end to end. Treat this migration as a proposal until the implementation
+is compiled, the required bootstrap verification gate passes, and the first-run
+procedure has been reviewed.
+There is a deliberate finite pause after the first code PR merges: no claim is made
+that v0.2.20 remains available beyond that main advance. The bounded repair phase can
+land reviewed fixes during this pause, but it is not an alternate runtime or a bypass.
+Do not merge the proposal or start production rollout without the explicit permanent-
+settings approval and the reviewed bootstrap path.
 
 The deployment and verification reports dated before this proposal document evidence for the earlier runtime contract only. They do not establish that this lifecycle, bootstrap path, or proposed code has been deployed or verified.
 
 ## Emergency stop and retry
 
-Disable the relevant processing workflows and controlled-merges restrictions manually if a server change needs immediate containment.
-An already-successful check on an unchanged head is not automatically revoked when policy changes.
+Disable the relevant processing workflows for immediate containment while retaining
+controlled-merges restrictions. Recover through the active runtime or the bounded
+reviewed repair path as applicable; any change to enforcement authority or rulesets
+requires separate explicit administrator review. An already-successful check on an
+unchanged head is not automatically revoked when policy changes.
 Scheduled reconciliation preserves a disabled restriction and retains tag protection when a policy entry stops requesting it.
 Retry pending work from the latest runtime and current client pins; incompatible or stale manifests fail closed.
 Existing published releases and assets are never overwritten.

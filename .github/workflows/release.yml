@@ -15,6 +15,7 @@ jobs:
     if: startsWith(github.event.label.name, 'release-request-')
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
 

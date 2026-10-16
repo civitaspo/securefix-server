@@ -20,8 +20,66 @@ Activation stops if the active descriptor changes, the candidate source is not a
 
 After a successful activation, a later main commit does not by itself replace the active runtime or policy snapshot. If a later runtime revision fails, operations can continue through the prior published control as long as the descriptor and trusted loader workflow remain available. Recovery publishes and verifies a repair candidate, then activates it as the next generation. A rollback similarly publishes or selects a previously verified runtime and policy as a new generation with the current descriptor as predecessor. Missing or invalid active descriptor, runtime release, attestation, or policy match fails closed; the system must not infer a replacement from live main state.
 
-## Bootstrap constraint
+## One-time bootstrap
 
-This proposal is not yet a safe deployment path. The currently deployed v0.2.20 loader requires its exact workflow SHA and runtime policy, and its publisher cannot publish a different runtime version. The current publisher uses a production contents-write token that can update repository content as well as create a release. The new main revision is an unmerged, reviewable proposal; merging it and relying on a failure discovered afterward would not preserve the old runtime as an operative control. Activation remains blocked until a separately trusted bootstrap publication path is established and reviewed. No additional ruleset bypass or bootstrap exception is part of this decision.
+Before the first code pull request is merged, the owner must explicitly approve and
+complete the permanent live-settings rollout: remove Renovate bypass from all nine
+controlled-merge rulesets while retaining only the Server App `pull_request` bypass,
+disable native auto-merge and verify no pending native merge requests, and enable
+immutable releases on the server repository. The currently deployed v0.2.20 runtime
+cannot apply those settings; an existing repository administrator must use the GitHub
+UI or API. This is a required rollout prerequisite, not a temporary exception. No live
+production change has been authorized by this proposal.
+
+The proposed `control-bootstrap.yml` supplies a one-time, reviewed protected-main
+authority for the initial publication and descriptor proposal. Its fixed Python helper
+independently qualifies the source and workflow runs, candidate artifact ID, attestation,
+archive and policy, scratch proof, current main, absent descriptor, and reviewed PR.
+Qualification is read-only and does not run the candidate executable; the archive is
+data. App-token jobs use the protected `main` environment, and candidate code receives
+no write token. The workflow separates `propose` from `merge`: the first revalidates
+and publishes the initial archive and proposes the descriptor PR; the second is a
+separate owner-reviewed dispatch that rechecks expected main, exact PR head, descriptor
+identity, and required CI before expected-head CAS merge. If publication succeeded but a
+later step failed, retry may reuse the reserved release only after re-downloading its
+bounded immutable asset and rechecking GitHub size/digest, exact-source bundled policy,
+and fixed bootstrap attestation; a mismatched draft asset fails closed. The trusted
+bootstrap producer publishes only the verified initial archive and never runs again
+after generation one. A later normal successor may select that same archive for
+rollback, with the original bootstrap publisher run and fixed signer path recorded in
+the descriptor. Other generations use the regular runtime publisher.
+There is no fallback runtime selection. After generation one is required, a missing or
+invalid descriptor disables operations until a valid control revision is restored.
+
+Publication and activation remain distinct. The workflow proposes an exact descriptor
+PR; an owner reviews it; a separate serialized dispatch merges only after checking the
+owner, expected protected-main SHA, exact PR head SHA, full descriptor identity, and
+required CI. The first bootstrap sequence and its failure behavior remain unverified.
+The `testing-securefix-server.yml` `phase=bootstrap` rehearsal uses the pinned v0.2.20
+read baseline (release ID `414653308`, asset ID `646481902`, verified archive digest
+and attestation for source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`) because the
+current-main producer cannot validate its own initial trust chain. It checks current
+main and descriptor absence before minting scratch tokens, uses v0.2.20 for scratch
+output validation, and runs the candidate runtime's fixture preparation, verification,
+and control probe only against scratch. This establishes a bootstrap test mode; it does
+not verify production publication, activation, or distribution.
+
+The proposal is not deployable until its code is compiled, the required bootstrap
+verification gate passes, and operators review the procedure. While the descriptor is
+absent, recovery uses `repair-propose` and `repair-merge`. Because required CI is not
+triggered for an arbitrary repair branch, the operator first dispatches `CI` on that
+signed branch and waits for the required `status-check` before `repair-propose`. The
+first phase checks exact main and head, signed descendant commits, successful required
+CI, and allowed changed paths before the Server App opens a PR; it does not require
+owner review before a PR exists. The owner then reviews the opened PR at its exact
+head. The second phase requires the latest exact-head owner review, repeats the other
+checks, and merges with expected-head CAS. Repair rejects
+changes to the active descriptor, bootstrap workflow, and fixed helper; a defect in
+those trusted files requires a separately reviewed recovery. This bounded lane allows
+reviewed fixes during the finite pause, does not select a runtime or claim v0.2.20
+remains operative, and permanently stops once the descriptor exists. The old v0.2.20
+runtime is available before the first protected-main advance only; this proposal does
+not claim it will remain operative after that advance. No production settings changes
+are made here.
 
 The pull-request version check in this proposal is scoped to runtime inputs: Cargo manifests and lockfile, Rust sources, toolchain, policy, repository settings, CLI setup, and the runtime publisher workflow. Documentation-only changes do not require a package version increase. The bootstrap path and overall control lifecycle remain unverified, so this ADR describes a proposal rather than deployed behavior.

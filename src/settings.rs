@@ -242,7 +242,9 @@ fn reconcile_one(
 }
 
 fn ensure_immutable_releases(api: &GitHub, repo_policy: &RepositoryPolicy) -> Result<()> {
-    if !repo_policy.capabilities.contains(&Capability::Release) {
+    if repo_policy.repository != config::trusted()?.deployment.server.repository
+        && !repo_policy.capabilities.contains(&Capability::Release)
+    {
         return Ok(());
     }
     let path = format!("/repos/{}/immutable-releases", repo_policy.repository);
@@ -263,6 +265,16 @@ fn ensure_immutable_releases(api: &GitHub, repo_policy: &RepositoryPolicy) -> Re
     ensure!(
         state["enabled"] == true,
         "immutable releases did not become enabled"
+    );
+    Ok(())
+}
+
+pub(crate) fn require_server_immutable_releases(api: &GitHub) -> Result<()> {
+    let server = &config::trusted()?.deployment.server.repository;
+    let state: Value = api.get(&format!("/repos/{server}/immutable-releases"))?;
+    ensure!(
+        state["enabled"] == true,
+        "server immutable releases must be enabled before runtime publication or activation"
     );
     Ok(())
 }
@@ -308,6 +320,7 @@ fn activation_preflight() -> Result<()> {
 }
 
 fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
+    require_server_immutable_releases(api)?;
     let trusted = config::trusted()?;
     let deployment = &trusted.deployment;
     let repositories = merge_repositories(policy, &deployment.server.repository)?;
@@ -1814,6 +1827,45 @@ mod tests {
         )]);
         ensure_immutable_releases(&fixture.api, &repository).unwrap();
         fixture.finish();
+
+        let server = RepositoryPolicy {
+            repository: config::trusted()
+                .unwrap()
+                .deployment
+                .server
+                .repository
+                .clone(),
+            capabilities: vec![Capability::Settings],
+            release: None,
+            sensitive_paths: vec![".github/**".into()],
+            protect_tags: false,
+        };
+        let path = format!("/repos/{}/immutable-releases", server.repository);
+        let fixture = Fixture::new(vec![Route::get(
+            path,
+            json!({"enabled":true,"enforced_by_owner":false}),
+        )]);
+        ensure_immutable_releases(&fixture.api, &server).unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn runtime_publication_requires_server_immutable_releases() {
+        let server = &config::trusted().unwrap().deployment.server.repository;
+        let path = format!("/repos/{server}/immutable-releases");
+        let enabled = Fixture::new(vec![Route::get(
+            &path,
+            json!({"enabled":true,"enforced_by_owner":false}),
+        )]);
+        require_server_immutable_releases(&enabled.api).unwrap();
+        enabled.finish();
+
+        let disabled = Fixture::new(vec![Route::get(
+            path,
+            json!({"enabled":false,"enforced_by_owner":false}),
+        )]);
+        assert!(require_server_immutable_releases(&disabled.api).is_err());
+        disabled.finish();
     }
 
     #[test]

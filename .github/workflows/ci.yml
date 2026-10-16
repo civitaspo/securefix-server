@@ -39,6 +39,9 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt
 
+      - name: Test the fixed bootstrap boundaries
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       - name: Check formatting
         run: cargo +1.99.0 fmt --all -- --check
 

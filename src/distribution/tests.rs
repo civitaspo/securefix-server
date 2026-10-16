@@ -459,7 +459,7 @@ fn publisher_gate_accepts_only_successful_owner_run_for_active_control_revision(
         ),
         Route::get(
             format!("/repos/{server}/releases/tags/v0.2.0-pre.1"),
-            release,
+            release.clone(),
         ),
         Route::get(
             format!("/repos/{server}/git/ref/tags/{}", "v0.2.0-pre.1"),
@@ -472,6 +472,53 @@ fn publisher_gate_accepts_only_successful_owner_run_for_active_control_revision(
             .source_sha,
         sha
     );
+    fixture.finish();
+
+    let mut bootstrap_publisher = publisher.clone();
+    bootstrap_publisher["path"] = json!(format!(
+        ".github/workflows/control-bootstrap.yml@refs/heads/{branch}"
+    ));
+    bootstrap_publisher["run_attempt"] = json!(1);
+    let fixture = Fixture::new(vec![
+        Route::get(
+            format!("/repos/{server}/actions/runs/17"),
+            bootstrap_publisher.clone(),
+        ),
+        Route::get(
+            format!("/repos/{server}"),
+            json!({
+                "full_name":server,
+                "id":trusted.deployment.server.id,
+                "owner":{"id":trusted.deployment.repository_owner.id}
+            }),
+        ),
+        Route::get(
+            format!("/repos/{server}/contents/Cargo.toml?ref={sha}"),
+            json!({"type":"file","path":"Cargo.toml","size":34,"encoding":"base64","content":"W3BhY2thZ2VdCnZlcnNpb24gPSAiMC4yLjAtcHJlLjEiCg=="}),
+        ),
+        Route::get(
+            format!("/repos/{server}/releases/tags/v0.2.0-pre.1"),
+            release.clone(),
+        ),
+        Route::get(
+            format!("/repos/{server}/git/ref/tags/{}", "v0.2.0-pre.1"),
+            json!({"ref":"refs/tags/v0.2.0-pre.1","object":{"type":"commit","sha":sha}}),
+        ),
+    ]);
+    assert_eq!(
+        validate_promotion(&fixture.api, &policy, 17)
+            .unwrap()
+            .source_sha,
+        sha
+    );
+    fixture.finish();
+
+    bootstrap_publisher["run_attempt"] = json!(2);
+    let fixture = Fixture::new(vec![Route::get(
+        format!("/repos/{server}/actions/runs/17"),
+        bootstrap_publisher,
+    )]);
+    assert!(validate_promotion(&fixture.api, &policy, 17).is_err());
     fixture.finish();
 
     let fixture = Fixture::new(vec![

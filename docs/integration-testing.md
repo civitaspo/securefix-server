@@ -72,6 +72,40 @@ generation identities, and booleans `source_advance_kept_descriptor`,
 `distribution_verified` fields are all `false`: this scratch-only probe does not
 publish or activate a production runtime and does not exercise distribution.
 
+For the initial descriptor rehearsal, dispatch `testing-securefix-server.yml` with
+`phase=bootstrap` from protected `main`. This mode cannot use the usual current-main
+`validate-producer` baseline because that would make the proposed runtime validate its
+own initial trust chain. It instead downloads the pinned v0.2.20 baseline (release ID
+`414653308`, asset ID `646481902`, size `3964894`, archive SHA-256
+`1f0f991e766e287b1ff55cf8cbda05982c0ddb90295f988081bf5b85a480d96c`) and checks its
+GitHub attestation and runtime identity against source
+`e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`. Before minting scratch App tokens, the
+fixed bootstrap helper checks the owner dispatch, current main SHA, and absent active
+descriptor. The candidate runtime prepares and verifies the integration fixtures; the
+pinned runtime validates their output files. The candidate also runs the scratch-only
+`control-probe`. This test mode does not publish or activate production control, and a
+green result does not establish production distribution or the published client loader.
+The initial bootstrap proposal's archive qualification separately treats the candidate
+archive as data and never executes it.
+
+
+In `phase=bootstrap`, the workflow uploads the `control-probe` artifact and the
+`bootstrap-fixture-heads` artifact, then prints both JSON files in the run summary
+before candidate verification waits for reviews and owner commands. Download them
+from that in-progress Actions run with `gh run download <run-id> --name control-probe`
+and `gh run download <run-id> --name bootstrap-fixture-heads`. Read the control ID
+from `control-probe/control-verification.json` at `.generation_one`; read the positive
+and stale PR numbers and exact heads from `fixtures/state.json` at
+`.positive.number`, `.positive.head_sha`, `.stale.number`, and `.stale.head_sha`.
+The configured User reviewer must submit an `APPROVED` review on the positive PR whose
+body includes this exact marker line, with the values replaced by the positive head and
+generation-one control ID:
+`<!-- securefix:v3:approval:<positive-head-sha>:<generation-one-control-id> -->`.
+A plain UI approval without that marker is rejected. Then post exact owner `/approve`
+and `/merge` comments on the positive PR, and `/merge` on the stale PR; each command
+must bind to the corresponding current head. These are scratch fixture controls, not
+production activation approval.
+
 The harness invokes production PR authorization, merge-state, readiness, and
 distribution rendering/validation functions. It does not claim that a scratch
 workflow is a production request source: the source-run and reusable-workflow
@@ -124,12 +158,7 @@ and creates its request label in scratch. The trusted verifier independently rea
 the source artifact and scratch label, checks exact metadata and file bytes, and
 uploads `client-verification.json`.
 
-Candidate testing uses `client_runtime: candidate-artifact`. After stable publication,
-repeat prepare and verify with `client_runtime: published-release`; that leaves the
-Action's candidate-directory override empty and exercises Release download,
-attestation verification, preparation, upload and dispatch. Completion requires this
-published-runtime client test, successful consumer pinact CI and the Server App
-scratch merge path. Fixture preparation and distribution success alone are insufficient.
+Candidate testing uses `client_runtime: candidate-artifact`; that path skips published descriptor and release loading. The live `published-release` loader path cannot be verified until the initial active descriptor exists. After bootstrap, run a published-release prepare and verify to cover descriptor selection, publisher-run validation, Release download, attestation verification, preparation, upload, and dispatch. Record that run separately; candidate-artifact smoke results do not stand in for it. The bootstrap and published-loader end-to-end gate remain unverified.
 
 The distribution fixture also migrates the three-file autofix workflow call chain.
 Its scratch-only job deliberately changes a tracked workflow, requires the native

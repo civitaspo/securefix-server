@@ -8,9 +8,9 @@ on:
         type: string
         default: ''
       phase:
-        description: Prepare/verify Securefix fixtures or test the no-publish Sigma release flow
+        description: Prepare/verify Securefix fixtures, run the explicit legacy bootstrap probe, or test the no-publish Sigma release flow
         type: choice
-        options: [prepare, verify, provider]
+        options: [prepare, verify, bootstrap, provider]
         default: prepare
       fixture_run_id:
         description: Successful prepare run whose binary and state are reused
@@ -38,14 +38,210 @@ concurrency:
 
 jobs:
   trusted-runtime-main:
-    if: inputs.phase != 'provider' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
+    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
 
+  bootstrap-legacy-runtime:
+    if: inputs.phase == 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    timeout-minutes: 5
+    steps:
+      - name: Download and verify the pinned legacy runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo=civitaspo/securefix-server
+          release="$(gh api "repos/$repo/releases/414653308")"
+          [[ "$(jq -r '.id' <<<"$release")" == 414653308 ]]
+          [[ "$(jq -r '.tag_name' <<<"$release")" == v0.2.20 ]]
+          asset="$(jq -c '.assets[] | select(.id == 646481902)' <<<"$release")"
+          [[ "$(jq -r '.name' <<<"$asset")" == securefix-runtime-linux-x86_64.tar.gz ]]
+          [[ "$(jq -r '.size' <<<"$asset")" == 3964894 ]]
+          mkdir -p bootstrap-legacy-runtime
+          gh release download v0.2.20 --repo "$repo" --pattern securefix-runtime-linux-x86_64.tar.gz --dir bootstrap-legacy-runtime
+          cd bootstrap-legacy-runtime
+          echo '1f0f991e766e287b1ff55cf8cbda05982c0ddb90295f988081bf5b85a480d96c  securefix-runtime-linux-x86_64.tar.gz' | sha256sum --check
+          gh attestation verify securefix-runtime-linux-x86_64.tar.gz --repo "$repo" --source-digest e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --source-ref refs/heads/main --signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml --signer-digest e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --cert-oidc-issuer https://token.actions.githubusercontent.com --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+          tar -xzf securefix-runtime-linux-x86_64.tar.gz
+          ./securefix runtime verify --source-sha e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --repository civitaspo/securefix-server --archive securefix-runtime-linux-x86_64.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: control-bootstrap-legacy-runtime
+          path: |
+            bootstrap-legacy-runtime/securefix
+            bootstrap-legacy-runtime/policy.json
+          if-no-files-found: error
+          retention-days: 1
+
+  bootstrap-scratch:
+    if: inputs.phase == 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main' && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    needs: [bootstrap-legacy-runtime, build]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-legacy-runtime.outputs.artifact-id }}
+          path: legacy-runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: candidate-runtime
+          merge-multiple: true
+      - uses: ./.github/actions/install-cli
+        with:
+          binary: candidate-runtime/securefix
+      - name: Validate current main and inactive descriptor before credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 scripts/control-bootstrap.py validate-legacy-context --source-sha "$SOURCE_SHA"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: server
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-checks: write
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client
+        with:
+          app-id: '3872492'
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-issues: write
+      - name: Prepare scratch fixtures with the candidate runtime
+        env:
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
+          SECUREFIX_TEST_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_PUBLISHED_RUNTIME_SHA: e8e2bc77d96a4e359417217f1d1c22f4e1ac4483
+          SECUREFIX_PUBLISHED_RUNTIME_TAG: v0.2.20
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p fixtures control-probe
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /fixtures \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/usr/local/bin/securefix,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/policy.json,target=/usr/local/bin/policy.json,readonly" \
+            --mount "type=bind,source=$PWD/fixtures,target=/fixtures" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA \
+            -e SECUREFIX_PUBLISHED_RUNTIME_SHA -e SECUREFIX_PUBLISHED_RUNTIME_TAG \
+            -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            securefix integration run --phase prepare --candidate-sha "$CANDIDATE_SHA" --state-file state.json
+
+      - name: Probe candidate control generation and CAS before approval
+        env:
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_TEST_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+        run: |
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /control-probe \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/candidate/securefix,readonly" \
+            --mount "type=bind,source=$PWD/control-probe,target=/control-probe" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e CANDIDATE_SHA \
+            -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            /candidate/securefix integration control-probe --candidate-sha "$CANDIDATE_SHA" --state-file control-verification.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-probe
+          path: control-probe/control-verification.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bootstrap-fixture-heads
+          path: fixtures/state.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Publish pre-approval scratch identities
+        run: |
+          printf '## Bootstrap scratch proof\n\nGeneration-one control probe and fixture pull-request heads are available as run artifacts before owner approval.\n\n### Control probe\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat control-probe/control-verification.json >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n\n### Fixture pull-request heads\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat fixtures/state.json >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Execute candidate verification against isolated scratch fixtures
+        env:
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
+          SECUREFIX_TEST_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_PUBLISHED_RUNTIME_SHA: e8e2bc77d96a4e359417217f1d1c22f4e1ac4483
+          SECUREFIX_PUBLISHED_RUNTIME_TAG: v0.2.20
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+        run: |
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /fixtures \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/usr/local/bin/securefix,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/policy.json,target=/usr/local/bin/policy.json,readonly" \
+            --mount "type=bind,source=$PWD/fixtures,target=/fixtures" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA \
+            -e SECUREFIX_PUBLISHED_RUNTIME_SHA -e SECUREFIX_PUBLISHED_RUNTIME_TAG \
+            -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            securefix integration run --phase verify --candidate-sha "$CANDIDATE_SHA" --state-file state.json
+      - uses: ./.github/actions/install-cli
+        with:
+          binary: legacy-runtime/securefix
+      - name: Validate scratch outputs with the pinned legacy runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+          SECUREFIX_PUBLISHED_RUNTIME_SHA: e8e2bc77d96a4e359417217f1d1c22f4e1ac4483
+          SECUREFIX_PUBLISHED_RUNTIME_TAG: v0.2.20
+        run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase verify --state-file fixtures/state.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scratch-fixtures
+          path: |
+            fixtures/state.json
+            fixtures/verification.json
+          if-no-files-found: error
+          retention-days: 7
+
   baseline-build:
-    if: inputs.phase != 'provider' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -104,7 +300,7 @@ jobs:
           retention-days: 7
 
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && inputs.phase == 'prepare'
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'prepare' || inputs.phase == 'bootstrap') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -276,7 +472,7 @@ jobs:
 
   scratch:
     needs: [baseline-build, trusted-runtime-main, build, reuse]
-    if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (needs.build.result == 'success' || needs.reuse.result == 'success') && (needs.baseline-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
+    if: always() && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (needs.build.result == 'success' || needs.reuse.result == 'success') && (needs.baseline-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -410,7 +606,11 @@ jobs:
           SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           SECUREFIX_PUBLISHED_RUNTIME_TAG: ${{ steps.runtime.outputs.published_runtime_tag }}
         run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase "$TEST_PHASE" --state-file fixtures/state.json
-      - name: Probe scratch control descriptor generation and CAS
+      - uses: ./.github/actions/install-cli
+        if: steps.validate-outputs.outcome == 'success'
+        with:
+          binary: candidate-runtime/securefix
+      - name: Execute scratch control probe
         id: control-probe
         if: steps.validate-outputs.outcome == 'success'
         env:
@@ -423,7 +623,7 @@ jobs:
           docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
             --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /control-probe \
-            --mount "type=bind,source=$PWD/candidate-runtime,target=/candidate,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/candidate/securefix,readonly" \
             --mount "type=bind,source=$PWD/control-probe,target=/control-probe" \
             --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
             -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e CANDIDATE_SHA \

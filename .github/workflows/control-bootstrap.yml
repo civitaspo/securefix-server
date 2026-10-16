@@ -1,0 +1,399 @@
+name: Bootstrap active control descriptor
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Run one reviewed bootstrap or repair phase
+        required: true
+        type: choice
+        options: [propose, merge, repair-propose, repair-merge]
+      verification_run_id:
+        description: Successful bootstrap scratch verification run ID (propose)
+        required: false
+        type: string
+      pull_request:
+        description: Approved PR number (merge phases)
+        required: false
+        type: string
+      expected_main_sha:
+        description: Exact protected main SHA
+        required: false
+        type: string
+      expected_head_sha:
+        description: Exact signed PR or repair head SHA
+        required: false
+        type: string
+      control_id:
+        description: Generation-one descriptor identity (merge)
+        required: false
+        type: string
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+concurrency:
+  group: securefix-control-bootstrap
+  cancel-in-progress: false
+jobs:
+  baseline:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    timeout-minutes: 5
+    steps:
+      - name: Verify the pinned legacy runtime baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bootstrap-baseline"
+          gh release download v0.2.20 --repo civitaspo/securefix-server --pattern securefix-runtime-linux-x86_64.tar.gz --dir "$RUNNER_TEMP/bootstrap-baseline"
+          cd "$RUNNER_TEMP/bootstrap-baseline"
+          echo '1f0f991e766e287b1ff55cf8cbda05982c0ddb90295f988081bf5b85a480d96c  securefix-runtime-linux-x86_64.tar.gz' | sha256sum --check
+          gh attestation verify securefix-runtime-linux-x86_64.tar.gz --repo civitaspo/securefix-server --source-digest e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --source-ref refs/heads/main --signer-workflow civitaspo/securefix-server/.github/workflows/publish-runtime.yml --signer-digest e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --cert-oidc-issuer https://token.actions.githubusercontent.com --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+          mkdir unpacked
+          tar -xzf securefix-runtime-linux-x86_64.tar.gz -C unpacked
+          unpacked/securefix runtime verify --source-sha e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --repository civitaspo/securefix-server --archive securefix-runtime-linux-x86_64.tar.gz
+
+  build-candidate:
+    if: inputs.phase == 'propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: baseline
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 15
+    outputs:
+      source-sha: ${{ steps.checkout.outputs.commit }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - name: Assemble candidate runtime archive as data
+        run: |
+          mkdir -p runtime distribution
+          install -Dm755 target/release/securefix runtime/securefix
+          cp policy.json runtime/policy.json
+          cp -R repo-settings runtime/repo-settings
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf distribution/securefix-runtime-linux-x86_64.tar.gz -C runtime .
+      - name: Attest candidate runtime archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: distribution/securefix-runtime-linux-x86_64.tar.gz
+          create-storage-record: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: control-bootstrap-candidate
+          path: distribution/securefix-runtime-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  validate-proposal:
+    if: inputs.phase == 'propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: [baseline, build-candidate]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      checks: read
+      attestations: read
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.plan.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build-candidate.outputs.artifact-id }}
+          path: distribution
+          merge-multiple: true
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: settings-read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+      - id: validate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
+          VERIFY_RUN: ${{ inputs.verification_run_id }}
+        run: python3 scripts/control-bootstrap.py prepare --source-sha "$GITHUB_SHA" --verification-run-id "$VERIFY_RUN" --archive distribution/securefix-runtime-linux-x86_64.tar.gz
+      - name: Save validated plan artifact
+        env:
+          PLAN: ${{ steps.validate.outputs.plan }}
+        run: printf '%s\n' "$PLAN" > control-bootstrap-plan.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: plan
+        with:
+          name: control-bootstrap-plan
+          path: control-bootstrap-plan.json
+          if-no-files-found: error
+          retention-days: 1
+
+  propose:
+    if: inputs.phase == 'propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: [baseline, validate-proposal, build-candidate]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      checks: read
+      attestations: read
+    timeout-minutes: 10
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build-candidate.outputs.artifact-id }}
+          path: distribution
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.validate-proposal.outputs.artifact-id }}
+          path: .
+          merge-multiple: true
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: settings-read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Publish immutable archive and open descriptor PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
+        run: python3 scripts/control-bootstrap.py propose --plan control-bootstrap-plan.json --archive distribution/securefix-runtime-linux-x86_64.tar.gz
+
+  validate-merge:
+    if: inputs.phase == 'merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: baseline
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+      attestations: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: settings-read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Revalidate bootstrap PR without candidate execution
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
+          PR: ${{ inputs.pull_request }}
+          MAIN: ${{ inputs.expected_main_sha }}
+          HEAD: ${{ inputs.expected_head_sha }}
+          ID: ${{ inputs.control_id }}
+        run: python3 scripts/control-bootstrap.py validate-merge --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD" --control-id "$ID"
+
+  merge:
+    if: inputs.phase == 'merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: [baseline, validate-merge]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      checks: read
+      pull-requests: write
+      attestations: read
+    timeout-minutes: 5
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: settings-read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Revalidate and merge with exact PR head compare-and-swap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
+          PR: ${{ inputs.pull_request }}
+          MAIN: ${{ inputs.expected_main_sha }}
+          HEAD: ${{ inputs.expected_head_sha }}
+          ID: ${{ inputs.control_id }}
+        run: python3 scripts/control-bootstrap.py merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD" --control-id "$ID"
+
+  repair-propose:
+    if: inputs.phase == 'repair-propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: read
+      actions: read
+      attestations: read
+    timeout-minutes: 5
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: read
+          permission-pull-requests: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: settings-read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Qualify repair commit then open Server App PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
+          MAIN: ${{ inputs.expected_main_sha }}
+          HEAD: ${{ inputs.expected_head_sha }}
+        run: python3 scripts/control-bootstrap.py repair-propose --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"
+
+  repair-merge:
+    if: inputs.phase == 'repair-merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: read
+      actions: read
+      attestations: read
+    timeout-minutes: 5
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: settings-read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Revalidate and merge approved repair PR with head SHA compare-and-swap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
+          PR: ${{ inputs.pull_request }}
+          MAIN: ${{ inputs.expected_main_sha }}
+          HEAD: ${{ inputs.expected_head_sha }}
+        run: python3 scripts/control-bootstrap.py repair-merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"

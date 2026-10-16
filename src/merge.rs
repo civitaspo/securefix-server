@@ -233,11 +233,6 @@ fn apply() -> Result<()> {
         manifest.kind == RequestKind::Merge && manifest.workflow_sha == policy.revision,
         "merge manifest is invalid or stale"
     );
-    let policy = Policy::active(&read)?;
-    ensure!(
-        policy.revision == manifest.workflow_sha,
-        "server policy revision changed before merge"
-    );
     securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let source = request::load_source_request(
         &read,

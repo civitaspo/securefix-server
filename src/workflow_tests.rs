@@ -40,6 +40,18 @@ fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
     for scenario in [
         "success",
         "success-no-pin",
+        "success-unsuffixed-publisher",
+        "success-bootstrap",
+        "success-unsuffixed-bootstrap",
+        "success-publisher-later-generation",
+        "wrong-publisher-source",
+        "wrong-publisher-path",
+        "wrong-publisher-suffix",
+        "wrong-publisher-ref",
+        "wrong-publisher-actor",
+        "wrong-publisher-repository",
+        "bootstrap-rerun",
+        "bootstrap-later-generation",
         "missing",
         "wrong-source",
         "malformed-pin",
@@ -69,6 +81,7 @@ case "$1" in
       repos/example/runtime/contents/control/active.json\?ref=*)
         [[ "$SCENARIO" != missing ]] || exit 1
         cat "$CONTENT_RESPONSE" ;;
+      repos/example/runtime/actions/runs/9) cat "$PUBLISHER_RUN_JSON" ;;
       repos/example/runtime/releases/7) cat "$RELEASE_JSON" ;;
       repos/example/runtime/releases/assets/8)
       echo download >> "$TRACE"
@@ -77,6 +90,7 @@ case "$1" in
     esac ;;
   attestation)
     echo attestation >> "$TRACE"
+    printf '%s\n' "$@" > "$ATTESTATION_ARGS"
     [[ "$SCENARIO" != bad-attestation && "$SCENARIO" != wrong-source ]] ;;
   *) exit 1 ;;
 esac
@@ -113,7 +127,9 @@ elif [[ "$1 $2" == "control identify" ]]; then
   echo control-identify >> "$TRACE"
   source_sha="$ACTIVE_SOURCE_SHA"
   [[ "$SCENARIO" != bad-metadata ]] || source_sha="$(printf 'e%.0s' {1..40})"
-  printf 'source-sha=%s\ngeneration=1\npolicy-sha256=%s\narchive-sha256=%s\nrelease-id=7\nasset-id=8\n' "$source_sha" "$POLICY_SHA" "$ARCHIVE_SHA"
+  generation=1
+  [[ "$SCENARIO" != bootstrap-later-generation && "$SCENARIO" != success-publisher-later-generation ]] || generation=2
+  printf 'source-sha=%s\ngeneration=%s\npolicy-sha256=%s\narchive-sha256=%s\nrelease-id=7\nasset-id=8\n' "$source_sha" "$generation" "$POLICY_SHA" "$ARCHIVE_SHA"
   printf 'control-id=%s\n' "$CONTROL_ID"
 else
   exit 1
@@ -127,7 +143,7 @@ fi
         }
         let mut descriptor = serde_json::json!({
             "version": 1,
-            "generation": 1,
+            "generation": if scenario == "bootstrap-later-generation" || scenario == "success-publisher-later-generation" { 2 } else { 1 },
             "source_sha": source_sha,
             "policy_sha256": policy_sha,
             "archive_sha256": archive_sha,
@@ -155,9 +171,49 @@ fi
         let repository_path = temp.path().join("repository.json");
         fs::write(
             &repository_path,
-            serde_json::to_vec(&serde_json::json!({"default_branch":"main"})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({
+                "id":1,"default_branch":"main","owner":{"id":2}
+            }))
+            .unwrap(),
         )
         .unwrap();
+        let publisher_run_path = if scenario == "success-bootstrap"
+            || scenario == "success-unsuffixed-bootstrap"
+            || scenario == "bootstrap-rerun"
+            || scenario == "bootstrap-later-generation"
+        {
+            if scenario == "success-unsuffixed-bootstrap" {
+                ".github/workflows/control-bootstrap.yml"
+            } else {
+                ".github/workflows/control-bootstrap.yml@refs/heads/main"
+            }
+        } else if scenario == "wrong-publisher-path" {
+            ".github/workflows/other.yml@refs/heads/main"
+        } else if scenario == "wrong-publisher-suffix" {
+            ".github/workflows/publish-runtime.yml@refs/heads/other"
+        } else if scenario == "success-unsuffixed-publisher" {
+            ".github/workflows/publish-runtime.yml"
+        } else {
+            ".github/workflows/publish-runtime.yml@refs/heads/main"
+        };
+        let publisher_run_path_file = temp.path().join("publisher-run.json");
+        fs::write(
+            &publisher_run_path_file,
+            serde_json::to_vec(&serde_json::json!({
+                "id":9,
+                "path":publisher_run_path,
+                "run_attempt": if scenario == "bootstrap-rerun" { 2 } else { 1 },
+                "status":"completed",
+                "conclusion":"success",
+                "event":"workflow_dispatch",
+                "head_branch": if scenario == "wrong-publisher-ref" { "other" } else { "main" },
+                "head_sha": if scenario == "wrong-publisher-source" { "f".repeat(40) } else { source_sha.clone() },
+                "repository": if scenario == "wrong-publisher-repository" { serde_json::json!({"id":7,"full_name":"example/other"}) } else { serde_json::json!({"id":1,"full_name":"example/runtime"}) },
+                "head_repository":{"id":1,"full_name":"example/runtime"},
+                "actor":{"id": if scenario == "wrong-publisher-actor" { 3 } else { 4525500 }},
+                "triggering_actor":{"id":4525500}
+            })).unwrap(),
+        ).unwrap();
         let mut release = serde_json::json!({
             "id":7,"draft":false,"immutable":true,
             "assets":[{"id":8,"name":"securefix-runtime-linux-x86_64.tar.gz"}]
@@ -200,8 +256,10 @@ fi
             .env("SCENARIO", scenario)
             .env("CONTENT_RESPONSE", content_path)
             .env("REPOSITORY_JSON", repository_path)
+            .env("PUBLISHER_RUN_JSON", publisher_run_path_file)
             .env("RELEASE_JSON", release_path)
             .env("TRACE", &trace)
+            .env("ATTESTATION_ARGS", temp.path().join("attestation-args"))
             .env("VERIFIER", bin.join("securefix-mock"));
         match scenario {
             "wrong-source" => {
@@ -216,30 +274,78 @@ fi
             }
         }
         let result = command.output().unwrap();
+        let should_succeed = matches!(
+            scenario,
+            "success"
+                | "success-no-pin"
+                | "success-unsuffixed-publisher"
+                | "success-bootstrap"
+                | "success-unsuffixed-bootstrap"
+                | "success-publisher-later-generation"
+                | "bootstrap-later-generation"
+        );
         assert_eq!(
             result.status.success(),
-            matches!(scenario, "success" | "success-no-pin"),
+            should_succeed,
             "{scenario}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
         let expected = match scenario {
-            "success" | "success-no-pin" => {
+            "success"
+            | "success-no-pin"
+            | "success-unsuffixed-publisher"
+            | "success-bootstrap"
+            | "success-unsuffixed-bootstrap"
+            | "success-publisher-later-generation"
+            | "bootstrap-later-generation" => {
                 "download\nattestation\nextraction\nruntime-verify\ncontrol-identify\n"
             }
             "bad-metadata" => {
                 "download\nattestation\nextraction\nruntime-verify\ncontrol-identify\n"
             }
             "bad-attestation" => "download\nattestation\n",
-            "wrong-source" | "malformed-pin" => "",
+            "wrong-source"
+            | "malformed-pin"
+            | "wrong-publisher-source"
+            | "wrong-publisher-path"
+            | "wrong-publisher-suffix"
+            | "wrong-publisher-ref"
+            | "wrong-publisher-actor"
+            | "wrong-publisher-repository"
+            | "bootstrap-rerun" => "",
             "oversized" | "bad-digest" => "download\n",
             _ => "",
         };
         assert_eq!(fs::read_to_string(trace).unwrap(), expected, "{scenario}");
         assert_eq!(
             !fs::read(output).unwrap().is_empty(),
-            matches!(scenario, "success" | "success-no-pin"),
+            should_succeed,
             "{scenario}"
         );
+        if matches!(
+            scenario,
+            "success"
+                | "success-no-pin"
+                | "success-unsuffixed-publisher"
+                | "success-bootstrap"
+                | "success-unsuffixed-bootstrap"
+                | "success-publisher-later-generation"
+                | "bootstrap-later-generation"
+        ) {
+            let args = fs::read_to_string(temp.path().join("attestation-args")).unwrap();
+            let expected_signer = if scenario == "success-bootstrap"
+                || scenario == "success-unsuffixed-bootstrap"
+                || scenario == "bootstrap-later-generation"
+            {
+                "example/runtime/.github/workflows/control-bootstrap.yml"
+            } else {
+                "example/runtime/.github/workflows/publish-runtime.yml"
+            };
+            assert!(
+                args.lines().any(|line| line == expected_signer),
+                "{scenario}: {args}"
+            );
+        }
     }
 }
 
@@ -271,6 +377,10 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     "runtime loader cannot inherit secrets"
                 );
                 if uses == "./.github/workflows/load-cli.yml" {
+                    assert_eq!(
+                        job["permissions"]["actions"], "read",
+                        "{path}/{job_id}: loader caller needs action run metadata read"
+                    );
                     assert_eq!(
                         job["permissions"]["contents"], "read",
                         "{path}/{job_id}: loader caller needs content read"
@@ -399,11 +509,17 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 } else if job_id == "client-smoke" {
                                     "${{ needs.build.outputs.source-sha }}"
+                                } else if job_id == "bootstrap-scratch" {
+                                    "${{ github.workflow_sha }}"
                                 } else {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 }
                             } else {
-                                "${{ job.workflow_sha }}"
+                                if path == ".github/workflows/control-bootstrap.yml" {
+                                    "${{ github.workflow_sha }}"
+                                } else {
+                                    "${{ job.workflow_sha }}"
+                                }
                             },
                             "{path}/{job_id}: actual defining workflow revision required"
                         );
@@ -426,7 +542,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert_eq!(
         load["permissions"],
         serde_json::json!({
-            "contents":"read", "attestations":"read"
+            "actions":"read", "contents":"read", "attestations":"read"
         })
     );
     let steps = load["steps"].as_array().unwrap();
@@ -498,6 +614,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     );
     for required in [
         "control/active.json?ref=$main_sha",
+        "actions/runs/$publisher_run_id",
         "releases/$release_id",
         "releases/assets/$asset_id",
         ".immutable",
@@ -508,7 +625,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         "--repo \"$REPOSITORY\"",
         "--source-digest \"$source_sha\"",
         "--source-ref \"refs/heads/$DEFAULT_BRANCH\"",
-        "--signer-workflow \"$REPOSITORY/.github/workflows/publish-runtime.yml\"",
+        "--signer-workflow \"$signer_workflow\"",
+        "control-bootstrap.yml@refs/heads/$DEFAULT_BRANCH",
+        "publisher_run_id",
         "--signer-digest \"$source_sha\"",
         "--cert-oidc-issuer https://token.actions.githubusercontent.com",
         "--predicate-type https://slsa.dev/provenance/v1",
@@ -687,6 +806,10 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     let controller = &publisher["jobs"]["controller"];
     assert_eq!(controller["uses"], "./.github/workflows/load-cli.yml");
     assert_eq!(controller["if"], build["if"]);
+    assert_eq!(
+        controller["permissions"],
+        serde_json::json!({"actions":"read", "contents":"read", "attestations":"read"})
+    );
     let publish = &publisher["jobs"]["publish"];
     assert_eq!(publish["needs"], serde_json::json!(["build", "controller"]));
     assert_eq!(
@@ -694,7 +817,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         serde_json::json!({"contents":"write", "attestations":"read"})
     );
     let publish_text = serde_json::to_string(publish).unwrap();
-    for forbidden in ["id-token", "secrets.", "setup-cli", "actions/checkout"] {
+    for forbidden in ["id-token", "setup-cli", "actions/checkout"] {
         assert!(
             !publish_text.contains(forbidden),
             "publisher contains {forbidden}"
@@ -746,11 +869,30 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         })
     });
     let installed = publish_index(&|step| step["uses"] == "$/.github/actions/install-cli");
+    let read_token = publish_index(&|step| step["id"] == "immutable-release-read-token");
+    assert_eq!(
+        publish_steps[read_token]["with"]["repositories"],
+        "securefix-server"
+    );
+    assert_eq!(
+        publish_steps[read_token]["with"]["permission-administration"],
+        "read"
+    );
+    assert!(
+        publish_steps[read_token]["with"]
+            .get("permission-contents")
+            .is_none()
+    );
     assert!(
         downloaded < controller_downloaded
             && controller_downloaded < verified
             && verified < installed
-            && installed < invoked
+            && installed < read_token
+            && read_token < invoked
+    );
+    assert_eq!(
+        publish_steps[invoked]["env"]["SECUREFIX_SERVER_APP_TOKEN"],
+        "${{ steps.immutable-release-read-token.outputs.token }}"
     );
     assert_eq!(
         publish_steps[installed]["with"]["binary"],
@@ -824,6 +966,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         setup_users,
         [
             ".github/workflows/ci.yml",
+            ".github/workflows/control-bootstrap.yml",
             ".github/workflows/publish-runtime.yml",
             ".github/workflows/testing-release-pr.yml",
             ".github/workflows/testing-securefix-server.yml",
@@ -887,6 +1030,7 @@ fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
         let value = workflow(name);
         let loader = &value["jobs"][loader_job];
         assert_eq!(loader["uses"], "./.github/workflows/load-cli.yml", "{name}");
+        assert_eq!(loader["permissions"]["actions"], "read", "{name}");
         assert_eq!(loader["permissions"]["contents"], "read", "{name}");
         assert_eq!(loader["permissions"]["attestations"], "read", "{name}");
         for consumer_id in consumer_jobs {
@@ -952,6 +1096,261 @@ fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
             .unwrap()
             .contains("distribute-runtime")
     );
+}
+
+#[test]
+fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
+    let bootstrap = workflow("control-bootstrap.yml");
+    assert_eq!(
+        bootstrap["concurrency"]["group"],
+        "securefix-control-bootstrap"
+    );
+    let build = &bootstrap["jobs"]["build-candidate"];
+    assert_eq!(
+        build["permissions"],
+        serde_json::json!({"contents":"read", "id-token":"write", "attestations":"write"})
+    );
+    assert_eq!(build["needs"], "baseline");
+    assert!(
+        build["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| { step["uses"] == "./.github/actions/setup-cli" })
+    );
+    assert!(!serde_json::to_string(build).unwrap().contains("secrets."));
+    let build_download = "${{ needs.build-candidate.outputs.artifact-id }}";
+    for job_id in ["validate-proposal", "propose"] {
+        assert!(
+            bootstrap["jobs"][job_id]["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step["with"]["artifact-ids"] == build_download),
+            "{job_id} must consume the immutable candidate artifact ID"
+        );
+    }
+    assert!(
+        bootstrap["jobs"]["propose"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["with"]["artifact-ids"]
+                == "${{ needs.validate-proposal.outputs.artifact-id }}")
+    );
+
+    const SETTINGS_REPOSITORIES: &str = "dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server";
+    for job_id in ["propose", "merge", "repair-propose", "repair-merge"] {
+        let job = &bootstrap["jobs"][job_id];
+        assert_eq!(job["environment"], "main", "{job_id}");
+        assert_eq!(job["concurrency"]["group"], "securefix-control", "{job_id}");
+        assert_eq!(job["concurrency"]["queue"], "max", "{job_id}");
+        assert_eq!(job["concurrency"]["cancel-in-progress"], false, "{job_id}");
+    }
+    for job_id in ["propose", "merge", "repair-propose", "repair-merge"] {
+        let job = &bootstrap["jobs"][job_id];
+        for step in job["steps"].as_array().unwrap() {
+            if step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
+            {
+                if step["id"] == "settings-read" {
+                    assert_eq!(
+                        step["with"]["repositories"], SETTINGS_REPOSITORIES,
+                        "{job_id}"
+                    );
+                    assert_eq!(
+                        step["with"]["permission-administration"], "read",
+                        "{job_id}"
+                    );
+                    assert_eq!(step["with"]["permission-contents"], "read", "{job_id}");
+                    assert_eq!(step["with"]["permission-pull-requests"], "read", "{job_id}");
+                } else {
+                    assert_eq!(step["with"]["repositories"], "securefix-server", "{job_id}");
+                }
+            }
+        }
+    }
+    let propose = &bootstrap["jobs"]["propose"]["steps"];
+    let propose = propose.as_array().unwrap();
+    let writer = propose.iter().find(|step| step["id"] == "writer").unwrap();
+    assert_eq!(writer["with"]["permission-contents"], "write");
+    assert_eq!(writer["with"]["permission-pull-requests"], "write");
+    let settings = propose
+        .iter()
+        .find(|step| step["id"] == "settings-read")
+        .unwrap();
+    assert_eq!(settings["with"]["permission-administration"], "read");
+
+    let text = serde_json::to_string(&bootstrap).unwrap();
+    assert!(!text.contains("candidate-runtime/securefix"));
+    assert!(!text.contains("/candidate/securefix"));
+    for (job_id, job) in bootstrap["jobs"].as_object().unwrap() {
+        for step in job["steps"].as_array().into_iter().flatten() {
+            if let Some(run) = step["run"].as_str() {
+                assert!(
+                    !run.contains("cargo ") && !run.contains("rustup "),
+                    "{job_id}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
+    let testing = workflow("testing-securefix-server.yml");
+    assert_eq!(
+        testing["on"]["workflow_dispatch"]["inputs"]["phase"]["options"],
+        serde_json::json!(["prepare", "verify", "bootstrap", "provider"])
+    );
+    let legacy = &testing["jobs"]["bootstrap-legacy-runtime"];
+    let legacy_if = legacy["if"].as_str().unwrap();
+    for guard in [
+        "inputs.phase == 'bootstrap'",
+        "github.ref == 'refs/heads/main'",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+    ] {
+        assert!(legacy_if.contains(guard));
+    }
+    let legacy_script = legacy["steps"][0]["run"].as_str().unwrap();
+    for pin in [
+        "v0.2.20",
+        "414653308",
+        "646481902",
+        "1f0f991e766e287b1ff55cf8cbda05982c0ddb90295f988081bf5b85a480d96c",
+        "gh attestation verify",
+    ] {
+        assert!(
+            legacy_script.contains(pin),
+            "bootstrap legacy runtime lacks {pin}"
+        );
+    }
+    let scratch = &testing["jobs"]["bootstrap-scratch"];
+    assert!(
+        scratch["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|need| need == "bootstrap-legacy-runtime")
+    );
+    let steps = scratch["steps"].as_array().unwrap();
+    let context = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Validate current main and inactive descriptor before credentials"
+        })
+        .unwrap();
+    let server_token = steps
+        .iter()
+        .position(|step| step["id"] == "server")
+        .unwrap();
+    let candidate_probe = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Probe candidate control generation and CAS before approval"
+        })
+        .unwrap();
+    assert!(context < server_token && server_token < candidate_probe);
+    assert_eq!(scratch["environment"], "main");
+    assert_eq!(
+        steps[context]["run"],
+        "python3 scripts/control-bootstrap.py validate-legacy-context --source-sha \"$SOURCE_SHA\""
+    );
+    let server = steps.iter().find(|step| step["id"] == "server").unwrap();
+    assert_eq!(server["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(server["with"]["permission-contents"], "write");
+    let probe = steps[candidate_probe]["run"].as_str().unwrap();
+    assert!(probe.contains("docker run --rm --read-only"));
+    assert!(probe.contains("/candidate/securefix integration control-probe"));
+    assert!(steps[candidate_probe]["env"].get("GITHUB_TOKEN").is_none());
+    assert!(steps[candidate_probe]["env"]["SECUREFIX_SERVER_APP_TOKEN"].is_string());
+
+    let prepare = steps
+        .iter()
+        .position(|step| step["name"] == "Prepare scratch fixtures with the candidate runtime")
+        .unwrap();
+    let upload_control_probe = steps
+        .iter()
+        .position(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+                && step["with"]["name"] == "control-probe"
+        })
+        .unwrap();
+    let upload_fixture_heads = steps
+        .iter()
+        .position(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+                && step["with"]["name"] == "bootstrap-fixture-heads"
+        })
+        .unwrap();
+    let publish_proof = steps
+        .iter()
+        .position(|step| step["name"] == "Publish pre-approval scratch identities")
+        .unwrap();
+    let verify = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Execute candidate verification against isolated scratch fixtures"
+        })
+        .unwrap();
+    let upload_final = steps
+        .iter()
+        .position(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+                && step["with"]["name"] == "scratch-fixtures"
+        })
+        .unwrap();
+    assert!(
+        prepare < candidate_probe
+            && candidate_probe < upload_control_probe
+            && upload_control_probe < upload_fixture_heads
+            && upload_fixture_heads < publish_proof
+            && publish_proof < verify
+            && verify < upload_final,
+        "bootstrap proof identities must be available before verification waits for owner approval"
+    );
+    assert_eq!(
+        steps[upload_control_probe]["with"]["path"],
+        "control-probe/control-verification.json"
+    );
+    assert_eq!(
+        steps[upload_fixture_heads]["with"]["path"],
+        "fixtures/state.json"
+    );
+    assert_eq!(
+        steps[upload_final]["with"]["path"],
+        "fixtures/state.json\nfixtures/verification.json\n"
+    );
+    assert!(
+        steps[publish_proof]["run"]
+            .as_str()
+            .unwrap()
+            .contains("$GITHUB_STEP_SUMMARY")
+    );
+    assert_eq!(
+        steps[publish_proof]["run"]
+            .as_str()
+            .unwrap()
+            .matches("$GITHUB_STEP_SUMMARY")
+            .count(),
+        5
+    );
+    for step in steps {
+        if step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
+        {
+            assert_eq!(step["with"]["repositories"], "testing-securefix-server");
+        }
+    }
 }
 
 #[test]
@@ -1410,6 +1809,14 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         .as_object_mut()
         .unwrap()
         .remove("provider-release-probe");
+    native_candidate["jobs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bootstrap-legacy-runtime");
+    native_candidate["jobs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bootstrap-scratch");
     let text = serde_json::to_string(&native_candidate).unwrap();
     for forbidden in [
         "CIVITASPO_BOT_PR_APPROVE_TOKEN",
@@ -1431,18 +1838,20 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
-            let downloads_cli = steps.iter().any(|step| {
-                step["uses"]
-                    .as_str()
-                    .is_some_and(|u| u.starts_with("actions/download-artifact@"))
-                    && step["with"]["artifact-ids"].is_string()
-            });
+            let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
+                && steps.iter().any(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|u| u.starts_with("actions/download-artifact@"))
+                        && step["with"]["artifact-ids"].is_string()
+                });
             if path == ".github/workflows/testing-provider-release.yml" {
                 continue;
             }
-            let installer = steps
-                .iter()
-                .position(|step| step["uses"] == "$/.github/actions/install-cli");
+            let installer = steps.iter().position(|step| {
+                step["uses"] == "$/.github/actions/install-cli"
+                    || step["uses"] == "./.github/actions/install-cli"
+            });
             if path == ".github/workflows/testing-release-pr.yml" && job_id == "execute" {
                 let trusted_installer = steps
                     .iter()
@@ -1573,6 +1982,40 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("gh release")
                     && !run.contains("jq -e")
                     && !run.contains("jq -r '.content'");
+                let bounded_legacy_runtime_reads = path
+                    == ".github/workflows/testing-securefix-server.yml"
+                    && job_id == "bootstrap-legacy-runtime"
+                    && run.contains("repos/$repo/releases/414653308")
+                    && run.contains("assets[] | select(.id == 646481902)")
+                    && run.contains("gh release download v0.2.20")
+                    && run.contains("sha256sum --check")
+                    && run.contains("gh attestation verify")
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method")
+                    && !run.contains("gh release upload")
+                    && !run.contains("gh release create");
+                let fixed_bootstrap_host_validation = path
+                    == ".github/workflows/testing-securefix-server.yml"
+                    && job_id == "bootstrap-scratch"
+                    && step["name"]
+                        == "Validate current main and inactive descriptor before credentials"
+                    && run
+                        == "python3 scripts/control-bootstrap.py validate-legacy-context --source-sha \"$SOURCE_SHA\"";
+                let fixed_bootstrap_host_script = path == ".github/workflows/control-bootstrap.yml"
+                    && run.starts_with("python3 scripts/control-bootstrap.py ")
+                    && [
+                        "prepare ",
+                        "propose ",
+                        "validate-merge ",
+                        "merge ",
+                        "repair-propose ",
+                        "repair-merge ",
+                    ]
+                    .iter()
+                    .any(|command| run.contains(command));
+                let fixed_workflow_script_tests = path == ".github/workflows/ci.yml"
+                    && job_id == "workflows"
+                    && run.trim() == "python3 -m unittest discover -s scripts -p 'test_*.py'";
                 let bounded_release_artifact_lookup = path
                     == ".github/workflows/testing-release-pr.yml"
                     && job_id == "execute"
@@ -1592,8 +2035,12 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && !run.contains("node ")
                         && (!run.contains("jq ")
                             || bounded_baseline_reads
+                            || bounded_legacy_runtime_reads
                             || bounded_release_artifact_lookup)
-                        && !run.contains("curl "),
+                        && !run.contains("curl ")
+                        || fixed_bootstrap_host_validation
+                        || fixed_bootstrap_host_script
+                        || fixed_workflow_script_tests,
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
                 assert!(

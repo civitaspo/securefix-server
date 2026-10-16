@@ -7,7 +7,16 @@ boundaries when changing approval, merge, repair, release, or repository setting
 The Rust `securefix` CLI owns validation and business logic. Workflows orchestrate
 events, verified runtime loading, credential isolation, and CLI invocation; keep
 shell steps limited to this orchestration. Do not restore upstream Securefix
-Actions or implement policy decisions in Bash, Python, or github-script.
+Actions or implement policy decisions in Bash, Python, or github-script, except in
+the fixed `control-bootstrap.yml` workflow and its `scripts/control-bootstrap.py`
+helper while the active descriptor is absent. The helper independently qualifies the
+bootstrap source, publisher run, archive, attestation, policy, scratch proof, and
+reviewed PR because no verified active Rust runtime exists for the first migration.
+The candidate archive is data during this qualification; the candidate executable is
+never run. Repair is split into `repair-propose` and `repair-merge`; both validate the
+bounded repair PR contract. Repair cannot change the bootstrap workflow or helper.
+This exception ends once the active descriptor exists and must not be generalized to
+normal operations or other workflows.
 
 Keep Rust suitable for reuse outside this deployment. Account names, repository
 identities, GitHub App identities, branch names, capabilities, trusted actors, and
@@ -59,13 +68,16 @@ helpers and keep the change focused; do not add speculative abstractions.
   release and asset IDs, publisher and scratch-verification run IDs, and the
   previous descriptor identity. Its identity is the SHA-256 of its canonical
   serialized fields. Candidate publication alone never changes active control.
-- Publish candidates through the currently active published controller. The
+- Publish normal candidates through the currently active published controller. The
   candidate executable and build artifact never receive production write
   credentials. Keep any release-writing token in the trusted host publisher
-  step and never expose it to candidate code. After publication and scratch
-  verification, an owner-dispatched active-controller command may open a signed
-  activation PR. The owner reviews and merges that PR through the normal server
-  Actions lane.
+  step and never expose it to candidate code. The one-time initial publication
+  uses only the separately reviewed fixed `control-bootstrap.yml` authority. Its
+  host-side qualification is read-only, and its separate writer does not execute the
+  candidate binary.
+  After publication and scratch verification, propose a signed descriptor PR, then
+  merge it only through the separately dispatched owner, expected-main, exact-head,
+  descriptor-identity, and required-CI fence.
 - Protected-main mutation workflows use the shared `securefix-control`
   concurrency group with `queue: max`. Do not add a ruleset bypass actor or
   mode beyond the exact Server App pull-request bypass required by the
@@ -128,14 +140,49 @@ dispatch distribution for the verified publisher run and review the resulting
 caller PRs. Use SemVer tags `vX.Y.Z`; prereleases use `vX.Y.Z-pre.N`. Never
 overwrite a published version or fabricate release provenance.
 
-The first activation is a bootstrap boundary. The currently deployed v0.2.20
-loader accepts only its exact pinned workflow provenance and policy, and it
-cannot publish a different version. The current publisher uses a production
-contents-write token that can also update repository content. A proposed main
-revision is therefore not a safe migration path by itself: do not merge it as
-though the old runtime can remain operative, and do not treat a post-merge
-recovery as a completed safe transition. Keep the proposal unmerged until a
-separately trusted bootstrap publication path is established and reviewed.
+The first protected-main code PR has an explicit permanent-settings gate. Before it
+merges, an owner must approve and complete removal of Renovate bypass from all nine
+controlled-merge rulesets (retaining only the Server App `pull_request` bypass),
+disable native auto-merge and confirm no queued requests, and enable immutable
+releases for the server. The deployed v0.2.20 runtime cannot apply these changes;
+use the repository administrator UI or API. Do not use a temporary exception.
+
+The one-time bootstrap is handled only by the reviewed fixed `control-bootstrap.yml`
+workflow. Its narrowly scoped Python helper performs host-side qualification only
+because no verified active Rust runtime exists for the first migration. It treats the
+candidate archive as data and never executes its binary. It publishes only the verified
+initial archive and never runs again after generation one. A later normal successor may select that same archive for rollback
+using its recorded bootstrap publisher run and fixed signer path; other generations
+use the normal publisher. There is no fallback runtime.
+After generation one is required, a missing or invalid descriptor disables operations
+until a valid control revision is restored. Publish and propose first, obtain owner
+review of the exact descriptor PR, then separately dispatch merge with owner,
+expected-main SHA, exact PR head, full descriptor identity, and required CI checks.
+Every job that mints a Server App token uses the protected `main` environment. The
+bootstrap scratch rehearsal uses a pinned v0.2.20 read baseline because the current
+main runtime cannot validate its own initial bootstrap producer. In that rehearsal the
+candidate prepares and verifies scratch fixtures, while v0.2.20 validates their output
+files. This baseline does not replace the fixed helper's qualification or establish
+production publication.
+
+While `control/active.json` is absent, dispatch the `CI` workflow on a signed repair
+branch and wait for its required `status-check` before `repair-propose`; arbitrary
+repair branches do not receive CI automatically. `repair-propose` checks the exact
+expected main, signed repair head, successful required checks, and allowed paths before
+the Server App opens a PR. Owner review happens after PR creation. `repair-merge`
+requires the latest owner review on that exact PR head, repeats the checks, and merges
+with expected-head CAS. The repair lane rejects changes to `control/active.json`,
+`.github/workflows/control-bootstrap.yml`, and `scripts/control-bootstrap.py`. A defect
+in either bootstrap authority file needs a separately reviewed recovery; the bounded
+repair lane cannot rewrite its own trust root. Repair does not restore old-runtime
+availability and permanently stops once generation one exists.
+
+The bootstrap workflow, initial activation and failure handling remain unverified.
+Keep the proposal unmerged until it is compiled, the bootstrap verification gate passes,
+and the operator procedure is reviewed. The old v0.2.20 runtime is only expected to remain
+available before the first protected-main advance; no availability claim applies
+after the first code PR merges. No production settings changes are authorized by
+the proposal.
 
 Renovate remains a PR author. Native Renovate auto-merge is incompatible with
 the sole-controller model and is removed. Non-major and lockfile PRs now require

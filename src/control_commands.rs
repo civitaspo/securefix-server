@@ -17,6 +17,7 @@ use std::{
 
 const ACTIVE_PATH: &str = "control/active.json";
 const CONTROL_WORKFLOW: &str = ".github/workflows/control-activation.yml";
+const BOOTSTRAP_WORKFLOW: &str = ".github/workflows/control-bootstrap.yml";
 const PUBLISH_WORKFLOW: &str = ".github/workflows/publish-runtime.yml";
 const TEST_WORKFLOW: &str = ".github/workflows/testing-securefix-server.yml";
 const SCRATCH_ARTIFACT: &str = "scratch-fixtures";
@@ -335,8 +336,23 @@ fn verify_publisher(
     source: &str,
     run_id: u64,
 ) -> Result<(runtime::Publication, tempfile::NamedTempFile)> {
-    let run = owner_dispatch_run(api, repository, run_id, PUBLISH_WORKFLOW)?;
     let trusted = config::trusted()?;
+    let run: Value = api.get(&format!("/repos/{repository}/actions/runs/{run_id}"))?;
+    let workflow = [PUBLISH_WORKFLOW, BOOTSTRAP_WORKFLOW]
+        .into_iter()
+        .find(|workflow| {
+            validate_owner_dispatch_run(
+                &run,
+                repository,
+                run_id,
+                trusted.deployment.server.id,
+                trusted.owner_id,
+                workflow,
+                &trusted.deployment.server.default_branch,
+            )
+            .is_ok()
+        })
+        .context("runtime publisher is not a successful owner dispatch of an approved publisher workflow")?;
     validate_publisher_target(&run, source, &trusted.deployment.server.default_branch)?;
     let version = runtime::version_at_source(api, source)?;
     let release: Value = api.get(&format!(
@@ -351,6 +367,13 @@ fn verify_publisher(
     let mut archive = tempfile::NamedTempFile::new()?;
     std::io::Write::write_all(&mut archive, &bytes)?;
     let publication = runtime::verify_publication(api, source, repository, archive.path())?;
+    verify_archive_attestation_for_workflow(
+        archive.path(),
+        repository,
+        source,
+        &trusted.deployment.server.default_branch,
+        workflow,
+    )?;
     Ok((publication, archive))
 }
 
@@ -359,6 +382,16 @@ fn verify_archive_attestation(
     repository: &str,
     source: &str,
     branch: &str,
+) -> Result<()> {
+    verify_archive_attestation_for_workflow(path, repository, source, branch, PUBLISH_WORKFLOW)
+}
+
+fn verify_archive_attestation_for_workflow(
+    path: &Path,
+    repository: &str,
+    source: &str,
+    branch: &str,
+    workflow: &str,
 ) -> Result<()> {
     let output = Process::new("gh")
         .arg("attestation")
@@ -371,7 +404,7 @@ fn verify_archive_attestation(
         .arg("--source-ref")
         .arg(format!("refs/heads/{branch}"))
         .arg("--signer-workflow")
-        .arg(format!("{repository}/{PUBLISH_WORKFLOW}"))
+        .arg(format!("{repository}/{workflow}"))
         .arg("--signer-digest")
         .arg(source)
         .arg("--cert-oidc-issuer")
@@ -459,7 +492,8 @@ fn validate_owner_dispatch_run(
             && run["repository"]["id"].as_u64() == Some(repository_id)
             && run["head_repository"]["full_name"] == repository
             && run["head_repository"]["id"].as_u64() == Some(repository_id)
-            && run["path"] == format!("{workflow}@refs/heads/{branch}")
+            && (run["path"] == workflow
+                || run["path"] == format!("{workflow}@refs/heads/{branch}"))
             && run["event"] == "workflow_dispatch"
             && run["run_attempt"] == 1
             && run["status"] == "completed"
@@ -1117,7 +1151,194 @@ fn valid_digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::Route;
     use std::io::Write;
+
+    struct ActivationTestEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl ActivationTestEnvironment {
+        fn install(active: &securefix::control::ControlRevision, main_sha: &str) -> Self {
+            let mut previous = Vec::new();
+            let control_id = active.identity().unwrap();
+            for (key, value) in [
+                ("SECUREFIX_SOURCE_SHA", active.source_sha.as_str()),
+                ("SECUREFIX_CONTROL_ID", control_id.as_str()),
+                ("GITHUB_SHA", main_sha),
+            ] {
+                previous.push((key, std::env::var_os(key)));
+                // Rust 2024 marks process environment mutation unsafe; the guard restores each value.
+                unsafe { std::env::set_var(key, value) };
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for ActivationTestEnvironment {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn request_validation_routes(
+        active: &securefix::control::ControlRevision,
+        source: &str,
+        release: Route,
+    ) -> Vec<Route> {
+        use base64::Engine;
+        let trusted = config::trusted().unwrap();
+        let server = &trusted.deployment.server;
+        let repository = &server.repository;
+        let main_sha = "c".repeat(40);
+        let descriptor_path = format!("/repos/{repository}/contents/{ACTIVE_PATH}?ref={main_sha}");
+        let descriptor = serde_json::to_vec(active).unwrap();
+        let descriptor_response = json!({
+            "encoding":"base64",
+            "content":base64::engine::general_purpose::STANDARD.encode(descriptor)
+        });
+        let server_repo = json!({
+            "id":server.id,
+            "default_branch":server.default_branch,
+            "allow_auto_merge":false,
+            "allow_squash_merge":true,
+            "allow_merge_commit":false,
+            "allow_rebase_merge":false
+        });
+        let mut routes = vec![
+            Route::get(format!("/repos/{repository}"), server_repo.clone()),
+            Route::get(
+                format!("/repos/{repository}/commits/{}", server.default_branch),
+                json!({"sha":main_sha}),
+            ),
+            Route::get(descriptor_path.clone(), descriptor_response.clone()),
+            Route::get(
+                format!("/repos/{repository}/commits/{}", server.default_branch),
+                json!({"sha":main_sha}),
+            ),
+            Route::get(format!("/repos/{repository}"), server_repo.clone()),
+            Route::get(
+                format!("/repos/{repository}/commits/{}", server.default_branch),
+                json!({"sha":main_sha}),
+            ),
+            Route::get(descriptor_path, descriptor_response),
+        ];
+
+        let policy =
+            crate::policy::Policy::parse(&config::trusted_policy_bytes().unwrap()).unwrap();
+        let repositories = policy
+            .repositories
+            .iter()
+            .map(|entry| entry.repository.clone())
+            .chain(std::iter::once(repository.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        for repo in &repositories {
+            let identity = if repo == repository {
+                server_repo.clone()
+            } else {
+                json!({
+                    "full_name":repo,
+                    "allow_auto_merge":false,
+                    "allow_squash_merge":true,
+                    "allow_merge_commit":false,
+                    "allow_rebase_merge":false
+                })
+            };
+            routes.push(Route::get(format!("/repos/{repo}"), identity));
+            routes.push(Route::get(
+                format!("/repos/{repo}/pulls?state=open&per_page=100&page=1"),
+                json!([]),
+            ));
+        }
+        let mut merge_repositories = policy
+            .repositories
+            .iter()
+            .filter(|entry| {
+                entry
+                    .capabilities
+                    .contains(&crate::policy::Capability::Merge)
+            })
+            .map(|entry| entry.repository.clone())
+            .filter(|repo| repo != repository)
+            .collect::<Vec<_>>();
+        merge_repositories.sort();
+        merge_repositories.push(repository.clone());
+        for (index, repo) in merge_repositories.iter().enumerate() {
+            let id = index as u64 + 1;
+            let ruleset = json!({
+                "id":id,
+                "source_type":"Repository",
+                "source":repo,
+                "name":"controlled-merges",
+                "target":"branch",
+                "enforcement":"active",
+                "bypass_actors":[{"actor_id":trusted.deployment.server_app_id,"actor_type":"Integration","bypass_mode":"pull_request"}],
+                "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
+                "rules":[{"type":"update","parameters":{"update_allows_fetch_and_merge":false}}]
+            });
+            routes.push(Route::get(
+                format!("/repos/{repo}/rulesets?includes_parents=false&per_page=100&page=1"),
+                json!([ruleset]),
+            ));
+            routes.push(Route::get(format!("/repos/{repo}/rulesets/{id}"), ruleset));
+        }
+        routes.extend([
+            Route::get(
+                format!("/repos/{repository}/compare/{source}...{main_sha}"),
+                json!({"status":"ahead","base_commit":{"sha":source},"merge_base_commit":{"sha":source}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{source}"),
+                json!({"sha":source,"commit":{"verification":{"verified":true}}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{source}/status"),
+                json!({"state":"success","total_count":0}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{source}/check-runs?per_page=100&page=1&filter=latest"),
+                json!({"check_runs":[{"name":"status-check","app":{"id":trusted.deployment.checks.status_app_id},"status":"completed","conclusion":"success"}]}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/actions/runs/17"),
+                json!({
+                    "id":17,
+                    "repository":{"full_name":repository,"id":server.id},
+                    "head_repository":{"full_name":repository,"id":server.id},
+                    "path":PUBLISH_WORKFLOW,
+                    "event":"workflow_dispatch",
+                    "run_attempt":1,
+                    "status":"completed",
+                    "conclusion":"success",
+                    "actor":{"id":trusted.owner_id},
+                    "triggering_actor":{"id":trusted.owner_id},
+                    "head_sha":source,
+                    "head_branch":server.default_branch
+                }),
+            ),
+            Route::get(
+                format!("/repos/{repository}/contents/Cargo.toml?ref={source}"),
+                {
+                    let bytes = b"[package]\nversion = \"9.9.9\"\n";
+                    json!({
+                        "path":"Cargo.toml",
+                        "type":"file",
+                        "size":bytes.len(),
+                        "encoding":"base64",
+                        "content":base64::engine::general_purpose::STANDARD.encode(bytes)
+                    })
+                },
+            ),
+            release,
+        ]);
+        routes
+    }
 
     fn fixture_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -1313,6 +1534,44 @@ mod tests {
         let directory = tempfile::tempdir().unwrap().path().join("not-created");
         assert!(write_prepared(&directory, &before, &invalid_next).is_err());
         assert!(!directory.exists());
+    }
+
+    #[test]
+    fn prepare_and_propose_validation_rejects_unpublished_candidates_before_mutation() {
+        let active = crate::fixtures::Fixture::control_revision();
+        let source = "b".repeat(40);
+        let main = "c".repeat(40);
+        let _environment = ActivationTestEnvironment::install(&active, &main);
+        let trusted = config::trusted().unwrap();
+        let tag = format!(
+            "/repos/{}/releases/tags/v9.9.9",
+            trusted.deployment.server.repository
+        );
+
+        for (release, expected_error) in [
+            (
+                Route::request("GET", &tag, 404, json!({"message":"Not Found"})),
+                "404",
+            ),
+            (
+                Route::get(&tag, json!({"immutable":false,"assets":[{"id":42}]})),
+                "not immutable",
+            ),
+        ] {
+            let fixture =
+                crate::fixtures::Fixture::new(request_validation_routes(&active, &source, release));
+            let directory = tempfile::tempdir().unwrap().path().join("prepared");
+            let result =
+                validate_request(&fixture.api, &source, 17, 23, &active.identity().unwrap());
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "candidate validation failed for the wrong reason: {error:#}"
+            );
+            // Both CLI paths call validate_request before writing the descriptor or opening a PR.
+            assert!(!directory.exists());
+            fixture.finish();
+        }
     }
 
     #[test]

@@ -17,16 +17,46 @@ jq -r '.content' <<<"$descriptor_response" | base64 --decode > "$descriptor"
 [[ -s "$descriptor" && "$(stat -c %s "$descriptor")" -le 16384 ]] || { echo 'control descriptor is missing or exceeds size limit' >&2; exit 1; }
 
 source_sha="$(jq -er '.source_sha' "$descriptor")"
+generation="$(jq -er '.generation' "$descriptor")"
 asset_id="$(jq -er '.asset_id' "$descriptor")"
 release_id="$(jq -er '.release_id' "$descriptor")"
+publisher_run_id="$(jq -er '.publisher_run_id' "$descriptor")"
 expected_archive_sha="$(jq -er '.archive_sha256' "$descriptor")"
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'active runtime source SHA is invalid' >&2; exit 1; }
+[[ "$generation" =~ ^[1-9][0-9]*$ && "$publisher_run_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'active runtime generation or publisher run ID is invalid' >&2; exit 1; }
 if [[ -n "${SOURCE_SHA:-}" ]]; then
   [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'source-sha must be a full lowercase commit SHA' >&2; exit 1; }
   [[ "$SOURCE_SHA" == "$source_sha" ]] || { echo 'requested runtime source SHA differs from the active descriptor' >&2; exit 1; }
 fi
 [[ "$asset_id" =~ ^[1-9][0-9]{0,19}$ && "$release_id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'active runtime release or asset ID is invalid' >&2; exit 1; }
 [[ "$expected_archive_sha" =~ ^[0-9a-f]{64}$ ]] || { echo 'active runtime archive digest is invalid' >&2; exit 1; }
+
+publisher_run="$(gh api "repos/$REPOSITORY/actions/runs/$publisher_run_id")"
+repository_id="$(jq -er '.id' <<<"$repo")"
+[[ "$(jq -r '.id' <<<"$publisher_run")" == "$publisher_run_id" \
+  && "$(jq -r '.status' <<<"$publisher_run")" == 'completed' \
+  && "$(jq -r '.conclusion' <<<"$publisher_run")" == 'success' \
+  && "$(jq -r '.event' <<<"$publisher_run")" == 'workflow_dispatch' \
+  && "$(jq -r '.head_branch' <<<"$publisher_run")" == "$DEFAULT_BRANCH" \
+  && "$(jq -r '.head_sha' <<<"$publisher_run")" == "$source_sha" \
+  && "$(jq -r '.repository.id' <<<"$publisher_run")" == "$repository_id" \
+  && "$(jq -r '.repository.full_name' <<<"$publisher_run")" == "$REPOSITORY" \
+  && "$(jq -r '.head_repository.id' <<<"$publisher_run")" == "$repository_id" \
+  && "$(jq -r '.head_repository.full_name' <<<"$publisher_run")" == "$REPOSITORY" \
+  && "$(jq -r '.actor.id' <<<"$publisher_run")" == '4525500' \
+  && "$(jq -r '.triggering_actor.id' <<<"$publisher_run")" == '4525500' ]] || {
+  echo 'active runtime publisher run does not match the trusted repository, source, and dispatch identity' >&2
+  exit 1
+}
+publisher_path="$(jq -er '.path' <<<"$publisher_run")"
+case "$publisher_path" in
+  ".github/workflows/publish-runtime.yml"|".github/workflows/publish-runtime.yml@refs/heads/$DEFAULT_BRANCH")
+    signer_workflow="$REPOSITORY/.github/workflows/publish-runtime.yml" ;;
+  ".github/workflows/control-bootstrap.yml"|".github/workflows/control-bootstrap.yml@refs/heads/$DEFAULT_BRANCH")
+    [[ "$(jq -r '.run_attempt' <<<"$publisher_run")" == 1 ]] || { echo 'bootstrap publisher must be the first run attempt' >&2; exit 1; }
+    signer_workflow="$REPOSITORY/.github/workflows/control-bootstrap.yml" ;;
+  *) echo 'active runtime publisher workflow is not trusted' >&2; exit 1 ;;
+esac
 
 release="$(gh api "repos/$REPOSITORY/releases/$release_id")"
 [[ "$(jq -r '.id' <<<"$release")" == "$release_id" && "$(jq -r '.draft' <<<"$release")" == 'false' && "$(jq -r '.immutable' <<<"$release")" == 'true' ]] || { echo 'active runtime release is not the selected immutable published release' >&2; exit 1; }
@@ -36,7 +66,7 @@ actual_size="$(stat -c %s "$archive")"
 [[ "$actual_size" -gt 0 && "$actual_size" -le 134217728 ]] || { echo 'runtime archive exceeds size limit' >&2; exit 1; }
 actual_sha="$(sha256sum "$archive" | cut -d ' ' -f 1)"
 [[ "$actual_sha" == "$expected_archive_sha" ]] || { echo 'runtime archive digest differs from active descriptor' >&2; exit 1; }
-gh attestation verify "$archive" --repo "$REPOSITORY" --source-digest "$source_sha" --source-ref "refs/heads/$DEFAULT_BRANCH" --signer-workflow "$REPOSITORY/.github/workflows/publish-runtime.yml" --signer-digest "$source_sha" --cert-oidc-issuer https://token.actions.githubusercontent.com --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+gh attestation verify "$archive" --repo "$REPOSITORY" --source-digest "$source_sha" --source-ref "refs/heads/$DEFAULT_BRANCH" --signer-workflow "$signer_workflow" --signer-digest "$source_sha" --cert-oidc-issuer https://token.actions.githubusercontent.com --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
 
 runtime_dir="$(mktemp -d "$RUNNER_TEMP/securefix-runtime.XXXXXX")"
 tar -xzf "$archive" -C "$runtime_dir" --no-same-owner

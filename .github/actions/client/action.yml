@@ -9,7 +9,7 @@ inputs:
     required: false
     default: ''
   runtime-token:
-    description: Optional read-only token for downloading a private runtime repository
+    description: Optional read-only token for runtime contents, action runs, and attestations
     required: false
     default: ''
   server-repository:
