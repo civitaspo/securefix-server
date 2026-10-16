@@ -178,11 +178,15 @@ repair lane cannot rewrite its own trust root. Repair does not restore old-runti
 availability and permanently stops once generation one exists.
 
 The bootstrap workflow, initial activation and failure handling remain unverified.
-Keep the proposal unmerged until it is compiled, the bootstrap verification gate passes,
-and the operator procedure is reviewed. The old v0.2.20 runtime is only expected to remain
-available before the first protected-main advance; no availability claim applies
-after the first code PR merges. No production settings changes are authorized by
-the proposal.
+Before merging the first code PR, compile the implementation, pass the normal candidate
+scratch verification on a frozen integration branch, review the fixed bootstrap path and
+operator procedure, and explicitly approve and complete the permanent live-settings
+rollout. The protected-main `phase=bootstrap` scratch gate cannot run before that merge;
+after the first code PR merges, it must pass during the finite pause before bootstrap
+publication or descriptor activation is proposed. The old v0.2.20 runtime is only
+expected to remain available before the first protected-main advance; no availability
+claim applies after the first code PR merges. No production settings changes are
+authorized by the proposal.
 
 Renovate remains a PR author. Native Renovate auto-merge is incompatible with
 the sole-controller model and is removed. Non-major and lockfile PRs now require

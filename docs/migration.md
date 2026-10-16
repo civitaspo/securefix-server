@@ -113,15 +113,16 @@ reviewed recovery. This bounded lane allows reviewed code repairs during the fin
 pre-generation-one pause, does not restore v0.2.20 availability, and stops once the
 descriptor exists.
 
-The bootstrap producer, the first activation sequence, and its failure behavior are
-not yet verified end to end. Treat this migration as a proposal until the implementation
-is compiled, the required bootstrap verification gate passes, and the first-run
-procedure has been reviewed.
-There is a deliberate finite pause after the first code PR merges: no claim is made
-that v0.2.20 remains available beyond that main advance. The bounded repair phase can
-land reviewed fixes during this pause, but it is not an alternate runtime or a bypass.
-Do not merge the proposal or start production rollout without the explicit permanent-
-settings approval and the reviewed bootstrap path.
+The bootstrap producer, first activation sequence, and failure behavior remain
+unverified. Before merging the first code PR, compile the implementation, pass the normal
+candidate scratch verification on a frozen integration branch, review the fixed
+bootstrap path and operator procedure, and explicitly approve and complete the permanent
+live-settings rollout. The protected-main `phase=bootstrap` scratch gate cannot run
+before that merge. After the first code PR merges, run that gate during the deliberate
+finite pause; it must pass before bootstrap publication or descriptor activation is
+proposed. The bounded repair phase can land reviewed fixes during this pause, but it is
+not an alternate runtime or a bypass. No claim is made that v0.2.20 remains available
+after the first protected-main advance.
 
 The deployment and verification reports dated before this proposal document evidence for the earlier runtime contract only. They do not establish that this lifecycle, bootstrap path, or proposed code has been deployed or verified.
 

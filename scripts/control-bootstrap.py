@@ -21,14 +21,9 @@ ACTIVE = "control/active.json"
 ASSET = "securefix-runtime-linux-x86_64.tar.gz"
 ZERO = "0" * 64
 BOOTSTRAP_WORKFLOW = ".github/workflows/control-bootstrap.yml"
-PUBLISH_WORKFLOW = ".github/workflows/publish-runtime.yml"
 TEST_WORKFLOW = ".github/workflows/testing-securefix-server.yml"
 LEGACY_SOURCE_SHA = "e8e2bc77d96a4e359417217f1d1c22f4e1ac4483"
 LEGACY_TAG = "v0.2.20"
-LEGACY_RELEASE_ID = 414653308
-LEGACY_ASSET_ID = 646481902
-LEGACY_ARCHIVE_SHA256 = "1f0f991e766e287b1ff55cf8cbda05982c0ddb90295f988081bf5b85a480d96c"
-LEGACY_ARCHIVE_SIZE = 3964894
 OWNER_ID = 4525500
 SERVER_ID = 1250079425
 STATUS_APP_ID = 15368
@@ -52,10 +47,6 @@ def canonical_control_id(descriptor):
     checked(set(descriptor) == set(fields), "descriptor schema mismatch")
     ordered = {field: descriptor[field] for field in fields}
     return hashlib.sha256(json.dumps(ordered, separators=(",", ":")).encode()).hexdigest()
-
-
-def api_json(method, path, **kwargs):
-    return request(method, path, **kwargs)
 
 
 def contents(repo, path, revision):
@@ -167,11 +158,6 @@ def required_status(repo, sha):
         if len(batch) < 100:
             break
     checked(len(matches) == 1 and matches[0].get("status") == "completed" and matches[0].get("conclusion") == "success", "required status-check is not unique and successful")
-
-
-def is_ancestor(repo, ancestor, descendant):
-    compare = request("GET", repo_path(repo, f"compare/{ancestor}...{descendant}"))
-    checked(compare.get("base_commit", {}).get("sha") == ancestor and compare.get("merge_base_commit", {}).get("sha") == ancestor and compare.get("status") in ("ahead", "identical"), "candidate is not a descendant of protected main")
 
 
 def verify_attestation(archive_path, repo, source, workflow):

@@ -1354,6 +1354,92 @@ fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
 }
 
 #[test]
+fn workflow_local_actions_have_a_prior_matching_checkout() {
+    for (path, value) in workflows() {
+        for (job_id, job) in value["jobs"].as_object().unwrap() {
+            let Some(steps) = job["steps"].as_array() else {
+                continue;
+            };
+            for (index, step) in steps.iter().enumerate() {
+                let Some(uses) = step["uses"].as_str() else {
+                    continue;
+                };
+                let Some(local) = uses.strip_prefix("./") else {
+                    continue;
+                };
+                let action_root = if local.starts_with(".github/actions/") {
+                    ""
+                } else if let Some((root, _)) = local.split_once("/.github/actions/") {
+                    root
+                } else {
+                    continue;
+                };
+                let has_matching_checkout = steps[..index].iter().any(|prior| {
+                    if !prior["uses"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("actions/checkout@"))
+                    {
+                        return false;
+                    }
+                    let checkout_path = prior["with"]["path"].as_str().unwrap_or("");
+                    checkout_path == action_root
+                });
+                assert!(
+                    has_matching_checkout,
+                    "{path}/{job_id}: local action {uses} needs an earlier checkout at its action root"
+                );
+            }
+        }
+    }
+
+    let testing = workflow("testing-securefix-server.yml");
+    let scratch = &testing["jobs"]["scratch"];
+    let steps = scratch["steps"].as_array().unwrap();
+    let probe = steps
+        .iter()
+        .position(|step| step["name"] == "Execute scratch control probe")
+        .unwrap();
+    let installer = steps
+        .iter()
+        .position(|step| {
+            step["uses"] == "$/.github/actions/install-cli"
+                && step["with"]["binary"] == "candidate-runtime/securefix"
+        })
+        .unwrap();
+    assert!(installer < probe);
+}
+
+#[test]
+fn control_probe_containers_mount_candidate_policy_beside_the_binary() {
+    let testing = workflow("testing-securefix-server.yml");
+    for (job_id, step_name) in [
+        (
+            "bootstrap-scratch",
+            "Probe candidate control generation and CAS before approval",
+        ),
+        ("scratch", "Execute scratch control probe"),
+    ] {
+        let steps = testing["jobs"][job_id]["steps"].as_array().unwrap();
+        let step = steps
+            .iter()
+            .find(|step| step["name"] == step_name)
+            .unwrap_or_else(|| panic!("{job_id}: missing {step_name}"));
+        let run = step["run"].as_str().unwrap();
+        assert!(
+            run.contains(
+                "source=$RUNNER_TEMP/securefix-bin/securefix,target=/candidate/securefix,readonly"
+            ),
+            "{job_id}: candidate executable must be mounted read-only at /candidate/securefix"
+        );
+        assert!(
+            run.contains("source=$RUNNER_TEMP/securefix-bin/policy.json,target=/candidate/policy.json,readonly"),
+            "{job_id}: matching candidate policy must be mounted read-only beside the executable"
+        );
+        assert!(run.contains("/candidate/securefix integration control-probe"));
+    }
+}
+
+#[test]
 fn operational_workflows_have_no_securefix_action_dependency() {
     for (path, value) in workflows() {
         assert!(
