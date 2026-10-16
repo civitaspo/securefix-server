@@ -73,7 +73,7 @@ jobs:
           SECUREFIX_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
         run: securefix securefix apply
       - name: Delete the consumed request label
-        if: success() && steps.event.outcome == 'success'
+        if: always() && steps.event.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: securefix securefix cleanup

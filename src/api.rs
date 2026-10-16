@@ -87,21 +87,18 @@ impl GitHub {
                 .redirect(Policy::none())
                 .retry(
                     reqwest::retry::for_host(retry_host)
-                        .max_retries_per_request(2)
+                        .max_retries_per_request(1)
                         .classify_fn(|request| {
-                            // POST /graphql is read-only because request() rejects mutations.
-                            let read_only =
-                                matches!(request.method(), &Method::GET | &Method::HEAD)
-                                    || (request.method() == &Method::POST
-                                        && request.uri().path().ends_with("/graphql"));
-                            let transport_error = request
+                            let safe_method =
+                                matches!(request.method(), &Method::GET | &Method::HEAD);
+                            let transient_failure = request
                                 .error()
                                 .and_then(|error| error.downcast_ref::<reqwest::Error>())
-                                .is_some_and(|error| error.is_request() || error.is_connect());
-                            let server_error = request
-                                .status()
-                                .is_some_and(|status| status.is_server_error());
-                            if read_only && (transport_error || server_error) {
+                                .is_some_and(|error| error.is_request() || error.is_connect())
+                                || request
+                                    .status()
+                                    .is_some_and(|status| status.is_server_error());
+                            if safe_method && transient_failure {
                                 request.retryable()
                             } else {
                                 request.success()
