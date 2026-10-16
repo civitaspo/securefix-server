@@ -219,8 +219,6 @@ fn validate_request(
         std::env::var("GITHUB_SHA").is_ok_and(|sha| sha == main_sha),
         "activation workflow is not running from current protected main"
     );
-    let active_policy = crate::policy::Policy::active(api)?;
-    crate::settings::require_serialized_merges(api, &active_policy)?;
     require_ancestor(api, repository, source_sha, main_sha)?;
     verify_source_commit(api, repository, source_sha)?;
     verify_ci_status(api, repository, source_sha)?;
@@ -824,8 +822,6 @@ fn validate_request_for_active_descriptor(
 ) -> Result<()> {
     let trusted = config::trusted()?;
     let repository = &trusted.deployment.server.repository;
-    let policy = crate::policy::Policy::active(api)?;
-    crate::settings::require_serialized_merges(api, &policy)?;
     let main: Value = api.get(&format!(
         "/repos/{repository}/commits/{}",
         trusted.deployment.server.default_branch
@@ -1205,89 +1201,21 @@ mod tests {
         });
         let server_repo = json!({
             "id":server.id,
-            "default_branch":server.default_branch,
-            "allow_auto_merge":false,
-            "allow_squash_merge":true,
-            "allow_merge_commit":false,
-            "allow_rebase_merge":false
+            "default_branch":server.default_branch
         });
         let mut routes = vec![
-            Route::get(format!("/repos/{repository}"), server_repo.clone()),
-            Route::get(
-                format!("/repos/{repository}/commits/{}", server.default_branch),
-                json!({"sha":main_sha}),
-            ),
-            Route::get(descriptor_path.clone(), descriptor_response.clone()),
-            Route::get(
-                format!("/repos/{repository}/commits/{}", server.default_branch),
-                json!({"sha":main_sha}),
-            ),
-            Route::get(format!("/repos/{repository}"), server_repo.clone()),
+            Route::get(format!("/repos/{repository}"), server_repo),
             Route::get(
                 format!("/repos/{repository}/commits/{}", server.default_branch),
                 json!({"sha":main_sha}),
             ),
             Route::get(descriptor_path, descriptor_response),
+            Route::get(
+                format!("/repos/{repository}/commits/{}", server.default_branch),
+                json!({"sha":main_sha}),
+            ),
         ];
 
-        let policy =
-            crate::policy::Policy::parse(&config::trusted_policy_bytes().unwrap()).unwrap();
-        let repositories = policy
-            .repositories
-            .iter()
-            .map(|entry| entry.repository.clone())
-            .chain(std::iter::once(repository.clone()))
-            .collect::<std::collections::BTreeSet<_>>();
-        for repo in &repositories {
-            let identity = if repo == repository {
-                server_repo.clone()
-            } else {
-                json!({
-                    "full_name":repo,
-                    "allow_auto_merge":false,
-                    "allow_squash_merge":true,
-                    "allow_merge_commit":false,
-                    "allow_rebase_merge":false
-                })
-            };
-            routes.push(Route::get(format!("/repos/{repo}"), identity));
-            routes.push(Route::get(
-                format!("/repos/{repo}/pulls?state=open&per_page=100&page=1"),
-                json!([]),
-            ));
-        }
-        let mut merge_repositories = policy
-            .repositories
-            .iter()
-            .filter(|entry| {
-                entry
-                    .capabilities
-                    .contains(&crate::policy::Capability::Merge)
-            })
-            .map(|entry| entry.repository.clone())
-            .filter(|repo| repo != repository)
-            .collect::<Vec<_>>();
-        merge_repositories.sort();
-        merge_repositories.push(repository.clone());
-        for (index, repo) in merge_repositories.iter().enumerate() {
-            let id = index as u64 + 1;
-            let ruleset = json!({
-                "id":id,
-                "source_type":"Repository",
-                "source":repo,
-                "name":"controlled-merges",
-                "target":"branch",
-                "enforcement":"active",
-                "bypass_actors":[{"actor_id":trusted.deployment.server_app_id,"actor_type":"Integration","bypass_mode":"pull_request"}],
-                "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
-                "rules":[{"type":"update","parameters":{"update_allows_fetch_and_merge":false}}]
-            });
-            routes.push(Route::get(
-                format!("/repos/{repo}/rulesets?includes_parents=false&per_page=100&page=1"),
-                json!([ruleset]),
-            ));
-            routes.push(Route::get(format!("/repos/{repo}/rulesets/{id}"), ruleset));
-        }
         routes.extend([
             Route::get(
                 format!("/repos/{repository}/compare/{source}...{main_sha}"),

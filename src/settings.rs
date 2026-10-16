@@ -356,28 +356,6 @@ fn preflight(api: &GitHub, policy: &Policy) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn require_serialized_merges(api: &GitHub, policy: &Policy) -> Result<()> {
-    let server = &config::trusted()?.deployment.server.repository;
-    let server_app_id = config::trusted()?.deployment.server_app_id;
-    let merge_repositories = merge_repositories(policy, server)?;
-    let repositories = policy
-        .repositories
-        .iter()
-        .map(|repository| repository.repository.as_str())
-        .chain(std::iter::once(server.as_str()))
-        .collect::<BTreeSet<_>>();
-    for repository in repositories {
-        validate_native_merge_settings(api, repository)?;
-    }
-    for repository in merge_repositories {
-        ensure!(
-            validate_existing_controlled_merges(api, &repository, server_app_id)?,
-            "{repository} has no active controlled-merges ruleset"
-        );
-    }
-    Ok(())
-}
-
 fn merge_repositories(policy: &Policy, server: &str) -> Result<Vec<String>> {
     let mut clients = policy
         .repositories

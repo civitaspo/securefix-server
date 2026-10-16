@@ -43,9 +43,9 @@ See the [GitHub action self-reference syntax](https://docs.github.com/en/actions
 Execution jobs retain the existing exact-current runtime/policy checks before effects.
 All callers grant `attestations: read` alongside their existing contents permission.
 Public Releases avoid a cross-repository Actions artifact download token, and do not expire with Actions artifact retention.
-No server immutable-release setting is required for runtime integrity: tags and assets locate bytes, while the attestation establishes their source.
-Deletion or replacement may deny service, but unverified replacement bytes cannot be executed.
-This does not change the immutable-release requirement for client product releases.
+Under this superseded design, attestation established runtime source integrity without requiring immutable server Releases.
+The current contract in [ADR 0009](0009-active-control-revision.md) additionally requires the actual published runtime Release to be immutable.
+Repository settings management owns enablement; publication and loading verify the resulting Release rather than querying administrative configuration.
 
 The [scratch testing workflow](../testing.md) builds a reviewed server revision in a secret-free job and transfers the runtime and API probe by immutable same-run artifact ID.
 Its separate probe job checks the installed executable and a metadata-only Client App token limited to the scratch repository.

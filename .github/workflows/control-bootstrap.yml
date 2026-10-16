@@ -121,21 +121,10 @@ jobs:
           artifact-ids: ${{ needs.build-candidate.outputs.artifact-id }}
           path: distribution
           merge-multiple: true
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: settings-read
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
       - id: validate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
-          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
           VERIFY_RUN: ${{ inputs.verification_run_id }}
         run: python3 scripts/control-bootstrap.py prepare --source-sha "$GITHUB_SHA" --verification-run-id "$VERIFY_RUN" --archive distribution/securefix-runtime-linux-x86_64.tar.gz
       - name: Save validated plan artifact
@@ -191,21 +180,10 @@ jobs:
           repositories: securefix-server
           permission-contents: write
           permission-pull-requests: write
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: settings-read
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
       - name: Publish immutable archive and open descriptor PR
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.writer.outputs.token }}
-          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
         run: python3 scripts/control-bootstrap.py propose --plan control-bootstrap-plan.json --archive distribution/securefix-runtime-linux-x86_64.tar.gz
 
   validate-merge:
@@ -226,21 +204,10 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: settings-read
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
       - name: Revalidate bootstrap PR without candidate execution
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
-          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
           PR: ${{ inputs.pull_request }}
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
@@ -278,21 +245,10 @@ jobs:
           repositories: securefix-server
           permission-contents: write
           permission-pull-requests: write
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: settings-read
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
       - name: Revalidate and merge with exact PR head compare-and-swap
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.writer.outputs.token }}
-          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
           PR: ${{ inputs.pull_request }}
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
@@ -329,21 +285,10 @@ jobs:
           repositories: securefix-server
           permission-contents: read
           permission-pull-requests: write
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: settings-read
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
       - name: Qualify repair commit then open Server App PR
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.writer.outputs.token }}
-          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
         run: python3 scripts/control-bootstrap.py repair-propose --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"
@@ -378,21 +323,10 @@ jobs:
           repositories: securefix-server
           permission-contents: write
           permission-pull-requests: write
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: settings-read
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
       - name: Revalidate and merge approved repair PR with head SHA compare-and-swap
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.writer.outputs.token }}
-          SECUREFIX_SERVER_APP_READ_TOKEN: ${{ steps.settings-read.outputs.token }}
           PR: ${{ inputs.pull_request }}
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}

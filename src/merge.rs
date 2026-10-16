@@ -254,7 +254,6 @@ fn apply() -> Result<()> {
         ready(&read, &manifest)?,
         "merge prerequisites are not ready; retry outside the protected apply lane"
     );
-    crate::settings::require_serialized_merges(&read, &policy)?;
     crate::control_commands::validate_activation_merge(&read, &manifest)?;
     let commits = read.paginate(&format!(
         "/repos/{}/pulls/{}/commits",

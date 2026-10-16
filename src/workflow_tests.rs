@@ -869,31 +869,18 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         })
     });
     let installed = publish_index(&|step| step["uses"] == "$/.github/actions/install-cli");
-    let read_token = publish_index(&|step| step["id"] == "immutable-release-read-token");
-    assert_eq!(
-        publish_steps[read_token]["with"]["repositories"],
-        "securefix-server"
-    );
-    assert_eq!(
-        publish_steps[read_token]["with"]["permission-administration"],
-        "read"
-    );
-    assert!(
-        publish_steps[read_token]["with"]
-            .get("permission-contents")
-            .is_none()
-    );
     assert!(
         downloaded < controller_downloaded
             && controller_downloaded < verified
             && verified < installed
-            && installed < read_token
-            && read_token < invoked
+            && installed < invoked
     );
-    assert_eq!(
-        publish_steps[invoked]["env"]["SECUREFIX_SERVER_APP_TOKEN"],
-        "${{ steps.immutable-release-read-token.outputs.token }}"
-    );
+    assert!(publish_steps.iter().all(|step| {
+        !step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
+    }));
+    assert!(publish_steps[invoked]["env"].is_null());
     assert_eq!(
         publish_steps[installed]["with"]["binary"],
         "${{ runner.temp }}/controller/securefix"
@@ -1139,7 +1126,6 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
                 == "${{ needs.validate-proposal.outputs.artifact-id }}")
     );
 
-    const SETTINGS_REPOSITORIES: &str = "dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server";
     for job_id in ["propose", "merge", "repair-propose", "repair-merge"] {
         let job = &bootstrap["jobs"][job_id];
         assert_eq!(job["environment"], "main", "{job_id}");
@@ -1154,20 +1140,11 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
                 .as_str()
                 .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
             {
-                if step["id"] == "settings-read" {
-                    assert_eq!(
-                        step["with"]["repositories"], SETTINGS_REPOSITORIES,
-                        "{job_id}"
-                    );
-                    assert_eq!(
-                        step["with"]["permission-administration"], "read",
-                        "{job_id}"
-                    );
-                    assert_eq!(step["with"]["permission-contents"], "read", "{job_id}");
-                    assert_eq!(step["with"]["permission-pull-requests"], "read", "{job_id}");
-                } else {
-                    assert_eq!(step["with"]["repositories"], "securefix-server", "{job_id}");
-                }
+                assert_eq!(step["with"]["repositories"], "securefix-server", "{job_id}");
+                assert!(
+                    step["with"].get("permission-administration").is_none(),
+                    "{job_id}"
+                );
             }
         }
     }
@@ -1176,11 +1153,6 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
     let writer = propose.iter().find(|step| step["id"] == "writer").unwrap();
     assert_eq!(writer["with"]["permission-contents"], "write");
     assert_eq!(writer["with"]["permission-pull-requests"], "write");
-    let settings = propose
-        .iter()
-        .find(|step| step["id"] == "settings-read")
-        .unwrap();
-    assert_eq!(settings["with"]["permission-administration"], "read");
 
     let text = serde_json::to_string(&bootstrap).unwrap();
     assert!(!text.contains("candidate-runtime/securefix"));
@@ -2468,6 +2440,29 @@ fn integration_testing_documents_the_active_control_review_marker() {
         assert!(
             source.contains("<!-- securefix:control-review:{} -->"),
             "the documented review marker must match the production marker template"
+        );
+    }
+}
+
+#[test]
+fn operational_workflows_do_not_request_administration_or_settings_credentials() {
+    for (path, value) in workflows() {
+        if path.ends_with("/repo-settings.yml") {
+            continue;
+        }
+        for (job_id, job) in value["jobs"].as_object().unwrap() {
+            for step in job["steps"].as_array().into_iter().flatten() {
+                assert!(
+                    step["with"].get("permission-administration").is_none(),
+                    "{path} {job_id} requests Administration for an operational step"
+                );
+            }
+        }
+        assert!(
+            !serde_json::to_string(&value)
+                .unwrap()
+                .contains("CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN"),
+            "{path} exposes the repository-settings administrator credential"
         );
     }
 }

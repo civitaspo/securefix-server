@@ -39,7 +39,7 @@ class BootstrapTests(unittest.TestCase):
             run = control.workflow_run("civitaspo/securefix-server", 77, control.BOOTSTRAP_WORKFLOW, MAIN, "in_progress")
         self.assertEqual(run["path"], control.BOOTSTRAP_WORKFLOW)
 
-    def test_repair_branch_endpoint_array_is_accepted(self):
+    def test_repair_validation_works_without_admin_settings_access(self):
         environment = {
             "GITHUB_REPOSITORY": "civitaspo/securefix-server",
             "GITHUB_REF": "refs/heads/main",
@@ -84,10 +84,11 @@ class BootstrapTests(unittest.TestCase):
             json.dump({"inputs": {"phase": "repair-propose"}}, event_file)
             event_file.flush()
             environment["GITHUB_EVENT_PATH"] = event_file.name
-            with patch.dict(os.environ, environment, clear=False), patch.object(control, "request", side_effect=fixture), patch.object(control, "current_policy", return_value=({"repositories": []}, b"{}")), patch.object(control, "require_serialized_merge_settings"):
+            with patch.dict(os.environ, environment, clear=True), patch.object(control, "request", side_effect=fixture), patch.object(control, "current_policy", return_value=({"repositories": []}, b"{}")):
                 plan = control.validate_repair_commit(MAIN, HEAD)
         self.assertEqual(plan["branch"], "repair/green-head")
         self.assertIn(("GET", f"/repos/civitaspo/securefix-server/commits/{HEAD}/branches-where-head"), calls)
+        self.assertFalse(any("rulesets" in path or "immutable-releases" in path for _, path in calls))
 
     def test_control_identity_uses_rust_field_order(self):
         descriptor = {

@@ -24,6 +24,28 @@ sensitive-path exceptions belong in deployment configuration (`policy.json` and
 `repo-settings/`), not Rust defaults. See `docs/configuration.md` and
 `docs/policy.example.json`.
 
+## Repository settings ownership and least privilege
+
+`repo-settings.yml` owns repository configuration and periodically reconciles it
+with the desired settings using its existing dedicated administrator credential.
+This includes protection rulesets and bypass actors, native merge settings, and
+immutable-release enablement.
+
+Do not add repository-settings preflights to PR creation, approval, merge, runtime
+publication, control activation, or bootstrap/repair operations. Do not request
+Server App `Administration: read` or `Administration: write`, broaden token scope,
+or inject administrator credentials into these operations to inspect those
+settings. Possible configuration drift between reconciliation runs does not
+justify expanding their privileges. This rule also applies to shared helpers and
+new workflows. If an operation fails because such a settings read lacks
+permission, remove the unnecessary dependency rather than asking for more access.
+
+Keep settings inspection and repair in the repository-settings management flow;
+separate manual settings changes require explicit user authorization. Preserve
+operation-specific validation of actor identity, owner approval, exact PR head,
+required CI, provenance, and the actual published release's immutable state. These
+checks do not justify querying administrative configuration in normal operations.
+
 ## Read before changing a flow
 
 - `README.md` describes current operation and credentials.

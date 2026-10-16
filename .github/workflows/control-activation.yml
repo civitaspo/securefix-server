@@ -69,8 +69,8 @@ jobs:
           app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
+          repositories: securefix-server
           permission-actions: read
-          permission-administration: read
           permission-checks: read
           permission-contents: read
           permission-pull-requests: read

@@ -70,69 +70,6 @@ def current_policy(repo, source):
     return candidate, raw
 
 
-def require_serialized_merge_settings(repo, policy):
-    """Mirror the fixed serialized-merge preflight using a read-only App token."""
-    token = os.environ.get("SECUREFIX_SERVER_APP_READ_TOKEN", "")
-    checked(bool(token), "configured-repository settings read token is required")
-    owner_id = policy["deployment"]["repository_owner"]["id"]
-    server_app_id = policy["deployment"]["server_app_id"]
-    server = policy["deployment"]["server"]["repository"]
-    native_repositories = {entry["repository"] for entry in policy["repositories"]} | {server}
-    merge_repositories = {
-        entry["repository"] for entry in policy["repositories"]
-        if "merge" in entry["capabilities"]
-    }
-    checked(server in merge_repositories, "server merge capability is not enabled")
-
-    for repository in sorted(native_repositories):
-        remote = request("GET", f"/repos/{repository}", token=token)
-        checked(remote.get("full_name") == repository and remote.get("owner", {}).get("id") == owner_id,
-                f"{repository} repository identity changed")
-        checked(remote.get("allow_auto_merge") is False and remote.get("allow_squash_merge") is True
-                and remote.get("allow_merge_commit") is False and remote.get("allow_rebase_merge") is False,
-                f"{repository} native merge settings are not controlled")
-        pulls = []
-        for page in range(1, 101):
-            batch = request("GET", repo_path(repository, f"pulls?state=open&per_page=100&page={page}"), token=token)
-            checked(isinstance(batch, list), f"{repository} open pull request list is malformed")
-            pulls.extend(batch)
-            if len(batch) < 100:
-                break
-        else:
-            raise RuntimeError(f"{repository} open pull request pagination exceeded limit")
-        checked(all(pull.get("auto_merge") is None for pull in pulls),
-                f"{repository} has an outstanding native auto-merge request")
-
-    for repository in sorted(merge_repositories):
-        listed = []
-        for page in range(1, 101):
-            batch = request("GET", repo_path(repository, f"rulesets?includes_parents=false&per_page=100&page={page}"), token=token)
-            checked(isinstance(batch, list), f"{repository} ruleset list is malformed")
-            listed.extend(item for item in batch if item.get("name") == "controlled-merges" and item.get("source_type") == "Repository")
-            if len(batch) < 100:
-                break
-        else:
-            raise RuntimeError(f"{repository} ruleset pagination exceeded limit")
-        checked(len(listed) == 1, f"{repository} has no unique active controlled-merges ruleset")
-        ruleset_id = listed[0].get("id")
-        checked(isinstance(ruleset_id, int) and ruleset_id > 0, f"{repository} controlled-merges ruleset ID is invalid")
-        detail = request("GET", repo_path(repository, f"rulesets/{ruleset_id}"), token=token)
-        checked(detail.get("id") == ruleset_id and detail.get("source_type") == "Repository"
-                and detail.get("source") == repository and detail.get("name") == "controlled-merges"
-                and detail.get("target") == "branch" and detail.get("enforcement") == "active",
-                f"{repository} controlled-merges ruleset identity or enforcement changed")
-        checked(detail.get("conditions", {}).get("ref_name", {}).get("include") == ["~DEFAULT_BRANCH"]
-                and detail.get("conditions", {}).get("ref_name", {}).get("exclude") == [],
-                f"{repository} controlled-merges ruleset is not scoped to exactly its default branch")
-        checked(detail.get("bypass_actors") == [{"actor_id": server_app_id, "actor_type": "Integration", "bypass_mode": "pull_request"}],
-                f"{repository} controlled-merges must have only the Server App pull-request bypass")
-        rules = detail.get("rules")
-        checked(rules == [{"type": "update"}] or (
-            rules == [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}]
-            and rules[0]["parameters"]["update_allows_fetch_and_merge"] is False),
-                f"{repository} controlled-merges rule set is not exact")
-
-
 def workflow_run(repo, run_id, workflow, source=None, status="completed"):
     run = request("GET", repo_path(repo, f"actions/runs/{run_id}"))
     checked(run.get("id") == int(run_id) and run.get("repository", {}).get("full_name") == repo and run.get("repository", {}).get("id") == SERVER_ID, "workflow run repository identity mismatch")
@@ -335,9 +272,7 @@ def validate_proposal(source, verification_run_id, archive_path):
     checked(main.get("sha") == source, "proposal source is not current protected main")
     workflow_run(repo, run_id, BOOTSTRAP_WORKFLOW, source, "in_progress")
     require_absent(repo, source)
-    immutable_enabled(repo)
     policy, source_policy = current_policy(repo, source)
-    require_serialized_merge_settings(repo, policy)
     required_status(repo, source)
     archive_sha, archived_policy = archive_policy(archive_path)
     checked(archived_policy == source_policy, "published runtime policy differs from exact source policy")
@@ -431,9 +366,7 @@ def validate_bootstrap_merge(pr_number, expected_main, expected_head, control_id
     checked(re.fullmatch(r"[0-9a-f]{64}", control_id) is not None, "invalid control identity")
     repo, current_run = validate_dispatch(expected_main, "merge")
     require_absent(repo, expected_main)
-    immutable_enabled(repo)
     policy, _ = current_policy(repo, expected_main)
-    require_serialized_merge_settings(repo, policy)
     pull = validate_pull(repo, pr_number, expected_main, expected_head, True)
     descriptor_bytes = contents(repo, ACTIVE, expected_head)
     descriptor = json.loads(descriptor_bytes)
@@ -484,8 +417,7 @@ def validate_bootstrap_merge(pr_number, expected_main, expected_head, control_id
 def validate_repair_commit(expected_main, expected_head, pr_number=None, phase="repair-propose"):
     repo, current_run = validate_dispatch(expected_main, phase)
     require_absent(repo, expected_main)
-    policy, _ = current_policy(repo, expected_main)
-    require_serialized_merge_settings(repo, policy)
+    current_policy(repo, expected_main)
     checked(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "invalid repair head SHA")
     compare = request("GET", repo_path(repo, f"compare/{expected_main}...{expected_head}"))
     commits = compare.get("commits", [])
@@ -665,12 +597,6 @@ def require_absent(repo, revision):
         raise RuntimeError("active descriptor exists; bootstrap is permanently disabled")
 
 
-def immutable_enabled(repo):
-    state = request("GET", repo_path(repo, "immutable-releases"), token=os.environ.get("SECUREFIX_SERVER_APP_READ_TOKEN") or os.environ.get("SECUREFIX_SERVER_APP_TOKEN"))
-    if state.get("enabled") is not True:
-        raise RuntimeError("server immutable releases must be enabled before bootstrap")
-
-
 def require_server_installation(repo):
     value = request("GET", "/installation/repositories?per_page=100", token=os.environ.get("GH_TOKEN"))
     items = value.get("repositories", [])
@@ -688,7 +614,6 @@ def create_descriptor_pr(plan, archive_path):
     if current_main(repo, plan["default_branch"]) != plan["expected_main_sha"]:
         raise RuntimeError("protected main moved after read-only validation")
     require_absent(repo, plan["expected_main_sha"])
-    immutable_enabled(repo)
     with open(archive_path, "rb") as stream:
         archive = stream.read(128 * 1024 * 1024 + 1)
     if len(archive) > 128 * 1024 * 1024 or hashlib.sha256(archive).hexdigest() != plan["archive_sha256"]:

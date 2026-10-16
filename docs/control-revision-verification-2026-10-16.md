@@ -108,28 +108,51 @@ both comments were minimized. The positive PR did not merge. The pinned legacy
 runtime verification, candidate build/tests, prepare, and scratch control probe had
 passed, but they do not satisfy the failed gate.
 
-The repair candidate gives each phase distinct synthetic failure summaries and keeps
-them deterministic within that phase. Production comment deduplication and the fixed
-bootstrap workflow/helper are unchanged. A regression test covers phase separation
-and retry stability. Local checks passed **32 library, 234 binary, and 2 native Rust
-tests**, formatting, and Clippy; 2 binary tests remain ignored. The repair procedure requires
-its own exact-head review, required CI, and bounded `repair-merge`, followed by a new
-protected-main bootstrap gate. No successful repaired bootstrap result is claimed.
+The first repair candidate gives each phase distinct synthetic failure summaries and keeps
+them deterministic within that phase. Production comment deduplication is unchanged.
+Its signed head `ac383b575f1a862311a2419a775f88ea44ac1afe` passed
+[CI](https://github.com/civitaspo/securefix-server/actions/runs/38887298255).
+The subsequent [repair-propose run](https://github.com/civitaspo/securefix-server/actions/runs/38887691959)
+failed before qualification or PR creation: a second App token request asked for
+Administration read plus Contents/Pull requests read across ten repositories and
+GitHub rejected it with HTTP 422. The first server-scoped writer token succeeded.
+The response does not identify which requested installation grant was absent.
+
+The combined recovery candidate removes repository-settings preflights from normal
+merge, activation, publication, and bootstrap/repair operations, and deletes the
+associated token requests. Repository configuration belongs to the existing dedicated
+`repo-settings.yml` reconciliation flow. Operation-specific actor, owner review,
+exact-head CI, provenance, control identity, and CAS checks remain. Runtime publication
+and loading require the actual published Release to report `immutable=true`; asset
+identity, size, and digest checks remain. The bootstrap repair guard still excludes
+its workflow and helper, so this authority correction requires separate reviewed
+recovery. It cannot use the bounded repair lane to change its own trust root.
+
+The combined candidate passed local **32 library, 235 binary, and 2 native Rust
+tests**; 2 binary tests remain ignored. All **15 Python bootstrap tests**, formatting,
+Clippy with warnings denied, and pinned actionlint passed. Strict API fixtures exercise
+repair qualification and publication without administrative settings reads, and runtime
+verification rejects false or absent immutable state. These are local results; there
+is no successful repaired protected-main bootstrap result yet.
 
 All disposable fixtures and refs from the failed run were cleaned, the four scratch
 handlers were restored, and native auto-merge remains disabled. Normal operation is
 paused because `control/active.json` is absent; the post-merge Policy Check failed
-closed with HTTP 404 in the loader. No production runtime publication, descriptor
-activation, or caller distribution occurred.
+closed with HTTP 404 in the loader. The scheduled
+[Repository settings run](https://github.com/civitaspo/securefix-server/actions/runs/38957102703)
+stopped at the same missing-descriptor boundary. No production runtime publication,
+descriptor activation, or caller distribution occurred.
 
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent
-human security assurance. The owner subsequently authorized merge; the normal exact-
-head approval and required checks still apply.
+human security assurance. The owner authorized the earlier PR #94 merge. This combined
+recovery candidate still requires its own review and merge authorization.
 
-The permanent settings rollout described above is complete. Every operational lane
-checks this configuration before performing mutations.
+The permanent settings rollout described above is complete. `repo-settings.yml` owns
+configuration validation and reconciliation using its dedicated management credential.
+Operational lanes validate their own required evidence and actual published Release
+immutability without requesting administrative settings access.
 
 The protected-main `phase=bootstrap` scratch gate is necessarily post-merge. Its first
 attempt failed as recorded above; a repaired-source run must pass before initial publication

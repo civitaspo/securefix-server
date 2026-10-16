@@ -36,59 +36,19 @@ class BootstrapBoundaryTests(unittest.TestCase):
         download.assert_called_once_with("/repos/civitaspo/securefix-server/releases/assets/12", control.MAX_ARCHIVE)
         attest.assert_called_once()
 
+        for immutable in (False, None):
+            mutable = dict(release, immutable=immutable)
+            with self.subTest(immutable=immutable), patch.object(control, "request_bytes") as download:
+                with self.assertRaisesRegex(RuntimeError, "not immutable and published"):
+                    control.verify_published_immutable_archive("civitaspo/securefix-server", mutable, "a" * 40, expected_policy)
+            download.assert_not_called()
+
         bad_release = copy.deepcopy(release)
         bad_release["assets"][0]["digest"] = "sha256:" + "0" * 64
         with patch.object(control, "request_bytes", return_value=published), patch.object(control, "verify_attestation") as attest:
             with self.assertRaisesRegex(RuntimeError, "GitHub metadata"):
                 control.verify_published_immutable_archive("civitaspo/securefix-server", bad_release, "a" * 40, expected_policy)
         attest.assert_not_called()
-
-    def test_serialized_merge_gate_requires_exact_server_only_bypass(self):
-        policy = {
-            "deployment": {
-                "server": {"repository": "civitaspo/securefix-server"},
-                "server_app_id": 3872533,
-                "repository_owner": {"id": 4525500},
-            },
-            "repositories": [{"repository": "civitaspo/securefix-server", "capabilities": ["merge"]}],
-        }
-        responses = [
-            {"full_name": "civitaspo/securefix-server", "owner": {"id": 4525500}, "allow_auto_merge": False, "allow_squash_merge": True, "allow_merge_commit": False, "allow_rebase_merge": False},
-            [],
-            [{"id": 12, "name": "controlled-merges", "source_type": "Repository"}],
-            {"id": 12, "source_type": "Repository", "source": "civitaspo/securefix-server", "name": "controlled-merges", "target": "branch", "enforcement": "active", "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "bypass_actors": [{"actor_id": 3872533, "actor_type": "Integration", "bypass_mode": "pull_request"}], "rules": [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}]},
-        ]
-        with patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses) as request:
-            control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
-        self.assertEqual(request.call_count, 4)
-        self.assertTrue(all(call.kwargs.get("token") == "read-only" for call in request.call_args_list))
-
-        responses[3]["rules"] = [{"type": "update"}]
-        with patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
-            control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
-        for rules in (
-            [{"type": "update", "parameters": {"update_allows_fetch_and_merge": True}}],
-            [{"type": "update", "parameters": {"update_allows_fetch_and_merge": 0}}],
-            [{"type": "update", "parameters": None}],
-            [{"type": "update", "parameters": {}}],
-            [{"type": "update", "unexpected": False}],
-        ):
-            responses[3]["rules"] = rules
-            with self.subTest(rules=rules), patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
-                with self.assertRaisesRegex(RuntimeError, "rule set is not exact"):
-                    control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
-        responses[3]["rules"] = [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}]
-
-        responses[3]["bypass_actors"] = [{"actor_id": 3872533, "actor_type": "Integration", "bypass_mode": "always"}]
-        with patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
-            with self.assertRaisesRegex(RuntimeError, "pull-request bypass"):
-                control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
-
-        responses[3]["bypass_actors"] = [{"actor_id": 3872533, "actor_type": "Integration", "bypass_mode": "pull_request"}]
-        responses[3]["conditions"]["ref_name"]["include"] = ["refs/heads/release"]
-        with patch.dict(control.os.environ, {"SECUREFIX_SERVER_APP_READ_TOKEN": "read-only"}), patch.object(control, "request", side_effect=responses):
-            with self.assertRaisesRegex(RuntimeError, "default branch"):
-                control.require_serialized_merge_settings("civitaspo/securefix-server", policy)
 
     def test_publisher_run_rejects_mismatched_provenance(self):
         good = fixtures.run_fixture(control.BOOTSTRAP_WORKFLOW)
