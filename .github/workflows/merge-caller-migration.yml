@@ -108,6 +108,7 @@ jobs:
           repositories: ${{ steps.target.outputs.repository_name }}
           permission-checks: write
           permission-issues: write
+          permission-pull-requests: write
       - name: Record exact-head owner authorization and control-bound policy result
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
