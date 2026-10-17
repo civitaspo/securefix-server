@@ -5,7 +5,7 @@ There is one execution path for each operation; old inline scripts and legacy al
 [`policy.json`](../policy.json) grants exact repository capabilities for release, settings, approval, merge, and Securefix.
 Rust applies branch and source-provenance validation directly; there is no second allowlist or upstream runtime configuration.
 
-The contract table below records the earlier Rust migration. Its current-main runtime selection was superseded by the active-control proposal in [ADR 0009](adr/0009-active-control-revision.md); the operational sequence later in this document is the proposed lifecycle and is not evidence of deployment.
+The contract table below records the earlier Rust migration. Its current-main runtime selection was superseded by the active-control design in [ADR 0009](adr/0009-active-control-revision.md); the operational sequence below describes the current lifecycle. Deployment evidence is recorded in the dated verification report.
 
 ## Contract changes
 
@@ -28,9 +28,9 @@ The Securefix client may dispatch a request from a CI run that will deliberately
 
 ## Active control lifecycle
 
-The active control proposal separates the protected-main source tree from the runtime currently authorized to perform privileged work. `control/active.json` identifies the source SHA and bundled policy digest, the published archive digest and immutable release and asset IDs, the publisher and scratch-verification run IDs, its generation, and the previous control identity. Ordinary main commits leave this descriptor unchanged. The runtime uses the policy snapshot in its attested archive and does not fetch live `policy.json` from main.
+Active control separates the protected-main source tree from the runtime currently authorized to perform privileged work. `control/active.json` identifies the source SHA and bundled policy digest, the published archive digest and immutable release and asset IDs, the publisher and scratch-verification run IDs, its generation, and the previous control identity. Ordinary main commits leave this descriptor unchanged. The runtime uses the policy snapshot in its attested archive and does not fetch live `policy.json` from main.
 
-The proposed activation sequence is:
+The activation sequence is:
 
 1. Merge ordinary changes through the normal protected-main checks. They do not activate or publish a runtime automatically.
 2. Build, attest, and publish a candidate runtime from protected main using the trusted publisher path. Candidate code and artifacts receive no production write credentials.
@@ -49,15 +49,14 @@ After activation, a later main commit does not select its own runtime or policy.
 
 ### One-time bootstrap and first activation
 
-The first protected-main revision needs a separate trusted bootstrap route. Before its
-first code pull request is merged, an owner must explicitly approve and complete the
-permanent live-settings rollout: remove the Renovate bypass from all nine controlled-
-merge rulesets while retaining the sole Server App `pull_request` bypass, disable
-native auto-merge and confirm that no requests remain queued, and enable immutable
-releases for `civitaspo/securefix-server`. The currently deployed v0.2.20 runtime
-cannot make those changes. They require the existing repository administrator UI or
-API. No temporary ruleset exception is part of this migration, and no production
-settings change has been made as part of this proposal.
+The first protected-main revision needs a separate trusted bootstrap route. Before
+the first code pull request merged, the owner explicitly approved and completed the
+permanent settings rollout through the repository administrator flow: removing the
+Renovate bypass from all nine controlled-merge rulesets while retaining the sole
+Server App `pull_request` bypass, disabling native auto-merge, confirming no queued
+requests, and enabling immutable releases for `civitaspo/securefix-server`. The former
+v0.2.20 runtime could not make those changes. These settings remain in force without
+a temporary ruleset exception.
 
 The one-time `control-bootstrap.yml` path is an explicitly reviewed protected-main
 authority. Its `securefix-bootstrap` Rust binary is compiled from the exact workflow
@@ -106,19 +105,22 @@ scratch integration fixtures and runs the scratch-only control probe. This avoid
 the current-main `validate-producer` path as its own initial trust baseline. It verifies
 the bootstrap test path, not production publication, activation, or distribution.
 
-Generation one is active at immutable runtime v0.2.23 following the separately
-approved recovery, successful bootstrap scratch gate, publication, and descriptor
-activation. Bootstrap and bounded repair now reject further use. The first normal
-successor, v0.2.24, was published and proposed, but its merge rejected the PR ownership
-payload before calling the merge API. Generation one remains active; successor
-activation and caller distribution are pending. See the
-[dated verification report](control-successor-verification-2026-10-17.md) for evidence.
+Generation three is active at immutable runtime v0.2.26, source
+`9865421823a451a8a7fe443e1896710971869fbc`. After a separately approved
+generation-two recovery, the complete ordinary successor cycle passed: source
+merge, scratch verification, normal publication, descriptor review, Bot approval
+and separate owner commands through the normal merge lane. The generation-three
+descriptor merged in [PR #106](https://github.com/civitaspo/securefix-server/pull/106).
+All nine canonical caller migrations and their post-merge CI and default-branch
+PolicyChecks have passed. Bootstrap and bounded repair remain retired. See the
+[dated verification report](control-successor-verification-2026-10-17.md) for the
+failed attempts, corrections, activation and caller rollout evidence.
 If the active descriptor becomes missing or invalid, ordinary operations fail closed;
 the settings administrator credential does not supply a replacement runtime.
 
 Repository settings remain owned by the periodic `repo-settings.yml` management flow and its existing dedicated administrator credential. Normal PR creation, approval, merge, runtime publication, control activation, and bootstrap/repair do not read administrative settings or receive that credential or Server App Administration read permission. This boundary does not remove required source provenance, owner and exact-head checks, CI, immutable-release verification, signature/attestation, archive verification, or activation CAS.
 
-The deployment and verification reports dated before this proposal document evidence for the earlier runtime contract only. They do not establish that this lifecycle, bootstrap path, or proposed code has been deployed or verified.
+Earlier deployment and verification reports certify only the revisions and paths they actually tested. Use the current dated successor report for active-control activation and caller rollout evidence.
 
 ## Emergency stop and retry
 

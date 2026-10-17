@@ -175,8 +175,9 @@ The first protected-main code PR has an explicit permanent-settings gate. Before
 merges, an owner must approve and complete removal of Renovate bypass from all nine
 controlled-merge rulesets (retaining only the Server App `pull_request` bypass),
 disable native auto-merge and confirm no queued requests, and enable immutable
-releases for the server. The deployed v0.2.20 runtime cannot apply these changes;
-use the repository administrator UI or API. Do not use a temporary exception.
+releases for the server. The former v0.2.20 runtime could not apply these changes;
+the owner completed them through the repository administrator flow. Keep these
+settings in force without a temporary exception.
 
 The one-time bootstrap is handled only by the reviewed fixed `control-bootstrap.yml`
 workflow. Its source-pinned `securefix-bootstrap` Rust binary performs host-side
@@ -215,12 +216,13 @@ in the bootstrap authority needs a separately reviewed recovery; the bounded
 repair lane cannot rewrite its own trust root. Repair does not restore old-runtime
 availability and permanently stops once generation one exists.
 
-Generation one is active at immutable runtime v0.2.23 after separately approved
-recovery, scratch verification and descriptor activation. See
-`docs/control-successor-verification-2026-10-17.md` for evidence and successor
-verification still pending. Bootstrap and repair now reject further use. Candidate
-testing uses a secret-free validator built from the captured signed current main;
-the tested published runtime remains the one selected by the active descriptor.
+Generation three is active at immutable runtime v0.2.26, source
+`9865421823a451a8a7fe443e1896710971869fbc`, after successful ordinary successor
+activation. See `docs/control-successor-verification-2026-10-17.md` for the recovery
+history, ordinary activation and caller rollout evidence. Bootstrap and repair
+reject further use. Candidate testing uses a secret-free validator built from the
+captured signed current main; the tested published runtime remains the one selected
+by the active descriptor.
 This test validator never supplies ordinary operational authority or executes
 candidate code with production credentials.
 
