@@ -52,3 +52,13 @@ could not start because the copied toolchain omitted `rustdoc`; rerunning only t
 stage with the installed Rust 1.99.0 `rustdoc` passed (zero documentation tests).
 Independent source and prose reviews were completed. These local results do not
 establish successor activation or the full migration workflow.
+
+## First corrected successor recovery, 2026-10-18 JST
+
+The PR-author correction merged through ordinary [PR #103](https://github.com/civitaspo/securefix-server/pull/103) as signed source `2f7bd311be7c6bca92666dbcd9252991b8c8214a`. Normal [scratch verification 39040925267](https://github.com/civitaspo/securefix-server/actions/runs/39040925267), [publication 39041250830](https://github.com/civitaspo/securefix-server/actions/runs/39041250830), and [proposal 39041443660](https://github.com/civitaspo/securefix-server/actions/runs/39041443660) passed for immutable `v0.2.25`. Descriptor [PR #104](https://github.com/civitaspo/securefix-server/pull/104) passed required CI and exact-head owner and Bot reviews. Superseded PR #102 was closed without merging.
+
+The owner separately approved signed one-use recovery source `554e8477e61859d36584879fe9276dfb4cbbdac5`. Its [CI 39042395087](https://github.com/civitaspo/securefix-server/actions/runs/39042395087) and [read-only qualification 39042636670](https://github.com/civitaspo/securefix-server/actions/runs/39042636670) passed. Approved [recovery run 39073563908](https://github.com/civitaspo/securefix-server/actions/runs/39073563908) merged only PR #104. Resulting signed main `f9e2ac3738e16143faa89cccb8eba9f945cd0ce6` has one parent and changes only `control/active.json`, with bytes matching the reviewed head. Generation two selects `v0.2.25`, source `2f7bd311be7c6bca92666dbcd9252991b8c8214a`, and full control identity `1d259a21246696b0792be649d85caad702da271c417c441bd8dace786126cb42`.
+
+The temporary environment admission and repository approval variable were removed after verification. The original main admission remains the sole policy; the unmerged executor stays locked. Bootstrap and bounded repair remain retired. No ruleset exception, native auto-merge, direct-main write, or candidate execution with production credentials was introduced.
+
+This recovery does not prove the corrected ordinary activation path. The v0.2.26 follow-up changes only the package version and this evidence report, then repeats normal source review and merge, scratch prepare/verify, publication, descriptor review, and separate ordinary `/approve` and `/merge` commands. That cycle and subsequent caller distribution are pending at this report revision. Distribution starts only after ordinary activation succeeds, with the configured scratch caller first and the other eight callers afterward.
