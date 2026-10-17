@@ -1064,20 +1064,7 @@ pub(crate) fn validate_activation_merge(
         "/repos/{repository}/pulls/{}",
         manifest.pull_request.number
     ))?;
-    let branch = activation_branch(&proposed)?;
-    ensure!(
-        pull["state"] == "open"
-            && pull["head"]["sha"] == manifest.pull_request.head_sha
-            && pull["head"]["ref"] == branch
-            && pull["head"]["repo"]["full_name"].as_str() == Some(repository.as_str())
-            && pull["head"]["user"]["id"].as_u64() == Some(trusted.server_bot_id)
-            && pull["head"]["user"]["login"].as_str().is_some_and(
-                |login| login.eq_ignore_ascii_case(&trusted.deployment.server_bot_login)
-            )
-            && pull["base"]["repo"]["full_name"].as_str() == Some(repository.as_str())
-            && pull["base"]["ref"] == trusted.deployment.server.default_branch,
-        "control activation PR ownership or branch identity is invalid"
-    );
+    validate_activation_pull(&pull, &manifest.pull_request, &proposed)?;
     let main: Value = api.get(&format!(
         "/repos/{repository}/commits/{}",
         trusted.deployment.server.default_branch
@@ -1095,6 +1082,36 @@ pub(crate) fn validate_activation_merge(
         "activation PR changes files outside the control descriptor"
     );
     validate_request_for_active_descriptor(api, &proposed)?;
+    Ok(())
+}
+
+fn validate_activation_pull(
+    pull: &Value,
+    accepted: &crate::request::PullRequestRef,
+    proposed: &securefix::control::ControlRevision,
+) -> Result<()> {
+    let trusted = config::trusted()?;
+    let server = &trusted.deployment.server;
+    let branch = activation_branch(proposed)?;
+    ensure!(
+        pull["state"] == "open"
+            && pull["draft"] == false
+            && pull["number"].as_u64() == Some(accepted.number)
+            && pull["head"]["sha"] == accepted.head_sha
+            && pull["head"]["ref"] == branch
+            && pull["user"]["id"].as_u64() == Some(trusted.server_bot_id)
+            && pull["user"]["type"] == "Bot"
+            && pull["user"]["login"].as_str().is_some_and(
+                |login| login.eq_ignore_ascii_case(&trusted.deployment.server_bot_login)
+            )
+            && [&pull["head"]["repo"], &pull["base"]["repo"]]
+                .iter()
+                .all(|repo| repo["full_name"] == server.repository
+                    && repo["id"].as_u64() == Some(server.id))
+            && pull["base"]["ref"] == server.default_branch
+            && accepted.base_ref == server.default_branch,
+        "control activation PR ownership or branch identity is invalid"
+    );
     Ok(())
 }
 
@@ -1150,6 +1167,59 @@ mod tests {
     use super::*;
     use crate::fixtures::Route;
     use std::io::Write;
+
+    #[test]
+    fn activation_uses_the_pr_author_while_head_user_is_the_repository_owner() {
+        let trusted = config::trusted().unwrap();
+        let server = &trusted.deployment.server;
+        let proposed = crate::fixtures::Fixture::control_revision();
+        let accepted = crate::request::PullRequestRef {
+            number: 102,
+            head_sha: "a".repeat(40),
+            base_ref: server.default_branch.clone(),
+        };
+        let repository = json!({"id":server.id,"full_name":server.repository});
+        let pull = json!({
+            "number":102,"state":"open","draft":false,
+            "user":{"id":trusted.server_bot_id,"login":trusted.deployment.server_bot_login,"type":"Bot"},
+            "head":{"sha":accepted.head_sha,"ref":activation_branch(&proposed).unwrap(),
+                "repo":repository,"user":{"id":trusted.owner_id,"login":trusted.deployment.owner_login,"type":"User"}},
+            "base":{"ref":server.default_branch,"repo":repository}
+        });
+        validate_activation_pull(&pull, &accepted, &proposed).unwrap();
+        for (path, value) in [
+            ("/number", json!(103)),
+            ("/state", json!("closed")),
+            ("/draft", json!(true)),
+            ("/user/id", json!(trusted.owner_id)),
+            ("/user/login", json!(trusted.deployment.owner_login)),
+            ("/user/type", json!("User")),
+            ("/head/sha", json!("b".repeat(40))),
+            ("/head/ref", json!("unreviewed")),
+            ("/head/repo/id", json!(server.id + 1)),
+            (
+                "/head/repo/full_name",
+                json!(trusted.deployment.integration.repository),
+            ),
+            ("/base/repo/id", json!(server.id + 1)),
+            (
+                "/base/repo/full_name",
+                json!(trusted.deployment.integration.repository),
+            ),
+            ("/base/ref", json!("unprotected")),
+        ] {
+            let mut changed = pull.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(
+                validate_activation_pull(&changed, &accepted, &proposed).is_err(),
+                "{path}"
+            );
+        }
+        let mut impostor = pull.clone();
+        impostor["head"]["user"] = pull["user"].clone();
+        impostor["user"] = pull["head"]["user"].clone();
+        assert!(validate_activation_pull(&impostor, &accepted, &proposed).is_err());
+    }
 
     #[test]
     fn candidate_ci_accepts_successful_pr_suites_and_rejects_any_pending_or_failed_suite() {

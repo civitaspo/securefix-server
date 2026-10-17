@@ -29,4 +29,26 @@ Distribution proposes canonical caller PRs without merging them. The dedicated o
 
 Local checks passed with Rust 1.99.0: formatting, 301 tests (32 library, 246 CLI, 21 bootstrap and 2 native-client), Clippy with warnings denied, pinned actionlint and diff checks. Two existing tests remain ignored. The composed API fixture accepts the canonical migration with its owner review, commands and active control, and rejects changed head/control plans. The shared merge fixture confirms that the final authorization callback can prevent the API write. A separate same-model code review found no actionable security or correctness defect.
 
-These successor changes are not yet deployed. A reviewed source PR, scratch prepare/verify, normal publication, generation-two activation and caller migration completion remain required. The full new migration workflow has not been exercised in production. The complete workflow must first succeed on the configured scratch caller after activation; shared-helper and fixture results do not alone certify that dispatch context.
+The source merge, scratch prepare/verify and normal publication subsequently passed
+as recorded below. Generation-two activation and caller migration completion remain
+required. The complete migration workflow must first succeed on the configured scratch
+caller after activation; shared-helper and fixture results do not alone certify that
+dispatch context.
+
+## Normal successor activation failure
+
+The successor source merged through the ordinary controller in [PR #101](https://github.com/civitaspo/securefix-server/pull/101), producing signed main `cf98fd0d399b5951f8f8c4a6e06a48842d8b098f` while generation one stayed active. Normal scratch [prepare 39037821545](https://github.com/civitaspo/securefix-server/actions/runs/39037821545) and [verify 39038155711](https://github.com/civitaspo/securefix-server/actions/runs/39038155711) passed, including the actual published client, owner approval, exact-head merge, stale-head rejection, caller generation and pinact CI. Scratch fixtures were removed and the four request handlers restored.
+
+Normal publisher [39038448538](https://github.com/civitaspo/securefix-server/actions/runs/39038448538) published immutable `v0.2.24`. Proposal [39038602112](https://github.com/civitaspo/securefix-server/actions/runs/39038602112) opened signed descriptor-only [PR #102](https://github.com/civitaspo/securefix-server/pull/102). Its exact head passed required CI, owner review, and [normal Bot approval](https://github.com/civitaspo/securefix-server/actions/runs/39038964664). The separate normal merge [39039061397](https://github.com/civitaspo/securefix-server/actions/runs/39039061397) failed before the PR merge API call with `control activation PR ownership or branch identity is invalid`. Generation one and its descriptor remained unchanged. Distribution did not run.
+
+The active `v0.2.23` validator compared `pull.head.user` with the Server App. GitHub reports the source repository owner in that field. PR #102 has owner ID `4525500` in `head.user` and the Server App ID `288069019` in the top-level `user`. PR creation already uses the latter field. The earlier source review missed this payload distinction.
+
+The correction validates the top-level PR author's Bot ID, login and type, while retaining the exact head, deterministic branch, same repository IDs and protected base. Its regression fixture uses the observed GitHub shape and rejects a non-Bot author even when `head.user` claims the Bot. The immutable active runtime cannot load this correction before activation, so source repair alone does not restore successor activation. A separately reviewed, explicitly authorized recovery authority is required. Bootstrap remains permanently retired; there is no build fallback, direct-main write or ruleset exception.
+
+The v0.2.25 correction passed formatting, 302 Rust execution tests (32 library,
+247 CLI, 21 bootstrap and two native-client tests), and Clippy with warnings denied.
+Two existing tests remain ignored. The first local documentation-test invocation
+could not start because the copied toolchain omitted `rustdoc`; rerunning only that
+stage with the installed Rust 1.99.0 `rustdoc` passed (zero documentation tests).
+Independent source and prose reviews were completed. These local results do not
+establish successor activation or the full migration workflow.

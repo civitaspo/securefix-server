@@ -86,8 +86,13 @@ publishes and proposes an exact descriptor change. An owner reviews the resultin
 activation PR. A separate dispatch then merges only after it rechecks the owner,
 expected protected-main SHA, exact PR head SHA, full proposed descriptor identity,
 and required CI through the serialized server Actions lane. Normal candidate
-publication and scratch verification do not alter active control; after this bootstrap,
-normal activations and later rollbacks use the same reviewed descriptor-PR fence.
+publication and scratch verification do not alter active control. After bootstrap,
+normal activations and later rollbacks require exact-head owner review, `/approve`,
+successful Bot approval and required checks, then a separate `/merge` through the
+ordinary server lane. These commands bind to the exact head and full current control
+identity. The merge revalidates the successor descriptor and uses expected-head CAS.
+An unrelated main advance with an unchanged descriptor does not select a new runtime
+or invalidate that control identity.
 
 The bootstrap scratch rehearsal has its own `phase=bootstrap` in
 `testing-securefix-server.yml`. It verifies the pinned v0.2.20 legacy runtime by
@@ -95,14 +100,21 @@ release ID `414653308`, asset ID `646481902`, archive digest, GitHub attestation
 runtime verification against source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`.
 Before minting scratch App tokens, the fixed Rust host checks that the dispatch came from
 current protected main and that `control/active.json` is absent. The pinned runtime
-validates the fixture output files. The candidate runtime prepares and verifies the
+provides the read baseline. The source-pinned fixed Rust host validates the bounded
+fixture output files. The candidate runtime prepares and verifies the
 scratch integration fixtures and runs the scratch-only control probe. This avoids using
 the current-main `validate-producer` path as its own initial trust baseline. It verifies
 the bootstrap test path, not production publication, activation, or distribution.
 
-While `control/active.json` is absent, the current proposal does not provide a proven recovery route. Ordinary Policy Check and repository-settings loads fail closed when the descriptor lookup returns 404. The proposed `repair-propose` path has not passed prequalification: a failed prequalification opens no PR, so its paired `repair-merge` phase cannot recover the control path. A scheduled settings run also fails at descriptor loading; the dedicated settings administrator credential does not make a missing runtime descriptor valid.
-
-Do not describe this pause as recoverable through those phases until a separately reviewed recovery route has passed its end-to-end checks. Any route that changes the bootstrap workflow or fixed helper needs independent review. It must preserve the self-repair guard, signed source and owner-head CI checks, exact-head compare-and-swap, and must not use a temporary ruleset exception or direct main API write. No route may infer a runtime from main or use an unverified archive. The dated deployment report records prior runtime evidence only; it is not proof that bootstrap or repair works.
+Generation one is active at immutable runtime v0.2.23 following the separately
+approved recovery, successful bootstrap scratch gate, publication, and descriptor
+activation. Bootstrap and bounded repair now reject further use. The first normal
+successor, v0.2.24, was published and proposed, but its merge rejected the PR ownership
+payload before calling the merge API. Generation one remains active; successor
+activation and caller distribution are pending. See the
+[dated verification report](control-successor-verification-2026-10-17.md) for evidence.
+If the active descriptor becomes missing or invalid, ordinary operations fail closed;
+the settings administrator credential does not supply a replacement runtime.
 
 Repository settings remain owned by the periodic `repo-settings.yml` management flow and its existing dedicated administrator credential. Normal PR creation, approval, merge, runtime publication, control activation, and bootstrap/repair do not read administrative settings or receive that credential or Server App Administration read permission. This boundary does not remove required source provenance, owner and exact-head checks, CI, immutable-release verification, signature/attestation, archive verification, or activation CAS.
 
@@ -111,8 +123,9 @@ The deployment and verification reports dated before this proposal document evid
 ## Emergency stop and retry
 
 Disable the relevant processing workflows for immediate containment while retaining
-controlled-merges restrictions. Recover through the active runtime or the bounded
-reviewed repair path as applicable; any change to enforcement authority or rulesets
+controlled-merges restrictions. Recover through the verified active runtime.
+Bootstrap and bounded repair are retired after generation one; a defect that prevents
+normal activation needs a separately reviewed recovery authority. Any change to enforcement authority or rulesets
 requires separate explicit administrator review. An already-successful check on an
 unchanged head is not automatically revoked when policy changes.
 Scheduled reconciliation preserves a disabled restriction and retains tag protection when a policy entry stops requesting it.
