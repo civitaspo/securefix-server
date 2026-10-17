@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generation": 1,
-  "source_sha": "f05a400115ef744070671028865a6269d65bae8b",
+  "generation": 2,
+  "source_sha": "cf98fd0d399b5951f8f8c4a6e06a48842d8b098f",
   "policy_sha256": "91292daf7e6229ec64d66618926b10c4785e67bb3b1cd31d1a9bc1646464cc1c",
-  "archive_sha256": "258fbab974214a0af9f1e349b20d1d4f319ac47c78ea35171ca516013e4043c2",
-  "release_id": 415808229,
-  "asset_id": 650489932,
-  "publisher_run_id": 39034975925,
-  "verification_run_id": 39034639333,
-  "previous": "0000000000000000000000000000000000000000000000000000000000000000"
+  "archive_sha256": "f8206be25a595c9ad8fec727501322f074d581b128fe31ba0e732c51d8fc0fa7",
+  "release_id": 415831261,
+  "asset_id": 650603868,
+  "publisher_run_id": 39038448538,
+  "verification_run_id": 39038155711,
+  "previous": "a2f59b941ae1a92bd07513e672f64ed6ff9301fc48e254047d91874784b838ef"
 }
