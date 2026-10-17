@@ -549,29 +549,7 @@ pub fn load_source_request(
         ) => {
             let comment: Value =
                 api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
-            let commits: Value = api.get(&format!(
-                "/repos/{server}/commits?path=control/active.json&per_page=1"
-            ))?;
-            let activation = commits
-                .as_array()
-                .and_then(|items| items.first())
-                .context("active control file has no activation commit")?;
-            let activation_sha = activation["sha"]
-                .as_str()
-                .context("control activation commit has no SHA")?;
-            validate_sha(activation_sha)?;
-            let activated_control: securefix::control::ControlRevision = serde_json::from_slice(
-                &api.content(server, "control/active.json", activation_sha)?,
-            )?;
-            ensure!(
-                &activated_control == active_control,
-                "latest control activation commit differs from active control"
-            );
-            let activated_at = DateTime::parse_from_rfc3339(
-                activation["commit"]["committer"]["date"]
-                    .as_str()
-                    .context("control activation commit has no committer date")?,
-            )?;
+            let activated_at = control_activated_at(api, active_control)?;
             let comment_updated = DateTime::parse_from_rfc3339(
                 comment["updated_at"]
                     .as_str()
@@ -743,6 +721,36 @@ pub fn has_current_head_approval_for_control(
 ) -> Result<bool> {
     let reviewer = &crate::config::trusted()?.deployment.approval_reviewer;
     has_current_head_approval_for_reviewer(api, repository, number, sha, control, reviewer, "User")
+}
+
+pub(crate) fn control_activated_at(
+    api: &GitHub,
+    control: &securefix::control::ControlRevision,
+) -> Result<DateTime<Utc>> {
+    let server = &crate::config::trusted()?.deployment.server.repository;
+    let commits: Value = api.get(&format!(
+        "/repos/{server}/commits?path=control/active.json&per_page=1"
+    ))?;
+    let activation = commits
+        .as_array()
+        .and_then(|items| items.first())
+        .context("active control file has no activation commit")?;
+    let sha = activation["sha"]
+        .as_str()
+        .context("control activation commit has no SHA")?;
+    validate_sha(sha)?;
+    let activated: securefix::control::ControlRevision =
+        serde_json::from_slice(&api.content(server, "control/active.json", sha)?)?;
+    ensure!(
+        &activated == control,
+        "latest control activation commit differs from active control"
+    );
+    Ok(DateTime::parse_from_rfc3339(
+        activation["commit"]["committer"]["date"]
+            .as_str()
+            .context("control activation commit has no committer date")?,
+    )?
+    .with_timezone(&Utc))
 }
 
 pub fn has_current_head_approval_for_reviewer(

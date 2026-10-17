@@ -430,7 +430,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     if path == ".github/workflows/testing-securefix-server.yml" && job_id == "reuse"
                     {
                         if inputs["artifact-ids"]
-                            == "${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}"
+                            == "${{ needs.baseline-build.outputs.artifact-id }}"
                         {
                             assert_eq!(inputs["path"], "trusted-runtime");
                             assert_eq!(inputs["merge-multiple"], true);
@@ -1015,6 +1015,7 @@ fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
             vec!["authorize", "wait", "apply", "cleanup"],
         ),
         ("policy-check.yml", "cli", vec!["request"]),
+        ("merge-caller-migration.yml", "runtime", vec!["merge"]),
     ] {
         let value = workflow(name);
         let loader = &value["jobs"][loader_job];
@@ -1085,6 +1086,69 @@ fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
             .unwrap()
             .contains("distribute-runtime")
     );
+}
+
+#[test]
+fn caller_migration_requires_read_validation_and_readiness_before_each_write_token() {
+    let migration = workflow("merge-caller-migration.yml");
+    assert_eq!(
+        migration["jobs"]["merge"]["concurrency"]["group"],
+        "securefix-control"
+    );
+    assert_eq!(migration["jobs"]["merge"]["concurrency"]["queue"], "max");
+    let steps = migration["jobs"]["merge"]["steps"].as_array().unwrap();
+    let target = steps.iter().position(|s| s["id"] == "target").unwrap();
+    let read = steps.iter().position(|s| s["id"] == "read-token").unwrap();
+    let prepare = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("securefix caller-migration prepare "))
+        })
+        .unwrap();
+    let authorize = steps
+        .iter()
+        .position(|s| s["id"] == "authorization-token")
+        .unwrap();
+    let ready = steps
+        .iter()
+        .position(|s| s["run"] == "securefix caller-migration ready")
+        .unwrap();
+    let merge = steps.iter().position(|s| s["id"] == "merge-token").unwrap();
+    assert!(
+        target < read
+            && read < prepare
+            && prepare < authorize
+            && authorize < ready
+            && ready < merge
+    );
+    assert_eq!(steps[merge + 1]["run"], "securefix caller-migration merge");
+    assert_eq!(steps[read]["with"]["permission-contents"], "read");
+    assert!(
+        steps[authorize]["with"]
+            .get("permission-contents")
+            .is_none()
+    );
+    assert!(
+        steps[authorize]["with"]
+            .get("permission-pull-requests")
+            .is_none()
+    );
+    assert_eq!(
+        steps[merge]["with"]["repositories"],
+        "${{ steps.target.outputs.repository_name }}"
+    );
+    assert!(steps.iter().all(|s| s["uses"] != "actions/checkout"));
+    let source = fs::read_to_string("src/distribution.rs").unwrap();
+    let production = source
+        .split("Command::ApplyCaller {")
+        .nth(1)
+        .unwrap()
+        .split("Command::ProbeCaller")
+        .next()
+        .unwrap();
+    assert!(!production.contains("merge_runtime_update"));
 }
 
 #[test]
@@ -1762,15 +1826,7 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
 #[test]
 fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch() {
     let candidate = workflow("testing-securefix-server.yml");
-    let trusted_main = &candidate["jobs"]["trusted-runtime-main"];
-    assert_eq!(trusted_main["uses"], "./.github/workflows/load-cli.yml");
-    assert!(
-        trusted_main["if"]
-            .as_str()
-            .unwrap()
-            .contains("github.ref == 'refs/heads/main'")
-    );
-    assert!(trusted_main.get("secrets").is_none());
+    assert!(candidate["jobs"].get("trusted-runtime-main").is_none());
     let baseline_build = &candidate["jobs"]["baseline-build"];
     assert_eq!(
         baseline_build["permissions"],
@@ -1795,6 +1851,18 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
         assert!(guard.contains("integration/native-"), "{job_id}");
     }
     let baseline_steps = baseline_build["steps"].as_array().unwrap();
+    assert!(
+        baseline_build["if"]
+            .as_str()
+            .unwrap()
+            .contains("refs/heads/main")
+    );
+    for job in ["reuse", "client-smoke", "scratch"] {
+        assert_eq!(
+            candidate["jobs"][job]["env"]["SECUREFIX_TEST_BASELINE_SHA"],
+            "${{ needs.baseline-build.outputs.source-sha }}"
+        );
+    }
     assert!(
         baseline_steps[0]["run"]
             .as_str()

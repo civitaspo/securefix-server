@@ -26,6 +26,41 @@ The active control revision supplies the policy used for privileged effects. The
 
 After explicit control activation and distribution dispatch, the distributor opens or updates a pull request authored by the Server App for the canonical managed caller-workflow files. It validates the configured branch, fresh PR identity and head, and exact managed-file changes. The PR remains reviewable and follows the normal review and check rules; distribution does not merge it or bypass those rules. Caller pins change only after control activation, not after ordinary publication.
 
+### Reviewing a caller migration
+
+The previous caller pin cannot send normal requests after activation. Complete its
+generated migration through `merge-caller-migration.yml` on server `main`. This
+separate owner dispatch loads the active published controller and shares the
+`securefix-control` mutation lane. It accepts only a policy-registered caller's
+canonical Server App PR, signed migration history, and exact generated workflow
+bytes for the active runtime. It never executes caller code.
+
+1. Inspect the generated diff and required Actions `status-check`. Submit an owner
+   `APPROVED` review of the exact PR head with the marker
+   `<!-- securefix:control-review:<full-active-control-id> -->`. The review must be
+   later than the active descriptor's activation commit.
+2. Post separate owner `/approve` and `/merge` comments, in that order, after the
+   review. Commands must be unedited, less than one hour old, and unused by a
+   previous migration dispatch.
+3. Dispatch `merge-caller-migration.yml` with `repository`, `pull_request`,
+   `expected_head_sha`, `control_id`, `approve_comment_id`, `merge_comment_id`,
+   and the active descriptor's `publisher_run_id`.
+
+The controller validates the dispatch's repository, signed current main, owner,
+first attempt and fixed workflow before it mints caller credentials. It records
+the normal head/control-bound owner receipts and policy check only after full PR
+authorization. It requires required CI and the current-head control-bound owner
+review before minting the merge token. Immediately before expected-head squash
+merge it repeats those checks, command timestamps, canonical files, base SHA,
+control identity and producer validation. Changed inputs, commands, heads, bases
+or control generations fail closed. It then verifies the resulting default SHA
+and all managed file bytes. A failed consumed dispatch requires fresh commands.
+
+This workflow has no Administration permission or repository-settings preflight.
+After the migration, the caller's normal request workflows use the active pin.
+
+## Provider build and publication
+
 The build job compiles the fixed provider target matrix from the validated merge commit. It has no app token or signing key. The signer receives the already-built release bundle and a read-only server token for current-runtime and artifact provenance checks; it uses public client API data for release validation and has no client repository credential. It verifies exact filenames, archive structure, and hashes, generates canonical SHA256SUMS, and verifies the signature against the configured signing fingerprint before packaging it. Preflight uses a token scoped to the single client repository with contents-write permission because GitHub requires push access to read unpublished drafts; its Rust API connection permits reads only. If a retry finds a signature already uploaded to the same draft release, preflight downloads that exact asset, binds its digest and release ID into the short-lived plan, and the signer reuses those bytes only after checking the digest and verifying the signature over the regenerated checksum file. This preserves the signature bytes across partial uploads even though a fresh OpenPGP signature can differ. Unexpected, duplicate, mismatched, oversized, or unverifiable draft assets stop the run for inspection. The signer never loads client GoReleaser config, hooks, scripts, or executables. The publisher receives the signed bytes and a client contents-write token, but no GPG key. Existing published assets are never overwritten.
 
 ## Client policy and strategies

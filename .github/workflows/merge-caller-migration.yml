@@ -1,0 +1,133 @@
+name: Merge reviewed caller migration
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Exact policy-approved caller repository
+        required: true
+        type: string
+      pull_request:
+        description: Server App migration PR number
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact owner-reviewed migration head
+        required: true
+        type: string
+      control_id:
+        description: Full active control identity
+        required: true
+        type: string
+      approve_comment_id:
+        description: Fresh owner /approve comment after the control-bound review
+        required: true
+        type: string
+      merge_comment_id:
+        description: Separate fresh owner /merge comment
+        required: true
+        type: string
+      publisher_run_id:
+        description: Verified publisher run selected by the active descriptor
+        required: true
+        type: string
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  runtime:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+  merge:
+    needs: runtime
+    runs-on: ubuntu-24.04
+    environment: main
+    timeout-minutes: 15
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: read
+      contents: read
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - name: Validate caller before minting installation tokens
+        id: target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CALLER: ${{ inputs.repository }}
+        run: securefix caller-migration target "$CALLER"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: |
+            securefix-server
+            ${{ steps.target.outputs.repository_name }}
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Validate canonical PR, owner review and separate commands
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          CALLER: ${{ inputs.repository }}
+          PR: ${{ inputs.pull_request }}
+          HEAD: ${{ inputs.expected_head_sha }}
+          CONTROL: ${{ inputs.control_id }}
+          APPROVE_COMMENT: ${{ inputs.approve_comment_id }}
+          MERGE_COMMENT: ${{ inputs.merge_comment_id }}
+          PUBLISHER: ${{ inputs.publisher_run_id }}
+        run: securefix caller-migration prepare "$CALLER" "$PR" "$HEAD" "$CONTROL" "$APPROVE_COMMENT" "$MERGE_COMMENT" "$PUBLISHER"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: authorization-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.target.outputs.repository_name }}
+          permission-checks: write
+          permission-issues: write
+      - name: Record exact-head owner authorization and control-bound policy result
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_AUTHORIZATION_TOKEN: ${{ steps.authorization-token.outputs.token }}
+        run: securefix caller-migration authorize
+      - name: Require normal checks and the exact-head owner review
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: securefix caller-migration ready
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: merge-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ steps.target.outputs.repository_name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Revalidate and merge only the reviewed canonical head
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
+        run: securefix caller-migration merge

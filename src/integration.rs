@@ -373,9 +373,7 @@ fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result
             && std::env::var("GITHUB_SHA").is_ok_and(|sha| sha == workflow_sha),
         "client verification must run in the matching Securefix Server workflow context"
     );
-    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
-    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
-    let api = GitHub::new("https://api.github.com", token)?;
+    let api = integration_read_api()?;
     let run: Value = api.get(&format!(
         "/repos/{}/actions/runs/{run_id}",
         server.repository
@@ -1253,9 +1251,7 @@ fn validate_producer(workflow_sha: &str) -> Result<()> {
     let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
     validate_workflow_ref(workflow_sha, &workflow_ref)?;
 
-    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
-    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
-    let api = GitHub::new("https://api.github.com", token)?;
+    let api = integration_read_api()?;
     let repository: Value = api.get(&format!("/repos/{}", server_repository()?))?;
     ensure!(
         repository["full_name"] == server_repository()?
@@ -1289,7 +1285,25 @@ fn integration_read_api() -> Result<GitHub> {
     );
     let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
     ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
-    GitHub::new("https://api.github.com", token)
+    let api = GitHub::new("https://api.github.com", token)?;
+    let baseline = std::env::var("SECUREFIX_TEST_BASELINE_SHA")
+        .context("missing captured test baseline SHA")?;
+    let main: Value = api.get(&format!(
+        "/repos/{}/commits/{}",
+        server_repository()?,
+        crate::config::trusted()?.deployment.server.default_branch
+    ))?;
+    validate_test_baseline(&baseline, &main)?;
+    Ok(api)
+}
+
+fn validate_test_baseline(expected_sha: &str, main: &Value) -> Result<()> {
+    validate_sha(expected_sha)?;
+    ensure!(
+        main["sha"] == expected_sha && main["commit"]["verification"]["verified"] == true,
+        "captured signed test baseline is no longer current main"
+    );
+    Ok(())
 }
 
 fn current_published_runtime(api: &GitHub) -> Result<(String, String)> {
@@ -1303,13 +1317,8 @@ fn current_published_runtime(api: &GitHub) -> Result<(String, String)> {
             && repository["default_branch"] == server.default_branch.as_str(),
         "published runtime repository identity changed"
     );
-    let main: Value = api.get(&format!(
-        "/repos/{}/commits/{}",
-        server.repository, server.default_branch
-    ))?;
-    let source_sha = main["sha"]
-        .as_str()
-        .context("server default branch SHA missing")?;
+    let control = securefix::control::ControlRevision::load(api)?;
+    let source_sha = control.source_sha.as_str();
     validate_sha(source_sha)?;
     let version = crate::runtime::version_at_source(api, source_sha)?;
     let tag = version.tag();
@@ -1318,9 +1327,11 @@ fn current_published_runtime(api: &GitHub) -> Result<(String, String)> {
         tag_ref["ref"] == format!("refs/tags/{tag}")
             && tag_ref["object"]["type"] == "commit"
             && tag_ref["object"]["sha"] == source_sha,
-        "canonical runtime tag does not directly target the default branch source"
+        "canonical runtime tag does not directly target the active control source"
     );
-    validate_runtime_release(api, source_sha, &tag, !version.as_semver().pre.is_empty())?;
+    let release =
+        validate_runtime_release(api, source_sha, &tag, !version.as_semver().pre.is_empty())?;
+    validate_active_test_release(&release, &control)?;
     Ok((source_sha.to_owned(), tag))
 }
 
@@ -1341,17 +1352,10 @@ fn resolve_test_runtime_tag(api: &GitHub, expected_sha: &str) -> Result<String> 
             && repository["default_branch"] == server.default_branch.as_str(),
         "published runtime repository identity changed"
     );
-    let main: Value = api.get(&format!(
-        "/repos/{}/commits/{}",
-        server.repository, server.default_branch
-    ))?;
-    let source_sha = main["sha"]
-        .as_str()
-        .context("server default branch SHA missing")?;
-    validate_sha(source_sha)?;
+    let control = securefix::control::ControlRevision::load(api)?;
     ensure!(
-        source_sha == expected_sha,
-        "server default branch moved after baseline runtime validation"
+        control.source_sha == expected_sha,
+        "active runtime changed after baseline runtime validation"
     );
     let version = crate::runtime::version_at_source(api, expected_sha)?;
     let canonical = version.tag();
@@ -1382,7 +1386,8 @@ fn resolve_test_runtime_tag(api: &GitHub, expected_sha: &str) -> Result<String> 
         // the separate SHA-keyed release name.
         (format!("securefix-runtime-{expected_sha}"), true)
     };
-    validate_runtime_release(api, expected_sha, &release_tag, prerelease)?;
+    let release = validate_runtime_release(api, expected_sha, &release_tag, prerelease)?;
+    validate_active_test_release(&release, &control)?;
     Ok(tag)
 }
 
@@ -1479,12 +1484,26 @@ fn optional_tag_ref(api: &GitHub, tag: &str) -> Result<Option<Value>> {
     }
 }
 
+fn validate_active_test_release(
+    release: &Value,
+    control: &securefix::control::ControlRevision,
+) -> Result<()> {
+    ensure!(
+        release["id"] == control.release_id
+            && release["immutable"] == true
+            && release["assets"][0]["id"] == control.asset_id
+            && release["assets"][0]["digest"] == format!("sha256:{}", control.archive_sha256),
+        "test runtime release differs from the immutable active descriptor"
+    );
+    Ok(())
+}
+
 fn validate_runtime_release(
     api: &GitHub,
     source_sha: &str,
     tag: &str,
     prerelease: bool,
-) -> Result<()> {
+) -> Result<Value> {
     let release: Value = api.get(&format!(
         "/repos/{}/releases/tags/{tag}",
         server_repository()?
@@ -1512,7 +1531,7 @@ fn validate_runtime_release(
             }),
         "published runtime release metadata or asset is invalid"
     );
-    Ok(())
+    Ok(release)
 }
 
 fn published_runtime_tag_from_env() -> Result<String> {
@@ -1559,9 +1578,7 @@ fn validate_workflow_ref(workflow_sha: &str, workflow_ref: &str) -> Result<()> {
 
 fn fetch_state(candidate_sha: &str, run_id: u64, state_file: &Path) -> Result<()> {
     ensure!(run_id > 0, "invalid fixture workflow run ID");
-    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
-    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
-    let api = GitHub::new("https://api.github.com", token)?;
+    let api = integration_read_api()?;
     let run: Value = api.get(&format!(
         "/repos/{}/actions/runs/{run_id}",
         server_repository()?
@@ -1812,7 +1829,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     )?;
     println!("Prepared Securefix scratch integration state.");
     println!(
-        "Positive PR (post exact owner /approve and /merge; add a current-head review): {}",
+        "Positive PR (add the current-head control-bound owner review, then post separate /approve and /merge comments): {}",
         state.positive.url
     );
     println!(
@@ -2817,6 +2834,38 @@ fn verify_inner(
         "positive policy check was published before the native auto-merge probe"
     );
     wait_for_merge_gates_except_policy(api, &scenario.positive, deadline)?;
+    let (owner_review_id, owner_review_at) = crate::distribution::reviewed::owner_review(
+        api,
+        integration_repository()?,
+        scenario.positive.number,
+        &scenario.positive.head_sha,
+        control,
+    )?;
+    ensure!(owner_review_id > 0, "scratch owner review has no ID");
+    let approve_at = crate::distribution::reviewed::validate_comment(
+        &approve_comment,
+        integration_repository()?,
+        scenario.positive.number,
+        approve_comment["id"]
+            .as_u64()
+            .context("fixture command has no ID")?,
+        RequestKind::Approve,
+        owner_review_at,
+    )?;
+    let merge_at = crate::distribution::reviewed::validate_comment(
+        &positive_merge_comment,
+        integration_repository()?,
+        scenario.positive.number,
+        positive_merge_comment["id"]
+            .as_u64()
+            .context("fixture command has no ID")?,
+        RequestKind::Merge,
+        owner_review_at,
+    )?;
+    ensure!(
+        approve_at <= merge_at,
+        "scratch owner commands are not separate and ordered after the review"
+    );
     ensure!(
         !merge::ready_with_reviewer(api, &positive_manifest, (&scratch_reviewer, "User"))?,
         "scratch positive PR became merge-ready without the Securefix policy check"
@@ -2857,6 +2906,17 @@ fn verify_inner(
         ..control.clone()
     };
     control.validate_successor(&next_control)?;
+    ensure!(
+        crate::distribution::reviewed::owner_review(
+            api,
+            integration_repository()?,
+            scenario.positive.number,
+            &scenario.positive.head_sha,
+            &next_control,
+        )
+        .is_err(),
+        "scratch owner review was reusable in a new control generation"
+    );
     ensure!(
         !request::has_current_head_approval_for_reviewer(
             api,
@@ -4381,6 +4441,192 @@ impl RequestKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn captured_test_baseline_must_be_the_signed_current_main() {
+        let sha = "a".repeat(40);
+        let verified = json!({"sha":sha,"commit":{"verification":{"verified":true}}});
+        super::validate_test_baseline(&sha, &verified).unwrap();
+        assert!(super::validate_test_baseline(&"b".repeat(40), &verified).is_err());
+        assert!(
+            super::validate_test_baseline(
+                &sha,
+                &json!({"sha":sha,"commit":{"verification":{"verified":false}}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_runtime_selection_follows_active_descriptor_after_main_advances() {
+        use crate::fixtures::{Fixture, Route};
+        use base64::Engine;
+        let trusted = crate::config::trusted().unwrap();
+        let server = &trusted.deployment.server;
+        let control = Fixture::control_revision();
+        let main = "b".repeat(40);
+        let repo = json!({"id":server.id,"full_name":server.repository,
+            "default_branch":server.default_branch,"owner":{"id":trusted.deployment.repository_owner.id}});
+        let content = |bytes: &[u8]| json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)});
+        let manifest_bytes = b"[package]\nname = \"securefix\"\nversion = \"0.2.23\"\n";
+        let mut manifest = content(manifest_bytes);
+        manifest["path"] = json!("Cargo.toml");
+        manifest["type"] = json!("file");
+        manifest["size"] = json!(manifest_bytes.len());
+        let release = json!({"id":control.release_id,"tag_name":"v0.2.23","name":"v0.2.23",
+            "target_commitish":control.source_sha,"draft":false,"prerelease":false,"immutable":true,
+            "assets":[{"id":control.asset_id,"name":"securefix-runtime-linux-x86_64.tar.gz","state":"uploaded","size":100,"digest":format!("sha256:{}",control.archive_sha256)}]});
+        let fixture = Fixture::new(vec![
+            Route::get(format!("/repos/{}", server.repository), repo.clone()),
+            Route::get(format!("/repos/{}", server.repository), repo),
+            Route::get(
+                format!(
+                    "/repos/{}/commits/{}",
+                    server.repository, server.default_branch
+                ),
+                json!({"sha":main}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/contents/control/active.json?ref={main}",
+                    server.repository
+                ),
+                content(&serde_json::to_vec(&control).unwrap()),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/contents/Cargo.toml?ref={}",
+                    server.repository, control.source_sha
+                ),
+                manifest,
+            ),
+            Route::get(
+                format!("/repos/{}/git/ref/tags/v0.2.23", server.repository),
+                json!({"ref":"refs/tags/v0.2.23","object":{"type":"commit","sha":control.source_sha}}),
+            ),
+            Route::get(
+                format!("/repos/{}/releases/tags/v0.2.23", server.repository),
+                release.clone(),
+            ),
+        ]);
+        assert_eq!(
+            super::current_published_runtime(&fixture.api).unwrap(),
+            (control.source_sha.clone(), "v0.2.23".into())
+        );
+        fixture.finish();
+        for field in ["id", "immutable"] {
+            let mut changed = release.clone();
+            changed[field] = json!(0);
+            assert!(super::validate_active_test_release(&changed, &control).is_err());
+        }
+        let mut changed = release;
+        changed["assets"][0]["digest"] = json!(format!("sha256:{}", "3".repeat(64)));
+        assert!(super::validate_active_test_release(&changed, &control).is_err());
+    }
+
+    #[test]
+    fn test_runtime_resolver_uses_active_canonical_release_and_rejects_mismatch() {
+        use base64::Engine;
+        let trusted = crate::config::trusted().unwrap();
+        let server = &trusted.deployment.server;
+        let control = Fixture::control_revision();
+        let main = "b".repeat(40);
+        let content = |bytes: &[u8]| {
+            json!({
+                "encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(bytes)
+            })
+        };
+        let manifest_bytes = b"[package]\nname = \"securefix\"\nversion = \"0.2.23\"\n";
+        let mut manifest = content(manifest_bytes);
+        manifest["path"] = json!("Cargo.toml");
+        manifest["type"] = json!("file");
+        manifest["size"] = json!(manifest_bytes.len());
+        let release = json!({"id":control.release_id,"tag_name":"v0.2.23","name":"v0.2.23",
+            "target_commitish":control.source_sha,"draft":false,"prerelease":false,"immutable":true,
+            "assets":[{"id":control.asset_id,"name":"securefix-runtime-linux-x86_64.tar.gz","state":"uploaded","size":100,"digest":format!("sha256:{}",control.archive_sha256)}]});
+        let repository = json!({"id":server.id,"full_name":server.repository,
+            "default_branch":server.default_branch,"owner":{"id":trusted.deployment.repository_owner.id}});
+        let routes = |release: serde_json::Value| {
+            vec![
+                Route::get(format!("/repos/{}", server.repository), repository.clone()),
+                Route::get(format!("/repos/{}", server.repository), repository.clone()),
+                Route::get(
+                    format!(
+                        "/repos/{}/commits/{}",
+                        server.repository, server.default_branch
+                    ),
+                    json!({"sha":main}),
+                ),
+                Route::get(
+                    format!(
+                        "/repos/{}/contents/control/active.json?ref={main}",
+                        server.repository
+                    ),
+                    content(&serde_json::to_vec(&control).unwrap()),
+                ),
+                Route::get(
+                    format!(
+                        "/repos/{}/contents/Cargo.toml?ref={}",
+                        server.repository, control.source_sha
+                    ),
+                    manifest.clone(),
+                ),
+                Route::get(
+                    format!("/repos/{}/git/ref/tags/v0.2.23", server.repository),
+                    json!({"ref":"refs/tags/v0.2.23","object":{"type":"commit","sha":control.source_sha}}),
+                ),
+                Route::request(
+                    "GET",
+                    format!(
+                        "/repos/{}/git/ref/tags/v0.2.23+{}",
+                        server.repository, control.source_sha
+                    ),
+                    404,
+                    json!({"message":"Not Found"}),
+                ),
+                Route::get(
+                    format!("/repos/{}/releases/tags/v0.2.23", server.repository),
+                    release,
+                ),
+            ]
+        };
+        let fixture = Fixture::new(routes(release.clone()));
+        assert_eq!(
+            super::resolve_test_runtime_tag(&fixture.api, &control.source_sha).unwrap(),
+            "v0.2.23"
+        );
+        fixture.finish();
+
+        let mut wrong_asset = release;
+        wrong_asset["assets"][0]["id"] = json!(control.asset_id + 1);
+        let fixture = Fixture::new(routes(wrong_asset));
+        assert!(super::resolve_test_runtime_tag(&fixture.api, &control.source_sha).is_err());
+        fixture.finish();
+
+        let repo = json!({"id":server.id,"full_name":server.repository,
+            "default_branch":server.default_branch,"owner":{"id":trusted.deployment.repository_owner.id}});
+        let fixture = Fixture::new(vec![
+            Route::get(format!("/repos/{}", server.repository), repo.clone()),
+            Route::get(format!("/repos/{}", server.repository), repo),
+            Route::get(
+                format!(
+                    "/repos/{}/commits/{}",
+                    server.repository, server.default_branch
+                ),
+                json!({"sha":main}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/contents/control/active.json?ref={main}",
+                    server.repository
+                ),
+                content(&serde_json::to_vec(&control).unwrap()),
+            ),
+        ]);
+        assert!(super::resolve_test_runtime_tag(&fixture.api, &"c".repeat(40)).is_err());
+        fixture.finish();
+    }
+
     use super::*;
     use crate::fixtures::{Fixture, Route};
 
