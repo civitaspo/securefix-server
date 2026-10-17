@@ -1,5 +1,18 @@
 # Agent instructions
 
+## Unmerged recovery executor branch
+
+This branch contains a proposed one-use recovery executor for the exact PR #95
+target recorded in `control/bootstrap-recovery.json`. Never merge this executor
+branch into main. Its production use requires separate explicit owner approval
+of the final executor SHA and the settings changes in
+`docs/bootstrap-recovery-2026-10-17.md`. Before that approval, only source review,
+CI, and `recovery-qualify` (without production credentials) are authorized.
+The normal repair guard and main rulesets remain in force. After approval,
+the executor branch must be locked before its exact environment admission and
+out-of-band SHA variable are configured; remove admission and the variable after
+the attempt. Do not give settings credentials to the executor.
+
 ## Purpose and architecture
 
 This repository is a privileged GitHub automation server. Preserve its security

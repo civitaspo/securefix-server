@@ -1,20 +1,20 @@
 use super::*;
 use crate::fixtures::{Fixture, Route};
 
-fn main_sha() -> String {
+pub(super) fn main_sha() -> String {
     "a".repeat(40)
 }
-fn head_sha() -> String {
+pub(super) fn head_sha() -> String {
     "b".repeat(40)
 }
-fn policy() -> Policy {
+pub(super) fn policy() -> Policy {
     Policy::parse(&securefix::config::trusted_policy_bytes().unwrap()).unwrap()
 }
-fn path(suffix: &str) -> String {
+pub(super) fn path(suffix: &str) -> String {
     format!("/repos/{}/{suffix}", policy().deployment.server.repository)
 }
 
-fn host(fixture: &Fixture, phase: &str) -> Host {
+pub(super) fn host(fixture: &Fixture, phase: &str) -> Host {
     let policy = policy();
     let server = &policy.deployment.server;
     let workflow = if phase == "bootstrap" {
@@ -46,7 +46,7 @@ fn host(fixture: &Fixture, phase: &str) -> Host {
     }
 }
 
-fn run_fixture(workflow: &str, complete: bool) -> Value {
+pub(super) fn run_fixture(workflow: &str, complete: bool) -> Value {
     let policy = policy();
     let server = policy.deployment.server;
     json!({"id":77,"repository":{"id":server.id,"full_name":server.repository},
@@ -56,10 +56,10 @@ fn run_fixture(workflow: &str, complete: bool) -> Value {
         "status":if complete {"completed"} else {"in_progress"},"conclusion":if complete {json!("success")} else {Value::Null}})
 }
 
-fn main_route() -> Route {
+pub(super) fn main_route() -> Route {
     Route::get(path("commits/main"), json!({"sha":main_sha()}))
 }
-fn absent_route() -> Route {
+pub(super) fn absent_route() -> Route {
     Route::request(
         "GET",
         path(&format!("contents/{ACTIVE}?ref={}", main_sha())),
@@ -67,13 +67,13 @@ fn absent_route() -> Route {
         json!({}),
     )
 }
-fn content_route(name: &str, sha: &str, bytes: &[u8]) -> Route {
+pub(super) fn content_route(name: &str, sha: &str, bytes: &[u8]) -> Route {
     Route::get(
         path(&format!("contents/{name}?ref={sha}")),
         json!({"type":"file","path":name,"encoding":"base64","size":bytes.len(),"content":STANDARD.encode(bytes)}),
     )
 }
-fn status_routes(sha: &str) -> Vec<Route> {
+pub(super) fn status_routes(sha: &str) -> Vec<Route> {
     vec![
         Route::get(
             path(&format!("commits/{sha}")),
@@ -91,7 +91,7 @@ fn status_routes(sha: &str) -> Vec<Route> {
         ),
     ]
 }
-fn comparison(files: Value) -> Value {
+pub(super) fn comparison(files: Value) -> Value {
     json!({"base_commit":{"sha":main_sha()},"merge_base_commit":{"sha":main_sha()},"status":"ahead","total_commits":1,"commits":[{"commit":{"verification":{"verified":true}}}],"files":files})
 }
 fn descriptor() -> ControlRevision {
@@ -108,7 +108,7 @@ fn descriptor() -> ControlRevision {
         previous: "0".repeat(64),
     }
 }
-fn pull(head: &str) -> Value {
+pub(super) fn pull(head: &str) -> Value {
     let policy = policy();
     let server = policy.deployment.server;
     json!({"number":12,"state":"open","user":{"id":policy.server_bot_id},

@@ -30,8 +30,14 @@ const MAX_ARTIFACT: usize = 64 * 1024;
 const MAX_UNPACKED: u64 = 512 * 1024 * 1024;
 const MAX_MEMBERS: usize = 4096;
 
+#[path = "bootstrap_recovery.rs"]
+mod recovery;
+
 #[derive(Subcommand)]
 pub enum Command {
+    RecoveryValidate,
+    RecoveryPropose,
+    RecoveryMerge,
     Prepare {
         #[arg(long)]
         source_sha: String,
@@ -93,6 +99,9 @@ pub enum Command {
 pub fn run(command: Command) -> Result<()> {
     let host = Host::from_env()?;
     match command {
+        Command::RecoveryValidate => recovery::validate(&host),
+        Command::RecoveryPropose => recovery::propose(&host),
+        Command::RecoveryMerge => recovery::merge(&host),
         Command::Prepare {
             source_sha,
             verification_run_id,
@@ -201,8 +210,24 @@ struct Dispatch {
 
 impl Dispatch {
     fn validate(&self, host: &Host, source: &str, phase: &str, workflow: &str) -> Result<()> {
+        self.validate_branch(
+            host,
+            source,
+            phase,
+            workflow,
+            &host.policy.deployment.server.default_branch,
+        )
+    }
+
+    fn validate_branch(
+        &self,
+        host: &Host,
+        source: &str,
+        phase: &str,
+        workflow: &str,
+        branch: &str,
+    ) -> Result<()> {
         validate_sha(source)?;
-        let branch = &host.policy.deployment.server.default_branch;
         ensure!(
             self.repository == host.repository()
                 && self.reference == format!("refs/heads/{branch}")
@@ -1104,16 +1129,37 @@ fn validate_run(
     source: &str,
     in_progress: bool,
 ) -> Result<()> {
+    validate_run_branch(
+        run,
+        policy,
+        id,
+        workflow,
+        source,
+        in_progress,
+        &policy.deployment.server.default_branch,
+    )
+}
+
+fn validate_run_branch(
+    run: &Value,
+    policy: &Policy,
+    id: u64,
+    workflow: &str,
+    source: &str,
+    in_progress: bool,
+    branch: &str,
+) -> Result<()> {
     let server = &policy.deployment.server;
     ensure!(
         run["id"].as_u64() == Some(id)
             && [&run["repository"], &run["head_repository"]]
                 .iter()
                 .all(|r| r["full_name"] == server.repository && r["id"].as_u64() == Some(server.id))
-            && run["path"].as_str().is_some_and(|p| p == workflow
-                || p == format!("{workflow}@refs/heads/{}", server.default_branch))
+            && run["path"]
+                .as_str()
+                .is_some_and(|p| p == workflow || p == format!("{workflow}@refs/heads/{branch}"))
             && run["event"] == "workflow_dispatch"
-            && run["head_branch"] == server.default_branch
+            && run["head_branch"] == branch
             && run["run_attempt"] == 1
             && run["head_sha"] == source
             && run["actor"]["id"].as_u64() == Some(policy.owner_id)
