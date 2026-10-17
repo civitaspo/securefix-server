@@ -98,9 +98,12 @@ helpers and keep the change focused; do not add speculative abstractions.
   uses only the separately reviewed fixed `control-bootstrap.yml` authority. Its
   host-side qualification is read-only, and its separate writer does not execute the
   candidate binary.
-  After publication and scratch verification, propose a signed descriptor PR, then
-  merge it only through the separately dispatched owner, expected-main, exact-head,
-  descriptor-identity, and required-CI fence.
+  After publication and scratch verification, propose a signed descriptor PR.
+  Normal activation requires owner review, `/approve`, successful Bot approval
+  and required checks, then a separate `/merge` through the ordinary server lane.
+  Bind commands to the exact head and full current control identity, revalidate
+  the successor descriptor, and preserve expected-head CAS. The one-time bootstrap
+  instead uses its separate merge dispatch with an explicit expected-main fence.
 - Protected-main mutation workflows use the shared `securefix-control`
   concurrency group with `queue: max`. Do not add a ruleset bypass actor or
   mode beyond the exact Server App pull-request bypass required by the
@@ -184,8 +187,10 @@ using its recorded bootstrap publisher run and fixed signer path; other generati
 use the normal publisher. There is no fallback runtime.
 After generation one is required, a missing or invalid descriptor disables operations
 until a valid control revision is restored. Publish and propose first, obtain owner
-review of the exact descriptor PR, then separately dispatch merge with owner,
-expected-main SHA, exact PR head, full descriptor identity, and required CI checks.
+review of the exact descriptor PR. The bootstrap's separate merge dispatch checks
+owner, expected-main SHA, exact PR head, full descriptor identity, and required CI.
+Normal successors use owner review and separate `/approve` and `/merge` commands
+through the ordinary control-bound server lane described above.
 Every job that mints a Server App token uses the protected `main` environment. The
 bootstrap scratch rehearsal uses a pinned v0.2.20 read baseline because the current
 main runtime cannot validate its own initial bootstrap producer. In that rehearsal the

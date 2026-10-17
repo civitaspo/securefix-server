@@ -53,19 +53,38 @@ the descriptor. Other generations use the regular runtime publisher.
 There is no fallback runtime selection. After generation one is required, a missing or
 invalid descriptor disables operations until a valid control revision is restored.
 
-Publication and activation remain distinct. The workflow proposes an exact descriptor
-PR; an owner reviews it; a separate serialized dispatch merges only after checking the
-owner, expected protected-main SHA, exact PR head SHA, full descriptor identity, and
-required CI. The first bootstrap sequence and its failure behavior remain unverified.
+Publication and activation remain distinct. Bootstrap proposes an exact descriptor
+PR and requires a separate owner-reviewed merge dispatch with expected-main, exact-head,
+descriptor-identity, and required-CI checks. Normal successors use the ordinary server
+lane after exact-head owner review, `/approve`, successful Bot approval and required
+checks, then a separate `/merge`. Both commands bind to the exact head and full current
+control identity. The merge revalidates the successor and uses expected-head CAS.
+An unrelated main advance with the same descriptor preserves the active control identity.
 The `testing-securefix-server.yml` `phase=bootstrap` rehearsal uses the pinned v0.2.20
 read baseline (release ID `414653308`, asset ID `646481902`, verified archive digest
 and attestation for source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`) because the
 current-main producer cannot validate its own initial trust chain. It checks current
-main and descriptor absence before minting scratch tokens, uses v0.2.20 for scratch
-output validation, and runs the candidate runtime's fixture preparation, verification,
+main and descriptor absence before minting scratch tokens, uses the source-pinned fixed
+Rust host for bounded scratch output validation, and runs the candidate runtime's fixture preparation, verification,
 and control probe only against scratch. This establishes a bootstrap test mode; it does
 not verify production publication, activation, or distribution.
 
-The proposal is not deployable until its code is compiled, the required bootstrap verification gate passes, and operators review the procedure. The bootstrap scratch rehearsal validates fixtures; it does not establish production publication, activation, or recovery. While the descriptor is absent, Policy Check and settings loads fail closed on descriptor lookup. The proposed `repair-propose` and `repair-merge` sequence has not demonstrated a recovery: failed prequalification creates no PR for the merge phase, and scheduled settings reconciliation also stops at the missing descriptor. Do not claim a proven recovery path or that v0.2.20 remains operative after main advances. A separately reviewed recovery may change the bootstrap trust root only with independent qualification; it must not weaken self-repair restrictions, bypass rulesets, or write directly to main. Preserve exact-head CI, review, provenance, immutable-release postconditions, signed attestation, archive verification, and CAS. Historical deployment reports cover the earlier runtime contract only. The protected-main `phase=bootstrap` scratch gate is post-merge by design; it must pass before proposing bootstrap publication or descriptor activation.
+During initial rollout, descriptor absence stopped ordinary Policy Check and settings
+loads. Bounded repair could not modify the bootstrap authority; recovery therefore
+required a separately reviewed source-pinned executor and explicit owner authorization.
+That recovery, the protected-main bootstrap scratch gate, initial immutable publication,
+and descriptor activation have since completed. Generation one selects v0.2.23, and
+bootstrap and repair are retired. The normal v0.2.24 successor merge failed its PR
+ownership check before the merge API call; successor activation and caller distribution
+remain pending. See the [dated verification report](../control-successor-verification-2026-10-17.md).
+A missing or invalid active descriptor still disables ordinary operations. Any new
+recovery authority requires independent qualification and explicit authorization,
+preserving owner review, exact-head CI, provenance, immutable releases, attestation,
+archive verification, and CAS.
 
-The pull-request version check in this proposal is scoped to runtime inputs: Cargo manifests and lockfile, Rust sources, toolchain, policy, repository settings, CLI setup, and the runtime publisher workflow. Documentation-only changes do not require a package version increase. The bootstrap path and overall control lifecycle remain unverified, so this ADR describes a proposal rather than deployed behavior. Before the first code PR merges, compile the implementation, pass normal candidate scratch verification on a frozen integration branch, review the fixed bootstrap path and operator procedure, and explicitly approve and complete the permanent live-settings rollout. The protected-main `phase=bootstrap` scratch gate is post-merge by design: run it during the finite pause, and require it to pass before bootstrap publication or descriptor activation is proposed.
+The pull-request version check is scoped to runtime inputs: Cargo manifests and
+lockfile, Rust sources, toolchain, policy, repository settings, CLI setup, and the
+runtime publisher workflow. Documentation-only changes do not require a package
+version increase. The protected-main bootstrap scratch gate was required before
+initial publication and activation; its successful evidence does not certify later
+normal successors.
