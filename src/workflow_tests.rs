@@ -869,31 +869,18 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         })
     });
     let installed = publish_index(&|step| step["uses"] == "$/.github/actions/install-cli");
-    let read_token = publish_index(&|step| step["id"] == "immutable-release-read-token");
-    assert_eq!(
-        publish_steps[read_token]["with"]["repositories"],
-        "securefix-server"
-    );
-    assert_eq!(
-        publish_steps[read_token]["with"]["permission-administration"],
-        "read"
-    );
-    assert!(
-        publish_steps[read_token]["with"]
-            .get("permission-contents")
-            .is_none()
-    );
     assert!(
         downloaded < controller_downloaded
             && controller_downloaded < verified
             && verified < installed
-            && installed < read_token
-            && read_token < invoked
+            && installed < invoked
     );
-    assert_eq!(
-        publish_steps[invoked]["env"]["SECUREFIX_SERVER_APP_TOKEN"],
-        "${{ steps.immutable-release-read-token.outputs.token }}"
-    );
+    assert!(publish_steps.iter().all(|step| {
+        !step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
+    }));
+    assert!(publish_steps[invoked]["env"].is_null());
     assert_eq!(
         publish_steps[installed]["with"]["binary"],
         "${{ runner.temp }}/controller/securefix"
@@ -977,7 +964,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     for (path, workflow) in workflows() {
         if matches!(
             path.as_str(),
-            ".github/workflows/ci.yml" | ".github/workflows/publish-runtime.yml"
+            ".github/workflows/ci.yml"
+                | ".github/workflows/publish-runtime.yml"
+                | ".github/workflows/build-bootstrap-host.yml"
         ) {
             continue;
         }
@@ -1102,6 +1091,102 @@ fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
 fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
     let bootstrap = workflow("control-bootstrap.yml");
     assert_eq!(
+        bootstrap["jobs"]["bootstrap-host"]["uses"],
+        "./.github/workflows/build-bootstrap-host.yml"
+    );
+    let host_build = workflow("build-bootstrap-host.yml");
+    let host_build = &host_build["jobs"]["build"];
+    assert_eq!(
+        host_build["permissions"],
+        serde_json::json!({"contents":"read"})
+    );
+    let host_text = serde_json::to_string(host_build).unwrap();
+    for forbidden in [
+        "secrets.",
+        "environment",
+        "id-token",
+        "attestations",
+        "candidate-runtime",
+        "create-github-app-token",
+    ] {
+        assert!(
+            !host_text.contains(forbidden),
+            "host build exposes {forbidden}"
+        );
+    }
+    assert!(
+        host_build["if"]
+            .as_str()
+            .unwrap()
+            .contains("github.run_attempt == 1")
+    );
+    let build_steps = host_build["steps"].as_array().unwrap();
+    assert_eq!(build_steps[0]["with"]["ref"], "${{ job.workflow_sha }}");
+    let compile = build_steps
+        .iter()
+        .find(|step| step["env"]["SECUREFIX_BOOTSTRAP_SOURCE_SHA"].is_string())
+        .unwrap();
+    assert_eq!(
+        compile["env"]["SECUREFIX_BOOTSTRAP_SOURCE_SHA"],
+        "${{ job.workflow_sha }}"
+    );
+    assert_eq!(
+        compile["run"],
+        "cargo +1.99.0 build --locked --release --bin securefix-bootstrap"
+    );
+    for job_id in [
+        "validate-proposal",
+        "propose",
+        "validate-merge",
+        "merge",
+        "repair-propose",
+        "repair-merge",
+    ] {
+        let job = &bootstrap["jobs"][job_id];
+        assert!(
+            job["needs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|need| need == "bootstrap-host")
+        );
+        let steps = job["steps"].as_array().unwrap();
+        let download = steps
+            .iter()
+            .position(|step| {
+                step["with"]["artifact-ids"] == "${{ needs.bootstrap-host.outputs.artifact-id }}"
+            })
+            .unwrap();
+        assert_eq!(steps[download]["with"]["path"], "bootstrap-host");
+        let install = steps
+            .iter()
+            .position(|step| {
+                step["run"].as_str().is_some_and(|run| {
+                    run.contains("install -D -m 755 bootstrap-host/securefix-bootstrap")
+                })
+            })
+            .unwrap();
+        let invoke = steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.starts_with("\"$RUNNER_TEMP/securefix-bootstrap\" "))
+            })
+            .unwrap();
+        assert!(download < install && install < invoke, "{job_id}");
+    }
+    for path in [
+        "scripts/control-bootstrap.py",
+        "scripts/test_control_bootstrap.py",
+        "scripts/test_control_bootstrap_boundaries.py",
+    ] {
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "bootstrap logic must stay in Rust: {path}"
+        );
+    }
+    assert_eq!(
         bootstrap["concurrency"]["group"],
         "securefix-control-bootstrap"
     );
@@ -1139,7 +1224,6 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
                 == "${{ needs.validate-proposal.outputs.artifact-id }}")
     );
 
-    const SETTINGS_REPOSITORIES: &str = "dotfiles,securefix-server,dbt-authorized-models,dbt-snowflake-iceberg-sync,dbt-snowflake-rap-enforcement,terraform-provider-sigma,herdr-linear-agent,hook-relay-client-rs,herdr-infobox,testing-securefix-server";
     for job_id in ["propose", "merge", "repair-propose", "repair-merge"] {
         let job = &bootstrap["jobs"][job_id];
         assert_eq!(job["environment"], "main", "{job_id}");
@@ -1154,20 +1238,11 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
                 .as_str()
                 .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
             {
-                if step["id"] == "settings-read" {
-                    assert_eq!(
-                        step["with"]["repositories"], SETTINGS_REPOSITORIES,
-                        "{job_id}"
-                    );
-                    assert_eq!(
-                        step["with"]["permission-administration"], "read",
-                        "{job_id}"
-                    );
-                    assert_eq!(step["with"]["permission-contents"], "read", "{job_id}");
-                    assert_eq!(step["with"]["permission-pull-requests"], "read", "{job_id}");
-                } else {
-                    assert_eq!(step["with"]["repositories"], "securefix-server", "{job_id}");
-                }
+                assert_eq!(step["with"]["repositories"], "securefix-server", "{job_id}");
+                assert!(
+                    step["with"].get("permission-administration").is_none(),
+                    "{job_id}"
+                );
             }
         }
     }
@@ -1176,11 +1251,6 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
     let writer = propose.iter().find(|step| step["id"] == "writer").unwrap();
     assert_eq!(writer["with"]["permission-contents"], "write");
     assert_eq!(writer["with"]["permission-pull-requests"], "write");
-    let settings = propose
-        .iter()
-        .find(|step| step["id"] == "settings-read")
-        .unwrap();
-    assert_eq!(settings["with"]["permission-administration"], "read");
 
     let text = serde_json::to_string(&bootstrap).unwrap();
     assert!(!text.contains("candidate-runtime/securefix"));
@@ -1256,7 +1326,7 @@ fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
     assert_eq!(scratch["environment"], "main");
     assert_eq!(
         steps[context]["run"],
-        "python3 scripts/control-bootstrap.py validate-legacy-context --source-sha \"$SOURCE_SHA\""
+        "\"$RUNNER_TEMP/securefix-bootstrap\" validate-legacy-context --source-sha \"$SOURCE_SHA\""
     );
     let server = steps.iter().find(|step| step["id"] == "server").unwrap();
     assert_eq!(server["with"]["repositories"], "testing-securefix-server");
@@ -2080,28 +2150,6 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("--method")
                     && !run.contains("gh release upload")
                     && !run.contains("gh release create");
-                let fixed_bootstrap_host_validation = path
-                    == ".github/workflows/testing-securefix-server.yml"
-                    && job_id == "bootstrap-scratch"
-                    && step["name"]
-                        == "Validate current main and inactive descriptor before credentials"
-                    && run
-                        == "python3 scripts/control-bootstrap.py validate-legacy-context --source-sha \"$SOURCE_SHA\"";
-                let fixed_bootstrap_host_script = path == ".github/workflows/control-bootstrap.yml"
-                    && run.starts_with("python3 scripts/control-bootstrap.py ")
-                    && [
-                        "prepare ",
-                        "propose ",
-                        "validate-merge ",
-                        "merge ",
-                        "repair-propose ",
-                        "repair-merge ",
-                    ]
-                    .iter()
-                    .any(|command| run.contains(command));
-                let fixed_workflow_script_tests = path == ".github/workflows/ci.yml"
-                    && job_id == "workflows"
-                    && run.trim() == "python3 -m unittest discover -s scripts -p 'test_*.py'";
                 let bounded_release_artifact_lookup = path
                     == ".github/workflows/testing-release-pr.yml"
                     && job_id == "execute"
@@ -2123,10 +2171,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             || bounded_baseline_reads
                             || bounded_legacy_runtime_reads
                             || bounded_release_artifact_lookup)
-                        && !run.contains("curl ")
-                        || fixed_bootstrap_host_validation
-                        || fixed_bootstrap_host_script
-                        || fixed_workflow_script_tests,
+                        && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
                 assert!(
@@ -2469,5 +2514,80 @@ fn integration_testing_documents_the_active_control_review_marker() {
             source.contains("<!-- securefix:control-review:{} -->"),
             "the documented review marker must match the production marker template"
         );
+    }
+}
+
+#[test]
+fn operational_workflows_do_not_request_administration_or_settings_credentials() {
+    for (path, value) in workflows() {
+        if path.ends_with("/repo-settings.yml") {
+            continue;
+        }
+        for (job_id, job) in value["jobs"].as_object().unwrap() {
+            for step in job["steps"].as_array().into_iter().flatten() {
+                assert!(
+                    step["with"].get("permission-administration").is_none(),
+                    "{path} {job_id} requests Administration for an operational step"
+                );
+            }
+        }
+        assert!(
+            !serde_json::to_string(&value)
+                .unwrap()
+                .contains("CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN"),
+            "{path} exposes the repository-settings administrator credential"
+        );
+    }
+}
+
+#[test]
+fn reusable_callers_grant_the_permissions_requested_by_their_jobs() {
+    let mut callers = workflows();
+    let server = &crate::config::trusted()
+        .unwrap()
+        .deployment
+        .server
+        .repository;
+    for (path, bytes) in
+        crate::distribution::caller::rendered_files(&"a".repeat(40), "v0.2.22", "main", true)
+            .unwrap()
+    {
+        let mut value: Value = serde_yaml::from_slice(&bytes).unwrap();
+        for job in value["jobs"].as_object_mut().unwrap().values_mut() {
+            let uses = job["uses"].as_str().unwrap();
+            let local = uses
+                .strip_prefix(&format!("{server}/"))
+                .unwrap()
+                .split('@')
+                .next()
+                .unwrap();
+            job["uses"] = Value::String(format!("./{local}"));
+        }
+        callers.push((format!("generated:{path}"), value));
+    }
+    for (path, value) in callers {
+        for (job_id, job) in value["jobs"].as_object().unwrap() {
+            let Some(callee) = job["uses"]
+                .as_str()
+                .and_then(|uses| uses.strip_prefix("./.github/workflows/"))
+            else {
+                continue;
+            };
+            let called = workflow(callee);
+            for (nested_id, nested) in called["jobs"].as_object().unwrap() {
+                for (permission, required) in nested["permissions"].as_object().unwrap() {
+                    let granted = job["permissions"][permission].as_str().unwrap_or("none");
+                    assert!(
+                        match required.as_str().unwrap() {
+                            "none" => true,
+                            "read" => matches!(granted, "read" | "write"),
+                            "write" => granted == "write",
+                            other => panic!("unsupported permission {other}"),
+                        },
+                        "{path} {job_id} grants {permission}:{granted}, but {callee} {nested_id} needs {required}"
+                    );
+                }
+            }
+        }
     }
 }

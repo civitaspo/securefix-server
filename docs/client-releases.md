@@ -40,9 +40,9 @@ Pin each reusable to a full commit SHA and give its caller the minimum `permissi
 
 | Reusable | Caller permissions |
 | --- | --- |
-| `reusable-release-pr.yml` | `contents: read`, `attestations: read`, `pull-requests: read` |
-| `reusable-release-pr-sync.yml` | `contents: read`, `attestations: read`, `pull-requests: write` |
-| `reusable-release-tag.yml` | `contents: write`, `attestations: read`, `pull-requests: read`, `issues: write` |
+| `reusable-release-pr.yml` | `actions: read`, `contents: read`, `attestations: read`, `pull-requests: read` |
+| `reusable-release-pr-sync.yml` | `actions: read`, `contents: read`, `attestations: read`, `pull-requests: write` |
+| `reusable-release-tag.yml` | `actions: read`, `contents: write`, `attestations: read`, `pull-requests: read`, `issues: write` |
 
 A release PR wrapper passes `SECUREFIX_CLIENT_PRIVATE_KEY` and may provide an explicit version. The Rust CLI updates `.release-version`, `CHANGELOG.md`, and supported root package version metadata before Securefix opens or updates `release/next`. When reusing an existing Server App-owned release PR, the apply step also synchronizes its title and body from the validated artifact options, including on idempotent retries.
 
@@ -61,6 +61,7 @@ permissions: {}
 jobs:
   prepare:
     permissions:
+      actions: read
       contents: read
       attestations: read
       pull-requests: read
@@ -92,6 +93,7 @@ jobs:
   tag:
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.event.pull_request.head.ref == 'release/next' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
+      actions: read
       contents: write
       attestations: read
       pull-requests: read

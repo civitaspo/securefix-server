@@ -18,7 +18,7 @@ candidate binary. This narrow initial authority is explicitly documented and rev
 
 ## Local verification
 
-The assembled suite passed: **32 library, 233 binary, and 2 native integration tests**;
+The pre-merge assembled suite passed: **32 library, 233 binary, and 2 native integration tests**;
 2 binary tests were ignored. All **16 Python bootstrap tests**, formatting, Clippy,
 and pinned actionlint passed. The local suite covers all five requested scenarios at
 the boundaries below. Fixtures and workflow assertions do not establish live production
@@ -86,20 +86,151 @@ are enabled. These are the reviewed migration settings applied under the owner's
 merge authorization; they are not temporary exceptions. The earlier scratch cleanup
 record describes its original restored state before this permanent rollout.
 
+## Merge and first bootstrap gate
+
+The corrected source passed fresh [prepare](https://github.com/civitaspo/securefix-server/actions/runs/38884549807)
+and [verify](https://github.com/civitaspo/securefix-server/actions/runs/38885066101).
+All four artifact ZIP digests were checked against the artifact API. The final
+documentation-only head `230deb34925d30e8a68a8410b1fbab43d9a6b93e` passed CI,
+received owner `/approve` and `/merge`, a bot approval on that exact head, and both
+required checks. The [normal merge workflow](https://github.com/civitaspo/securefix-server/actions/runs/38885826777)
+succeeded. Signed main commit `5851ec5f7713357c0edd97355952aae03bdd0051` has the
+same tree as that reviewed head; its [push CI](https://github.com/civitaspo/securefix-server/actions/runs/38885945025)
+also passed.
+
+The first protected-main [bootstrap scratch gate](https://github.com/civitaspo/securefix-server/actions/runs/38885998261)
+failed in the scratch policy-feedback probe. Prepare and verify share one workflow
+run and fixture head in this mode. Prepare successfully minimized its synthetic
+failure comments on recovery; verify then generated identical bodies, so production
+comment deduplication reused those already minimized comments. The probe expected its
+latest synthetic failure to be visible and stopped. The API readback confirmed that
+both comments were minimized. The positive PR did not merge. The pinned legacy
+runtime verification, candidate build/tests, prepare, and scratch control probe had
+passed, but they do not satisfy the failed gate.
+
+The first repair candidate gives each phase distinct synthetic failure summaries and keeps
+them deterministic within that phase. Production comment deduplication is unchanged.
+Its signed head `ac383b575f1a862311a2419a775f88ea44ac1afe` passed
+[CI](https://github.com/civitaspo/securefix-server/actions/runs/38887298255).
+The subsequent [repair-propose run](https://github.com/civitaspo/securefix-server/actions/runs/38887691959)
+failed before qualification or PR creation: a second App token request asked for
+Administration read plus Contents/Pull requests read across ten repositories and
+GitHub rejected it with HTTP 422. The first server-scoped writer token succeeded.
+The response does not identify which requested installation grant was absent.
+
+The combined recovery candidate removes repository-settings preflights from normal
+merge, activation, publication, and bootstrap/repair operations, and deletes the
+associated token requests. Repository configuration belongs to the existing dedicated
+`repo-settings.yml` reconciliation flow. Operation-specific actor, owner review,
+exact-head CI, provenance, control identity, and CAS checks remain. Runtime publication
+and loading require the actual published Release to report `immutable=true`; asset
+identity, size, and digest checks remain. The bootstrap repair guard still excludes
+its workflow and helper, so this authority correction requires separate reviewed
+recovery. It cannot use the bounded repair lane to change its own trust root.
+
+Opening [repair PR #95](https://github.com/civitaspo/securefix-server/pull/95) exposed
+another independent failure: [Approve Request 38978227791](https://github.com/civitaspo/securefix-server/actions/runs/38978227791)
+failed at workflow validation, before any job ran. GitHub reported that the nested
+`build` job requested `actions: read` while its caller allowed `actions: none`.
+The server approval/merge entry workflows and five generated caller templates lacked
+that `GITHUB_TOKEN` grant; the policy-check template already had it. The combined
+candidate adds the required read grant, including the supported autofix call chain,
+and checks caller permissions against each called workflow's jobs. This permission
+lets the loader inspect publisher-run provenance; it does not grant repository
+Administration or change any GitHub App permission. Existing caller files still need
+reviewed distribution after activation. The PR's
+[Policy Check 38978227813](https://github.com/civitaspo/securefix-server/actions/runs/38978227813)
+failed at the current main's missing-descriptor loader boundary. A passing branch CI
+does not establish that these PR-target workflows have recovered on main.
+
+The combined candidate passed local **32 library, 236 binary, and 2 native Rust
+tests**; 2 binary tests remain ignored. All **15 Python bootstrap tests**, formatting,
+Clippy with warnings denied, and pinned actionlint passed. Strict API fixtures exercise
+repair qualification and publication without administrative settings reads, and runtime
+verification rejects false or absent immutable state. These are local results; there
+is no successful repaired protected-main bootstrap result yet.
+
+All disposable fixtures and refs from the failed run were cleaned, the four scratch
+handlers were restored, and native auto-merge remains disabled. Normal operation is
+paused because `control/active.json` is absent; the post-merge Policy Check failed
+closed with HTTP 404 in the loader. The scheduled
+[Repository settings run](https://github.com/civitaspo/securefix-server/actions/runs/38957102703)
+stopped at the same missing-descriptor boundary. No production runtime publication,
+descriptor activation, or caller distribution occurred.
+
+## Rust bootstrap correction (2026-10-17)
+
+The Python bootstrap implementation and its tests were introduced without an owner
+decision and violated the required Rust implementation boundary. They are removed.
+The earlier Python test results above describe superseded source and do not certify
+the corrected implementation.
+
+The existing Rust package now contains `securefix-bootstrap` alongside the normal
+`securefix` CLI. `build-bootstrap-host.yml` compiles the fixed host from its actual
+defining workflow SHA without production credentials and uploads only that binary.
+The host embeds its source SHA and policy and requires an exact protected-main owner
+dispatch. Credentialed jobs download the host by immutable artifact ID. Candidate
+archives remain data: the host validates bounded tar/gzip contents, exact policy,
+attestation, immutable release identity, scratch evidence, review, and CI before
+writing. The normal runtime API's active-descriptor write guard is unchanged.
+
+Repair protects all `.github/` workflows/actions (including the CI and scratch proof
+producers), the Rust source closure, policy and locked build
+inputs, including renamed paths. Manifest/lockfile changes permit only an advancing
+root package version with every other field unchanged. Bootstrap still stops when
+the active descriptor exists. The self-repair restriction has not been removed.
+
+The corrected assembled suite passed **32 library, 236 normal binary, 17 bootstrap
+binary, and 2 native integration tests** (287 passed; 2 ignored). Workflow tests
+require a separate credential-free host build, source binding, immutable artifact
+selection, and removal of the Python implementation and test files. These local
+results do not establish repaired protected-main execution, publication, or activation.
+
+Formatting, Clippy with warnings denied, and pinned actionlint also passed. A separate
+static code review found that repair could change its CI and scratch-evidence
+producers. The `.github/` exclusion above closes both findings and also prevents a
+new workflow from impersonating the required check. The follow-up review found no
+further actionable issue; it did not execute tests or inspect production.
+
+## Multiple PR check suites correction (2026-10-17)
+
+The first separately approved executor proposed [PR #96](https://github.com/civitaspo/securefix-server/pull/96)
+at the same signed head as PR #95. Both required CI suites succeeded, but GitHub's
+`filter=latest` check-runs response retained a `status-check` for each PR suite.
+The operator stopped before owner review or merge because the qualification guard
+incorrectly required exactly one matching check. The temporary environment admission
+and source-approval variable were removed; main was unchanged.
+
+The shared Rust bootstrap guard now requires at least one matching check from the
+configured GitHub Actions App and requires every matching latest check to be completed
+and successful. Multiple successful PR suites are accepted; an absent check or any
+pending or failing matching suite is rejected. Regression cases also reject an
+untrusted App as the only producer. This correction applies to publication, repair,
+activation, and the separate recovery executor through the same guard.
+
+The normal publication and activation validators had the same uniqueness
+assumption and now accept multiple successful trusted suites as well. The bounded
+publication query rejects a full response page rather than accepting potentially
+truncated evidence. The corrected local suite passed **32 library, 238 normal
+binary, 18 bootstrap binary, and 2 native integration tests** (290 passed;
+2 ignored), using a separate Cargo target directory for this source copy.
+
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent
-human security assurance. The owner subsequently authorized merge; the normal exact-
-head approval and required checks still apply.
+human security assurance. The owner authorized the earlier PR #94 merge. This combined
+recovery candidate still requires its own review and merge authorization.
 
-The permanent settings rollout described above is complete. Every operational lane
-checks this configuration before performing mutations.
+The permanent settings rollout described above is complete. `repo-settings.yml` owns
+configuration validation and reconciliation using its dedicated management credential.
+Operational lanes validate their own required evidence and actual published Release
+immutability without requesting administrative settings access.
 
-The protected-main `phase=bootstrap` scratch gate is necessarily post-merge and remains
-unexecuted. It must pass during the finite bootstrap pause before initial publication
+The protected-main `phase=bootstrap` scratch gate is necessarily post-merge. Its first
+attempt failed as recorded above; a repaired-source run must pass before initial publication
 or descriptor activation is proposed. The old v0.2.20 runtime is not claimed to remain
 available after that first main advance. The bounded repair lane excludes
-`control-bootstrap.yml` and `scripts/control-bootstrap.py`; a defect in that authority
+the bootstrap workflows and Rust authority/build inputs; a defect in that authority
 needs separately reviewed recovery. Invalid/missing active descriptors, missing release
 assets, failed attestation, and unavailable required GitHub services still fail closed.
 

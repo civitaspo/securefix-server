@@ -39,10 +39,14 @@ For the supported managed autofix layout, runtime distribution also migrates
 `wc-autofix.yml`, `workflow_call_pr.yml`, and `pull_request.yml`. It preserves
 the existing formatter, check and configuration steps, replaces the legacy
 client step with this action and a narrowly scoped token step, and adds
-`attestations: read` throughout the reusable-workflow call chain. Subsequent
-promotions update the action and runtime pins together. Server identities and
-App IDs come from the trusted deployment configuration. Unsupported action
-inputs, ambiguous step layouts and write permissions stop the migration.
+`actions: read` and `attestations: read` to the three managed jobs. The loader
+uses `actions: read` to inspect the descriptor-selected publisher run, then
+downloads its release asset and verifies its attestation. A prior generated
+layout with attestation access but without `actions: read` is upgraded on the
+next distribution. Subsequent promotions update the action and runtime pins
+together. Server identities and App IDs come from the trusted deployment
+configuration. Unsupported action inputs, ambiguous step layouts and write
+permissions stop the migration.
 
 Distribution also adds a positive `status-check` aggregator to the supported
 default-branch push CI. For the minimal CI layout it adds default-branch push

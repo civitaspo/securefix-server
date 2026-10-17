@@ -16,6 +16,6 @@ runs:
       shell: bash
       working-directory: ${{ github.action_path }}/../../..
       run: |
-        cargo +1.99.0 build --locked --release
+        cargo +1.99.0 build --locked --release --bin securefix
         install -m 644 policy.json target/release/policy.json
         echo "binary=$PWD/target/release/securefix" >> "$GITHUB_OUTPUT"

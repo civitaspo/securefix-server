@@ -60,7 +60,9 @@ API. No temporary ruleset exception is part of this migration, and no production
 settings change has been made as part of this proposal.
 
 The one-time `control-bootstrap.yml` path is an explicitly reviewed protected-main
-authority. Its fixed Python helper independently checks the source and workflow runs,
+authority. Its `securefix-bootstrap` Rust binary is compiled from the exact workflow
+SHA by `build-bootstrap-host.yml` in a separate job without production credentials.
+The binary embeds that source SHA and rejects a mismatched dispatch. It independently checks the source and workflow runs,
 candidate artifact ID, attestation, archive and bundled policy, scratch proof, current
 main, absent descriptor, and pull request before a write. Qualification treats the
 candidate archive as data and never executes its binary. App-token jobs use the
@@ -70,7 +72,7 @@ descriptor PR; the second requires a separate owner-reviewed dispatch and rechec
 expected main SHA, exact PR head, descriptor identity, and required CI before merging
 with expected-head CAS. If publication succeeded but a later step failed, a retry may
 reuse the reserved release only when it is already immutable and published and the
-helper re-downloads the bounded asset, verifies its GitHub size and digest, checks the
+host re-downloads the bounded asset, verifies its GitHub size and digest, checks the
 archive policy against the exact source, and verifies the fixed bootstrap attestation.
 A draft with mismatched asset metadata fails closed. This fixed producer never runs
 again after generation one. A later rollback can select the same archive in a new normal
@@ -91,38 +93,18 @@ The bootstrap scratch rehearsal has its own `phase=bootstrap` in
 `testing-securefix-server.yml`. It verifies the pinned v0.2.20 legacy runtime by
 release ID `414653308`, asset ID `646481902`, archive digest, GitHub attestation, and
 runtime verification against source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`.
-Before minting scratch App tokens, the fixed helper checks that the dispatch came from
+Before minting scratch App tokens, the fixed Rust host checks that the dispatch came from
 current protected main and that `control/active.json` is absent. The pinned runtime
 validates the fixture output files. The candidate runtime prepares and verifies the
 scratch integration fixtures and runs the scratch-only control probe. This avoids using
 the current-main `validate-producer` path as its own initial trust baseline. It verifies
 the bootstrap test path, not production publication, activation, or distribution.
 
-While `control/active.json` is absent, recovery is split into `repair-propose` and
-`repair-merge`. Before `repair-propose`, dispatch the `CI` workflow on the signed repair
-branch and wait for its required `status-check` to pass; CI runs automatically for PRs
-and pushes to `main`, but not for an arbitrary repair branch. The first phase verifies
-the exact expected main, signed descendant commits, successful required checks, and
-allowed changed paths, then asks the Server App to open a PR. It does not require owner
-review because the PR does not yet exist. The owner reviews the newly opened PR at its
-exact head. The separate `repair-merge` phase repeats qualification, including the
-latest owner review for that exact head, and merges by expected-head CAS. Repair cannot change
-`control/active.json`, `.github/workflows/control-bootstrap.yml`, or
-`scripts/control-bootstrap.py`; a defect in the bootstrap trust root needs a separately
-reviewed recovery. This bounded lane allows reviewed code repairs during the finite
-pre-generation-one pause, does not restore v0.2.20 availability, and stops once the
-descriptor exists.
+While `control/active.json` is absent, the current proposal does not provide a proven recovery route. Ordinary Policy Check and repository-settings loads fail closed when the descriptor lookup returns 404. The proposed `repair-propose` path has not passed prequalification: a failed prequalification opens no PR, so its paired `repair-merge` phase cannot recover the control path. A scheduled settings run also fails at descriptor loading; the dedicated settings administrator credential does not make a missing runtime descriptor valid.
 
-The bootstrap producer, first activation sequence, and failure behavior remain
-unverified. Before merging the first code PR, compile the implementation, pass the normal
-candidate scratch verification on a frozen integration branch, review the fixed
-bootstrap path and operator procedure, and explicitly approve and complete the permanent
-live-settings rollout. The protected-main `phase=bootstrap` scratch gate cannot run
-before that merge. After the first code PR merges, run that gate during the deliberate
-finite pause; it must pass before bootstrap publication or descriptor activation is
-proposed. The bounded repair phase can land reviewed fixes during this pause, but it is
-not an alternate runtime or a bypass. No claim is made that v0.2.20 remains available
-after the first protected-main advance.
+Do not describe this pause as recoverable through those phases until a separately reviewed recovery route has passed its end-to-end checks. Any route that changes the bootstrap workflow or fixed helper needs independent review. It must preserve the self-repair guard, signed source and owner-head CI checks, exact-head compare-and-swap, and must not use a temporary ruleset exception or direct main API write. No route may infer a runtime from main or use an unverified archive. The dated deployment report records prior runtime evidence only; it is not proof that bootstrap or repair works.
+
+Repository settings remain owned by the periodic `repo-settings.yml` management flow and its existing dedicated administrator credential. Normal PR creation, approval, merge, runtime publication, control activation, and bootstrap/repair do not read administrative settings or receive that credential or Server App Administration read permission. This boundary does not remove required source provenance, owner and exact-head checks, CI, immutable-release verification, signature/attestation, archive verification, or activation CAS.
 
 The deployment and verification reports dated before this proposal document evidence for the earlier runtime contract only. They do not establish that this lifecycle, bootstrap path, or proposed code has been deployed or verified.
 

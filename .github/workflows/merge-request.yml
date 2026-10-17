@@ -20,6 +20,7 @@ jobs:
       github.run_attempt == 1
     uses: ./.github/workflows/reusable-merge-request.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
       issues: write

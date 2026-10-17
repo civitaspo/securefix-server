@@ -13,6 +13,7 @@ concurrency:
 jobs:
   sync:
     permissions:
+      actions: read
       contents: read
       attestations: read
       pull-requests: write

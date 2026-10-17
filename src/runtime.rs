@@ -145,9 +145,8 @@ pub fn run(command: Command) -> Result<()> {
             archive,
         } => {
             let api = GitHub::from_env("GITHUB_TOKEN")?;
-            let preflight_api = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
             securefix::control::require_runtime(&api)?;
-            publish(&api, &preflight_api, &source_sha, &archive).map(|_| ())
+            publish(&api, &source_sha, &archive).map(|_| ())
         }
         Command::Verify {
             source_sha,
@@ -321,13 +320,7 @@ fn require_unused_version(api: &GitHub, repository: &str, version: &RuntimeVersi
     Ok(())
 }
 
-fn publish(
-    api: &GitHub,
-    preflight_api: &GitHub,
-    source_sha: &str,
-    archive_path: &Path,
-) -> Result<Publication> {
-    crate::settings::require_server_immutable_releases(preflight_api)?;
+fn publish(api: &GitHub, source_sha: &str, archive_path: &Path) -> Result<Publication> {
     let trusted = crate::config::trusted()?;
     let repository = trusted.deployment.server.repository.as_str();
     crate::policy::validate_sha(source_sha)?;
@@ -456,12 +449,15 @@ fn verify_candidate_commit(api: &GitHub, repository: &str, source_sha: &str) -> 
         .as_array()
         .context("candidate check runs malformed")?;
     ensure!(
-        matches.len() == 1
-            && matches[0]["name"] == "status-check"
-            && matches[0]["app"]["id"] == status_app_id
-            && matches[0]["status"] == "completed"
-            && matches[0]["conclusion"] == "success",
-        "candidate CI status-check is not a unique successful check"
+        !matches.is_empty()
+            && matches.len() < 100
+            && matches.iter().all(|check| {
+                check["name"] == "status-check"
+                    && check["app"]["id"] == status_app_id
+                    && check["status"] == "completed"
+                    && check["conclusion"] == "success"
+            }),
+        "candidate CI status-check is missing, truncated, pending, or failing"
     );
     Ok(())
 }
@@ -548,6 +544,12 @@ fn validate_release(release: &Value, source_sha: &str, tag: &str, prerelease: bo
         release["draft"].is_boolean(),
         "runtime release draft state missing"
     );
+    if release["draft"] == false {
+        ensure!(
+            release["immutable"] == true,
+            "runtime release is not immutable"
+        );
+    }
     ensure!(
         release["prerelease"] == prerelease,
         "runtime release prerelease state mismatch"
@@ -655,10 +657,6 @@ mod tests {
         )
     }
 
-    fn immutable_releases_route() -> Route {
-        Route::get(path("/immutable-releases"), json!({"enabled":true}))
-    }
-
     fn candidate_checks_routes() -> Vec<Route> {
         let repository = &crate::config::trusted()
             .unwrap()
@@ -688,13 +686,46 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn candidate_checks_accept_multiple_successful_suites_and_reject_incomplete_evidence() {
+        let trusted = crate::config::trusted().unwrap();
+        let repository = &trusted.deployment.server.repository;
+        let status_app_id = trusted.deployment.checks.status_app_id;
+        let check = json!({"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"success"});
+        let mut pending = check.clone();
+        pending["status"] = json!("in_progress");
+        pending["conclusion"] = Value::Null;
+        let mut failed = check.clone();
+        failed["conclusion"] = json!("failure");
+        let mut foreign = check.clone();
+        foreign["app"]["id"] = json!(1);
+        for (checks, accepted) in [
+            (json!([]), false),
+            (json!([check.clone(), check.clone()]), true),
+            (json!([check.clone(), pending]), false),
+            (json!([check.clone(), failed]), false),
+            (json!([foreign]), false),
+            (json!(vec![check; 100]), false),
+        ] {
+            let mut routes = candidate_checks_routes();
+            routes.pop();
+            routes.push(Route::get(format!("/repos/{repository}/commits/{SHA}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"), json!({"check_runs":checks})));
+            let fixture = Fixture::new(routes);
+            assert_eq!(
+                verify_candidate_commit(&fixture.api, repository, SHA).is_ok(),
+                accepted
+            );
+            fixture.finish();
+        }
+    }
+
     fn release(draft: bool, assets: Value) -> Value {
-        json!({"id":7,"tag_name":tag(),"name":tag(),"target_commitish":SHA,"draft":draft,"prerelease":!version().as_semver().pre.is_empty(),"assets":assets})
+        json!({"id":7,"tag_name":tag(),"name":tag(),"target_commitish":SHA,"draft":draft,"immutable":!draft,"prerelease":!version().as_semver().pre.is_empty(),"assets":assets})
     }
 
     fn release_for(version: &str, draft: bool, assets: Value) -> Value {
         let parsed = RuntimeVersion::parse(version).unwrap();
-        json!({"id":7,"tag_name":parsed.tag(),"name":parsed.tag(),"target_commitish":SHA,"draft":draft,"prerelease":!parsed.as_semver().pre.is_empty(),"assets":assets})
+        json!({"id":7,"tag_name":parsed.tag(),"name":parsed.tag(),"target_commitish":SHA,"draft":draft,"immutable":!draft,"prerelease":!parsed.as_semver().pre.is_empty(),"assets":assets})
     }
 
     fn asset(bytes: &[u8]) -> Value {
@@ -817,25 +848,10 @@ mod tests {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
         let fixture = Fixture::new(vec![
-            immutable_releases_route(),
             repository_route(),
             main_route("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
         ]);
-        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
-        fixture.finish();
-    }
-
-    #[test]
-    fn mutable_server_release_setting_stops_publication_before_any_write() {
-        let archive = NamedTempFile::new().unwrap();
-        std::fs::write(archive.path(), b"archive").unwrap();
-        let fixture = Fixture::new(vec![Route::get(
-            path("/immutable-releases"),
-            json!({"enabled":false}),
-        )]);
-
-        let error = publish(&fixture.api, &fixture.api, SHA, archive.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("immutable releases must be enabled"));
+        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
         fixture.finish();
     }
 
@@ -860,11 +876,7 @@ mod tests {
         let release_path = path(&format!("/releases/tags/{}", tag()));
         let numbered_release = path("/releases/7");
         let existing = release(false, json!([asset(b"archive")]));
-        let mut routes = vec![
-            immutable_releases_route(),
-            repository_route(),
-            main_route(SHA),
-        ];
+        let mut routes = vec![repository_route(), main_route(SHA)];
         routes.extend(candidate_checks_routes());
         routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
@@ -886,7 +898,7 @@ mod tests {
             Route::get(release_path, existing),
         ]);
         let fixture = Fixture::new(routes);
-        publish(&fixture.api, &fixture.api, SHA, archive.path()).unwrap();
+        publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
     }
 
@@ -917,6 +929,37 @@ mod tests {
         );
         assert_eq!((publication.release_id, publication.asset_id), (7, 8));
         fixture.finish();
+    }
+
+    #[test]
+    fn publication_verification_rejects_false_or_missing_immutable_state() {
+        let archive = NamedTempFile::new().unwrap();
+        std::fs::write(archive.path(), b"archive").unwrap();
+        for immutable in [Some(json!(false)), None] {
+            let mut mutable = release(false, json!([asset(b"archive")]));
+            if let Some(value) = immutable {
+                mutable["immutable"] = value;
+            } else {
+                mutable.as_object_mut().unwrap().remove("immutable");
+            }
+            let fixture = Fixture::new(vec![
+                Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
+                Route::get(
+                    path(&format!("/git/ref/tags/{}", tag())),
+                    json!({"object":{"type":"commit","sha":SHA}}),
+                ),
+                Route::get(path(&format!("/releases/tags/{}", tag())), mutable),
+            ]);
+            let error = verify_publication(
+                &fixture.api,
+                SHA,
+                "civitaspo/securefix-server",
+                archive.path(),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("runtime release is not immutable"));
+            fixture.finish();
+        }
     }
 
     #[test]
@@ -962,7 +1005,6 @@ mod tests {
             .checks
             .status_app_id;
         let routes = vec![
-            immutable_releases_route(),
             Route::get(
                 format!("/repos/{repository}"),
                 json!({"id":server.id,"default_branch":server.default_branch}),
@@ -989,7 +1031,7 @@ mod tests {
         let fixture = Fixture::new(routes);
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"archive").unwrap();
-        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
+        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
         fixture.finish();
     }
 
@@ -1010,7 +1052,6 @@ mod tests {
         let repair_path = format!("/repos/{repository}/issues/17/comments");
         let repair_body = json!({"body":"repair under the still-active runtime"});
         let fixture = Fixture::new(vec![
-            immutable_releases_route(),
             Route::get(
                 format!("/repos/{repository}"),
                 json!({"id":server.id,"default_branch":server.default_branch}),
@@ -1045,11 +1086,10 @@ mod tests {
         let archive = NamedTempFile::new().unwrap();
         std::fs::write(archive.path(), b"candidate archive").unwrap();
 
-        let error =
-            publish(&fixture.api, &fixture.api, &candidate_sha, archive.path()).unwrap_err();
+        let error = publish(&fixture.api, &candidate_sha, archive.path()).unwrap_err();
         assert!(
             format!("{error:#}")
-                .contains("candidate CI status-check is not a unique successful check")
+                .contains("candidate CI status-check is missing, truncated, pending, or failing")
         );
 
         let repair: Value = fixture.api.post(&repair_path, &repair_body).unwrap();
@@ -1152,11 +1192,7 @@ mod tests {
         let numbered_release = path("/releases/7");
         let draft = release(true, json!([asset(b"archive")]));
         let published = release(false, json!([asset(b"archive")]));
-        let mut routes = vec![
-            immutable_releases_route(),
-            repository_route(),
-            main_route(SHA),
-        ];
+        let mut routes = vec![repository_route(), main_route(SHA)];
         routes.extend(candidate_checks_routes());
         routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
@@ -1183,7 +1219,7 @@ mod tests {
             Route::get(release_path, published),
         ]);
         let fixture = Fixture::new(routes);
-        publish(&fixture.api, &fixture.api, SHA, archive.path()).unwrap();
+        publish(&fixture.api, SHA, archive.path()).unwrap();
         fixture.finish();
     }
 
@@ -1193,18 +1229,14 @@ mod tests {
         std::fs::write(archive.path(), b"archive").unwrap();
         let release_path = path(&format!("/releases/tags/{}", tag()));
         let mismatch = release(true, json!([asset(b"different bytes")]));
-        let mut routes = vec![
-            immutable_releases_route(),
-            repository_route(),
-            main_route(SHA),
-        ];
+        let mut routes = vec![repository_route(), main_route(SHA)];
         routes.extend(candidate_checks_routes());
         routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
             Route::get(release_path, mismatch),
         ]);
         let fixture = Fixture::new(routes);
-        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
+        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
         fixture.finish();
     }
 
@@ -1297,18 +1329,14 @@ mod tests {
         std::fs::write(archive.path(), b"archive").unwrap();
         let mut old_release = release(false, json!([asset(b"archive")]));
         old_release["target_commitish"] = json!("b".repeat(40));
-        let mut routes = vec![
-            immutable_releases_route(),
-            repository_route(),
-            main_route(SHA),
-        ];
+        let mut routes = vec![repository_route(), main_route(SHA)];
         routes.extend(candidate_checks_routes());
         routes.extend(vec![
             Route::get(path(&format!("/contents/Cargo.toml?ref={SHA}")), manifest()),
             Route::get(path(&format!("/releases/tags/{}", tag())), old_release),
         ]);
         let fixture = Fixture::new(routes);
-        assert!(publish(&fixture.api, &fixture.api, SHA, archive.path()).is_err());
+        assert!(publish(&fixture.api, SHA, archive.path()).is_err());
         fixture.finish();
     }
 }

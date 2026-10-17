@@ -20,6 +20,7 @@ concurrency:
 jobs:
   approve:
     permissions:
+      actions: read
       contents: read
       attestations: read
       issues: write

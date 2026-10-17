@@ -20,7 +20,7 @@ Every change in the server repository is sensitive.
 
 Client wrappers are `.github/workflows/approve-request.yml` and `.github/workflows/merge-request.yml`.
 They call the corresponding reusable at the source SHA selected by the active control revision.
-The caller grants `contents: read`, `attestations: read`, `issues: read`, and `pull-requests: read`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
+The caller grants `actions: read`, `contents: read`, `attestations: read`, `issues: write`, and `pull-requests: write`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
 The Client App creates a server label whose description is only `civitaspo/<repository>/<run ID>`.
 The versioned manifest travels as an immutable source-run artifact.
 
@@ -56,7 +56,7 @@ The contents-write token is created after readiness succeeds and is scoped to th
 The Merge API receives the accepted SHA as its optimistic precondition.
 HTTP 405, 422, and 503 retry within the same deadline after full revalidation; head conflicts fail immediately.
 The squash body retains the PR description and unique co-author trailers.
-For ordinary PRs, GitHub's review/check rules remain active and the Rust processor independently checks the review and required statuses before calling the Merge API. The controlled-merge rulesets name only the Server App with pull-request-only bypass; live preflight verifies that exact actor and mode. The bypass does not authorize a merge by itself: all protected mutations pass through the serialized server Actions lane and its Rust owner, review, check, exact-head, and control-identity checks. Runtime distribution opens reviewable caller PRs. Native Renovate auto-merge is disabled, so an owner must issue `/merge` for a Renovate PR after its required checks pass.
+For ordinary PRs, GitHub's review/check rules remain active and the Rust processor independently checks the review and required statuses before calling the Merge API. The controlled-merge rulesets name only the Server App with pull-request-only bypass; the dedicated repository-settings flow verifies that exact actor and mode. The bypass does not authorize a merge by itself: all protected mutations pass through the serialized server Actions lane and its Rust owner, review, check, exact-head, and control-identity checks. Runtime distribution opens reviewable caller PRs. Native Renovate auto-merge is disabled, so an owner must issue `/merge` for a Renovate PR after its required checks pass.
 Comment/timeline reads and the Merge API are separate requests, so timeline visibility can lag; the SHA precondition prevents merging a different head.
 
 The Server App needs `actions: read`, `checks: write`, `statuses: read`, `contents: write`, `issues: write`, and `pull requests: write` on clients.

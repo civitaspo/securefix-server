@@ -46,14 +46,33 @@ pub(super) fn validate_previous_generation(
             }
         }
     }
+    if previous["jobs"]["autofix"]["permissions"]["actions"].is_null() {
+        previous["jobs"]["autofix"]["permissions"]["actions"] = Value::String("read".into());
+    }
     let autofix_is_native = serde_yaml::from_slice::<Value>(&migrated)? == previous;
     if let Some(native_sha) = native_runtime_sha(autofix)? {
         ensure!(
             native_sha == runtime_sha && autofix_is_native,
             "automation branch Securefix client pin does not match its generation"
         );
-        let (migrated_pull_request, migrated_workflow_call) =
+        let previous_pull_actions = validate_call_permission(
+            pull_request,
+            "./.github/workflows/workflow_call_pr.yml",
+            "pull request workflow",
+        )?;
+        let previous_inner_actions = validate_call_permission(
+            workflow_call,
+            "./.github/workflows/wc-autofix.yml",
+            "workflow-call PR workflow",
+        )?;
+        let (mut migrated_pull_request, mut migrated_workflow_call) =
             migrate_call_chain(pull_request, workflow_call)?;
+        if !previous_pull_actions {
+            migrated_pull_request = without_actions_read(&migrated_pull_request)?;
+        }
+        if !previous_inner_actions {
+            migrated_workflow_call = without_actions_read(&migrated_workflow_call)?;
+        }
         ensure!(
             migrated_pull_request == *pull_request && migrated_workflow_call == *workflow_call,
             "automation branch has a partially migrated Securefix client workflow chain"
@@ -209,7 +228,7 @@ pub(super) fn validate_call_file(source: &[u8], path: &str) -> Result<()> {
         ),
         _ => anyhow::bail!("unsupported caller workflow path"),
     };
-    validate_call_permission(source, reusable, description)
+    validate_call_permission(source, reusable, description).map(|_| ())
 }
 
 fn add_permission_to_call(source: &[u8], reusable: &str, description: &str) -> Result<Vec<u8>> {
@@ -235,7 +254,7 @@ fn add_permission_to_call(source: &[u8], reusable: &str, description: &str) -> R
     add_permission(text, job_name, &workflow, description).map(String::into_bytes)
 }
 
-fn validate_call_permission(source: &[u8], reusable: &str, description: &str) -> Result<()> {
+fn validate_call_permission(source: &[u8], reusable: &str, description: &str) -> Result<bool> {
     let text =
         std::str::from_utf8(source).with_context(|| format!("{description} is not UTF-8"))?;
     let workflow: Value =
@@ -263,7 +282,10 @@ fn validate_autofix_permissions(value: &Value) -> Result<()> {
         permissions.get("contents").and_then(Value::as_str) == Some("read")
             && permissions
                 .keys()
-                .all(|key| matches!(key.as_str(), Some("contents" | "attestations")))
+                .all(|key| matches!(key.as_str(), Some("contents" | "actions" | "attestations")))
+            && permissions
+                .get("actions")
+                .is_none_or(|value| value.as_str() == Some("read"))
             && permissions
                 .get("attestations")
                 .is_none_or(|value| value.as_str() == Some("read")),
@@ -272,7 +294,7 @@ fn validate_autofix_permissions(value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_read_permissions(value: &Value) -> Result<()> {
+fn validate_read_permissions(value: &Value) -> Result<bool> {
     let permissions = value
         .as_mapping()
         .context("reusable caller permissions are missing")?;
@@ -280,14 +302,28 @@ fn validate_read_permissions(value: &Value) -> Result<()> {
         permissions.get("contents").and_then(Value::as_str) == Some("read")
             && permissions.keys().all(|key| matches!(
                 key.as_str(),
-                Some("contents" | "attestations" | "pull-requests")
+                Some("contents" | "actions" | "attestations" | "pull-requests")
             ))
             && permissions
                 .values()
                 .all(|value| value.as_str() == Some("read")),
         "reusable caller permissions are unsupported"
     );
-    Ok(())
+    Ok(permissions.contains_key("actions"))
+}
+
+fn without_actions_read(source: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(source).context("generated caller workflow is not UTF-8")?;
+    let needle = if text.contains("      actions: read\r\n") {
+        "      actions: read\r\n"
+    } else {
+        "      actions: read\n"
+    };
+    ensure!(
+        text.matches(needle).count() == 1,
+        "generated caller actions permission source anchor is ambiguous"
+    );
+    Ok(text.replacen(needle, "", 1).into_bytes())
 }
 
 fn find_detection_step(steps: &[Value]) -> Result<(usize, String)> {
@@ -569,7 +605,10 @@ fn add_permission(
     let permissions = workflow["jobs"][job_name]["permissions"]
         .as_mapping()
         .with_context(|| format!("{description} permissions are missing"))?;
-    if permissions.get("attestations").and_then(Value::as_str) == Some("read") {
+    let needs_actions = permissions.get("actions").and_then(Value::as_str) != Some("read");
+    let needs_attestations =
+        permissions.get("attestations").and_then(Value::as_str) != Some("read");
+    if !needs_actions && !needs_attestations {
         return Ok(source.to_owned());
     }
     ensure!(
@@ -629,7 +668,14 @@ fn add_permission(
         "\n"
     };
     let mut result = source.to_owned();
-    result.insert_str(insert_at, &format!("      attestations: read{newline}"));
+    let mut additions = String::new();
+    if needs_actions {
+        additions.push_str(&format!("      actions: read{newline}"));
+    }
+    if needs_attestations {
+        additions.push_str(&format!("      attestations: read{newline}"));
+    }
+    result.insert_str(insert_at, &additions);
     Ok(result)
 }
 
@@ -688,6 +734,7 @@ mod tests {
         let migrated =
             migrate_autofix(original.as_bytes(), &"a".repeat(40), "v0.2.0-pre.1").unwrap();
         let migrated = String::from_utf8(migrated).unwrap();
+        assert!(migrated.contains("actions: read"));
         assert!(migrated.contains("attestations: read"));
         assert!(migrated.contains(
             "git ls-files --modified --deleted --others --exclude-standard --deduplicate"
@@ -701,16 +748,38 @@ mod tests {
     }
 
     #[test]
-    fn client_workflow_chain_migration_adds_only_attestation_read() {
+    fn client_workflow_chain_migration_adds_loader_read_permissions() {
         let (pull_request, workflow_call) = caller_chain();
         let (pull_request, workflow_call) =
             migrate_call_chain(&pull_request, &workflow_call).unwrap();
         assert!(String::from_utf8_lossy(&pull_request).contains("attestations: read"));
+        assert!(String::from_utf8_lossy(&pull_request).contains("actions: read"));
         assert!(String::from_utf8_lossy(&pull_request).contains("pull-requests: read"));
         assert!(String::from_utf8_lossy(&workflow_call).contains("attestations: read"));
+        assert!(String::from_utf8_lossy(&workflow_call).contains("actions: read"));
         assert_eq!(
             migrate_call_chain(&pull_request, &workflow_call).unwrap(),
             (pull_request, workflow_call)
+        );
+
+        let (pull_request, workflow_call) = caller_chain();
+        let pull_request = String::from_utf8(pull_request).unwrap().replace(
+            "      contents: read\n",
+            "      contents: read\n      attestations: read\n",
+        );
+        let workflow_call = String::from_utf8(workflow_call).unwrap().replace(
+            "      contents: read\n",
+            "      contents: read\n      attestations: read\n",
+        );
+        let (pull_request, workflow_call) =
+            migrate_call_chain(pull_request.as_bytes(), workflow_call.as_bytes()).unwrap();
+        assert!(String::from_utf8_lossy(&pull_request).contains("actions: read"));
+        assert!(String::from_utf8_lossy(&workflow_call).contains("actions: read"));
+        assert_eq!(
+            String::from_utf8_lossy(&pull_request)
+                .matches("attestations: read")
+                .count(),
+            1
         );
     }
 
@@ -764,6 +833,25 @@ mod tests {
             "      contents: read\n      issues: write",
         );
         assert!(migrate_call_chain(extra_permission.as_bytes(), &workflow_call).is_err());
+
+        let write_permission = String::from_utf8(caller_chain().0).unwrap().replace(
+            "      contents: read",
+            "      contents: read\n      actions: write",
+        );
+        assert!(migrate_call_chain(write_permission.as_bytes(), &workflow_call).is_err());
+
+        let write_autofix_permission = original.replace(
+            "      contents: read",
+            "      contents: read\n      actions: write",
+        );
+        assert!(
+            migrate_autofix(
+                write_autofix_permission.as_bytes(),
+                &"a".repeat(40),
+                "v0.2.0-pre.1"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -787,6 +875,28 @@ mod tests {
             (CALLER_PATH.to_owned(), workflow_call),
         ]);
         assert!(validate_previous_generation(&files, &"a".repeat(40)).is_ok());
+        let mut previous_attestation_only = files.clone();
+        for path in [AUTOFIX_PATH, PULL_REQUEST_PATH, CALLER_PATH] {
+            let source = String::from_utf8(previous_attestation_only[path].clone())
+                .unwrap()
+                .replace("      actions: read\n", "");
+            previous_attestation_only.insert(path.to_owned(), source.into_bytes());
+        }
+        assert!(validate_previous_generation(&previous_attestation_only, &"a".repeat(40)).is_ok());
+        let upgraded_autofix = migrate_autofix(
+            &previous_attestation_only[AUTOFIX_PATH],
+            &"a".repeat(40),
+            "v0.2.0-pre.1",
+        )
+        .unwrap();
+        let (upgraded_pull_request, upgraded_workflow_call) = migrate_call_chain(
+            &previous_attestation_only[PULL_REQUEST_PATH],
+            &previous_attestation_only[CALLER_PATH],
+        )
+        .unwrap();
+        assert_eq!(upgraded_autofix, files[AUTOFIX_PATH]);
+        assert_eq!(upgraded_pull_request, files[PULL_REQUEST_PATH]);
+        assert_eq!(upgraded_workflow_call, files[CALLER_PATH]);
         files.insert(AUTOFIX_PATH.to_owned(), second.clone());
         assert!(validate_previous_generation(&files, &"a".repeat(40)).is_err());
         files.insert(AUTOFIX_PATH.to_owned(), second);

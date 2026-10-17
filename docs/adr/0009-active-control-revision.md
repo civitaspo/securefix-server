@@ -12,7 +12,7 @@ An ordinary main commit does not change the active control revision. The active 
 
 The active controller validates a candidate publisher run and scratch-verification run before preparing an activation. It revalidates both when proposing the signed activation pull request. Candidate build and publication credentials cannot write `control/active.json`. The owner merges the resulting PR through the serialized server Actions lane. The current active control identity and the proposed successor identity are included in the request metadata, while owner commands, reviews, checks, and completion markers bind to both the exact PR head and full active control identity.
 
-All protected-main mutation workflows use the `securefix-control` concurrency group with `queue: max`. The rulesets retain the exact Server App pull-request bypass required by the controlled merge lane; settings preflight validates that identity and mode, and the bypass does not replace Rust owner, review, check, exact-head, or control-identity validation. No additional bypass actor or mode is added, and native Renovate auto-merge is disabled. The signed activation PR follows the same server Actions lane as other controlled mutations.
+The proposed protected-main mutation workflows use the `securefix-control` concurrency group with `queue: max`. The rulesets retain the exact Server App pull-request bypass required by the controlled merge lane; repository-settings management validates that identity and mode. Approval, merge, publication, activation, and bootstrap or repair do not query administrative settings or receive the dedicated repository-settings administrator credential or Server App Administration read permission. That separation does not relax owner, review, required CI, exact-head, control-identity, source provenance, signature, attestation, archive, or immutable-release checks. No additional bypass actor or mode is added, and native Renovate auto-merge is disabled. The signed activation PR follows the same server Actions lane as other controlled mutations.
 
 ## Failure and recovery
 
@@ -32,7 +32,9 @@ UI or API. This is a required rollout prerequisite, not a temporary exception. N
 production change has been authorized by this proposal.
 
 The proposed `control-bootstrap.yml` supplies a one-time, reviewed protected-main
-authority for the initial publication and descriptor proposal. Its fixed Python helper
+authority for the initial publication and descriptor proposal. Its `securefix-bootstrap`
+Rust binary is compiled from the exact workflow SHA in a separate job without
+production credentials and embeds that source identity. The binary
 independently qualifies the source and workflow runs, candidate artifact ID, attestation,
 archive and policy, scratch proof, current main, absent descriptor, and reviewed PR.
 Qualification is read-only and does not run the candidate executable; the archive is
@@ -64,22 +66,6 @@ output validation, and runs the candidate runtime's fixture preparation, verific
 and control probe only against scratch. This establishes a bootstrap test mode; it does
 not verify production publication, activation, or distribution.
 
-The proposal is not deployable until its code is compiled, the required bootstrap
-verification gate passes, and operators review the procedure. While the descriptor is
-absent, recovery uses `repair-propose` and `repair-merge`. Because required CI is not
-triggered for an arbitrary repair branch, the operator first dispatches `CI` on that
-signed branch and waits for the required `status-check` before `repair-propose`. The
-first phase checks exact main and head, signed descendant commits, successful required
-CI, and allowed changed paths before the Server App opens a PR; it does not require
-owner review before a PR exists. The owner then reviews the opened PR at its exact
-head. The second phase requires the latest exact-head owner review, repeats the other
-checks, and merges with expected-head CAS. Repair rejects
-changes to the active descriptor, bootstrap workflow, and fixed helper; a defect in
-those trusted files requires a separately reviewed recovery. This bounded lane allows
-reviewed fixes during the finite pause, does not select a runtime or claim v0.2.20
-remains operative, and permanently stops once the descriptor exists. The old v0.2.20
-runtime is available before the first protected-main advance only; this proposal does
-not claim it will remain operative after that advance. No production settings changes
-are made here.
+The proposal is not deployable until its code is compiled, the required bootstrap verification gate passes, and operators review the procedure. The bootstrap scratch rehearsal validates fixtures; it does not establish production publication, activation, or recovery. While the descriptor is absent, Policy Check and settings loads fail closed on descriptor lookup. The proposed `repair-propose` and `repair-merge` sequence has not demonstrated a recovery: failed prequalification creates no PR for the merge phase, and scheduled settings reconciliation also stops at the missing descriptor. Do not claim a proven recovery path or that v0.2.20 remains operative after main advances. A separately reviewed recovery may change the bootstrap trust root only with independent qualification; it must not weaken self-repair restrictions, bypass rulesets, or write directly to main. Preserve exact-head CI, review, provenance, immutable-release postconditions, signed attestation, archive verification, and CAS. Historical deployment reports cover the earlier runtime contract only. The protected-main `phase=bootstrap` scratch gate is post-merge by design; it must pass before proposing bootstrap publication or descriptor activation.
 
 The pull-request version check in this proposal is scoped to runtime inputs: Cargo manifests and lockfile, Rust sources, toolchain, policy, repository settings, CLI setup, and the runtime publisher workflow. Documentation-only changes do not require a package version increase. The bootstrap path and overall control lifecycle remain unverified, so this ADR describes a proposal rather than deployed behavior. Before the first code PR merges, compile the implementation, pass normal candidate scratch verification on a frozen integration branch, review the fixed bootstrap path and operator procedure, and explicitly approve and complete the permanent live-settings rollout. The protected-main `phase=bootstrap` scratch gate is post-merge by design: run it during the finite pause, and require it to pass before bootstrap publication or descriptor activation is proposed.

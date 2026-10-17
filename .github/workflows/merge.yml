@@ -187,7 +187,6 @@ jobs:
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
           owner: civitaspo
           permission-actions: read
-          permission-administration: read
           permission-checks: read
           permission-contents: read
           permission-issues: read

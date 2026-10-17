@@ -19,6 +19,7 @@ jobs:
       github.event.comment.user.id == @OWNER_ID@ &&
       github.run_attempt == 1
     permissions:
+      actions: read
       contents: read
       attestations: read
       issues: write

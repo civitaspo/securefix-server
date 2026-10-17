@@ -1808,6 +1808,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             .control
             .as_ref()
             .context("scratch policy control fixture missing")?,
+        Phase::Prepare,
     )?;
     println!("Prepared Securefix scratch integration state.");
     println!(
@@ -2738,6 +2739,7 @@ fn verify_inner(
             .control
             .as_ref()
             .context("scratch policy control fixture missing")?,
+        Phase::Verify,
     )?;
 
     request::validate_pr_authorization(
@@ -3045,20 +3047,26 @@ fn verify_inner(
     })
 }
 
+fn policy_feedback_probe_summaries(phase: Phase) -> [String; 2] {
+    [
+        "current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- \"Cargo.toml\"\n- \"Cargo.lock\"",
+        "policy rejection was superseded.",
+    ]
+    .map(|reason| format!("Integration {phase:?} probe: {reason}"))
+}
+
 fn verify_policy_feedback(
     api: &GitHub,
     fixture: &PullRequestFixture,
     control: &securefix::control::ControlRevision,
+    phase: Phase,
 ) -> Result<()> {
     let repo = integration_repository()?;
     let server_bot_id = trusted_config()?.server_bot_id;
     let mut failure_ids = Vec::new();
-    for reason in [
-        "Integration probe: current-head approval is missing.\n\nPost /approve for the current PR head.\nMatching paths:\n- \"Cargo.toml\"\n- \"Cargo.lock\"",
-        "Integration probe: policy rejection was superseded.",
-    ] {
-        policy_check::publish(api, repo, &fixture.head_sha, false, reason, control)?;
-        policy_check::report_result(api, repo, fixture.number, &fixture.head_sha, false, reason)?;
+    for reason in policy_feedback_probe_summaries(phase) {
+        policy_check::publish(api, repo, &fixture.head_sha, false, &reason, control)?;
+        policy_check::report_result(api, repo, fixture.number, &fixture.head_sha, false, &reason)?;
         let comments =
             api.paginate(&format!("/repos/{repo}/issues/{}/comments", fixture.number))?;
         let comment = comments
@@ -3384,23 +3392,6 @@ fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Resu
     )?;
     files.insert(".github/workflows/ci.yml".to_owned(), ci.into_bytes());
 
-    for path in [
-        ".github/workflows/pull_request.yml",
-        ".github/workflows/workflow_call_pr.yml",
-    ] {
-        let bytes = files
-            .get_mut(path)
-            .context("scratch caller workflow is missing")?;
-        let text = std::str::from_utf8(bytes)?;
-        let text = replace_once(
-            text,
-            "    permissions:\n      contents: read\n",
-            "    permissions:\n      actions: read\n      contents: read\n",
-            path,
-        )?;
-        *bytes = text.into_bytes();
-    }
-
     let autofix_path = ".github/workflows/wc-autofix.yml";
     let bytes = files
         .get_mut(autofix_path)
@@ -3408,7 +3399,7 @@ fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Resu
     let text = std::str::from_utf8(bytes)?;
     let text = replace_once(
         text,
-        "      contents: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}\n      SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}\n",
+        "      contents: read\n      actions: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: ${{ vars.SECUREFIX_CLIENT_APP_ID }}\n      SECUREFIX_SERVER_REPOSITORY: ${{ vars.SECUREFIX_SERVER_REPOSITORY }}\n",
         &format!(
             "      actions: read\n      contents: read\n      attestations: read\n    env:\n      SECUREFIX_CLIENT_APP_ID: {}\n      SECUREFIX_SERVER_REPOSITORY: {}\n",
             trusted.deployment.client_app_id, scratch
@@ -4393,6 +4384,21 @@ mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
 
+    #[test]
+    fn feedback_probe_phases_do_not_reuse_same_run_comment_bodies() {
+        let prepare = policy_feedback_probe_summaries(Phase::Prepare);
+        let verify = policy_feedback_probe_summaries(Phase::Verify);
+        for (prepare, verify) in prepare.iter().zip(&verify) {
+            assert_ne!(prepare, verify);
+            assert_eq!(
+                prepare.split_once(" probe: ").unwrap().1,
+                verify.split_once(" probe: ").unwrap().1
+            );
+        }
+        assert_eq!(prepare, policy_feedback_probe_summaries(Phase::Prepare));
+        assert_eq!(verify, policy_feedback_probe_summaries(Phase::Verify));
+    }
+
     fn scratch_branch_api(branch: &str, delete_status: u16, follow_up: Option<Route>) -> Fixture {
         let config = crate::config::trusted().unwrap();
         let repository = &config.deployment.integration.repository;
@@ -4825,8 +4831,15 @@ mod tests {
             ".github/workflows/pull_request.yml",
             ".github/workflows/workflow_call_pr.yml",
         ] {
-            let workflow = std::str::from_utf8(files.get(path).unwrap()).unwrap();
-            assert!(workflow.contains("      actions: read\n      contents: read"));
+            let workflow: serde_yaml::Value =
+                serde_yaml::from_slice(files.get(path).unwrap()).unwrap();
+            let caller = workflow["jobs"]
+                .as_mapping()
+                .unwrap()
+                .values()
+                .find(|job| job["uses"].is_string())
+                .unwrap();
+            assert_eq!(caller["permissions"]["actions"], "read");
         }
         validate_rendered_files(&files).unwrap();
     }
