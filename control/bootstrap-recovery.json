@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "expected_main_sha": "51eba48c73fce56b1c7dcc7acd53bc58da6cc099",
+  "expected_head_sha": "2b37d2808a322abd04fdeee6febbe4a3779c0695",
+  "expected_tree_sha": "e0f159acbefc30ab4b8294901a12e3dc5564e551",
+  "source_pull_request": 98,
+  "authority_branch": "codex/recover-bootstrap-2b37d28-20261017",
+  "proposal_branch": "securefix-bootstrap-recovery-2b37d2808a32"
+}
