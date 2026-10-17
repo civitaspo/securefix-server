@@ -78,6 +78,11 @@ enum Command {
         #[command(subcommand)]
         command: distribution::Command,
     },
+    #[command(about = "Merge only an explicitly reviewed canonical caller migration")]
+    CallerMigration {
+        #[command(subcommand)]
+        command: distribution::reviewed::Command,
+    },
     #[command(about = "Reconcile repository settings and activate merge controls")]
     Settings {
         #[command(subcommand)]
@@ -106,6 +111,7 @@ fn main() -> Result<()> {
         Command::Runtime { command } => runtime::run(command),
         Command::Control { command } => control_commands::run(command),
         Command::Distribute { command } => distribution::run(command),
+        Command::CallerMigration { command } => distribution::reviewed::run(command),
         Command::Settings { command } => settings::run(command),
         Command::Securefix { command } => securefix_gate::run(command),
         Command::Check { command } => policy_check::run(command),

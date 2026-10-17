@@ -123,7 +123,7 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
 }
 
 #[test]
-fn runtime_update_auto_merge_requires_the_fresh_server_owned_pr_and_managed_files() {
+fn runtime_update_merge_requires_the_fresh_server_owned_pr_and_managed_files() {
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let migration = CallerMigration {
         repository: "civitaspo/herdr-linear-agent".into(),
@@ -170,7 +170,12 @@ fn runtime_update_auto_merge_requires_the_fresh_server_owned_pr_and_managed_file
 }
 
 #[test]
-fn runtime_update_auto_merge_sha_pins_the_merge_and_verifies_default_branch_contents() {
+fn runtime_update_merge_sha_pins_the_merge_and_verifies_default_branch_contents() {
+    exercise_runtime_merge(false);
+    exercise_runtime_merge(true);
+}
+
+fn exercise_runtime_merge(reject_before_merge: bool) {
     use crate::fixtures::{Fixture, Route};
     use base64::Engine;
 
@@ -273,35 +278,52 @@ fn runtime_update_auto_merge_sha_pins_the_merge_and_verifies_default_branch_cont
             format!("/repos/{repository}/git/ref/heads/{branch}"),
             json!({"object":{"sha":head}}),
         ),
-        Route::active_control(&Fixture::control_revision()),
-        Route::request(
-            "PUT",
-            format!("/repos/{repository}/pulls/19/merge"),
-            200,
-            json!({"merged":true,"sha":merge_sha}),
-        )
-        .with_request_body(json!({"sha":head,"merge_method":"squash"})),
-        Route::get(
-            format!("/repos/{repository}/commits/main"),
-            json!({"sha":merge_sha}),
-        ),
     ]);
-    for (path, bytes) in &migration.files {
-        routes.push(Route::get(
-            format!("/repos/{repository}/contents/{path}?ref={merge_sha}"),
-            content(bytes),
-        ));
+    if !reject_before_merge {
+        routes.extend([
+            Route::active_control(&Fixture::control_revision()),
+            Route::request(
+                "PUT",
+                format!("/repos/{repository}/pulls/19/merge"),
+                200,
+                json!({"merged":true,"sha":merge_sha}),
+            )
+            .with_request_body(json!({"sha":head,"merge_method":"squash"})),
+            Route::get(
+                format!("/repos/{repository}/commits/main"),
+                json!({"sha":merge_sha}),
+            ),
+        ]);
+        for (path, bytes) in &migration.files {
+            routes.push(Route::get(
+                format!("/repos/{repository}/contents/{path}?ref={merge_sha}"),
+                content(bytes),
+            ));
+        }
     }
     let fixture = Fixture::new(routes);
-    assert_eq!(
-        merge_runtime_update(&fixture.api, &policy, &migration, 19, &head).unwrap(),
-        merge_sha
-    );
+    let result = merge_runtime_update(&fixture.api, &policy, &migration, 19, &head, || {
+        ensure!(
+            !reject_before_merge,
+            "owner authorization changed before merge"
+        );
+        Ok(())
+    });
+    if reject_before_merge {
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("owner authorization changed before merge")
+        );
+    } else {
+        assert_eq!(result.unwrap(), merge_sha);
+    }
     fixture.finish();
 }
 
 #[test]
-fn runtime_update_auto_merge_aborts_when_the_branch_head_moves_before_validation() {
+fn runtime_update_merge_aborts_when_the_branch_head_moves_before_validation() {
     use crate::fixtures::{Fixture, Route};
     let policy = Policy::load("tests/fixtures/policy.json").unwrap();
     let migration = CallerMigration {
@@ -339,12 +361,12 @@ fn runtime_update_auto_merge_aborts_when_the_branch_head_moves_before_validation
             json!({"object":{"sha":moved_head}}),
         ),
     ]);
-    assert!(merge_runtime_update(&fixture.api, &policy, &migration, 19, &head).is_err());
+    assert!(merge_runtime_update(&fixture.api, &policy, &migration, 19, &head, || Ok(())).is_err());
     fixture.finish();
 }
 
 #[test]
-fn runtime_update_auto_merge_waits_for_only_the_same_valid_pr_head_to_catch_up() {
+fn runtime_update_merge_waits_for_only_the_same_valid_pr_head_to_catch_up() {
     use crate::fixtures::{Fixture, Route};
     use std::time::Duration;
 
@@ -1104,10 +1126,10 @@ fn reconcile_reuses_one_scoped_open_pr_and_does_not_duplicate_it() {
             200,
             json!({}),
         )
-        .with_request_body(json!({"title":"chore: update Securefix caller workflows to v0.2.3"})),
+        .with_request_body(json!({"title":"chore: update Securefix caller workflows to v0.2.3", "body":CALLER_PR_BODY})),
         Route::get(
             "/repos/civitaspo/herdr-linear-agent/pulls?state=open&head=civitaspo:automation/securefix-runtime&per_page=100&page=1",
-            json!([{ "title": "chore: update Securefix caller workflows to v0.2.3", "user":pr["user"], "number":4, "head":pr["head"], "base":pr["base"] }]),
+            json!([{ "title": "chore: update Securefix caller workflows to v0.2.3", "body":CALLER_PR_BODY,"user":pr["user"], "number":4, "head":pr["head"], "base":pr["base"] }]),
         ),
         Route::get(
             "/repos/civitaspo/herdr-linear-agent/pulls/4/files?per_page=100&per_page=100&page=1",
@@ -1202,7 +1224,7 @@ fn apply_caller_creates_only_the_reviewed_signed_branch_change_before_opening_a_
     ]);
 
     assert_eq!(
-        apply_caller_migration(&fixture.api, &policy, &migration, false).unwrap(),
+        apply_caller_migration(&fixture.api, &policy, &migration).unwrap(),
         4
     );
     fixture.finish();

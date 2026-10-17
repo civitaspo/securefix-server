@@ -9,12 +9,19 @@ same way. Do not pass a user token or a production installation token to the
 candidate process.
 
 The trusted workflow builds the candidate without credentials, then runs the
-artifact in an isolated job. On an integration branch, it separately captures
-the exact protected server default-branch SHA, builds that baseline with locked
+artifact in an isolated job. On main or an integration branch, it separately captures
+the exact signed protected server default-branch SHA, builds that read-only test validator with locked
 dependencies, and uploads a distinct immutable artifact. Baseline commands
 validate the producer and retrieve fixture state; candidate commands prepare
 client input, exercise the isolated mutations, and verify the client result.
-The baseline SHA must remain current throughout the test. Run `securefix integration run --phase prepare`
+The validator's baseline SHA must remain current throughout the test. Read-only
+producer, fixture-state and client-verification commands require
+`SECUREFIX_TEST_BASELINE_SHA` to match signed current main at entry. This test-only
+build receives no production credentials and does not select an operational runtime.
+The published test runtime is selected independently from `control/active.json`:
+its source, immutable release/asset IDs, archive digest and canonical tag must
+match. An ordinary main advance does not require a new runtime release.
+Run `securefix integration run --phase prepare`
 with the candidate SHA and a state-file path. The workflow producer SHA is
 recorded separately from the candidate SHA, so a candidate commit does not
 need to contain the workflow that produced its fixture artifact. The workflow

@@ -112,6 +112,11 @@ helpers and keep the change focused; do not add speculative abstractions.
 - Caller migration is restricted to exact generated workflows in a reviewable
   server-owned PR. Preserve ownership, exact-file, expected-head, and resulting
   default-branch checks. Distribution must not merge caller PRs automatically.
+  While an old caller pin is unavailable, use the separate owner-dispatched
+  `merge-caller-migration.yml` lane after a fresh exact-head control-bound owner
+  review, separate unedited owner commands, signatures and required CI. This
+  route shares `securefix-control` and verifies the canonical generated files;
+  it is not a general merge route for caller-authored PRs.
 - Release publication requires immutable releases and validates final immutable
   state. Preserve merged-release-PR identity and idempotent recovery checks.
 
@@ -205,16 +210,14 @@ in the bootstrap authority needs a separately reviewed recovery; the bounded
 repair lane cannot rewrite its own trust root. Repair does not restore old-runtime
 availability and permanently stops once generation one exists.
 
-The bootstrap workflow, initial activation and failure handling remain unverified.
-Before merging the first code PR, compile the implementation, pass the normal candidate
-scratch verification on a frozen integration branch, review the fixed bootstrap path and
-operator procedure, and explicitly approve and complete the permanent live-settings
-rollout. The protected-main `phase=bootstrap` scratch gate cannot run before that merge;
-after the first code PR merges, it must pass during the finite pause before bootstrap
-publication or descriptor activation is proposed. The old v0.2.20 runtime is only
-expected to remain available before the first protected-main advance; no availability
-claim applies after the first code PR merges. No production settings changes are
-authorized by the proposal.
+Generation one is active at immutable runtime v0.2.23 after separately approved
+recovery, scratch verification and descriptor activation. See
+`docs/control-successor-verification-2026-10-17.md` for evidence and successor
+verification still pending. Bootstrap and repair now reject further use. Candidate
+testing uses a secret-free validator built from the captured signed current main;
+the tested published runtime remains the one selected by the active descriptor.
+This test validator never supplies ordinary operational authority or executes
+candidate code with production credentials.
 
 Renovate remains a PR author. Native Renovate auto-merge is incompatible with
 the sole-controller model and is removed. Non-major and lockfile PRs now require

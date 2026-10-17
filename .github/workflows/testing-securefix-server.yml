@@ -43,14 +43,6 @@ jobs:
     permissions:
       contents: read
 
-  trusted-runtime-main:
-    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
-    uses: ./.github/workflows/load-cli.yml
-    permissions:
-      actions: read
-      contents: read
-      attestations: read
-
   bootstrap-legacy-runtime:
     if: inputs.phase == 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -246,7 +238,7 @@ jobs:
           retention-days: 7
 
   baseline-build:
-    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -265,7 +257,9 @@ jobs:
           metadata="$(gh api "repos/$repo")"
           [[ "$(jq -r '.full_name' <<<"$metadata")" == "$repo" ]] || { echo 'unexpected server repository identity' >&2; exit 1; }
           [[ "$(jq -r '.default_branch' <<<"$metadata")" == main ]] || { echo 'server default branch changed' >&2; exit 1; }
-          sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
+          commit="$(gh api "repos/$repo/commits/main")"
+          [[ "$(jq -r '.commit.verification.verified' <<<"$commit")" == true ]] || { echo 'baseline main signature is not verified' >&2; exit 1; }
+          sha="$(jq -r .sha <<<"$commit")"
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'default branch did not resolve to a full SHA' >&2; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -334,20 +328,22 @@ jobs:
           retention-days: 7
 
   reuse:
-    needs: [baseline-build, trusted-runtime-main]
-    if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && inputs.phase == 'verify' && (needs.baseline-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
+    needs: [baseline-build]
+    if: always() && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && inputs.phase == 'verify' && needs.baseline-build.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
     timeout-minutes: 5
+    env:
+      SECUREFIX_TEST_BASELINE_SHA: ${{ needs.baseline-build.outputs.source-sha }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       source-sha: ${{ inputs.candidate_sha || job.workflow_sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}
+          artifact-ids: ${{ needs.baseline-build.outputs.artifact-id }}
           path: trusted-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
@@ -380,8 +376,8 @@ jobs:
           retention-days: 7
 
   client-smoke:
-    needs: [baseline-build, trusted-runtime-main, build]
-    if: always() && inputs.phase == 'prepare' && needs.build.result == 'success' && (needs.baseline-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
+    needs: [baseline-build, build]
+    if: always() && inputs.phase == 'prepare' && needs.build.result == 'success' && needs.baseline-build.result == 'success'
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -391,10 +387,11 @@ jobs:
     timeout-minutes: 10
     env:
       CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_TEST_BASELINE_SHA: ${{ needs.baseline-build.outputs.source-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}
+          artifact-ids: ${{ needs.baseline-build.outputs.artifact-id }}
           path: trusted-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
@@ -428,13 +425,11 @@ jobs:
         run: securefix integration resolve-test-runtime --published-runtime-sha "$PUBLISHED_RUNTIME_SHA"
       - name: Bind resolved tag to the trusted producer metadata
         env:
-          BASELINE_SHA: ${{ needs.trusted-runtime-main.outputs.source-sha || needs.baseline-build.outputs.source-sha }}
           PRODUCER_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           PRODUCER_TAG: ${{ steps.producer.outputs.published_runtime_tag }}
           RESOLVED_SHA: ${{ steps.runtime.outputs.published_runtime_sha }}
           RESOLVED_TAG: ${{ steps.runtime.outputs.published_runtime_tag }}
         run: |
-          [[ "$PRODUCER_SHA" == "$BASELINE_SHA" ]] || { echo 'published runtime differs from captured baseline source' >&2; exit 1; }
           [[ "$RESOLVED_SHA" == "$PRODUCER_SHA" ]] || { echo 'resolved runtime SHA differs from trusted producer' >&2; exit 1; }
           [[ -z "$PRODUCER_TAG" || "$RESOLVED_TAG" == "$PRODUCER_TAG" ]] || { echo 'resolved runtime tag differs from trusted producer' >&2; exit 1; }
       - name: Prepare the trusted scratch deployment and client input
@@ -476,18 +471,20 @@ jobs:
           retention-days: 7
 
   scratch:
-    needs: [baseline-build, trusted-runtime-main, build, reuse]
-    if: always() && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (needs.build.result == 'success' || needs.reuse.result == 'success') && (needs.baseline-build.result == 'success' || needs.trusted-runtime-main.result == 'success')
+    needs: [baseline-build, build, reuse]
+    if: always() && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (needs.build.result == 'success' || needs.reuse.result == 'success') && needs.baseline-build.result == 'success'
     runs-on: ubuntu-24.04
     environment: main
     permissions:
       actions: read
       contents: read
     timeout-minutes: 15
+    env:
+      SECUREFIX_TEST_BASELINE_SHA: ${{ needs.baseline-build.outputs.source-sha }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.trusted-runtime-main.outputs.artifact-id || needs.baseline-build.outputs.artifact-id }}
+          artifact-ids: ${{ needs.baseline-build.outputs.artifact-id }}
           path: trusted-runtime
           merge-multiple: true
       - uses: $/.github/actions/install-cli
@@ -526,7 +523,6 @@ jobs:
         run: securefix integration resolve-test-runtime --published-runtime-sha "$PUBLISHED_RUNTIME_SHA"
       - name: Bind resolved metadata to the trusted fixture validation
         env:
-          BASELINE_SHA: ${{ needs.trusted-runtime-main.outputs.source-sha || needs.baseline-build.outputs.source-sha }}
           PRODUCER_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           PRODUCER_TAG: ${{ steps.producer.outputs.published_runtime_tag }}
           STATE_SHA: ${{ steps.state.outputs.published_runtime_sha }}
@@ -535,7 +531,6 @@ jobs:
           RESOLVED_TAG: ${{ steps.runtime.outputs.published_runtime_tag }}
         run: |
           set -euo pipefail
-          [[ "$PRODUCER_SHA" == "$BASELINE_SHA" ]] || { echo 'published runtime differs from captured baseline source' >&2; exit 1; }
           [[ "$RESOLVED_SHA" == "$PRODUCER_SHA" ]] || { echo 'resolved runtime SHA differs from trusted producer' >&2; exit 1; }
           [[ -z "$STATE_SHA" || "$STATE_SHA" == "$PRODUCER_SHA" ]] || { echo 'fixture state resolved a different published runtime SHA' >&2; exit 1; }
           [[ -z "$PRODUCER_TAG" || "$RESOLVED_TAG" == "$PRODUCER_TAG" ]] || { echo 'resolved runtime tag differs from trusted producer' >&2; exit 1; }
