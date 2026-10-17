@@ -6,7 +6,11 @@ on:
         description: Run one reviewed bootstrap or repair phase
         required: true
         type: choice
-        options: [propose, merge, repair-propose, repair-merge]
+        options: [propose, merge, repair-propose, repair-merge, recovery-qualify, recovery-propose, recovery-merge]
+      authority_sha:
+        description: Exact separately approved one-time recovery executor SHA
+        required: false
+        type: string
       verification_run_id:
         description: Successful bootstrap scratch verification run ID (propose)
         required: false
@@ -36,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   bootstrap-host:
-    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (github.ref == 'refs/heads/codex/recover-bootstrap-91c8416-20261017' && inputs.authority_sha == github.sha))
     uses: ./.github/workflows/build-bootstrap-host.yml
     permissions:
       contents: read
@@ -381,3 +385,67 @@ jobs:
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
         run: '"$RUNNER_TEMP/securefix-bootstrap" repair-merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"'
+
+  recovery-validate:
+    if: startsWith(inputs.phase, 'recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/codex/recover-bootstrap-91c8416-20261017' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    needs: bootstrap-host
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust recovery host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
+      - name: Qualify the exact recovery executor and target without production credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/securefix-bootstrap" recovery-validate'
+
+  recovery-write:
+    if: contains(fromJSON('["recovery-propose","recovery-merge"]'), inputs.phase) && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/codex/recover-bootstrap-91c8416-20261017' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_RECOVERY_SOURCE_SHA == github.sha
+    needs: [bootstrap-host, recovery-validate]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+    timeout-minutes: 5
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust recovery host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Revalidate and perform the separately approved recovery phase
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          PHASE: ${{ inputs.phase }}
+          SECUREFIX_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/securefix-bootstrap" "$PHASE"'

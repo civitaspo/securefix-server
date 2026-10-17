@@ -1268,6 +1268,81 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
 }
 
 #[test]
+fn one_use_recovery_keeps_executor_approval_and_production_credentials_separate() {
+    let flow = workflow("control-bootstrap.yml");
+    let qualify = &flow["jobs"]["recovery-validate"];
+    let writer = &flow["jobs"]["recovery-write"];
+    assert!(qualify.get("environment").is_none());
+    assert!(!serde_json::to_string(qualify).unwrap().contains("secrets."));
+    assert!(
+        !serde_json::to_string(qualify)
+            .unwrap()
+            .contains("create-github-app-token")
+    );
+    assert_eq!(qualify["needs"], "bootstrap-host");
+    assert_eq!(
+        writer["needs"],
+        serde_json::json!(["bootstrap-host", "recovery-validate"])
+    );
+    assert_eq!(writer["environment"], "main");
+    assert_eq!(writer["concurrency"]["group"], "securefix-control");
+    assert_eq!(writer["concurrency"]["queue"], "max");
+    assert_eq!(writer["concurrency"]["cancel-in-progress"], false);
+    let guard = writer["if"].as_str().unwrap();
+    for required in [
+        "vars.SECUREFIX_RECOVERY_SOURCE_SHA == github.sha",
+        "inputs.authority_sha == github.sha",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+        "refs/heads/codex/recover-bootstrap-91c8416-20261017",
+        "recovery-propose",
+        "recovery-merge",
+    ] {
+        assert!(guard.contains(required), "{required}");
+    }
+    assert!(!guard.contains("recovery-qualify"));
+    for job in [qualify, writer] {
+        assert_eq!(
+            job["permissions"],
+            serde_json::json!({"contents":"read","pull-requests":"read","checks":"read","actions":"read"})
+        );
+        let steps = job["steps"].as_array().unwrap();
+        assert_eq!(
+            steps[0]["with"]["artifact-ids"],
+            "${{ needs.bootstrap-host.outputs.artifact-id }}"
+        );
+        let command = steps.last().unwrap();
+        assert_eq!(
+            command["env"]["SECUREFIX_RECOVERY_SOURCE_SHA"],
+            "${{ vars.SECUREFIX_RECOVERY_SOURCE_SHA }}"
+        );
+        assert!(
+            command["run"]
+                .as_str()
+                .unwrap()
+                .starts_with("\"$RUNNER_TEMP/securefix-bootstrap\" ")
+        );
+        assert!(
+            !serde_json::to_string(steps)
+                .unwrap()
+                .contains("candidate-runtime")
+        );
+    }
+    let steps = writer["steps"].as_array().unwrap();
+    let token = &steps[2];
+    assert!(
+        token["uses"]
+            .as_str()
+            .unwrap()
+            .starts_with("actions/create-github-app-token@")
+    );
+    assert_eq!(token["with"]["repositories"], "securefix-server");
+    assert_eq!(token["with"]["permission-contents"], "write");
+    assert_eq!(token["with"]["permission-pull-requests"], "write");
+    assert!(token["with"].get("permission-administration").is_none());
+}
+
+#[test]
 fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
     let testing = workflow("testing-securefix-server.yml");
     assert_eq!(
