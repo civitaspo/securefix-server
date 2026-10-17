@@ -104,7 +104,12 @@ GitHub attestation and runtime identity against source
 `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`. Before minting scratch App tokens, the
 fixed bootstrap helper checks the owner dispatch, current main SHA, and absent active
 descriptor. The candidate runtime prepares and verifies the integration fixtures; the
-pinned runtime validates their output files. The candidate also runs the scratch-only
+pinned runtime remains an independently verified baseline. The fixed, source-pinned
+Rust bootstrap host validates the exact bounded regular output files, rejects symlinks
+and unexpected fields, and checks source, baseline, fixture, and control-generation
+bindings. It repeats the owner dispatch, current main, policy, and absent descriptor
+checks. The legacy runtime's ordinary `validate-outputs` command requires its source
+to remain on main, so it cannot validate this post-merge rehearsal. The candidate also runs the scratch-only
 `control-probe`. This test mode does not publish or activate production control, and a
 green result does not establish production distribution or the published client loader.
 The initial bootstrap proposal's archive qualification separately treats the candidate

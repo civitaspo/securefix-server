@@ -1268,7 +1268,7 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
 }
 
 #[test]
-fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
+fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_baseline() {
     let testing = workflow("testing-securefix-server.yml");
     assert_eq!(
         testing["on"]["workflow_dispatch"]["inputs"]["phase"]["options"],
@@ -1378,6 +1378,31 @@ fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
                 && step["with"]["name"] == "scratch-fixtures"
         })
         .unwrap();
+    let validate_outputs = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Validate scratch outputs with the fixed Rust bootstrap host"
+        })
+        .unwrap();
+    assert!(verify < validate_outputs && validate_outputs < upload_final);
+    let output_command = steps[validate_outputs]["run"].as_str().unwrap();
+    assert!(
+        output_command
+            .starts_with("\"$RUNNER_TEMP/securefix-bootstrap\" validate-scratch-outputs ")
+    );
+    for argument in [
+        "--source-sha \"$SOURCE_SHA\"",
+        "--published-runtime-sha e8e2bc77d96a4e359417217f1d1c22f4e1ac4483",
+        "--state-directory fixtures",
+        "--probe-directory control-probe",
+    ] {
+        assert!(output_command.contains(argument));
+    }
+    assert!(!steps.iter().any(|step| {
+        step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("securefix integration validate-outputs"))
+    }));
     assert!(
         prepare < candidate_probe
             && candidate_probe < upload_control_probe

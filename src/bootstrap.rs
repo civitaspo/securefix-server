@@ -88,6 +88,16 @@ pub enum Command {
         #[arg(long)]
         source_sha: String,
     },
+    ValidateScratchOutputs {
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        published_runtime_sha: String,
+        #[arg(long)]
+        state_directory: PathBuf,
+        #[arg(long)]
+        probe_directory: PathBuf,
+    },
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -149,15 +159,21 @@ pub fn run(command: Command) -> Result<()> {
                 .merge(pull_request, &expected_head_sha)
         }
         Command::ValidateLegacyContext { source_sha } => {
-            host.dispatch(&source_sha, "bootstrap", TEST_WORKFLOW)?;
-            ensure!(
-                host.context.event["inputs"]["candidate_sha"]
-                    .as_str()
-                    .is_some_and(|s| s.is_empty() || s == source_sha),
-                "legacy scratch source input mismatch"
-            );
-            host.require_absent(&source_sha)?;
-            host.current_policy(&source_sha)?;
+            host.validate_legacy_context(&source_sha)?;
+            emit(&json!({"source_sha":source_sha}))
+        }
+        Command::ValidateScratchOutputs {
+            source_sha,
+            published_runtime_sha,
+            state_directory,
+            probe_directory,
+        } => {
+            host.validate_scratch_outputs(
+                &source_sha,
+                &published_runtime_sha,
+                &state_directory,
+                &probe_directory,
+            )?;
             emit(&json!({"source_sha":source_sha}))
         }
     }
@@ -483,6 +499,42 @@ impl Host {
             &self.artifact(run_id, "control-probe", 16 * 1024)?,
             &["control-verification.json"],
         )?;
+        validate_scratch_evidence(
+            &pair["state.json"],
+            &pair["verification.json"],
+            &probe["control-verification.json"],
+            &self.policy,
+            source,
+        )
+    }
+
+    fn validate_legacy_context(&self, source: &str) -> Result<()> {
+        self.dispatch(source, "bootstrap", TEST_WORKFLOW)?;
+        ensure!(
+            self.context.event["inputs"]["candidate_sha"]
+                .as_str()
+                .is_some_and(|s| s.is_empty() || s == source),
+            "legacy scratch source input mismatch"
+        );
+        self.require_absent(source)?;
+        self.current_policy(source)
+    }
+
+    fn validate_scratch_outputs(
+        &self,
+        source: &str,
+        published_runtime: &str,
+        state_directory: &Path,
+        probe_directory: &Path,
+    ) -> Result<()> {
+        self.validate_legacy_context(source)?;
+        validate_sha(published_runtime)?;
+        let pair = output_json_files(state_directory, &["state.json", "verification.json"])?;
+        let probe = output_json_files(probe_directory, &["control-verification.json"])?;
+        ensure!(
+            pair["state.json"]["published_runtime_sha"] == published_runtime,
+            "scratch output published baseline mismatch"
+        );
         validate_scratch_evidence(
             &pair["state.json"],
             &pair["verification.json"],
@@ -1499,13 +1551,97 @@ fn validate_scratch_evidence(
     source: &str,
 ) -> Result<()> {
     let scratch = &policy.deployment.integration;
+    exact_keys(
+        state,
+        &[
+            "version",
+            "repository",
+            "repository_id",
+            "candidate_sha",
+            "published_runtime_sha",
+            "workflow_sha",
+            "default_branch",
+            "base_sha",
+            "prepared_at",
+            "positive",
+            "stale",
+            "distribution",
+        ],
+    )?;
+    exact_keys(
+        verification,
+        &[
+            "version",
+            "repository",
+            "candidate_sha",
+            "positive_pr",
+            "merged_sha",
+            "stale_pr",
+            "stale_head_sha",
+            "distribution_pr",
+            "managed_files",
+            "annotated_tag_verified",
+            "closed_or_merged",
+        ],
+    )?;
+    exact_keys(
+        probe,
+        &[
+            "version",
+            "repository",
+            "candidate_sha",
+            "branch",
+            "base_sha",
+            "generation_one_commit_sha",
+            "generation_two_commit_sha",
+            "generation_three_commit_sha",
+            "generation_one",
+            "generation_two",
+            "generation_three",
+            "source_advance_kept_descriptor",
+            "expected_head_conflict_rejected",
+            "stale_identity_rejected_after_aba",
+            "production_publication_verified",
+            "production_activation_verified",
+            "distribution_verified",
+        ],
+    )?;
     ensure!(
-        state["candidate_sha"] == source
+        state["version"] == 2
+            && state["candidate_sha"] == source
             && state["repository"] == scratch.repository
             && state["repository_id"].as_u64() == Some(scratch.id)
-            && state["workflow_sha"] == source,
+            && state["workflow_sha"] == source
+            && state["default_branch"] == scratch.default_branch
+            && ["base_sha", "published_runtime_sha"]
+                .iter()
+                .all(|k| state[k].as_str().is_some_and(|s| validate_sha(s).is_ok()))
+            && state["prepared_at"]
+                .as_str()
+                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()),
         "scratch-fixtures artifact identity mismatch"
     );
+    let mut numbers = BTreeSet::new();
+    for name in ["positive", "stale", "distribution"] {
+        let fixture = &state[name];
+        exact_keys(fixture, &["number", "branch", "head_sha", "url"])?;
+        let number = positive(&fixture["number"])?;
+        ensure!(
+            numbers.insert(number)
+                && fixture["head_sha"]
+                    .as_str()
+                    .is_some_and(|s| validate_sha(s).is_ok())
+                && fixture["branch"].as_str().is_some_and(|s| s
+                    .starts_with(&format!("securefix-integration-{name}-"))
+                    && s.len() <= 100
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
+                && fixture["url"]
+                    == format!("https://github.com/{}/pull/{number}", scratch.repository)
+                && verification[format!("{name}_pr")] == number,
+            "scratch fixture identity or verification binding mismatch"
+        );
+    }
     ensure!(
         verification["version"] == 2
             && verification["repository"] == scratch.repository
@@ -1568,6 +1704,62 @@ fn validate_scratch_evidence(
         "control probe generation or CAS evidence incomplete"
     );
     Ok(())
+}
+
+fn exact_keys(value: &Value, expected: &[&str]) -> Result<()> {
+    let object = value.as_object().context("scratch JSON object missing")?;
+    ensure!(
+        object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key)),
+        "scratch JSON fields differ from the strict schema"
+    );
+    Ok(())
+}
+
+fn output_json_files(directory: &Path, expected: &[&str]) -> Result<BTreeMap<String, Value>> {
+    ensure!(
+        directory.is_relative() && !directory.as_os_str().is_empty(),
+        "scratch output directory must be relative"
+    );
+    let mut parent = PathBuf::new();
+    for component in directory.components() {
+        ensure!(
+            matches!(component, std::path::Component::Normal(_)),
+            "invalid scratch output directory component"
+        );
+        parent.push(component.as_os_str());
+        ensure!(
+            std::fs::symlink_metadata(&parent)?.file_type().is_dir(),
+            "scratch output directory is not a real directory"
+        );
+    }
+    let mut values = BTreeMap::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("scratch output filename is not UTF-8"))?;
+        ensure!(
+            expected.contains(&name.as_str()),
+            "unexpected scratch output file"
+        );
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        ensure!(
+            metadata.file_type().is_file() && metadata.len() <= 16 * 1024,
+            "scratch output is not a bounded regular file"
+        );
+        let bytes = read_bounded(&entry.path(), 16 * 1024)?;
+        ensure!(
+            bytes.len() as u64 == metadata.len(),
+            "scratch output size changed while reading"
+        );
+        values.insert(name, serde_json::from_slice(&bytes)?);
+    }
+    ensure!(
+        values.len() == expected.len(),
+        "scratch output files are incomplete"
+    );
+    Ok(values)
 }
 
 fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>> {

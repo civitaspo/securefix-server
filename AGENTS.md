@@ -184,8 +184,11 @@ expected-main SHA, exact PR head, full descriptor identity, and required CI chec
 Every job that mints a Server App token uses the protected `main` environment. The
 bootstrap scratch rehearsal uses a pinned v0.2.20 read baseline because the current
 main runtime cannot validate its own initial bootstrap producer. In that rehearsal the
-candidate prepares and verifies scratch fixtures, while v0.2.20 validates their output
-files. This baseline does not replace the fixed helper's qualification or establish
+candidate prepares and verifies scratch fixtures, while the source-pinned fixed Rust
+bootstrap host validates the bounded output files and their source, fixture, and
+control-generation bindings. The legacy runtime's ordinary output validator requires
+its own source on main and cannot validate the post-merge bootstrap rehearsal.
+This baseline does not replace the fixed helper's qualification or establish
 production publication.
 
 While `control/active.json` is absent, dispatch the `CI` workflow on a signed repair
