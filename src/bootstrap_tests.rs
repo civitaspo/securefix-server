@@ -358,13 +358,22 @@ fn mutable_release_and_changed_download_fail_before_attestation() {
     fixture.finish();
 }
 
+fn scratch_evidence() -> (Value, Value, Value) {
+    let policy = policy();
+    let scratch = &policy.deployment.integration;
+    let mut state = json!({"version":2,"repository":scratch.repository,"repository_id":scratch.id,"candidate_sha":main_sha(),"workflow_sha":main_sha(),"published_runtime_sha":head_sha(),"default_branch":scratch.default_branch,"base_sha":head_sha(),"prepared_at":"2026-10-17T00:00:00Z"});
+    for (name, number) in [("positive", 1), ("stale", 2), ("distribution", 3)] {
+        state[name] = json!({"number":number,"branch":format!("securefix-integration-{name}-test"),"head_sha":head_sha(),"url":format!("https://github.com/{}/pull/{number}", scratch.repository)});
+    }
+    let verification = json!({"version":2,"repository":scratch.repository,"candidate_sha":main_sha(),"positive_pr":1,"stale_pr":2,"distribution_pr":3,"merged_sha":head_sha(),"stale_head_sha":head_sha(),"managed_files":[".github/workflows/ci.yml"],"annotated_tag_verified":true,"closed_or_merged":true});
+    let probe = json!({"version":1,"repository":scratch.repository,"candidate_sha":main_sha(),"branch":"securefix-integration-control-test","base_sha":main_sha(),"generation_one_commit_sha":head_sha(),"generation_two_commit_sha":head_sha(),"generation_three_commit_sha":head_sha(),"generation_one":"1".repeat(64),"generation_two":"2".repeat(64),"generation_three":"3".repeat(64),"source_advance_kept_descriptor":true,"expected_head_conflict_rejected":true,"stale_identity_rejected_after_aba":true,"production_publication_verified":false,"production_activation_verified":false,"distribution_verified":false});
+    (state, verification, probe)
+}
+
 #[test]
 fn scratch_proof_requires_all_generation_and_cas_evidence() {
     let policy = policy();
-    let scratch = &policy.deployment.integration;
-    let state = json!({"repository":scratch.repository,"repository_id":scratch.id,"candidate_sha":main_sha(),"workflow_sha":main_sha()});
-    let verification = json!({"version":2,"repository":scratch.repository,"candidate_sha":main_sha(),"positive_pr":1,"stale_pr":2,"distribution_pr":3,"merged_sha":head_sha(),"stale_head_sha":head_sha(),"managed_files":["README.md"],"annotated_tag_verified":true,"closed_or_merged":true});
-    let probe = json!({"version":1,"repository":scratch.repository,"candidate_sha":main_sha(),"branch":"securefix-integration-control-test","base_sha":main_sha(),"generation_one_commit_sha":head_sha(),"generation_two_commit_sha":head_sha(),"generation_three_commit_sha":head_sha(),"generation_one":"1".repeat(64),"generation_two":"2".repeat(64),"generation_three":"3".repeat(64),"source_advance_kept_descriptor":true,"expected_head_conflict_rejected":true,"stale_identity_rejected_after_aba":true,"production_publication_verified":false,"production_activation_verified":false,"distribution_verified":false});
+    let (state, verification, probe) = scratch_evidence();
     validate_scratch_evidence(&state, &verification, &probe, &policy, &main_sha()).unwrap();
     for key in [
         "source_advance_kept_descriptor",
@@ -384,6 +393,80 @@ fn scratch_proof_requires_all_generation_and_cas_evidence() {
     let mut bad = probe;
     bad["generation_two"] = bad["generation_one"].clone();
     assert!(validate_scratch_evidence(&state, &verification, &bad, &policy, &main_sha()).is_err());
+}
+
+#[test]
+fn scratch_output_host_accepts_an_older_baseline_without_requiring_it_on_main() {
+    let fixture = Fixture::new(vec![
+        main_route(),
+        Route::get(path("actions/runs/77"), run_fixture(TEST_WORKFLOW, false)),
+        absent_route(),
+        content_route(
+            "policy.json",
+            &main_sha(),
+            &securefix::config::trusted_policy_bytes().unwrap(),
+        ),
+    ]);
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let directory = PathBuf::from(temp.path().file_name().unwrap());
+    let state_directory = directory.join("fixtures");
+    let probe_directory = directory.join("control-probe");
+    std::fs::create_dir(&state_directory).unwrap();
+    std::fs::create_dir(&probe_directory).unwrap();
+    let (state, verification, probe) = scratch_evidence();
+    for (path, value) in [
+        (state_directory.join("state.json"), state),
+        (state_directory.join("verification.json"), verification),
+        (probe_directory.join("control-verification.json"), probe),
+    ] {
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    host(&fixture, "bootstrap")
+        .validate_scratch_outputs(&main_sha(), &head_sha(), &state_directory, &probe_directory)
+        .unwrap();
+    fixture.finish();
+}
+
+#[test]
+fn scratch_output_files_reject_symlinks_extras_traversal_and_oversized_json() {
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let directory = PathBuf::from(temp.path().file_name().unwrap());
+    let state = directory.join("state.json");
+    std::fs::write(&state, b"{}").unwrap();
+    output_json_files(&directory, &["state.json"]).unwrap();
+    assert!(output_json_files(&directory.join(".."), &["state.json"]).is_err());
+    assert!(
+        output_json_files(&std::fs::canonicalize(&directory).unwrap(), &["state.json"]).is_err()
+    );
+    std::fs::write(directory.join("extra.json"), b"{}").unwrap();
+    assert!(output_json_files(&directory, &["state.json"]).is_err());
+    std::fs::remove_file(directory.join("extra.json")).unwrap();
+    std::fs::write(&state, vec![b' '; 16 * 1024 + 1]).unwrap();
+    assert!(output_json_files(&directory, &["state.json"]).is_err());
+    std::fs::remove_file(&state).unwrap();
+    std::fs::write(directory.join("actual.json"), b"{}").unwrap();
+    std::os::unix::fs::symlink("actual.json", &state).unwrap();
+    assert!(output_json_files(&directory, &["state.json", "actual.json"]).is_err());
+    std::fs::remove_file(&state).unwrap();
+    std::fs::remove_file(directory.join("actual.json")).unwrap();
+    std::fs::create_dir(directory.join("actual")).unwrap();
+    std::os::unix::fs::symlink("actual", directory.join("linked")).unwrap();
+    assert!(output_json_files(&directory.join("linked"), &[]).is_err());
+}
+
+#[test]
+fn scratch_output_evidence_rejects_unknown_fields_and_fixture_substitution() {
+    let (state, verification, probe) = scratch_evidence();
+    let mut bad = state.clone();
+    bad["extra"] = json!(true);
+    assert!(
+        validate_scratch_evidence(&bad, &verification, &probe, &policy(), &main_sha()).is_err()
+    );
+    let mut bad = state;
+    bad["positive"]["number"] = json!(2);
+    assert!(
+        validate_scratch_evidence(&bad, &verification, &probe, &policy(), &main_sha()).is_err()
+    );
 }
 
 #[test]

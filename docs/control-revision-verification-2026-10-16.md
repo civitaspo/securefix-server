@@ -215,6 +215,37 @@ truncated evidence. The corrected local suite passed **32 library, 238 normal
 binary, 18 bootstrap binary, and 2 native integration tests** (290 passed;
 2 ignored), using a separate Cargo target directory for this source copy.
 
+## Post-recovery bootstrap rehearsal (2026-10-17)
+
+Owner-approved recovery PR [#97](https://github.com/civitaspo/securefix-server/pull/97)
+merged as signed main `51eba48c73fce56b1c7dcc7acd53bc58da6cc099` through
+[run 39014362215](https://github.com/civitaspo/securefix-server/actions/runs/39014362215).
+The expected tree and parent were verified. The temporary environment admission and
+source approval variable were removed; the prior main policy and locked executor branch
+were retained.
+
+The exact-main [bootstrap scratch run 39014510834](https://github.com/civitaspo/securefix-server/actions/runs/39014510834)
+passed the candidate tests, preparation, control-generation/CAS probe, normal Server App
+merge, stale-head and cross-generation approval rejection, command/feedback lifecycle,
+and real pinact consumer CI. The candidate verification step completed successfully.
+The overall run then failed in the final v0.2.20 `validate-outputs` command with
+`server default branch moved after baseline runtime validation`: that ordinary legacy
+validator requires its own old runtime source on main. No successful bootstrap gate or
+production publication is established by this partial result.
+
+All three fixtures were cleaned, all four scratch handlers restored, no integration
+refs remained, native auto-merge stayed disabled, and only pre-existing PR #105 remained
+open. Production main remained `51eba48c73fce56b1c7dcc7acd53bc58da6cc099`.
+
+The proposed correction uses the already source-pinned fixed Rust bootstrap host to
+validate the final local JSON files. It repeats its owner/current-main/absent-descriptor
+fence, validates bounded regular files and strict schemas, and reuses its publication
+qualifier's source, fixture, and control-generation checks. The pinned legacy runtime
+still passes its independent archive and attestation checks. The corrected local suite
+passed **32 library, 238 normal binary, 21 bootstrap binary, and 2 native integration
+tests** (293 passed; 2 ignored), plus formatting, Clippy, and actionlint. This new
+correction has not yet passed the protected-main bootstrap gate or restored ordinary Actions.
+
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent

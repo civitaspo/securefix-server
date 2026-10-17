@@ -108,11 +108,6 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.bootstrap-legacy-runtime.outputs.artifact-id }}
-          path: legacy-runtime
-          merge-multiple: true
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: candidate-runtime
           merge-multiple: true
@@ -235,16 +230,12 @@ jobs:
             -e GITHUB_REF -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
             ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
             securefix integration run --phase verify --candidate-sha "$CANDIDATE_SHA" --state-file state.json
-      - uses: ./.github/actions/install-cli
-        with:
-          binary: legacy-runtime/securefix
-      - name: Validate scratch outputs with the pinned legacy runtime
+      - name: Validate scratch outputs with the fixed Rust bootstrap host
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
-          SECUREFIX_PUBLISHED_RUNTIME_SHA: e8e2bc77d96a4e359417217f1d1c22f4e1ac4483
-          SECUREFIX_PUBLISHED_RUNTIME_TAG: v0.2.20
-        run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase verify --state-file fixtures/state.json
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+        run: '"$RUNNER_TEMP/securefix-bootstrap" validate-scratch-outputs --source-sha "$SOURCE_SHA" --published-runtime-sha e8e2bc77d96a4e359417217f1d1c22f4e1ac4483 --state-directory fixtures --probe-directory control-probe'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: scratch-fixtures
