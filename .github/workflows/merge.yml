@@ -159,6 +159,7 @@ jobs:
       actions: read
       checks: read
       statuses: read
+      attestations: read
     timeout-minutes: 15
     outputs:
       self_merged: ${{ needs.authorize.outputs.repository == 'civitaspo/securefix-server' && steps.apply.outcome == 'success' }}
@@ -223,6 +224,7 @@ jobs:
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: securefix merge apply
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         if: always() && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
