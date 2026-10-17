@@ -1130,10 +1130,12 @@ fn caller_migration_requires_read_validation_and_readiness_before_each_write_tok
             .get("permission-contents")
             .is_none()
     );
-    assert!(
-        steps[authorize]["with"]
-            .get("permission-pull-requests")
-            .is_none()
+    assert_eq!(steps[authorize]["with"]["permission-pull-requests"], "write");
+    assert_eq!(steps[authorize]["with"]["permission-checks"], "write");
+    assert_eq!(steps[authorize]["with"]["permission-issues"], "write");
+    assert_eq!(
+        steps[authorize]["with"]["repositories"],
+        "${{ steps.target.outputs.repository_name }}"
     );
     assert_eq!(
         steps[merge]["with"]["repositories"],
