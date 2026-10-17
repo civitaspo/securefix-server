@@ -3,6 +3,16 @@ run-name: Prepare Control Activation (${{ inputs.source_sha }})
 on:
   workflow_dispatch:
     inputs:
+      phase:
+        description: Normal proposal or separately reviewed one-use successor recovery
+        required: false
+        default: propose
+        type: choice
+        options: [propose, successor-qualify, successor-merge]
+      authority_sha:
+        description: Exact separately approved fixed recovery source SHA
+        required: false
+        type: string
       source_sha:
         description: Published and scratch-verified candidate source SHA
         required: true
@@ -108,3 +118,77 @@ jobs:
           --publisher-run-id "$PUBLISHER_RUN_ID"
           --verification-run-id "$VERIFICATION_RUN_ID"
           --expected-control-id "$EXPECTED_CONTROL_ID"
+
+  recovery-host:
+    if: startsWith(inputs.phase, 'successor-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/codex/recover-successor-025-20261017' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    uses: ./.github/workflows/build-bootstrap-host.yml
+    permissions:
+      contents: read
+
+  recovery-qualify:
+    if: startsWith(inputs.phase, 'successor-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/codex/recover-successor-025-20261017' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    needs: recovery-host
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+      attestations: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recovery-host.outputs.artifact-id }}
+          path: recovery-host
+          merge-multiple: true
+      - name: Install the source-pinned fixed recovery host
+        run: install -D -m 755 recovery-host/securefix-bootstrap "$RUNNER_TEMP/securefix-recovery"
+      - name: Independently qualify the fixed successor without production credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SUCCESSOR_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_SUCCESSOR_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/securefix-recovery" successor-recovery-validate'
+
+  # The one-use source approval is a repository-level Actions variable.
+  recovery-merge:
+    if: inputs.phase == 'successor-merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/codex/recover-successor-025-20261017' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_SUCCESSOR_RECOVERY_SOURCE_SHA == github.sha
+    needs: [recovery-host, recovery-qualify]
+    runs-on: ubuntu-24.04
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+      attestations: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recovery-host.outputs.artifact-id }}
+          path: recovery-host
+          merge-multiple: true
+      - name: Install the source-pinned fixed recovery host
+        run: install -D -m 755 recovery-host/securefix-bootstrap "$RUNNER_TEMP/securefix-recovery"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Repeat qualification and merge only the fixed successor with expected-head CAS
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          SECUREFIX_SUCCESSOR_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_SUCCESSOR_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/securefix-recovery" successor-recovery-merge'

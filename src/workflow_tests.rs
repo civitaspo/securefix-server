@@ -2087,6 +2087,39 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
+            if path == ".github/workflows/control-activation.yml"
+                && matches!(job_id.as_str(), "recovery-qualify" | "recovery-merge")
+            {
+                // This unmerged fixed host embeds its policy and is invoked by
+                // absolute path, like the retired bootstrap host. It is not the
+                // ordinary published CLI installed together with policy.json.
+                let download = steps
+                    .iter()
+                    .position(|step| {
+                        step["with"]["artifact-ids"]
+                            == "${{ needs.recovery-host.outputs.artifact-id }}"
+                            && step["with"]["path"] == "recovery-host"
+                    })
+                    .unwrap();
+                let install = steps
+                    .iter()
+                    .position(|step| {
+                        step["run"] == "install -D -m 755 recovery-host/securefix-bootstrap \"$RUNNER_TEMP/securefix-recovery\""
+                    })
+                    .unwrap();
+                let invocation = steps
+                    .iter()
+                    .position(|step| {
+                        step["run"].as_str().is_some_and(|run| {
+                            run.starts_with(
+                                "\"$RUNNER_TEMP/securefix-recovery\" successor-recovery-",
+                            )
+                        })
+                    })
+                    .unwrap();
+                assert!(download < install && install < invocation);
+                continue;
+            }
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
                 && steps.iter().any(|step| {
                     step["uses"]

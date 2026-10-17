@@ -1,3 +1,17 @@
+# Unmerged successor recovery executor
+
+This branch is a separately reviewed, one-use fixed authority. Never merge it to
+protected main or select it as a published runtime. Its fixed target is embedded
+in `control/successor-recovery.json`; dispatch inputs cannot replace that target.
+
+`SECUREFIX_SUCCESSOR_RECOVERY_SOURCE_SHA` is a **repository-level Actions variable**
+created through `/repos/civitaspo/securefix-server/actions/variables`, after new
+explicit approval of this exact signed source and target. It is not an environment
+variable. Read-only qualification receives no production environment or App key.
+Only the separate protected-environment writer may merge the already reviewed
+fixed descriptor PR. Always remove the temporary branch admission and source
+variable after the attempt; retain the locked executor branch as audit evidence.
+
 # Agent instructions
 
 ## Purpose and architecture

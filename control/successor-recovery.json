@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "authority_branch": "codex/recover-successor-025-20261017",
+  "expected_main_sha": "2f7bd311be7c6bca92666dbcd9252991b8c8214a",
+  "pull_request": 104,
+  "expected_head_sha": "1cb05b25b6ba0837e06890b2bf2f4d234d6e7be9",
+  "active": {
+    "version": 1,
+    "generation": 1,
+    "source_sha": "f05a400115ef744070671028865a6269d65bae8b",
+    "policy_sha256": "91292daf7e6229ec64d66618926b10c4785e67bb3b1cd31d1a9bc1646464cc1c",
+    "archive_sha256": "258fbab974214a0af9f1e349b20d1d4f319ac47c78ea35171ca516013e4043c2",
+    "release_id": 415808229,
+    "asset_id": 650489932,
+    "publisher_run_id": 39034975925,
+    "verification_run_id": 39034639333,
+    "previous": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "successor": {
+    "version": 1,
+    "generation": 2,
+    "source_sha": "2f7bd311be7c6bca92666dbcd9252991b8c8214a",
+    "policy_sha256": "91292daf7e6229ec64d66618926b10c4785e67bb3b1cd31d1a9bc1646464cc1c",
+    "archive_sha256": "329eee8f07df78d6d86b9441025bb6d3448a6045292d78cac9eb1e051a05808a",
+    "release_id": 415851171,
+    "asset_id": 650697091,
+    "publisher_run_id": 39041250830,
+    "verification_run_id": 39040925267,
+    "previous": "a2f59b941ae1a92bd07513e672f64ed6ff9301fc48e254047d91874784b838ef"
+  }
+}

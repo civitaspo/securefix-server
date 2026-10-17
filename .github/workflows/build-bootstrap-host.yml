@@ -11,7 +11,7 @@ defaults:
     shell: bash -euo pipefail {0}
 jobs:
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/securefix-server' && (github.ref == 'refs/heads/main' || (github.ref == 'refs/heads/codex/recover-successor-025-20261017' && github.event.inputs.authority_sha == github.sha)) && github.actor_id == '4525500' && github.run_attempt == 1
     runs-on: ubuntu-24.04
     permissions:
       contents: read

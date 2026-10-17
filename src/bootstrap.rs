@@ -30,8 +30,13 @@ const MAX_ARTIFACT: usize = 64 * 1024;
 const MAX_UNPACKED: u64 = 512 * 1024 * 1024;
 const MAX_MEMBERS: usize = 4096;
 
+#[path = "bootstrap_successor_recovery.rs"]
+mod successor_recovery;
+
 #[derive(Subcommand)]
 pub enum Command {
+    SuccessorRecoveryValidate,
+    SuccessorRecoveryMerge,
     Prepare {
         #[arg(long)]
         source_sha: String,
@@ -103,6 +108,8 @@ pub enum Command {
 pub fn run(command: Command) -> Result<()> {
     let host = Host::from_env()?;
     match command {
+        Command::SuccessorRecoveryValidate => successor_recovery::validate(&host),
+        Command::SuccessorRecoveryMerge => successor_recovery::merge(&host),
         Command::Prepare {
             source_sha,
             verification_run_id,
@@ -217,8 +224,24 @@ struct Dispatch {
 
 impl Dispatch {
     fn validate(&self, host: &Host, source: &str, phase: &str, workflow: &str) -> Result<()> {
+        self.validate_branch(
+            host,
+            source,
+            phase,
+            workflow,
+            &host.policy.deployment.server.default_branch,
+        )
+    }
+
+    fn validate_branch(
+        &self,
+        host: &Host,
+        source: &str,
+        phase: &str,
+        workflow: &str,
+        branch: &str,
+    ) -> Result<()> {
         validate_sha(source)?;
-        let branch = &host.policy.deployment.server.default_branch;
         ensure!(
             self.repository == host.repository()
                 && self.reference == format!("refs/heads/{branch}")
@@ -583,12 +606,16 @@ impl Host {
     }
 
     fn verify_attestation(&self, archive: &Path, source: &str) -> Result<()> {
+        self.verify_attestation_from(archive, source, BOOTSTRAP_WORKFLOW)
+    }
+
+    fn verify_attestation_from(&self, archive: &Path, source: &str, workflow: &str) -> Result<()> {
         validate_sha(source)?;
         let branch = format!(
             "refs/heads/{}",
             self.policy.deployment.server.default_branch
         );
-        let signer = format!("{}/{BOOTSTRAP_WORKFLOW}", self.repository());
+        let signer = format!("{}/{workflow}", self.repository());
         let status = Process::new("gh")
             .args(["attestation", "verify"])
             .arg(archive)

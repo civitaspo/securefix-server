@@ -9,7 +9,7 @@ on:
 permissions: {}
 jobs:
   runtime:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor_id == '4525500'
     uses: ./.github/workflows/load-cli.yml
     permissions:
       actions: read
@@ -45,6 +45,7 @@ jobs:
           PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
         run: securefix distribute validate-promotion "$PUBLISHER_RUN_ID"
   caller:
+    if: github.ref == 'refs/heads/main' && github.actor_id == '4525500'
     needs: [runtime, gate]
     strategy:
       fail-fast: false
