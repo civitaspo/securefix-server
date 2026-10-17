@@ -449,12 +449,15 @@ fn verify_candidate_commit(api: &GitHub, repository: &str, source_sha: &str) -> 
         .as_array()
         .context("candidate check runs malformed")?;
     ensure!(
-        matches.len() == 1
-            && matches[0]["name"] == "status-check"
-            && matches[0]["app"]["id"] == status_app_id
-            && matches[0]["status"] == "completed"
-            && matches[0]["conclusion"] == "success",
-        "candidate CI status-check is not a unique successful check"
+        !matches.is_empty()
+            && matches.len() < 100
+            && matches.iter().all(|check| {
+                check["name"] == "status-check"
+                    && check["app"]["id"] == status_app_id
+                    && check["status"] == "completed"
+                    && check["conclusion"] == "success"
+            }),
+        "candidate CI status-check is missing, truncated, pending, or failing"
     );
     Ok(())
 }
@@ -681,6 +684,39 @@ mod tests {
                 json!({"check_runs":[{"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"success"}]}),
             ),
         ]
+    }
+
+    #[test]
+    fn candidate_checks_accept_multiple_successful_suites_and_reject_incomplete_evidence() {
+        let trusted = crate::config::trusted().unwrap();
+        let repository = &trusted.deployment.server.repository;
+        let status_app_id = trusted.deployment.checks.status_app_id;
+        let check = json!({"name":"status-check","app":{"id":status_app_id},"status":"completed","conclusion":"success"});
+        let mut pending = check.clone();
+        pending["status"] = json!("in_progress");
+        pending["conclusion"] = Value::Null;
+        let mut failed = check.clone();
+        failed["conclusion"] = json!("failure");
+        let mut foreign = check.clone();
+        foreign["app"]["id"] = json!(1);
+        for (checks, accepted) in [
+            (json!([]), false),
+            (json!([check.clone(), check.clone()]), true),
+            (json!([check.clone(), pending]), false),
+            (json!([check.clone(), failed]), false),
+            (json!([foreign]), false),
+            (json!(vec![check; 100]), false),
+        ] {
+            let mut routes = candidate_checks_routes();
+            routes.pop();
+            routes.push(Route::get(format!("/repos/{repository}/commits/{SHA}/check-runs?per_page=100&filter=latest&check_name=status-check&app_id={status_app_id}"), json!({"check_runs":checks})));
+            let fixture = Fixture::new(routes);
+            assert_eq!(
+                verify_candidate_commit(&fixture.api, repository, SHA).is_ok(),
+                accepted
+            );
+            fixture.finish();
+        }
     }
 
     fn release(draft: bool, assets: Value) -> Value {
@@ -1053,7 +1089,7 @@ mod tests {
         let error = publish(&fixture.api, &candidate_sha, archive.path()).unwrap_err();
         assert!(
             format!("{error:#}")
-                .contains("candidate CI status-check is not a unique successful check")
+                .contains("candidate CI status-check is missing, truncated, pending, or failing")
         );
 
         let repair: Value = fixture.api.post(&repair_path, &repair_body).unwrap();

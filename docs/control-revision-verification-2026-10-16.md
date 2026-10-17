@@ -192,6 +192,29 @@ producers. The `.github/` exclusion above closes both findings and also prevents
 new workflow from impersonating the required check. The follow-up review found no
 further actionable issue; it did not execute tests or inspect production.
 
+## Multiple PR check suites correction (2026-10-17)
+
+The first separately approved executor proposed [PR #96](https://github.com/civitaspo/securefix-server/pull/96)
+at the same signed head as PR #95. Both required CI suites succeeded, but GitHub's
+`filter=latest` check-runs response retained a `status-check` for each PR suite.
+The operator stopped before owner review or merge because the qualification guard
+incorrectly required exactly one matching check. The temporary environment admission
+and source-approval variable were removed; main was unchanged.
+
+The shared Rust bootstrap guard now requires at least one matching check from the
+configured GitHub Actions App and requires every matching latest check to be completed
+and successful. Multiple successful PR suites are accepted; an absent check or any
+pending or failing matching suite is rejected. Regression cases also reject an
+untrusted App as the only producer. This correction applies to publication, repair,
+activation, and the separate recovery executor through the same guard.
+
+The normal publication and activation validators had the same uniqueness
+assumption and now accept multiple successful trusted suites as well. The bounded
+publication query rejects a full response page rather than accepting potentially
+truncated evidence. The corrected local suite passed **32 library, 238 normal
+binary, 18 bootstrap binary, and 2 native integration tests** (290 passed;
+2 ignored), using a separate Cargo target directory for this source copy.
+
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent

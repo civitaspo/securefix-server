@@ -320,10 +320,11 @@ fn verify_ci_status(api: &GitHub, repository: &str, source: &str) -> Result<()> 
         ensure!(page < 100, "candidate check-run pagination exceeded limit");
     }
     ensure!(
-        matches.len() == 1
-            && matches[0]["status"] == "completed"
-            && matches[0]["conclusion"] == "success",
-        "candidate CI status-check is not a unique successful check"
+        !matches.is_empty()
+            && matches.iter().all(|check| {
+                check["status"] == "completed" && check["conclusion"] == "success"
+            }),
+        "candidate CI status-check is missing, pending, or failing"
     );
     Ok(())
 }
@@ -1149,6 +1150,47 @@ mod tests {
     use super::*;
     use crate::fixtures::Route;
     use std::io::Write;
+
+    #[test]
+    fn candidate_ci_accepts_successful_pr_suites_and_rejects_any_pending_or_failed_suite() {
+        let trusted = config::trusted().unwrap();
+        let repository = &trusted.deployment.server.repository;
+        let source = "a".repeat(40);
+        let check = json!({"name":"status-check","app":{"id":trusted.deployment.checks.status_app_id},"status":"completed","conclusion":"success"});
+        let mut pending = check.clone();
+        pending["status"] = json!("queued");
+        pending["conclusion"] = Value::Null;
+        let mut failed = check.clone();
+        failed["conclusion"] = json!("failure");
+        let mut foreign = check.clone();
+        foreign["app"]["id"] = json!(1);
+        for (checks, accepted) in [
+            (json!([]), false),
+            (json!([check.clone(), check.clone()]), true),
+            (json!([check.clone(), pending]), false),
+            (json!([check.clone(), failed]), false),
+            (json!([foreign.clone()]), false),
+            (json!([check, foreign]), true),
+        ] {
+            let fixture = crate::fixtures::Fixture::new(vec![
+                Route::get(
+                    format!("/repos/{repository}/commits/{source}/status"),
+                    json!({"total_count":0,"state":"pending"}),
+                ),
+                Route::get(
+                    format!(
+                        "/repos/{repository}/commits/{source}/check-runs?per_page=100&page=1&filter=latest"
+                    ),
+                    json!({"check_runs":checks}),
+                ),
+            ]);
+            assert_eq!(
+                verify_ci_status(&fixture.api, repository, &source).is_ok(),
+                accepted
+            );
+            fixture.finish();
+        }
+    }
 
     struct ActivationTestEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 

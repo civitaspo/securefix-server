@@ -649,6 +649,44 @@ fn writer_installation_must_be_scoped_to_the_configured_server() {
 }
 
 #[test]
+fn required_ci_accepts_multiple_successful_pr_suites_and_rejects_any_unfinished_or_failed_suite() {
+    let check = json!({"name":"status-check","app":{"id":policy().deployment.checks.status_app_id},"status":"completed","conclusion":"success"});
+    let mut pending = check.clone();
+    pending["status"] = json!("in_progress");
+    pending["conclusion"] = Value::Null;
+    let mut failed = check.clone();
+    failed["conclusion"] = json!("failure");
+    let mut foreign = check.clone();
+    foreign["app"]["id"] = json!(1);
+    for (checks, accepted) in [
+        (json!([]), false),
+        (json!([check.clone(), check.clone()]), true),
+        (json!([check.clone(), pending]), false),
+        (json!([check.clone(), failed]), false),
+        (json!([foreign.clone()]), false),
+        (json!([check, foreign]), true),
+    ] {
+        let mut routes = status_routes(&main_sha());
+        routes.pop();
+        routes.push(Route::get(
+            path(&format!(
+                "commits/{}/check-runs?per_page=100&page=1&filter=latest",
+                main_sha()
+            )),
+            json!({"check_runs":checks}),
+        ));
+        let fixture = Fixture::new(routes);
+        assert_eq!(
+            host(&fixture, "propose")
+                .required_status(&main_sha())
+                .is_ok(),
+            accepted
+        );
+        fixture.finish();
+    }
+}
+
+#[test]
 fn bootstrap_plan_schema_rejects_missing_unknown_and_wrong_typed_fields() {
     let value = json!({"version":1,"operation":"prepare","repository":policy().deployment.server.repository,"repository_id":1,"default_branch":"main","owner_id":1,"server_bot_id":2,"status_app_id":3,"source_sha":main_sha(),"expected_main_sha":main_sha(),"archive_sha256":"1".repeat(64),"policy_sha256":"2".repeat(64),"verification_run_id":77,"publisher_run_id":88,"descriptor":null,"pull_request":null,"head_sha":null});
     serde_json::from_value::<Plan>(value.clone()).unwrap();

@@ -388,10 +388,11 @@ impl Host {
             );
             if batch.len() < 100 {
                 ensure!(
-                    matches.len() == 1
-                        && matches[0]["status"] == "completed"
-                        && matches[0]["conclusion"] == "success",
-                    "required status-check is not unique and successful"
+                    !matches.is_empty()
+                        && matches.iter().all(|check| {
+                            check["status"] == "completed" && check["conclusion"] == "success"
+                        }),
+                    "required status-check is missing, pending, or failing"
                 );
                 return Ok(());
             }
