@@ -964,7 +964,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     for (path, workflow) in workflows() {
         if matches!(
             path.as_str(),
-            ".github/workflows/ci.yml" | ".github/workflows/publish-runtime.yml"
+            ".github/workflows/ci.yml"
+                | ".github/workflows/publish-runtime.yml"
+                | ".github/workflows/build-bootstrap-host.yml"
         ) {
             continue;
         }
@@ -1088,6 +1090,102 @@ fn operational_lanes_use_the_active_control_and_keep_distribution_explicit() {
 #[test]
 fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
     let bootstrap = workflow("control-bootstrap.yml");
+    assert_eq!(
+        bootstrap["jobs"]["bootstrap-host"]["uses"],
+        "./.github/workflows/build-bootstrap-host.yml"
+    );
+    let host_build = workflow("build-bootstrap-host.yml");
+    let host_build = &host_build["jobs"]["build"];
+    assert_eq!(
+        host_build["permissions"],
+        serde_json::json!({"contents":"read"})
+    );
+    let host_text = serde_json::to_string(host_build).unwrap();
+    for forbidden in [
+        "secrets.",
+        "environment",
+        "id-token",
+        "attestations",
+        "candidate-runtime",
+        "create-github-app-token",
+    ] {
+        assert!(
+            !host_text.contains(forbidden),
+            "host build exposes {forbidden}"
+        );
+    }
+    assert!(
+        host_build["if"]
+            .as_str()
+            .unwrap()
+            .contains("github.run_attempt == 1")
+    );
+    let build_steps = host_build["steps"].as_array().unwrap();
+    assert_eq!(build_steps[0]["with"]["ref"], "${{ job.workflow_sha }}");
+    let compile = build_steps
+        .iter()
+        .find(|step| step["env"]["SECUREFIX_BOOTSTRAP_SOURCE_SHA"].is_string())
+        .unwrap();
+    assert_eq!(
+        compile["env"]["SECUREFIX_BOOTSTRAP_SOURCE_SHA"],
+        "${{ job.workflow_sha }}"
+    );
+    assert_eq!(
+        compile["run"],
+        "cargo +1.99.0 build --locked --release --bin securefix-bootstrap"
+    );
+    for job_id in [
+        "validate-proposal",
+        "propose",
+        "validate-merge",
+        "merge",
+        "repair-propose",
+        "repair-merge",
+    ] {
+        let job = &bootstrap["jobs"][job_id];
+        assert!(
+            job["needs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|need| need == "bootstrap-host")
+        );
+        let steps = job["steps"].as_array().unwrap();
+        let download = steps
+            .iter()
+            .position(|step| {
+                step["with"]["artifact-ids"] == "${{ needs.bootstrap-host.outputs.artifact-id }}"
+            })
+            .unwrap();
+        assert_eq!(steps[download]["with"]["path"], "bootstrap-host");
+        let install = steps
+            .iter()
+            .position(|step| {
+                step["run"].as_str().is_some_and(|run| {
+                    run.contains("install -D -m 755 bootstrap-host/securefix-bootstrap")
+                })
+            })
+            .unwrap();
+        let invoke = steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.starts_with("\"$RUNNER_TEMP/securefix-bootstrap\" "))
+            })
+            .unwrap();
+        assert!(download < install && install < invoke, "{job_id}");
+    }
+    for path in [
+        "scripts/control-bootstrap.py",
+        "scripts/test_control_bootstrap.py",
+        "scripts/test_control_bootstrap_boundaries.py",
+    ] {
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "bootstrap logic must stay in Rust: {path}"
+        );
+    }
     assert_eq!(
         bootstrap["concurrency"]["group"],
         "securefix-control-bootstrap"
@@ -1228,7 +1326,7 @@ fn initial_bootstrap_scratch_uses_only_the_pinned_legacy_baseline() {
     assert_eq!(scratch["environment"], "main");
     assert_eq!(
         steps[context]["run"],
-        "python3 scripts/control-bootstrap.py validate-legacy-context --source-sha \"$SOURCE_SHA\""
+        "\"$RUNNER_TEMP/securefix-bootstrap\" validate-legacy-context --source-sha \"$SOURCE_SHA\""
     );
     let server = steps.iter().find(|step| step["id"] == "server").unwrap();
     assert_eq!(server["with"]["repositories"], "testing-securefix-server");
@@ -2052,28 +2150,6 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("--method")
                     && !run.contains("gh release upload")
                     && !run.contains("gh release create");
-                let fixed_bootstrap_host_validation = path
-                    == ".github/workflows/testing-securefix-server.yml"
-                    && job_id == "bootstrap-scratch"
-                    && step["name"]
-                        == "Validate current main and inactive descriptor before credentials"
-                    && run
-                        == "python3 scripts/control-bootstrap.py validate-legacy-context --source-sha \"$SOURCE_SHA\"";
-                let fixed_bootstrap_host_script = path == ".github/workflows/control-bootstrap.yml"
-                    && run.starts_with("python3 scripts/control-bootstrap.py ")
-                    && [
-                        "prepare ",
-                        "propose ",
-                        "validate-merge ",
-                        "merge ",
-                        "repair-propose ",
-                        "repair-merge ",
-                    ]
-                    .iter()
-                    .any(|command| run.contains(command));
-                let fixed_workflow_script_tests = path == ".github/workflows/ci.yml"
-                    && job_id == "workflows"
-                    && run.trim() == "python3 -m unittest discover -s scripts -p 'test_*.py'";
                 let bounded_release_artifact_lookup = path
                     == ".github/workflows/testing-release-pr.yml"
                     && job_id == "execute"
@@ -2095,10 +2171,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             || bounded_baseline_reads
                             || bounded_legacy_runtime_reads
                             || bounded_release_artifact_lookup)
-                        && !run.contains("curl ")
-                        || fixed_bootstrap_host_validation
-                        || fixed_bootstrap_host_script
-                        || fixed_workflow_script_tests,
+                        && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
                 assert!(

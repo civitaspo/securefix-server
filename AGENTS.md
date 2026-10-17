@@ -7,16 +7,17 @@ boundaries when changing approval, merge, repair, release, or repository setting
 The Rust `securefix` CLI owns validation and business logic. Workflows orchestrate
 events, verified runtime loading, credential isolation, and CLI invocation; keep
 shell steps limited to this orchestration. Do not restore upstream Securefix
-Actions or implement policy decisions in Bash, Python, or github-script, except in
-the fixed `control-bootstrap.yml` workflow and its `scripts/control-bootstrap.py`
-helper while the active descriptor is absent. The helper independently qualifies the
+Actions or implement policy decisions in Bash, Python, or github-script. Introducing
+another implementation language requires an explicit owner decision. The fixed
+`control-bootstrap.yml` workflow invokes the `securefix-bootstrap` Rust binary,
+built from its exact protected-main source in a separate job without production
+credentials. It independently qualifies the
 bootstrap source, publisher run, archive, attestation, policy, scratch proof, and
 reviewed PR because no verified active Rust runtime exists for the first migration.
 The candidate archive is data during this qualification; the candidate executable is
 never run. Repair is split into `repair-propose` and `repair-merge`; both validate the
-bounded repair PR contract. Repair cannot change the bootstrap workflow or helper.
-This exception ends once the active descriptor exists and must not be generalized to
-normal operations or other workflows.
+bounded repair PR contract. Repair cannot change the bootstrap authority or its
+build inputs. Bootstrap permanently stops once the active descriptor exists.
 
 Keep Rust suitable for reuse outside this deployment. Account names, repository
 identities, GitHub App identities, branch names, capabilities, trusted actors, and
@@ -170,8 +171,8 @@ releases for the server. The deployed v0.2.20 runtime cannot apply these changes
 use the repository administrator UI or API. Do not use a temporary exception.
 
 The one-time bootstrap is handled only by the reviewed fixed `control-bootstrap.yml`
-workflow. Its narrowly scoped Python helper performs host-side qualification only
-because no verified active Rust runtime exists for the first migration. It treats the
+workflow. Its source-pinned `securefix-bootstrap` Rust binary performs host-side
+qualification before a verified active runtime exists for the first migration. It treats the
 candidate archive as data and never executes its binary. It publishes only the verified
 initial archive and never runs again after generation one. A later normal successor may select that same archive for rollback
 using its recorded bootstrap publisher run and fixed signer path; other generations
@@ -194,8 +195,10 @@ expected main, signed repair head, successful required checks, and allowed paths
 the Server App opens a PR. Owner review happens after PR creation. `repair-merge`
 requires the latest owner review on that exact PR head, repeats the checks, and merges
 with expected-head CAS. The repair lane rejects changes to `control/active.json`,
-`.github/workflows/control-bootstrap.yml`, and `scripts/control-bootstrap.py`. A defect
-in either bootstrap authority file needs a separately reviewed recovery; the bounded
+all `.github/` workflow/action definitions, Rust authority modules and their dependency/build inputs.
+Only package-version advances are permitted in `Cargo.toml` and `Cargo.lock`; all
+other contents must remain identical. A defect
+in the bootstrap authority needs a separately reviewed recovery; the bounded
 repair lane cannot rewrite its own trust root. Repair does not restore old-runtime
 availability and permanently stops once generation one exists.
 

@@ -37,6 +37,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  bootstrap-host:
+    if: inputs.phase == 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    uses: ./.github/workflows/build-bootstrap-host.yml
+    permissions:
+      contents: read
+
   trusted-runtime-main:
     if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/load-cli.yml
@@ -87,7 +93,7 @@ jobs:
 
   bootstrap-scratch:
     if: inputs.phase == 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && github.ref == 'refs/heads/main' && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
-    needs: [bootstrap-legacy-runtime, build]
+    needs: [bootstrap-legacy-runtime, build, bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -113,12 +119,19 @@ jobs:
       - uses: ./.github/actions/install-cli
         with:
           binary: candidate-runtime/securefix
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - name: Validate current main and inactive descriptor before credentials
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ github.sha }}
-        run: python3 scripts/control-bootstrap.py validate-legacy-context --source-sha "$SOURCE_SHA"
+        run: '"$RUNNER_TEMP/securefix-bootstrap" validate-legacy-context --source-sha "$SOURCE_SHA"'
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: server
         with:

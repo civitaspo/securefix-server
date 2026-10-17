@@ -1,0 +1,39 @@
+name: Build fixed bootstrap host
+on:
+  workflow_call:
+    outputs:
+      artifact-id:
+        description: Immutable artifact ID of the source-pinned bootstrap host
+        value: ${{ jobs.build.outputs.artifact-id }}
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  build:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Compile the fixed bootstrap host without production credentials
+        env:
+          SECUREFIX_BOOTSTRAP_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: cargo +1.99.0 build --locked --release --bin securefix-bootstrap
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: control-bootstrap-host
+          path: target/release/securefix-bootstrap
+          if-no-files-found: error
+          retention-days: 1

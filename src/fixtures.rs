@@ -24,6 +24,7 @@ enum Response {
 }
 
 impl Route {
+    #[allow(dead_code)]
     pub fn active_control(control: &crate::control::ControlRevision) -> Self {
         use base64::Engine;
         let server = &crate::config::trusted().unwrap().deployment.server;
@@ -100,6 +101,8 @@ impl Route {
 
 pub struct Fixture {
     pub api: GitHub,
+    #[allow(dead_code)]
+    pub base: String,
     thread: JoinHandle<()>,
 }
 impl Fixture {
@@ -128,13 +131,11 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let control = Self::control_revision();
-        let api = GitHub::new(
-            &format!("http://{}", listener.local_addr().unwrap()),
-            "fixture-token".into(),
-        )
-        .unwrap()
-        .with_control_revision(&control)
-        .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let api = GitHub::new(&base, "fixture-token".into())
+            .unwrap()
+            .with_control_revision(&control)
+            .unwrap();
         let thread = thread::spawn(move || {
             for route in routes {
                 let deadline = Instant::now() + Duration::from_secs(15);
@@ -228,7 +229,7 @@ impl Fixture {
                 }
             }
         });
-        Self { api, thread }
+        Self { api, base, thread }
     }
     pub fn finish(self) {
         self.thread.join().unwrap();

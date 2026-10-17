@@ -35,6 +35,12 @@ concurrency:
   group: securefix-control-bootstrap
   cancel-in-progress: false
 jobs:
+  bootstrap-host:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    uses: ./.github/workflows/build-bootstrap-host.yml
+    permissions:
+      contents: read
+
   baseline:
     if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
     runs-on: ubuntu-24.04
@@ -99,7 +105,7 @@ jobs:
 
   validate-proposal:
     if: inputs.phase == 'propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
-    needs: [baseline, build-candidate]
+    needs: [baseline, build-candidate, bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -121,12 +127,19 @@ jobs:
           artifact-ids: ${{ needs.build-candidate.outputs.artifact-id }}
           path: distribution
           merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - id: validate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           VERIFY_RUN: ${{ inputs.verification_run_id }}
-        run: python3 scripts/control-bootstrap.py prepare --source-sha "$GITHUB_SHA" --verification-run-id "$VERIFY_RUN" --archive distribution/securefix-runtime-linux-x86_64.tar.gz
+        run: '"$RUNNER_TEMP/securefix-bootstrap" prepare --source-sha "$GITHUB_SHA" --verification-run-id "$VERIFY_RUN" --archive distribution/securefix-runtime-linux-x86_64.tar.gz'
       - name: Save validated plan artifact
         env:
           PLAN: ${{ steps.validate.outputs.plan }}
@@ -141,7 +154,7 @@ jobs:
 
   propose:
     if: inputs.phase == 'propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
-    needs: [baseline, validate-proposal, build-candidate]
+    needs: [baseline, validate-proposal, build-candidate, bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -171,6 +184,13 @@ jobs:
           artifact-ids: ${{ needs.validate-proposal.outputs.artifact-id }}
           path: .
           merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: writer
         with:
@@ -184,11 +204,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ steps.writer.outputs.token }}
-        run: python3 scripts/control-bootstrap.py propose --plan control-bootstrap-plan.json --archive distribution/securefix-runtime-linux-x86_64.tar.gz
+        run: '"$RUNNER_TEMP/securefix-bootstrap" propose --plan control-bootstrap-plan.json --archive distribution/securefix-runtime-linux-x86_64.tar.gz'
 
   validate-merge:
     if: inputs.phase == 'merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
-    needs: baseline
+    needs: [baseline, bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -204,6 +224,13 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - name: Revalidate bootstrap PR without candidate execution
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -212,11 +239,11 @@ jobs:
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
           ID: ${{ inputs.control_id }}
-        run: python3 scripts/control-bootstrap.py validate-merge --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD" --control-id "$ID"
+        run: '"$RUNNER_TEMP/securefix-bootstrap" validate-merge --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD" --control-id "$ID"'
 
   merge:
     if: inputs.phase == 'merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
-    needs: [baseline, validate-merge]
+    needs: [baseline, validate-merge, bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -236,6 +263,13 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: writer
         with:
@@ -253,10 +287,11 @@ jobs:
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
           ID: ${{ inputs.control_id }}
-        run: python3 scripts/control-bootstrap.py merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD" --control-id "$ID"
+        run: '"$RUNNER_TEMP/securefix-bootstrap" merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD" --control-id "$ID"'
 
   repair-propose:
     if: inputs.phase == 'repair-propose' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: [bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -276,6 +311,13 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: writer
         with:
@@ -291,10 +333,11 @@ jobs:
           GH_TOKEN: ${{ steps.writer.outputs.token }}
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
-        run: python3 scripts/control-bootstrap.py repair-propose --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"
+        run: '"$RUNNER_TEMP/securefix-bootstrap" repair-propose --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"'
 
   repair-merge:
     if: inputs.phase == 'repair-merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: [bootstrap-host]
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -314,6 +357,13 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
+          path: bootstrap-host
+          merge-multiple: true
+      - name: Install the fixed Rust bootstrap host
+        run: install -D -m 755 bootstrap-host/securefix-bootstrap "$RUNNER_TEMP/securefix-bootstrap"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: writer
         with:
@@ -330,4 +380,4 @@ jobs:
           PR: ${{ inputs.pull_request }}
           MAIN: ${{ inputs.expected_main_sha }}
           HEAD: ${{ inputs.expected_head_sha }}
-        run: python3 scripts/control-bootstrap.py repair-merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"
+        run: '"$RUNNER_TEMP/securefix-bootstrap" repair-merge --repository civitaspo/securefix-server --pull-request "$PR" --expected-main-sha "$MAIN" --expected-head-sha "$HEAD"'

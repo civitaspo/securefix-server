@@ -32,7 +32,9 @@ UI or API. This is a required rollout prerequisite, not a temporary exception. N
 production change has been authorized by this proposal.
 
 The proposed `control-bootstrap.yml` supplies a one-time, reviewed protected-main
-authority for the initial publication and descriptor proposal. Its fixed Python helper
+authority for the initial publication and descriptor proposal. Its `securefix-bootstrap`
+Rust binary is compiled from the exact workflow SHA in a separate job without
+production credentials and embeds that source identity. The binary
 independently qualifies the source and workflow runs, candidate artifact ID, attestation,
 archive and policy, scratch proof, current main, absent descriptor, and reviewed PR.
 Qualification is read-only and does not run the candidate executable; the archive is

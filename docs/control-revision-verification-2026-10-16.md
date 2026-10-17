@@ -158,6 +158,40 @@ closed with HTTP 404 in the loader. The scheduled
 stopped at the same missing-descriptor boundary. No production runtime publication,
 descriptor activation, or caller distribution occurred.
 
+## Rust bootstrap correction (2026-10-17)
+
+The Python bootstrap implementation and its tests were introduced without an owner
+decision and violated the required Rust implementation boundary. They are removed.
+The earlier Python test results above describe superseded source and do not certify
+the corrected implementation.
+
+The existing Rust package now contains `securefix-bootstrap` alongside the normal
+`securefix` CLI. `build-bootstrap-host.yml` compiles the fixed host from its actual
+defining workflow SHA without production credentials and uploads only that binary.
+The host embeds its source SHA and policy and requires an exact protected-main owner
+dispatch. Credentialed jobs download the host by immutable artifact ID. Candidate
+archives remain data: the host validates bounded tar/gzip contents, exact policy,
+attestation, immutable release identity, scratch evidence, review, and CI before
+writing. The normal runtime API's active-descriptor write guard is unchanged.
+
+Repair protects all `.github/` workflows/actions (including the CI and scratch proof
+producers), the Rust source closure, policy and locked build
+inputs, including renamed paths. Manifest/lockfile changes permit only an advancing
+root package version with every other field unchanged. Bootstrap still stops when
+the active descriptor exists. The self-repair restriction has not been removed.
+
+The corrected assembled suite passed **32 library, 236 normal binary, 17 bootstrap
+binary, and 2 native integration tests** (287 passed; 2 ignored). Workflow tests
+require a separate credential-free host build, source binding, immutable artifact
+selection, and removal of the Python implementation and test files. These local
+results do not establish repaired protected-main execution, publication, or activation.
+
+Formatting, Clippy with warnings denied, and pinned actionlint also passed. A separate
+static code review found that repair could change its CI and scratch-evidence
+producers. The `.github/` exclusion above closes both findings and also prevents a
+new workflow from impersonating the required check. The follow-up review found no
+further actionable issue; it did not execute tests or inspect production.
+
 ## Review and remaining conditions
 
 Code and evidence reviews used the same model family; they do not provide independent
@@ -173,7 +207,7 @@ The protected-main `phase=bootstrap` scratch gate is necessarily post-merge. Its
 attempt failed as recorded above; a repaired-source run must pass before initial publication
 or descriptor activation is proposed. The old v0.2.20 runtime is not claimed to remain
 available after that first main advance. The bounded repair lane excludes
-`control-bootstrap.yml` and `scripts/control-bootstrap.py`; a defect in that authority
+the bootstrap workflows and Rust authority/build inputs; a defect in that authority
 needs separately reviewed recovery. Invalid/missing active descriptors, missing release
 assets, failed attestation, and unavailable required GitHub services still fail closed.
 

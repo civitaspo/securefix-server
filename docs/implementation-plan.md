@@ -1,6 +1,6 @@
 # Rust migration
 
-The implementation replaces repository-owned shell, Ruby, Python, and github-script business logic with one Rust executable.
+The implementation replaces repository-owned shell, Ruby, Python, and github-script business logic with one Rust package. It contains the normal `securefix` executable and the separately built, source-pinned `securefix-bootstrap` executable for initial activation.
 Workflows retain event routing, permissions, environments, isolated jobs, pinned actions, and calls to the executable.
 
 - [x] Frame the trust boundaries and operation capabilities.

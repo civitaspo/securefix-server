@@ -60,7 +60,9 @@ API. No temporary ruleset exception is part of this migration, and no production
 settings change has been made as part of this proposal.
 
 The one-time `control-bootstrap.yml` path is an explicitly reviewed protected-main
-authority. Its fixed Python helper independently checks the source and workflow runs,
+authority. Its `securefix-bootstrap` Rust binary is compiled from the exact workflow
+SHA by `build-bootstrap-host.yml` in a separate job without production credentials.
+The binary embeds that source SHA and rejects a mismatched dispatch. It independently checks the source and workflow runs,
 candidate artifact ID, attestation, archive and bundled policy, scratch proof, current
 main, absent descriptor, and pull request before a write. Qualification treats the
 candidate archive as data and never executes its binary. App-token jobs use the
@@ -70,7 +72,7 @@ descriptor PR; the second requires a separate owner-reviewed dispatch and rechec
 expected main SHA, exact PR head, descriptor identity, and required CI before merging
 with expected-head CAS. If publication succeeded but a later step failed, a retry may
 reuse the reserved release only when it is already immutable and published and the
-helper re-downloads the bounded asset, verifies its GitHub size and digest, checks the
+host re-downloads the bounded asset, verifies its GitHub size and digest, checks the
 archive policy against the exact source, and verifies the fixed bootstrap attestation.
 A draft with mismatched asset metadata fails closed. This fixed producer never runs
 again after generation one. A later rollback can select the same archive in a new normal
@@ -91,7 +93,7 @@ The bootstrap scratch rehearsal has its own `phase=bootstrap` in
 `testing-securefix-server.yml`. It verifies the pinned v0.2.20 legacy runtime by
 release ID `414653308`, asset ID `646481902`, archive digest, GitHub attestation, and
 runtime verification against source `e8e2bc77d96a4e359417217f1d1c22f4e1ac4483`.
-Before minting scratch App tokens, the fixed helper checks that the dispatch came from
+Before minting scratch App tokens, the fixed Rust host checks that the dispatch came from
 current protected main and that `control/active.json` is absent. The pinned runtime
 validates the fixture output files. The candidate runtime prepares and verifies the
 scratch integration fixtures and runs the scratch-only control probe. This avoids using
