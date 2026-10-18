@@ -418,7 +418,15 @@ fn legacy_request_generations(path: &str, expected: serde_yaml::Value) -> Vec<se
         ".github/workflows/merge-request.yml" => ("request", false),
         _ => return Vec::new(),
     };
-    let mut generations = Vec::with_capacity(2);
+    let mut generations = Vec::new();
+    if is_approval {
+        let mut unguarded = expected.clone();
+        unguarded["jobs"][job]
+            .as_mapping_mut()
+            .unwrap()
+            .remove("if");
+        generations.push(unguarded);
+    }
     for issues in ["write", "read"] {
         let mut legacy = expected.clone();
         legacy["jobs"][job]["permissions"]["issues"] = serde_yaml::Value::String(issues.to_owned());
@@ -429,7 +437,11 @@ fn legacy_request_generations(path: &str, expected: serde_yaml::Value) -> Vec<se
                 "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}".to_owned(),
             );
         }
-        generations.push(legacy);
+        generations.push(legacy.clone());
+        if is_approval {
+            legacy["jobs"][job].as_mapping_mut().unwrap().remove("if");
+            generations.push(legacy);
+        }
     }
     generations
 }

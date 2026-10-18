@@ -522,6 +522,25 @@ fn notify() -> Result<()> {
         "notification is not the accepted merge workflow's first attempt"
     );
     let token = GitHub::from_env("SECUREFIX_NOTIFY_TOKEN")?;
+    let result = std::env::var("SECUREFIX_MERGE_RESULT").unwrap_or_else(|_| "failure".into());
+    let sha = std::env::var("SECUREFIX_MERGE_SHA").unwrap_or_default();
+    let server_url =
+        std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".into());
+    let run_id = std::env::var("GITHUB_RUN_ID")?;
+    let run_url = format!("{server_url}/{server}/actions/runs/{run_id}");
+    notify_result(&read, &token, &policy, &manifest, &result, &sha, &run_url)
+}
+
+pub(crate) fn notify_result(
+    read: &GitHub,
+    token: &GitHub,
+    policy: &Policy,
+    manifest: &RequestManifest,
+    result: &str,
+    sha: &str,
+    run_url: &str,
+) -> Result<()> {
+    let trusted = config::trusted()?;
     let marker = format!("<!-- securefix-merge-request:{} -->", manifest.run_id);
     let comments = token.paginate(&format!(
         "/repos/{}/issues/{}/comments",
@@ -538,8 +557,6 @@ fn notify() -> Result<()> {
             .is_some_and(|body| body.lines().any(|line| line == marker))),
         "terminal result was already recorded"
     );
-    let result = std::env::var("SECUREFIX_MERGE_RESULT").unwrap_or_else(|_| "failure".into());
-    let sha = std::env::var("SECUREFIX_MERGE_SHA").unwrap_or_default();
     let (mut message, terminal) = if result == "success" {
         ensure!(
             sha.len() == 40
@@ -561,7 +578,7 @@ fn notify() -> Result<()> {
             Authorization::RenovateComment { .. }
         )
     {
-        message = match request_renovate_rebase(&read, &token, &policy, &manifest) {
+        message = match request_renovate_rebase(read, token, policy, manifest) {
             Ok(true) => "Securefix could not merge this request and added the `rebase` label. Renovate will reevaluate the PR after rebasing and rerunning CI. No further automatic rebase will be requested on this PR.".into(),
             Ok(false) => "Securefix could not merge this request. Its automatic rebase was already requested or a rebase is pending. Resolve the failure and use Renovate's rebase/retry checkbox for another attempt.".into(),
             Err(error) => {
@@ -570,11 +587,7 @@ fn notify() -> Result<()> {
             }
         };
     }
-    let server_url =
-        std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".into());
-    let run_id = std::env::var("GITHUB_RUN_ID")?;
-    let body =
-        format!("{marker}\n{message}\n\nServer run: {server_url}/{server}/actions/runs/{run_id}");
+    let body = format!("{marker}\n{message}\n\nServer run: {run_url}");
     let _: Value = token.post(
         &format!(
             "/repos/{}/issues/{}/comments",
@@ -958,6 +971,66 @@ mod tests {
             json!({"message":"Not Found"}),
         ));
         assert!(validate_state_with(routes).is_err());
+    }
+
+    #[test]
+    fn successful_renovate_notification_posts_sha_and_run_without_rebasing_or_merging() {
+        let manifest = renovate_manifest();
+        let policy = renovate_policy(&manifest);
+        let sha = "d".repeat(40);
+        let run_url = "https://github.com/civitaspo/securefix-server/actions/runs/42";
+        for status in [201, 403] {
+            let fixture = Fixture::new(vec![
+                Route::get("/repos/civitaspo/dbt-authorized-models/issues/7/comments?per_page=100&page=1", json!([])),
+                Route::active_control(&Fixture::control_revision()),
+                Route::request("POST", "/repos/civitaspo/dbt-authorized-models/issues/7/comments", status, json!({}))
+                    .with_request_body(json!({"body":format!(
+                        "<!-- securefix-merge-request:4 -->\nSecurefix merged this pull request with squash at {sha}.\n\nServer run: {run_url}") })),
+            ]);
+            let result = notify_result(
+                &fixture.api,
+                &fixture.api,
+                &policy,
+                &manifest,
+                "success",
+                &sha,
+                run_url,
+            );
+            assert_eq!(result.is_ok(), status == 201);
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn successful_notification_rejects_missing_sha_and_duplicate_receipts() {
+        let manifest = renovate_manifest();
+        let policy = renovate_policy(&manifest);
+        for (comments, sha) in [
+            (json!([]), "".to_owned()),
+            (
+                json!([{"user":{"id":288069019,"login":"civitaspo-securefix-server[bot]","type":"Bot"},
+                "body":"<!-- securefix-merge-request:4 -->\nalready reported"}]),
+                "d".repeat(40),
+            ),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(
+                "/repos/civitaspo/dbt-authorized-models/issues/7/comments?per_page=100&page=1",
+                comments,
+            )]);
+            assert!(
+                notify_result(
+                    &fixture.api,
+                    &fixture.api,
+                    &policy,
+                    &manifest,
+                    "success",
+                    &sha,
+                    "https://github.com/civitaspo/securefix-server/actions/runs/42"
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
     }
 
     #[test]

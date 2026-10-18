@@ -23,6 +23,7 @@ They call the corresponding reusable at the source SHA selected by the active co
 The caller grants `actions: read`, `contents: read`, `attestations: read`, `issues: write`, and `pull-requests: write`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
 The Client App creates a server label whose description is only `civitaspo/<repository>/<run ID>`.
 The versioned manifest travels as an immutable source-run artifact.
+After validating an explicit owner or Renovate command and its PR, intake adds a 🚀 reaction to acknowledge receipt. Automatic PR-event approval has no command to acknowledge. The generated approval caller ignores unrelated issue comments; Rust still validates the exact owner command.
 
 The Rust processor verifies the Client App sender ID/type, repository capability and ID, successful first attempt, event/path, default-branch ancestry, wrapper pin and Actions `referenced_workflows`, artifact identity, and manifest fields.
 The request captures the full active control identity. A changed identity invalidates the request even when the runtime source remains an ancestor of `main`.
@@ -63,6 +64,7 @@ Comment/timeline reads and the Merge API are separate requests, so timeline visi
 The Server App needs `actions: read`, `checks: write`, `statuses: read`, `contents: write`, `issues: write`, and `pull requests: write` on clients.
 Workflows narrow tokens by operation. The policy-result token is scoped to the target repository with `checks: write`, `issues: write`, and `pull requests: write` for check publication, PR failure comments, and hiding obsolete comments; it has no contents-write permission.
 Source-read tokens are read-only; authorization and notification tokens do not receive contents-write permission.
+Successful client merges receive a completion comment with the squash SHA and Server run URL. Notification failure cannot retry a successful merge or request a Renovate rebase. Successful server self-merges skip post-merge notification because an activation can change the active control identity; the old runtime must not write after that change.
 
 ## Renovate requests
 
