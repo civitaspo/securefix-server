@@ -132,6 +132,13 @@ and fields are then `control-probe/control-verification.json` `.generation_one` 
 `fixtures/state.json` fixture PR numbers/heads. The required review marker and owner
 comments are scratch fixture controls, not production activation approval.
 
+The harness also posts an actual scratch App `/merge` comment and assigns that
+App as the merge bot in an explicit in-memory test policy. It validates the bot's
+own PR, signed effective committers, disabled-authority rejection, current-head
+checks and review, and rejection after merge. Production policy rejects aliasing
+the Server App and Renovate identities. This tests the merge-bot validation core;
+it does not establish that the hosted Renovate service sent a production request.
+
 The harness invokes production PR authorization, merge-state, readiness, and
 distribution rendering/validation functions. It does not claim that a scratch
 workflow is a production request source: the source-run and reusable-workflow

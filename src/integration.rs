@@ -2824,6 +2824,41 @@ fn verify_inner(
         &positive_merge_comment,
         &scenario.candidate_sha,
     )?;
+    // Explicit scratch policy: the isolated Server App stands in for the
+    // configured merge bot. Production policy never aliases these principals.
+    let mut bot_policy = policy.clone();
+    bot_policy.renovate_merge_bot = Some(crate::config::Principal {
+        id: policy.server_bot_id,
+        login: policy.deployment.server_bot_login.clone(),
+    });
+    let bot_comment: Value = api.post(
+        &format!(
+            "/repos/{}/issues/{}/comments",
+            integration_repository()?,
+            scenario.positive.number
+        ),
+        &json!({"body":"/merge"}),
+    )?;
+    let mut bot_manifest = positive_manifest.clone();
+    bot_manifest.authorization = Authorization::RenovateComment {
+        comment_id: bot_comment["id"]
+            .as_u64()
+            .context("scratch bot comment has no ID")?,
+        updated_at: parse_time(&bot_comment["updated_at"])?,
+    };
+    bot_manifest.accepted_at = parse_time(&bot_comment["created_at"])?;
+    bot_manifest.validate()?;
+    merge::validate_state(api, &bot_policy, &bot_manifest)?;
+    request::validate_merge_policy(api, &bot_policy, &bot_manifest, true)?;
+    let mut disabled_bot_policy = bot_policy.clone();
+    disabled_bot_policy.renovate_merge_bot = None;
+    ensure!(
+        merge::validate_state(api, &disabled_bot_policy, &bot_manifest).is_err(),
+        "scratch bot request was accepted without configured bot authority"
+    );
+    println!(
+        "Verified live scratch bot command, own-PR identity, signed effective committers, and disabled-authority rejection."
+    );
     let scratch_reviewer = crate::config::Principal {
         id: trusted_config()?.owner_id,
         login: trusted_config()?.deployment.owner_login.clone(),
@@ -2886,6 +2921,12 @@ fn verify_inner(
     ensure!(
         merge::ready_with_reviewer(api, &positive_manifest, (&scratch_reviewer, "User"))?,
         "scratch positive PR lacks required checks or approved review after policy check"
+    );
+    merge::validate_state(api, &bot_policy, &bot_manifest)?;
+    request::validate_merge_policy(api, &bot_policy, &bot_manifest, false)?;
+    ensure!(
+        merge::ready_with_reviewer(api, &bot_manifest, (&scratch_reviewer, "User"))?,
+        "scratch bot request lacks required current-head checks and review"
     );
     ensure!(
         request::has_current_head_approval_for_reviewer(
@@ -2980,6 +3021,10 @@ fn verify_inner(
     ensure!(
         merge::validate_state(api, policy, &positive_manifest).is_err(),
         "replayed merge manifest unexpectedly remained valid after merge"
+    );
+    ensure!(
+        merge::validate_state(api, &bot_policy, &bot_manifest).is_err(),
+        "scratch bot merge request was replayable after merge"
     );
     verify_disposable_release_tag(
         api,

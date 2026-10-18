@@ -1364,6 +1364,139 @@ mod tests {
     use crate::fixtures::{Fixture, Route};
 
     #[test]
+    fn renovate_command_requires_exact_bot_unedited_merge_and_enabled_policy() {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.renovate_merge_bot = Some(crate::config::Principal {
+            id: 43,
+            login: "updater[bot]".into(),
+        });
+        let time = "2026-01-01T00:00:00Z";
+        let authorization = Authorization::RenovateComment {
+            comment_id: 19,
+            updated_at: DateTime::parse_from_rfc3339(time)
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let comment = json!({"id":19,"body":" /merge\n",
+            "user":{"id":43,"login":"updater[bot]","type":"Bot"},
+            "created_at":time,"updated_at":time,
+            "issue_url":"https://api.github.com/repos/civitaspo/example/issues/7"});
+        assert!(command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Merge,
+            &comment,
+            7
+        ));
+        assert!(!command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Approve,
+            &comment,
+            7
+        ));
+        assert!(!command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Merge,
+            &comment,
+            8
+        ));
+        for (pointer, value) in [
+            ("/user/id", json!(44)),
+            ("/user/login", json!("another[bot]")),
+            ("/user/type", json!("User")),
+            ("/body", json!("/merge please")),
+            ("/created_at", json!("2025-12-31T23:59:59Z")),
+            ("/updated_at", json!("2026-01-01T00:00:01Z")),
+        ] {
+            let mut changed = comment.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                !command_matches(&policy, &authorization, RequestKind::Merge, &changed, 7),
+                "{pointer}"
+            );
+        }
+        policy.renovate_merge_bot = None;
+        assert!(!command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Merge,
+            &comment,
+            7
+        ));
+    }
+
+    #[test]
+    fn renovate_authorization_requires_own_pr_and_every_signed_effective_committer() {
+        let sha = "a".repeat(40);
+        let repository = "civitaspo/dbt-authorized-models";
+        let bot = json!({"id":43,"login":"updater[bot]","type":"Bot"});
+        for scenario in [
+            "valid",
+            "other-author",
+            "other-committer",
+            "unsigned",
+            "disabled",
+        ] {
+            let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+            policy.trusted_committers.push("updater[bot]".into());
+            policy.renovate_merge_bot = Some(crate::config::Principal {
+                id: 43,
+                login: "updater[bot]".into(),
+            });
+            if scenario == "disabled" {
+                policy.renovate_merge_bot = None;
+            }
+            let mut commit = json!({"sha":sha,"author":bot,"committer":bot,
+                "commit":{"verification":{"verified":true}}});
+            if scenario == "unsigned" {
+                commit["commit"]["verification"]["verified"] = json!(false);
+            }
+            if scenario == "other-committer" {
+                commit["committer"] = json!({"id":4525500,"login":"civitaspo","type":"User"});
+            }
+            let author = if scenario == "other-author" {
+                json!({"id":99,"login":"other","type":"User"})
+            } else {
+                bot.clone()
+            };
+            let mut routes = vec![
+                Route::get(
+                    format!("/repos/{repository}/pulls/7"),
+                    json!({"state":"open","user":author,"head":{"repo":{"full_name":repository},"sha":sha}}),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/pulls/7/commits?per_page=100&page=1"),
+                    json!([commit]),
+                ),
+            ];
+            if scenario == "valid" {
+                routes.push(Route::get(
+                    format!("/repos/{repository}/pulls/7/files?per_page=100&page=1"),
+                    json!([{"filename":"README.md"}]),
+                ));
+            }
+            let fixture = Fixture::new(routes);
+            let result = validate_pr_authorization_inner(
+                &fixture.api,
+                &policy,
+                repository,
+                7,
+                &sha,
+                false,
+                true,
+            );
+            assert_eq!(
+                result.is_ok(),
+                scenario == "valid",
+                "{scenario}: {result:?}"
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
     fn acknowledge_rechecks_owner_command_and_pr_before_reacting() {
         let repository = "civitaspo/dbt-authorized-models";
         let number = 7;

@@ -613,6 +613,25 @@ fn retry_renovate_targets() -> Result<()> {
     output("repositories", serde_json::to_string(&repositories)?)
 }
 
+fn expired_renovate_command(
+    policy: &Policy,
+    comment: &Value,
+    number: u64,
+    cutoff: DateTime<Utc>,
+) -> Option<Authorization> {
+    let updated_at = DateTime::parse_from_rfc3339(comment["updated_at"].as_str()?)
+        .ok()?
+        .with_timezone(&Utc);
+    let comment_id = comment["id"].as_u64().filter(|id| *id > 0)?;
+    let authorization = Authorization::RenovateComment {
+        comment_id,
+        updated_at,
+    };
+    (updated_at < cutoff
+        && request::command_matches(policy, &authorization, RequestKind::Merge, comment, number))
+    .then_some(authorization)
+}
+
 fn retry_renovate() -> Result<()> {
     let (read, policy) = retry_renovate_policy()?;
     let control = policy
@@ -646,31 +665,11 @@ fn retry_renovate() -> Result<()> {
         }
         let number = pr["number"].as_u64().context("missing PR number")?;
         for comment in api.paginate(&format!("/repos/{repository}/issues/{number}/comments"))? {
-            let Some(updated_at) = comment["updated_at"]
-                .as_str()
-                .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-                .map(|v| v.with_timezone(&Utc))
+            let Some(authorization) = expired_renovate_command(&policy, &comment, number, cutoff)
             else {
                 continue;
             };
-            let Some(comment_id) = comment["id"].as_u64().filter(|id| *id > 0) else {
-                continue;
-            };
-            let authorization = Authorization::RenovateComment {
-                comment_id,
-                updated_at,
-            };
-            if updated_at >= cutoff
-                || !request::command_matches(
-                    &policy,
-                    &authorization,
-                    RequestKind::Merge,
-                    &comment,
-                    number,
-                )
-            {
-                continue;
-            }
+            let (comment_id, _) = request::command_identity(&authorization)?;
             let current_pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
             if !eligible(&current_pr) {
                 break;
@@ -702,6 +701,47 @@ fn retry_renovate() -> Result<()> {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn renovate_retry_selects_only_expired_unedited_configured_bot_commands() {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.renovate_merge_bot = Some(crate::config::Principal {
+            id: 43,
+            login: "updater[bot]".into(),
+        });
+        let cutoff = DateTime::parse_from_rfc3339("2026-01-01T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let comment = json!({"id":8,"body":"/merge","user":{"id":43,"login":"updater[bot]","type":"Bot"},
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
+            "issue_url":"https://api.github.com/repos/civitaspo/example/issues/7"});
+        assert!(expired_renovate_command(&policy, &comment, 7, cutoff).is_some());
+        for (pointer, value) in [
+            ("/id", json!(0)),
+            (
+                "/user",
+                json!({"id":policy.owner_id,"login":policy.deployment.owner_login,"type":"User"}),
+            ),
+            ("/body", json!("/approve")),
+            ("/created_at", json!("2025-12-31T23:59:59Z")),
+            ("/updated_at", json!("invalid")),
+        ] {
+            let mut changed = comment.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                expired_renovate_command(&policy, &changed, 7, cutoff).is_none(),
+                "{pointer}"
+            );
+        }
+        for time in ["2026-01-01T02:00:00Z", "2026-01-01T03:00:00Z"] {
+            let mut fresh = comment.clone();
+            fresh["created_at"] = json!(time);
+            fresh["updated_at"] = json!(time);
+            assert!(expired_renovate_command(&policy, &fresh, 7, cutoff).is_none());
+        }
+        policy.renovate_merge_bot = None;
+        assert!(expired_renovate_command(&policy, &comment, 7, cutoff).is_none());
+    }
 
     fn state_manifest() -> RequestManifest {
         RequestManifest {

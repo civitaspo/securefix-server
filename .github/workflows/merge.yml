@@ -79,7 +79,7 @@ jobs:
           permission-checks: write
           permission-issues: write
           permission-pull-requests: write
-      - name: Record owner authorization for the exact head
+      - name: Record validated authorization and refresh the policy check
         id: authorize
         if: steps.validate.outcome == 'success'
         env:

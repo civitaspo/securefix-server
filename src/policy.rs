@@ -350,6 +350,38 @@ pub fn run(command: Command) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn renovate_merge_authority_is_optional_separate_and_trusted() {
+        let mut value =
+            serde_json::to_value(Policy::load("tests/fixtures/policy.json").unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("renovate_merge_bot");
+        assert!(
+            Policy::parse(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .renovate_merge_bot
+                .is_none()
+        );
+        value["trusted_committers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("updater[bot]"));
+        value["renovate_merge_bot"] = serde_json::json!({"id":43,"login":"updater[bot]"});
+        assert!(Policy::parse(&serde_json::to_vec(&value).unwrap()).is_ok());
+        for bot in [
+            serde_json::json!({"id":0,"login":"updater[bot]"}),
+            serde_json::json!({"id":value["owner_id"],"login":"updater[bot]"}),
+            serde_json::json!({"id":value["client_bot_id"],"login":"updater[bot]"}),
+            serde_json::json!({"id":value["server_bot_id"],"login":"updater[bot]"}),
+            serde_json::json!({"id":43,"login":"untrusted[bot]"}),
+            serde_json::json!({"id":43,"login":"updater"}),
+        ] {
+            value["renovate_merge_bot"] = bot.clone();
+            assert!(
+                Policy::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "{bot}"
+            );
+        }
+    }
+    #[test]
     fn central_policy_is_exact_and_has_no_duplicate_repositories() {
         let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         assert_eq!(policy.repositories.len(), 9);
