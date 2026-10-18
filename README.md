@@ -98,4 +98,4 @@ The [initial Rust GitHub verification](docs/github-verification-2026-10-08.md) r
 See [migration and rollout](docs/migration.md), the [domain glossary](CONTEXT.md), and [architecture decisions](docs/adr/).
 The [previous GitHub verification](docs/archive/merge-verification-2026-10-08.md) is historical evidence for the former implementation.
 
-Deployment identities and branch names are configured in [policy.json](policy.json); see [deployment configuration](docs/configuration.md) and the [organization example](docs/policy.example.json). The Rust runtime has no account or GitHub App defaults.
+Deployment identities and branch names are configured in [policy.json](policy.json); the optional Renovate merge principal is configured separately in [src/renovate_merge_policy.json](src/renovate_merge_policy.json) and embedded in the attested executable. See [deployment configuration](docs/configuration.md) and the [organization example](docs/policy.example.json). The Rust code has no account or GitHub App defaults.

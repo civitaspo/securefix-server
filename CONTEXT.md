@@ -54,6 +54,10 @@ _Avoid_: runtime SHA
 
 **Policy snapshot**:
 The policy bytes bundled with a runtime revision and identified by their digest.
+The separate Renovate merge policy is embedded in the executable from
+`src/renovate_merge_policy.json`, and bound by the runtime source and attested
+archive digest. It does not add fields to the base policy parsed by a predecessor
+controller or grant owner authorization.
 _Avoid_: live policy (when referring to the active runtime's policy)
 
 **Control activation**:

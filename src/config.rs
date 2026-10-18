@@ -1,4 +1,4 @@
-//! Deployment identities come only from the trusted runtime's policy file.
+//! Deployment identities come only from the trusted runtime's policy files.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::OnceLock};
@@ -127,6 +127,18 @@ pub struct TrustedConfig {
     pub deployment: Deployment,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenovateMergePolicy {
+    #[serde(default)]
+    renovate_merge_bot: Option<Principal>,
+}
+
+fn renovate_merge_policy(bytes: &[u8]) -> Result<Option<Principal>> {
+    ensure!(bytes.len() <= 1024, "Renovate merge policy is oversized");
+    Ok(serde_json::from_slice::<RenovateMergePolicy>(bytes)?.renovate_merge_bot)
+}
+
 static TRUSTED: OnceLock<std::result::Result<(TrustedConfig, Vec<u8>), String>> = OnceLock::new();
 
 fn path() -> Result<PathBuf> {
@@ -149,7 +161,12 @@ fn loaded() -> Result<&'static (TrustedConfig, Vec<u8>)> {
                 let path = path()?;
                 let bytes = std::fs::read(&path)
                     .with_context(|| format!("read trusted policy {}", path.display()))?;
-                let policy = crate::policy::Policy::parse(&bytes)?;
+                // This source-bound policy is embedded in the attested binary.
+                // Keep policy.json readable by the predecessor controller that
+                // validates a successor before activating its new authority.
+                let policy = crate::policy::Policy::parse(&bytes)?.with_renovate_merge_bot(
+                    renovate_merge_policy(include_bytes!("renovate_merge_policy.json"))?,
+                )?;
                 Ok((
                     TrustedConfig {
                         owner_id: policy.owner_id,
@@ -172,4 +189,37 @@ pub fn trusted() -> Result<&'static TrustedConfig> {
 }
 pub fn trusted_policy_bytes() -> Result<Vec<u8>> {
     Ok(loaded()?.1.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_renovate_policy_is_optional_strict_and_separate_from_base_policy() {
+        assert!(renovate_merge_policy(b"{}").unwrap().is_none());
+        assert!(
+            renovate_merge_policy(br#"{"renovate_merge_bot":null}"#)
+                .unwrap()
+                .is_none()
+        );
+        for invalid in [
+            br#"{"extra":true}"#.as_slice(),
+            br#"{"renovate_merge_bot":{"id":43,"login":"updater[bot]","extra":true}}"#,
+            &[b' '; 1025],
+        ] {
+            assert!(renovate_merge_policy(invalid).is_err());
+        }
+        let policy = crate::policy::Policy::parse(include_bytes!("../policy.json")).unwrap();
+        assert!(policy.renovate_merge_bot.is_none());
+        let bot = renovate_merge_policy(include_bytes!("renovate_merge_policy.json")).unwrap();
+        let configured = policy.with_renovate_merge_bot(bot.clone()).unwrap();
+        assert_eq!(configured.renovate_merge_bot, bot);
+        assert!(
+            serde_json::to_value(configured)
+                .unwrap()
+                .get("renovate_merge_bot")
+                .is_none()
+        );
+    }
 }
