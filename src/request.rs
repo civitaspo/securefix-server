@@ -358,9 +358,6 @@ fn capture(kind: RequestKind) -> Result<()> {
             .as_u64()
             .context("missing issue number")?
     };
-    if let Authorization::OwnerComment { comment_id, .. } = &authorization {
-        acknowledge_request(&token, &repo, number, *comment_id, kind)?;
-    }
     let repository: Value = token.get(&format!("/repos/{repo}"))?;
     let pr: Value = token.get(&format!("/repos/{repo}/pulls/{number}"))?;
     ensure!(
@@ -413,6 +410,16 @@ fn capture(kind: RequestKind) -> Result<()> {
             .context("active control revision is missing")?,
     };
     manifest.validate()?;
+    if !matches!(manifest.authorization, Authorization::Automatic { .. }) {
+        acknowledge_request(
+            &token,
+            &policy,
+            &repo,
+            number,
+            &manifest.authorization,
+            kind,
+        )?;
+    }
     write_json("request/manifest.json", &manifest)?;
     output(
         "request_name",
@@ -443,23 +450,19 @@ fn validate_pull_request_target_source(payload: &Value, caller_workflow_sha: &st
 
 pub(crate) fn acknowledge_request(
     api: &GitHub,
+    policy: &Policy,
     repository: &str,
     number: u64,
-    comment_id: u64,
+    authorization: &Authorization,
     kind: RequestKind,
 ) -> Result<()> {
     validate_repository(repository)?;
+    let (comment_id, _) = command_identity(authorization)?;
     ensure!(number > 0 && comment_id > 0, "invalid request identity");
-    let trusted = config::trusted()?;
     let comment: Value = api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
     ensure!(
-        kind.matches_comment_body(&comment["body"])
-            && matches_principal(
-                &comment["user"],
-                trusted.owner_id,
-                &trusted.deployment.owner_login,
-                "User",
-            )
+        comment["id"].as_u64() == Some(comment_id)
+            && command_matches(policy, authorization, kind, &comment, number)
             && comment["issue_url"].as_str().is_some_and(|url| {
                 url.ends_with(&format!("/repos/{repository}/issues/{number}"))
             }),
@@ -1515,45 +1518,85 @@ mod tests {
     }
 
     #[test]
-    fn acknowledge_rechecks_owner_command_and_pr_before_reacting() {
+    fn acknowledge_rechecks_owner_and_renovate_commands_before_reacting() {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.renovate_merge_bot = Some(crate::config::Principal {
+            id: 29139614,
+            login: "renovate[bot]".into(),
+        });
         let repository = "civitaspo/dbt-authorized-models";
         let number = 7;
         let comment_id = 19;
-        let reaction = json!({"id":91,"content":"rocket"});
-        let fixture = Fixture::new(vec![
-            Route::get(
-                format!("/repos/{repository}/issues/comments/{comment_id}"),
-                json!({
-                    "body":" /approve ",
-                    "user":{"id":4525500,"login":"civitaspo","type":"User"},
-                    "issue_url":format!("https://api.github.com/repos/{repository}/issues/{number}")
-                }),
+        let updated_at = Utc::now();
+        for (kind, authorization, user, body) in [
+            (
+                RequestKind::Approve,
+                Authorization::OwnerComment {
+                    comment_id,
+                    updated_at: Some(updated_at),
+                },
+                json!({"id":4525500,"login":"civitaspo","type":"User"}),
+                " /approve ",
             ),
-            Route::active_control(&Fixture::control_revision()),
-            Route::request(
-                "POST",
-                format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
-                201,
-                reaction.clone(),
-            )
-            .with_request_body(json!({"content":"rocket"})),
-        ]);
+            (
+                RequestKind::Merge,
+                Authorization::OwnerComment {
+                    comment_id,
+                    updated_at: Some(updated_at),
+                },
+                json!({"id":4525500,"login":"civitaspo","type":"User"}),
+                "/merge",
+            ),
+            (
+                RequestKind::Merge,
+                Authorization::RenovateComment {
+                    comment_id,
+                    updated_at,
+                },
+                json!({"id":29139614,"login":"renovate[bot]","type":"Bot"}),
+                " /merge ",
+            ),
+        ] {
+            let fixture = Fixture::new(vec![
+                Route::get(
+                    format!("/repos/{repository}/issues/comments/{comment_id}"),
+                    json!({
+                        "id":comment_id,
+                        "body":body,
+                        "user":user,
+                        "created_at":updated_at,
+                        "updated_at":updated_at,
+                        "issue_url":format!("https://api.github.com/repos/{repository}/issues/{number}")
+                    }),
+                ),
+                Route::active_control(&Fixture::control_revision()),
+                Route::request(
+                    "POST",
+                    format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
+                    201,
+                    json!({"id":91,"content":"rocket"}),
+                )
+                .with_request_body(json!({"content":"rocket"})),
+            ]);
 
-        acknowledge_request(
-            &fixture.api,
-            repository,
-            number,
-            comment_id,
-            RequestKind::Approve,
-        )
-        .unwrap();
-        fixture.finish();
+            acknowledge_request(
+                &fixture.api,
+                &policy,
+                repository,
+                number,
+                &authorization,
+                kind,
+            )
+            .unwrap();
+            fixture.finish();
+        }
     }
 
     #[test]
     fn acknowledge_does_not_react_to_edited_or_misbound_comments() {
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
         let repository = "civitaspo/dbt-authorized-models";
-        for comment in [
+        for mut comment in [
             json!({
                 "body":"/merge",
                 "user":{"id":4525500,"login":"civitaspo","type":"User"},
@@ -1570,13 +1613,79 @@ mod tests {
                 "issue_url":format!("https://api.github.com/repos/{repository}/issues/8")
             }),
         ] {
+            comment["id"] = json!(19);
             let fixture = Fixture::new(vec![Route::get(
                 format!("/repos/{repository}/issues/comments/19"),
                 comment,
             )]);
             assert!(
-                acknowledge_request(&fixture.api, repository, 7, 19, RequestKind::Approve,)
-                    .is_err()
+                acknowledge_request(
+                    &fixture.api,
+                    &policy,
+                    repository,
+                    7,
+                    &Authorization::OwnerComment {
+                        comment_id: 19,
+                        updated_at: None
+                    },
+                    RequestKind::Approve
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn acknowledge_rejects_changed_or_disabled_renovate_commands() {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.renovate_merge_bot = Some(crate::config::Principal {
+            id: 29139614,
+            login: "renovate[bot]".into(),
+        });
+        let repository = "civitaspo/dbt-authorized-models";
+        let updated_at = Utc::now();
+        let authorization = Authorization::RenovateComment {
+            comment_id: 19,
+            updated_at,
+        };
+        let accepted = json!({
+            "id":19, "body":"/merge",
+            "user":{"id":29139614,"login":"renovate[bot]","type":"Bot"},
+            "created_at":updated_at, "updated_at":updated_at,
+            "issue_url":format!("https://api.github.com/repos/{repository}/issues/7")
+        });
+        for scenario in ["edited", "wrong-id", "wrong-user", "wrong-repo", "disabled"] {
+            let mut comment = accepted.clone();
+            let mut policy = policy.clone();
+            match scenario {
+                "edited" => {
+                    comment["created_at"] = json!(updated_at - chrono::Duration::seconds(1))
+                }
+                "wrong-id" => comment["id"] = json!(20),
+                "wrong-user" => comment["user"]["id"] = json!(29139615),
+                "wrong-repo" => {
+                    comment["issue_url"] =
+                        json!("https://api.github.com/repos/civitaspo/other/issues/7")
+                }
+                "disabled" => policy.renovate_merge_bot = None,
+                _ => unreachable!(),
+            }
+            let fixture = Fixture::new(vec![Route::get(
+                format!("/repos/{repository}/issues/comments/19"),
+                comment,
+            )]);
+            assert!(
+                acknowledge_request(
+                    &fixture.api,
+                    &policy,
+                    repository,
+                    7,
+                    &authorization,
+                    RequestKind::Merge
+                )
+                .is_err(),
+                "{scenario}"
             );
             fixture.finish();
         }
@@ -1585,15 +1694,27 @@ mod tests {
     #[test]
     fn acknowledge_rejects_invalid_identity_without_network_access() {
         let api = GitHub::new("https://api.github.com", "fixture-token".into()).unwrap();
-        assert!(
-            acknowledge_request(&api, "civitaspo/../other", 7, 19, RequestKind::Approve).is_err()
-        );
-        assert!(
-            acknowledge_request(&api, "civitaspo/example", 0, 19, RequestKind::Approve).is_err()
-        );
-        assert!(
-            acknowledge_request(&api, "civitaspo/example", 7, 0, RequestKind::Approve).is_err()
-        );
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        for (repository, number, comment_id) in [
+            ("civitaspo/../other", 7, 19),
+            ("civitaspo/example", 0, 19),
+            ("civitaspo/example", 7, 0),
+        ] {
+            assert!(
+                acknowledge_request(
+                    &api,
+                    &policy,
+                    repository,
+                    number,
+                    &Authorization::OwnerComment {
+                        comment_id,
+                        updated_at: None
+                    },
+                    RequestKind::Approve
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

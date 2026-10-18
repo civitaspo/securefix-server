@@ -2733,9 +2733,13 @@ fn verify_inner(
             .context("fixture command has no ID")?;
         request::acknowledge_request(
             api,
+            policy,
             integration_repository()?,
             scenario.positive.number,
-            id,
+            &Authorization::OwnerComment {
+                comment_id: id,
+                updated_at: Some(parse_time(&comment["updated_at"])?),
+            },
             kind,
         )?;
         let reactions = api.paginate(&format!(
@@ -2850,6 +2854,28 @@ fn verify_inner(
     bot_manifest.accepted_at = parse_time(&bot_comment["created_at"])?;
     bot_manifest.validate()?;
     merge::validate_state(api, &bot_policy, &bot_manifest)?;
+    request::acknowledge_request(
+        api,
+        &bot_policy,
+        integration_repository()?,
+        scenario.positive.number,
+        &bot_manifest.authorization,
+        RequestKind::Merge,
+    )?;
+    let reactions = api.paginate(&format!(
+        "/repos/{}/issues/comments/{}/reactions",
+        integration_repository()?,
+        bot_comment["id"]
+            .as_u64()
+            .context("scratch bot comment has no ID")?
+    ))?;
+    ensure!(
+        reactions
+            .iter()
+            .any(|reaction| reaction["content"] == "rocket"
+                && reaction["user"]["id"].as_u64() == Some(server_bot_id)),
+        "Renovate request did not receive a receipt reaction"
+    );
     request::validate_merge_policy(api, &bot_policy, &bot_manifest, true)?;
     let mut disabled_bot_policy = bot_policy.clone();
     disabled_bot_policy.renovate_merge_bot = None;
@@ -3097,6 +3123,34 @@ fn verify_inner(
         .context("scratch merge response has no commit SHA")?
         .to_owned();
     validate_sha(&merged_sha)?;
+    let run_url = format!(
+        "https://github.com/{}/actions/runs/{}",
+        trusted_config()?.deployment.server.repository,
+        std::env::var("GITHUB_RUN_ID")?
+    );
+    merge::notify_result(
+        api,
+        api,
+        &bot_policy,
+        &bot_manifest,
+        "success",
+        &merged_sha,
+        &run_url,
+    )?;
+    let comments = api.paginate(&format!(
+        "/repos/{}/issues/{}/comments",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    let expected = format!(
+        "<!-- securefix-merge-request:{} -->\nSecurefix merged this pull request with squash at {merged_sha}.\n\nServer run: {run_url}",
+        bot_manifest.run_id
+    );
+    ensure!(
+        comments.iter().any(|comment| comment["body"] == expected
+            && comment["user"]["id"].as_u64() == Some(server_bot_id)),
+        "scratch merge completion comment lacks the merged SHA or Server run URL"
+    );
     ensure!(
         merge::validate_state(api, policy, &positive_manifest).is_err(),
         "replayed merge manifest unexpectedly remained valid after merge"

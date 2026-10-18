@@ -1030,6 +1030,44 @@ fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows
 }
 
 #[test]
+fn approval_caller_migration_accepts_only_known_unguarded_generations() {
+    let sha = "a".repeat(40);
+    let path = ".github/workflows/approve-request.yml";
+    for legacy in [false, true] {
+        let mut files = caller::rendered_files(&sha, "v0.2.33", "main", false).unwrap();
+        let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
+        assert!(
+            workflow["jobs"]["approve"]["if"]
+                .as_str()
+                .unwrap()
+                .contains("'/approve'")
+        );
+        workflow["jobs"]["approve"]
+            .as_mapping_mut()
+            .unwrap()
+            .remove("if");
+        if legacy {
+            workflow["concurrency"]["group"] = serde_yaml::Value::String(
+                "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}".into());
+            workflow["jobs"]["approve"]["permissions"]["pull-requests"] =
+                serde_yaml::Value::String("read".into());
+        }
+        let bytes = serde_yaml::to_string(&workflow).unwrap().into_bytes();
+        files.insert(path.into(), bytes.clone());
+        assert!(caller::validate_existing(path, &bytes, "main").is_ok());
+        assert!(validate_previous_generation(&files, false).is_ok());
+
+        for condition in ["true", "false", ""] {
+            workflow["jobs"]["approve"]["if"] = serde_yaml::Value::String(condition.into());
+            let bytes = serde_yaml::to_string(&workflow).unwrap().into_bytes();
+            files.insert(path.into(), bytes.clone());
+            assert!(caller::validate_existing(path, &bytes, "main").is_err());
+            assert!(validate_previous_generation(&files, false).is_err());
+        }
+    }
+}
+
+#[test]
 fn caller_validator_accepts_only_the_exact_legacy_approve_concurrency_group() {
     let sha = "a".repeat(40);
     let files = caller::rendered_files(&sha, "v0.2.0-pre.1", "main", false).unwrap();

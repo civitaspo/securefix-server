@@ -2417,6 +2417,29 @@ fn merge_workflow_prefilter_allows_whitespace_for_rust_command_validation() {
 }
 
 #[test]
+fn approval_caller_prefilters_comments_without_disabling_automatic_approval() {
+    let template = fs::read_to_string("src/distribution_templates/approve-request.yml")
+        .unwrap()
+        .replace("@OWNER_ID@", "4525500");
+    let template: Value = serde_yaml::from_str(
+        &template
+            .replace("@SERVER_REPOSITORY@", "example/server")
+            .replace("@SECUREFIX_RUNTIME_SHA@", &"a".repeat(40))
+            .replace("@RUNTIME_VERSION@", "v0.2.33"),
+    )
+    .unwrap();
+    let condition = template["jobs"]["approve"]["if"].as_str().unwrap();
+    assert_eq!(
+        condition,
+        workflow("approve-request.yml")["jobs"]["request"]["if"]
+    );
+    assert!(condition.starts_with("github.event_name != 'issue_comment' ||"));
+    assert!(condition.contains("github.event.issue.pull_request"));
+    assert!(condition.contains("github.event.comment.user.id == 4525500"));
+    assert!(condition.contains("contains(github.event.comment.body, '/approve')"));
+}
+
+#[test]
 fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
     let merge = workflow("merge.yml");
     let authorize = &merge["jobs"]["authorize"];
@@ -2464,14 +2487,24 @@ fn self_merge_consumes_its_label_before_apply_and_skips_stale_success_writes() {
         steps[apply]["if"],
         "needs.wait.result == 'success' && (needs.authorize.outputs.repository != 'civitaspo/securefix-server' || steps.self-cleanup.outcome == 'success')"
     );
-    for index in [notify_token, notify] {
-        assert!(
-            steps[index]["if"]
-                .as_str()
-                .unwrap()
-                .contains("(needs.wait.result != 'success' || steps.apply.outcome != 'success')")
-        );
-    }
+    assert_eq!(
+        steps[notify_token]["if"],
+        "always() && (needs.authorize.outputs.repository != 'civitaspo/securefix-server' || needs.wait.result != 'success' || steps.apply.outcome != 'success')"
+    );
+    assert_eq!(
+        steps[notify]["if"],
+        "always() && steps.notify-token.outcome == 'success'"
+    );
+    assert_eq!(steps[notify]["run"], "securefix merge notify");
+    assert_eq!(
+        steps[notify]["env"]["SECUREFIX_MERGE_SHA"],
+        "${{ steps.apply.outputs.merge_sha }}"
+    );
+    assert_eq!(
+        steps[notify]["env"]["SECUREFIX_MERGE_RESULT"],
+        "${{ needs.wait.result == 'success' && steps.apply.outcome || 'wait-failed' }}"
+    );
+    assert!(apply < notify_token && notify_token < notify);
     assert_eq!(
         authorize["outputs"]["repository"],
         "${{ steps.validate.outputs.repository }}"

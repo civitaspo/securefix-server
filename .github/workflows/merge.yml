@@ -227,7 +227,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: securefix merge apply
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        if: always() && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
+        if: always() && (needs.authorize.outputs.repository != 'civitaspo/securefix-server' || needs.wait.result != 'success' || steps.apply.outcome != 'success')
         id: notify-token
         with:
           app-id: '3872533'
@@ -237,7 +237,7 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
       - name: Report the terminal result
-        if: always() && steps.notify-token.outcome == 'success' && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
+        if: always() && steps.notify-token.outcome == 'success'
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_NOTIFY_TOKEN: ${{ steps.notify-token.outputs.token }}
