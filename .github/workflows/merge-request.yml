@@ -16,7 +16,10 @@ jobs:
     if: >-
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '/merge') &&
-      github.event.comment.user.id == 4525500 &&
+      (github.event.comment.user.id == 4525500 ||
+       (github.event.comment.user.id == 29139614 &&
+        github.event.comment.user.type == 'Bot' &&
+        github.event.issue.user.id == 29139614)) &&
       github.run_attempt == 1
     uses: ./.github/workflows/reusable-merge-request.yml
     permissions:

@@ -235,14 +235,23 @@ fn render(
         .replace("@DEFAULT_BRANCH@", branch)
         .replace("@SERVER_REPOSITORY@", server_repository)
         .replace("@RELEASE_BRANCH@", release_branch)
-        .replace("@OWNER_ID@", owner_id);
+        .replace("@OWNER_ID@", owner_id)
+        .replace(
+            "@RENOVATE_BOT_ID@",
+            &crate::config::trusted()?
+                .renovate_merge_bot
+                .as_ref()
+                .map_or(0, |bot| bot.id)
+                .to_string(),
+        );
     ensure!(
         !rendered.contains("@SECUREFIX_RUNTIME_SHA@")
             && !rendered.contains("@RUNTIME_VERSION@")
             && !rendered.contains("@DEFAULT_BRANCH@")
             && !rendered.contains("@SERVER_REPOSITORY@")
             && !rendered.contains("@RELEASE_BRANCH@")
-            && !rendered.contains("@OWNER_ID@"),
+            && !rendered.contains("@OWNER_ID@")
+            && !rendered.contains("@RENOVATE_BOT_ID@"),
         "template contains an unresolved placeholder"
     );
     Ok(rendered)
@@ -508,12 +517,24 @@ fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut 
     if path == ".github/workflows/merge-request.yml"
         && let Some(condition) = expected["jobs"]["request"]["if"].as_str()
     {
-        let prior = condition.replace(
-            "contains(github.event.comment.body, '/merge')",
-            "github.event.comment.body == '/merge'",
+        let config = crate::config::trusted().expect("validated trusted configuration");
+        let owner_only = format!(
+            "github.event.issue.pull_request && contains(github.event.comment.body, '/merge') && github.event.comment.user.id == {} && github.run_attempt == 1",
+            config.owner_id
         );
-        if actual["jobs"]["request"]["if"].as_str() == Some(prior.as_str()) {
-            expected["jobs"]["request"]["if"] = serde_yaml::Value::String(prior);
+        for prior in [condition.to_owned(), owner_only] {
+            for known in [
+                prior.clone(),
+                prior.replace(
+                    "contains(github.event.comment.body, '/merge')",
+                    "github.event.comment.body == '/merge'",
+                ),
+            ] {
+                if actual["jobs"]["request"]["if"].as_str() == Some(known.as_str()) {
+                    expected["jobs"]["request"]["if"] = serde_yaml::Value::String(known);
+                    return;
+                }
+            }
         }
     }
     let actual_on = actual

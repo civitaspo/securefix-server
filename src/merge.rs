@@ -35,6 +35,8 @@ pub enum Command {
     Apply,
     Notify,
     Cleanup,
+    RetryRenovateTargets,
+    RetryRenovate,
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -45,6 +47,8 @@ pub fn run(command: Command) -> Result<()> {
         Command::Apply => apply(),
         Command::Notify => notify(),
         Command::Cleanup => cleanup(),
+        Command::RetryRenovateTargets => retry_renovate_targets(),
+        Command::RetryRenovate => retry_renovate(),
     }
 }
 
@@ -100,18 +104,8 @@ fn validate() -> Result<()> {
     let manifest =
         request::load_source_request(&api, &policy, repository, run_id, RequestKind::Merge)?;
     validate_state(&api, &policy, &manifest)?;
-    let owner_comment_id = match &manifest.authorization {
-        Authorization::OwnerComment { comment_id, .. } => *comment_id,
-        _ => anyhow::bail!("merge requires an owner comment"),
-    };
-    if request::validate_pr_authorization(
-        &api,
-        &policy,
-        repository,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-        true,
-    )? {
+    let (comment_id, _) = request::command_identity(&manifest.authorization)?;
+    if request::validate_merge_policy(&api, &policy, &manifest, true)? {
         output("sensitive", "true")?;
     } else {
         output("sensitive", "false")?;
@@ -125,7 +119,7 @@ fn validate() -> Result<()> {
     output("pull_number", manifest.pull_request.number.to_string())?;
     output("head_sha", &manifest.pull_request.head_sha)?;
     output("source_sha", source_sha)?;
-    output("owner_comment_id", owner_comment_id.to_string())?;
+    output("comment_id", comment_id.to_string())?;
     output("manifest", serde_json::to_string(&manifest)?)?;
     Ok(())
 }
@@ -151,27 +145,19 @@ fn authorize() -> Result<()> {
         "source request changed after validation"
     );
     validate_state(&read, &policy, &manifest)?;
-    request::validate_pr_authorization(
-        &read,
-        &policy,
-        &manifest.repository.full_name,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-        true,
-    )?;
+    request::validate_merge_policy(&read, &policy, &manifest, true)?;
     {
         let write = GitHub::from_env("SECUREFIX_AUTHORIZATION_TOKEN")?;
-        let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization else {
-            anyhow::bail!("merge authorization requires an owner comment")
-        };
-        request::post_owner_marker(
-            &write,
-            &manifest.repository.full_name,
-            manifest.pull_request.number,
-            &manifest.pull_request.head_sha,
-            *comment_id,
-            &manifest.control,
-        )?;
+        if let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization {
+            request::post_owner_marker(
+                &write,
+                &manifest.repository.full_name,
+                manifest.pull_request.number,
+                &manifest.pull_request.head_sha,
+                *comment_id,
+                &manifest.control,
+            )?;
+        }
         if request::has_current_head_approval_for_control(
             &read,
             &manifest.repository.full_name,
@@ -184,7 +170,7 @@ fn authorize() -> Result<()> {
                 &manifest.repository.full_name,
                 &manifest.pull_request.head_sha,
                 true,
-                "Changes passed signature, owner authorization, and current-head review checks.",
+                "Changes passed signature, authorization, and current-head review checks.",
                 &manifest.control,
             )?;
         }
@@ -205,13 +191,7 @@ fn wait() -> Result<()> {
     loop {
         securefix::control::ControlRevision::require_current(&api, &manifest.control)?;
         validate_state(&api, &policy, &manifest)?;
-        request::validate_pr_policy(
-            &api,
-            &policy,
-            &manifest.repository.full_name,
-            manifest.pull_request.number,
-            &manifest.pull_request.head_sha,
-        )?;
+        request::validate_merge_policy(&api, &policy, &manifest, false)?;
         if ready(&api, &manifest)? {
             output("ready", "true")?;
             return Ok(());
@@ -243,13 +223,7 @@ fn apply() -> Result<()> {
     )?;
     ensure!(source == manifest, "source request changed before merge");
     validate_state(&read, &policy, &manifest)?;
-    request::validate_pr_policy(
-        &read,
-        &policy,
-        &manifest.repository.full_name,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-    )?;
+    request::validate_merge_policy(&read, &policy, &manifest, false)?;
     ensure!(
         ready(&read, &manifest)?,
         "merge prerequisites are not ready; retry outside the protected apply lane"
@@ -349,36 +323,26 @@ pub(crate) fn validate_state(
             && pr["head"]["sha"] == manifest.pull_request.head_sha,
         "pull request is closed, retargeted, forked, draft, or has a different head"
     );
-    let Authorization::OwnerComment {
-        comment_id,
-        updated_at,
-    } = &manifest.authorization
-    else {
-        anyhow::bail!("merge request lacks owner authorization")
-    };
-    let trusted = config::trusted()?;
+    let (comment_id, _) = request::command_identity(&manifest.authorization)?;
+    if matches!(
+        manifest.authorization,
+        Authorization::RenovateComment { .. }
+    ) {
+        request::require_renovate_author(policy, &pr)?;
+    }
     let comment: Value = api.get(&format!(
         "/repos/{}/issues/comments/{comment_id}",
         manifest.repository.full_name
     ))?;
     ensure!(
-        RequestKind::Merge.matches_comment_body(&comment["body"])
-            && request::matches_principal(
-                &comment["user"],
-                trusted.owner_id,
-                &trusted.deployment.owner_login,
-                "User",
-            )
-            && comment["issue_url"].as_str().is_some_and(
-                |url| url.ends_with(&format!("/issues/{}", manifest.pull_request.number))
-            )
-            && comment["updated_at"]
-                .as_str()
-                .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-                .map(|v| v.with_timezone(&Utc))
-                .as_ref()
-                == updated_at.as_ref(),
-        "owner merge comment was changed or removed"
+        request::command_matches(
+            policy,
+            &manifest.authorization,
+            RequestKind::Merge,
+            &comment,
+            manifest.pull_request.number
+        ),
+        "merge command was changed or removed"
     );
     let events = api.paginate(&format!(
         "/repos/{}/issues/{}/timeline",
@@ -608,6 +572,130 @@ fn cleanup() -> Result<()> {
         Err(error) if error.to_string().contains("returned 404") => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+// Renovate's pr-comment mode keeps an existing identical comment indefinitely.
+// Remove only expired bot requests so Renovate can reevaluate its own rules and
+// submit a new first-attempt request, bound to the then-current head and control.
+fn retry_renovate_policy() -> Result<(GitHub, Policy)> {
+    let read = GitHub::from_env("GITHUB_TOKEN")?;
+    let policy = Policy::active(&read)?;
+    workflow::require_current_runtime(&read, ".github/workflows/renovate-merge-retry.yml")?;
+    let deployment = &policy.deployment;
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY")? == deployment.server.repository
+            && std::env::var("GITHUB_REF")?
+                == format!("refs/heads/{}", deployment.server.default_branch)
+            && std::env::var("GITHUB_WORKFLOW_REF")?
+                == format!(
+                    "{}/.github/workflows/renovate-merge-retry.yml@refs/heads/{}",
+                    deployment.server.repository, deployment.server.default_branch
+                )
+            && std::env::var("GITHUB_RUN_ATTEMPT")? == "1",
+        "Renovate retry must use the server default-branch workflow's first attempt"
+    );
+    match std::env::var("GITHUB_EVENT_NAME")?.as_str() {
+        "schedule" => {}
+        "workflow_dispatch" => ensure!(
+            std::env::var("GITHUB_ACTOR_ID")?.parse::<u64>()? == policy.owner_id,
+            "only the owner may dispatch Renovate retries"
+        ),
+        _ => anyhow::bail!("unsupported Renovate retry event"),
+    }
+    Ok((read, policy))
+}
+
+fn retry_renovate_targets() -> Result<()> {
+    let (_, policy) = retry_renovate_policy()?;
+    let repositories: Vec<_> = policy.repositories.iter()
+        .filter(|repo| policy.renovate_merge_bot.is_some() && repo.capabilities.contains(&Capability::Merge))
+        .map(|repo| json!({"repository": repo.repository, "name": repo.repository.rsplit('/').next().unwrap_or_default()})).collect();
+    output("repositories", serde_json::to_string(&repositories)?)
+}
+
+fn retry_renovate() -> Result<()> {
+    let (read, policy) = retry_renovate_policy()?;
+    let control = policy
+        .control
+        .as_ref()
+        .context("missing active control revision")?;
+    let bot = policy
+        .renovate_merge_bot
+        .as_ref()
+        .context("Renovate merge requests are disabled")?;
+    let repository = std::env::var("SECUREFIX_REPOSITORY")?;
+    policy.repository(&repository)?.require(Capability::Merge)?;
+    let api = GitHub::from_env("SECUREFIX_RENOVATE_TOKEN")?;
+    let repo: Value = api.get(&format!("/repos/{repository}"))?;
+    ensure!(
+        repo["full_name"] == repository
+            && repo["owner"]["id"].as_u64() == Some(policy.deployment.repository_owner.id),
+        "retry repository identity differs from the configured owner"
+    );
+    let eligible = |pr: &Value| {
+        pr["state"] == "open"
+            && pr["draft"] == false
+            && pr["head"]["repo"]["full_name"] == repository
+            && pr["base"]["ref"] == repo["default_branch"]
+            && request::matches_principal(&pr["user"], bot.id, &bot.login, "Bot")
+    };
+    let cutoff = Utc::now() - chrono::Duration::hours(2);
+    for pr in api.paginate(&format!("/repos/{repository}/pulls?state=open"))? {
+        if !eligible(&pr) {
+            continue;
+        }
+        let number = pr["number"].as_u64().context("missing PR number")?;
+        for comment in api.paginate(&format!("/repos/{repository}/issues/{number}/comments"))? {
+            let Some(updated_at) = comment["updated_at"]
+                .as_str()
+                .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+                .map(|v| v.with_timezone(&Utc))
+            else {
+                continue;
+            };
+            let Some(comment_id) = comment["id"].as_u64().filter(|id| *id > 0) else {
+                continue;
+            };
+            let authorization = Authorization::RenovateComment {
+                comment_id,
+                updated_at,
+            };
+            if updated_at >= cutoff
+                || !request::command_matches(
+                    &policy,
+                    &authorization,
+                    RequestKind::Merge,
+                    &comment,
+                    number,
+                )
+            {
+                continue;
+            }
+            let current_pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+            if !eligible(&current_pr) {
+                break;
+            }
+            let current_comment: Value =
+                api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
+            if current_comment["id"].as_u64() != Some(comment_id)
+                || !request::command_matches(
+                    &policy,
+                    &authorization,
+                    RequestKind::Merge,
+                    &current_comment,
+                    number,
+                )
+            {
+                continue;
+            }
+            securefix::control::ControlRevision::require_current(&read, control)?;
+            api.delete(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
+            println!(
+                "Removed expired Renovate merge request {repository}#{number} comment {comment_id}"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -53,3 +53,5 @@ default-branch push CI. For the minimal CI layout it adds default-branch push
 and manual triggers. The aggregator fails when its dependency fails, is
 cancelled, or is skipped. This lets activation verify real checks on the exact
 new default-branch commit rather than relying on pre-merge PR checks.
+
+The generated Merge Request wrapper permits the configured owner and the exact configured Renovate Bot on its own PRs. The runtime records bot requests separately from owner authorization and revalidates their provenance and accepted head. See [Renovate requests](merging.md#renovate-requests); changing a wrapper alone cannot authorize a bot in an older active runtime.

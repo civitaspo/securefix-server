@@ -101,6 +101,8 @@ pub struct Policy {
     pub server_bot_id: u64,
     pub trusted_committers: Vec<String>,
     #[serde(default)]
+    pub renovate_merge_bot: Option<crate::config::Principal>,
+    #[serde(default)]
     pub sensitive_path_approval_exemptions: SensitivePathApprovalExemptions,
     pub default_sensitive_paths: Vec<String>,
     pub merge_controls_enabled: bool,
@@ -134,6 +136,29 @@ impl Policy {
             "no trusted committers"
         );
         validate_sensitive_path_approval_exemptions(&policy)?;
+        if let Some(bot) = &policy.renovate_merge_bot {
+            ensure!(
+                bot.id > 0
+                    && ![
+                        policy.owner_id,
+                        policy.client_bot_id,
+                        policy.server_bot_id,
+                        policy.deployment.approval_reviewer.id
+                    ]
+                    .contains(&bot.id)
+                    && bot.login.ends_with("[bot]")
+                    && bot.login.len() <= 100
+                    && bot
+                        .login
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_[].".contains(&b))
+                    && policy
+                        .trusted_committers
+                        .iter()
+                        .any(|login| login.eq_ignore_ascii_case(&bot.login)),
+                "invalid Renovate merge bot"
+            );
+        }
         ensure!(
             !policy.default_sensitive_paths.is_empty(),
             "missing default sensitive paths"

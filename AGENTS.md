@@ -226,11 +226,14 @@ by the active descriptor.
 This test validator never supplies ordinary operational authority or executes
 candidate code with production credentials.
 
-Renovate remains a PR author. Native Renovate auto-merge is incompatible with
-the sole-controller model and is removed. Non-major and lockfile PRs now require
-an explicit owner `/merge` command after required checks; major updates also
-remain explicit. Do not add overlapping Dependabot version-update
-configuration.
+Renovate remains a PR author and requests eligible non-major and lockfile merges
+using `automergeType: pr-comment` and `/merge`. Only the separately configured
+`renovate_merge_bot` may request its own PRs; never mint owner authorization from
+that request. Preserve signatures, effective-committer identity, current-head
+review, required checks, full control identity, and the serialized Server App merge
+lane. Expired bot commands may be removed by the bounded retry workflow so
+Renovate reevaluates its rules. Native auto-merge stays disabled and major updates
+remain manual. Do not add overlapping Dependabot version-update configuration.
 
 Keep completion reports precise: what changed, what passed, and any remaining
 unverified condition. Reuse saved evidence and clean up disposable test fixtures.

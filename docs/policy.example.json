@@ -96,5 +96,9 @@
     },
     "release_branch": "releases/candidate",
     "runtime_update_branch": "automation/runtime"
+  },
+  "renovate_merge_bot": {
+    "id": 603,
+    "login": "example-renovate[bot]"
   }
 }

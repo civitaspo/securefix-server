@@ -25,12 +25,16 @@ The immutable record of a request and its captured repository, source, and targe
 _Avoid_: request metadata
 
 **Accepted head**:
-The pull request head SHA captured when an owner command is accepted.
+The pull request head SHA captured when a request command is accepted.
 _Avoid_: current head (unless referring to a later observation)
 
 **Owner authorization**:
 An owner command accepted for one exact pull request head and one active control revision.
 _Avoid_: approval (when describing authorization to run the server operation)
+
+**Renovate authorization**:
+A merge request from the configured Renovate bot for its own pull request, bound to one accepted head and one active control revision.
+_Avoid_: owner authorization
 
 **Sensitive change**:
 A change to a path that requires owner authorization for automatic approval.

@@ -27,7 +27,7 @@ Sensitive changes need owner authorization for that exact head unless the author
 The current policy exempts the Renovate App; membership in `trusted_committers` alone does not grant that exemption.
 Signature, source, current-head approval, and merge checks still apply.
 The server publishes `securefix-policy-check` from the Server App; an approval for an earlier head cannot satisfy it for an updated head.
-The sole-controller model disables native Renovate automerge. Non-major and lockfile Renovate PRs require an explicit owner `/merge` command after the normal checks; major updates also remain explicit.
+Renovate requests non-major and lockfile merges by posting `/merge` with `automergeType: "pr-comment"`. The configured bot can request only its own PRs; the Server App performs the merge after the normal checks. Major updates remain manual. Native auto-merge stays disabled.
 
 Rust owns the client artifact protocol, source validation, signed commits and pull requests.
 Repository capabilities in policy.json are the only Securefix allowlist.
@@ -79,8 +79,8 @@ The operation documents list the required App permissions.
 ## Dependency updates
 
 [`renovate.json`](renovate.json) manages dependency updates using signed platform commits.
-Non-major updates and lockfile maintenance require an explicit owner `/merge` command after required checks; major updates also remain explicit.
-Renovate does not merge its own PRs, and native Renovate auto-merge is not enabled.
+Non-major updates and lockfile maintenance use Renovate comment requests through the server merge lane; major updates remain manual.
+Renovate posts `/merge`; the Server App merges. The hourly retry workflow removes expired, unedited bot commands from open Renovate PRs so a later Renovate run can reevaluate and request again. See [merging.md](docs/merging.md#renovate-requests).
 Dependabot version-update configuration has been removed. Dependabot vulnerability alerts are a separate repository setting.
 
 ## Development and rollout
