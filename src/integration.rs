@@ -1192,10 +1192,11 @@ fn scratch_client_policy(trusted_policy: &[u8]) -> Result<Vec<u8>> {
     let mut policy: Value = serde_json::from_slice(trusted_policy)?;
     // Client-only fixtures have no approval capability and must also work with
     // the currently published runtime while a new policy schema is unreleased.
-    policy
+    let fields = policy
         .as_object_mut()
-        .context("scratch client policy must be an object")?
-        .remove("sensitive_path_approval_exemptions");
+        .context("scratch client policy must be an object")?;
+    fields.remove("sensitive_path_approval_exemptions");
+    fields.remove("renovate_merge_bot");
     let server_deployment = policy["deployment"]["server"].clone();
     policy["deployment"]["server"] = policy["deployment"]["integration"].clone();
     policy["deployment"]["integration"] = server_deployment;
@@ -4942,9 +4943,11 @@ mod tests {
         let mut original: Value =
             serde_json::from_slice(&crate::config::trusted_policy_bytes().unwrap()).unwrap();
         original["sensitive_path_approval_exemptions"] = json!({"users":[],"github_apps":[]});
+        original["renovate_merge_bot"] = json!({"id":43,"login":"updater[bot]"});
         let scratch = scratch_client_policy(&serde_json::to_vec(&original).unwrap()).unwrap();
         let scratch: Value = serde_json::from_slice(&scratch).unwrap();
         assert!(scratch.get("sensitive_path_approval_exemptions").is_none());
+        assert!(scratch.get("renovate_merge_bot").is_none());
         assert_eq!(
             scratch["deployment"]["server"],
             original["deployment"]["integration"]
