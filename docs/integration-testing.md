@@ -139,6 +139,17 @@ checks and review, and rejection after merge. Production policy rejects aliasing
 the Server App and Renovate identities. This tests the merge-bot validation core;
 it does not establish that the hosted Renovate service sent a production request.
 
+Before the positive fixture PR is merged, the harness also calls the production
+rebase-request core with the scratch Server App as the explicitly configured
+Renovate principal. It verifies that an owner command and disabled bot authority
+are rejected, the first eligible bot request writes the Server App retry marker
+and adds GitHub's standard `rebase` label, and another failure does not request
+another rebase. To prove the marker, rather than the still-present label, enforces
+the budget, the harness removes the label from the disposable PR before making
+the second call. It does not delete the repository's label definition. This is
+direct core coverage under an isolated scratch policy. It does not exercise a
+hosted Renovate installation or prove that Renovate processed the label.
+
 The harness invokes production PR authorization, merge-state, readiness, and
 distribution rendering/validation functions. It does not claim that a scratch
 workflow is a production request source: the source-run and reusable-workflow

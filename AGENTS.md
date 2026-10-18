@@ -232,9 +232,17 @@ using `automergeType: pr-comment` and `/merge`. Only the separately configured
 never mint owner authorization from
 that request. Preserve signatures, effective-committer identity, current-head
 review, required checks, full control identity, and the serialized Server App merge
-lane. Expired bot commands may be removed by the bounded retry workflow so
-Renovate reevaluates its rules. Native auto-merge stays disabled and major updates
-remain manual. Do not add overlapping Dependabot version-update configuration.
+lane. After an authorized merge attempt fails, the inline merge notifier may
+add the standard `rebase` label once per Renovate PR. It first records a durable
+Server App marker for the exact PR and revalidates the current control, accepted
+head, PR state, repository and base branch, bot author, every commit signature,
+effective committer identity, and sensitive-path policy. Human-modified branches
+and signature, authorization, or policy failures do not qualify. CI failures and
+timeouts after authorization do qualify. Never delete the existing Renovate
+command comment or add a scheduled scan or workflow for this recovery. A control
+change makes the old runtime unable to write; request a fresh merge under the
+new active runtime or retry Renovate manually. Native auto-merge stays disabled
+and major updates remain manual. Do not add overlapping Dependabot version-update configuration.
 The separate merge policy is embedded in the executable and bound by source and
 attested archive digests. Keep it out of the base `policy.json`, which predecessor
 controllers must parse strictly before successor activation. Its changes require

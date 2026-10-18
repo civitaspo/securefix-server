@@ -2857,8 +2857,86 @@ fn verify_inner(
         merge::validate_state(api, &disabled_bot_policy, &bot_manifest).is_err(),
         "scratch bot request was accepted without configured bot authority"
     );
+
+    let positive_pr: Value = api.get(&format!(
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    ensure!(
+        !positive_pr["labels"]
+            .as_array()
+            .is_some_and(|labels| { labels.iter().any(|label| label["name"] == "rebase") }),
+        "scratch positive PR already has the Renovate rebase label"
+    );
+    ensure!(
+        merge::request_renovate_rebase(api, api, &bot_policy, &positive_manifest).is_err(),
+        "owner-authored merge command was accepted for an automatic Renovate rebase"
+    );
+    ensure!(
+        merge::request_renovate_rebase(api, api, &disabled_bot_policy, &bot_manifest).is_err(),
+        "Renovate rebase was requested while bot authority was disabled"
+    );
+    let rebase_requested = merge::request_renovate_rebase(api, api, &bot_policy, &bot_manifest)?;
+    ensure!(
+        rebase_requested,
+        "first eligible Renovate failure did not request a rebase"
+    );
+    let comments = api.paginate(&format!(
+        "/repos/{}/issues/{}/comments",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    let marker = "<!-- securefix-renovate-rebase:v1 -->";
+    ensure!(
+        comments.iter().any(|comment| {
+            request::matches_principal(
+                &comment["user"],
+                bot_policy.server_bot_id,
+                &bot_policy.deployment.server_bot_login,
+                "Bot",
+            ) && comment["body"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line == marker))
+        }),
+        "scratch rebase request lacks its Server App retry marker"
+    );
+    let positive_pr: Value = api.get(&format!(
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    ensure!(
+        positive_pr["labels"]
+            .as_array()
+            .is_some_and(|labels| { labels.iter().any(|label| label["name"] == "rebase") }),
+        "scratch rebase request did not add the standard rebase label"
+    );
+
+    api.delete(&format!(
+        "/repos/{}/issues/{}/labels/rebase",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    let repeated_rebase_requested =
+        merge::request_renovate_rebase(api, api, &bot_policy, &bot_manifest)?;
+    ensure!(
+        !repeated_rebase_requested,
+        "a later Renovate failure reset the one-rebase budget"
+    );
+    let positive_pr: Value = api.get(&format!(
+        "/repos/{}/pulls/{}",
+        integration_repository()?,
+        scenario.positive.number
+    ))?;
+    ensure!(
+        !positive_pr["labels"]
+            .as_array()
+            .is_some_and(|labels| { labels.iter().any(|label| label["name"] == "rebase") }),
+        "a repeated failure re-added the rebase label after it was removed"
+    );
     println!(
-        "Verified live scratch bot command, own-PR identity, signed effective committers, and disabled-authority rejection."
+        "Verified scratch Renovate rebase authorization, one-retry marker, standard label, retry exhaustion, signed effective committers, and disabled-authority rejection."
     );
     let scratch_reviewer = crate::config::Principal {
         id: trusted_config()?.owner_id,
