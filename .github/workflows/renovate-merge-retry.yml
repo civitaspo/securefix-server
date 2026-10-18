@@ -1,0 +1,88 @@
+name: Retry Renovate Merge Requests
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    if: github.run_attempt == 1
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+
+  targets:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      repositories: ${{ steps.targets.outputs.repositories }}
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - id: targets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: securefix merge retry-renovate-targets
+
+  retry:
+    needs: [build, targets]
+    if: needs.targets.outputs.repositories != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.targets.outputs.repositories) }}
+    runs-on: ubuntu-latest
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ matrix.name }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+      - name: Expire stale Renovate commands for reevaluation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_RENOVATE_TOKEN: ${{ steps.token.outputs.token }}
+          SECUREFIX_REPOSITORY: ${{ matrix.repository }}
+        run: securefix merge retry-renovate

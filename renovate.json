@@ -11,15 +11,15 @@
   ],
   "timezone": "Asia/Tokyo",
   "automergeStrategy": "squash",
-  "automergeType": "pr",
+  "automergeType": "pr-comment",
   "platformAutomerge": false,
   "lockFileMaintenance": {
     "enabled": true,
-    "automerge": false
+    "automerge": true
   },
   "packageRules": [
     {
-      "description": "Require owner merge commands for non-major updates",
+      "description": "Request server merges for non-major updates",
       "matchUpdateTypes": [
         "minor",
         "patch",
@@ -27,7 +27,7 @@
         "pinDigest",
         "digest"
       ],
-      "automerge": false
+      "automerge": true
     },
     {
       "description": "Review major updates manually",
@@ -40,5 +40,6 @@
         "major"
       ]
     }
-  ]
+  ],
+  "automergeComment": "/merge"
 }

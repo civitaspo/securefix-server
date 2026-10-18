@@ -58,6 +58,10 @@ pub enum Authorization {
         comment_id: u64,
         updated_at: Option<DateTime<Utc>>,
     },
+    RenovateComment {
+        comment_id: u64,
+        updated_at: DateTime<Utc>,
+    },
     Automatic {
         actor_id: u64,
         actor_login: String,
@@ -87,6 +91,73 @@ pub(crate) fn matches_principal(user: &Value, id: u64, login: &str, kind: &str) 
         && user["type"] == kind
 }
 
+pub(crate) fn command_identity(
+    authorization: &Authorization,
+) -> Result<(u64, Option<DateTime<Utc>>)> {
+    match authorization {
+        Authorization::OwnerComment {
+            comment_id,
+            updated_at,
+        } => Ok((*comment_id, *updated_at)),
+        Authorization::RenovateComment {
+            comment_id,
+            updated_at,
+        } => Ok((*comment_id, Some(*updated_at))),
+        _ => anyhow::bail!("merge requires a command comment"),
+    }
+}
+
+pub(crate) fn require_renovate_author(policy: &Policy, pr: &Value) -> Result<()> {
+    let bot = policy
+        .renovate_merge_bot
+        .as_ref()
+        .context("Renovate merge requests are disabled")?;
+    ensure!(
+        matches_principal(&pr["user"], bot.id, &bot.login, "Bot"),
+        "Renovate may only request merging its own pull requests"
+    );
+    Ok(())
+}
+
+pub(crate) fn command_matches(
+    policy: &Policy,
+    authorization: &Authorization,
+    kind: RequestKind,
+    comment: &Value,
+    number: u64,
+) -> bool {
+    let Ok((_, updated_at)) = command_identity(authorization) else {
+        return false;
+    };
+    let principal_matches = match authorization {
+        Authorization::OwnerComment { .. } => matches_principal(
+            &comment["user"],
+            policy.owner_id,
+            &policy.deployment.owner_login,
+            "User",
+        ),
+        Authorization::RenovateComment { .. } => {
+            kind == RequestKind::Merge
+                && comment["created_at"].is_string()
+                && comment["created_at"] == comment["updated_at"]
+                && policy.renovate_merge_bot.as_ref().is_some_and(|bot| {
+                    matches_principal(&comment["user"], bot.id, &bot.login, "Bot")
+                })
+        }
+        _ => false,
+    };
+    principal_matches
+        && kind.matches_comment_body(&comment["body"])
+        && comment["issue_url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with(&format!("/issues/{number}")))
+        && comment["updated_at"]
+            .as_str()
+            .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+            .map(|v| v.with_timezone(&Utc))
+            == updated_at
+}
+
 impl RequestManifest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -113,6 +184,12 @@ impl RequestManifest {
         match &self.authorization {
             Authorization::OwnerComment { comment_id, .. } => {
                 ensure!(*comment_id > 0, "invalid owner comment ID")
+            }
+            Authorization::RenovateComment { comment_id, .. } => {
+                ensure!(
+                    self.kind == RequestKind::Merge && *comment_id > 0,
+                    "Renovate comments authorize only merge requests"
+                );
             }
             Authorization::Automatic {
                 actor_id,
@@ -185,36 +262,63 @@ fn capture(kind: RequestKind) -> Result<()> {
         );
         let comment = &payload["comment"];
         ensure!(
-            kind.matches_comment_body(&comment["body"])
-                && matches_principal(
-                    &comment["user"],
-                    trusted.owner_id,
-                    &trusted.deployment.owner_login,
-                    "User",
-                ),
-            "request comment is unauthorized"
+            payload["action"] == "created",
+            "only new commands are accepted"
         );
         let comment_id = comment["id"].as_u64().context("missing comment ID")?;
-        let current_comment: Value =
-            token.get(&format!("/repos/{repo}/issues/comments/{comment_id}"))?;
+        let current: Value = token.get(&format!("/repos/{repo}/issues/comments/{comment_id}"))?;
+        let owner = matches_principal(
+            &comment["user"],
+            trusted.owner_id,
+            &trusted.deployment.owner_login,
+            "User",
+        );
+        let authorization = if owner {
+            Authorization::OwnerComment {
+                comment_id,
+                updated_at: current["updated_at"]
+                    .as_str()
+                    .map(DateTime::parse_from_rfc3339)
+                    .transpose()?
+                    .map(|v| v.with_timezone(&Utc)),
+            }
+        } else {
+            let bot = policy
+                .renovate_merge_bot
+                .as_ref()
+                .context("Renovate merge requests are disabled")?;
+            ensure!(
+                kind == RequestKind::Merge
+                    && matches_principal(&comment["user"], bot.id, &bot.login, "Bot")
+                    && matches_principal(&payload["sender"], bot.id, &bot.login, "Bot"),
+                "request comment is unauthorized"
+            );
+            Authorization::RenovateComment {
+                comment_id,
+                updated_at: DateTime::parse_from_rfc3339(
+                    current["updated_at"]
+                        .as_str()
+                        .context("Renovate command has no update time")?,
+                )?
+                .with_timezone(&Utc),
+            }
+        };
         ensure!(
-            kind.matches_comment_body(&current_comment["body"])
-                && matches_principal(
-                    &current_comment["user"],
-                    trusted.owner_id,
-                    &trusted.deployment.owner_login,
-                    "User",
+            current["id"].as_u64() == Some(comment_id)
+                && current["body"] == comment["body"]
+                && current["updated_at"] == comment["updated_at"]
+                && command_matches(
+                    &policy,
+                    &authorization,
+                    kind,
+                    &current,
+                    payload["issue"]["number"]
+                        .as_u64()
+                        .context("missing issue number")?
                 ),
             "request comment changed during capture"
         );
-        Authorization::OwnerComment {
-            comment_id,
-            updated_at: current_comment["updated_at"]
-                .as_str()
-                .map(DateTime::parse_from_rfc3339)
-                .transpose()?
-                .map(|v| v.with_timezone(&Utc)),
-        }
+        authorization
     } else {
         ensure!(
             kind == RequestKind::Approve && event_name == "pull_request_target",
@@ -264,6 +368,9 @@ fn capture(kind: RequestKind) -> Result<()> {
             && pr["base"]["ref"] == repository["default_branch"],
         "pull request must be same-repository, open, ready, and target the default branch"
     );
+    if matches!(authorization, Authorization::RenovateComment { .. }) {
+        require_renovate_author(&policy, &pr)?;
+    }
     let caller_workflow_sha = std::env::var("GITHUB_SHA")?;
     if event_name == "pull_request_target" {
         validate_pull_request_target_source(&payload, &caller_workflow_sha)?;
@@ -569,6 +676,34 @@ pub fn load_source_request(
                     .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
                     .map(|v| v.with_timezone(&Utc))
                     == *updated_at
+        }
+        (
+            Authorization::RenovateComment {
+                comment_id,
+                updated_at,
+            },
+            "issue_comment",
+        ) => {
+            let comment: Value =
+                api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
+            let bot = policy
+                .renovate_merge_bot
+                .as_ref()
+                .context("Renovate merge requests are disabled")?;
+            let pr: Value = api.get(&format!(
+                "/repos/{repository}/pulls/{}",
+                manifest.pull_request.number
+            ))?;
+            require_renovate_author(policy, &pr)?;
+            matches_principal(&run["actor"], bot.id, &bot.login, "Bot")
+                && *updated_at > control_activated_at(api, active_control)?
+                && command_matches(
+                    policy,
+                    &manifest.authorization,
+                    kind,
+                    &comment,
+                    manifest.pull_request.number,
+                )
         }
         (
             Authorization::Automatic {
@@ -881,6 +1016,38 @@ pub fn validate_pr_authorization(
     sha: &str,
     owner_requested: bool,
 ) -> Result<bool> {
+    validate_pr_authorization_inner(api, policy, repository, number, sha, owner_requested, false)
+}
+
+pub(crate) fn validate_merge_policy(
+    api: &GitHub,
+    policy: &Policy,
+    manifest: &RequestManifest,
+    accepting: bool,
+) -> Result<bool> {
+    validate_pr_authorization_inner(
+        api,
+        policy,
+        &manifest.repository.full_name,
+        manifest.pull_request.number,
+        &manifest.pull_request.head_sha,
+        accepting && matches!(manifest.authorization, Authorization::OwnerComment { .. }),
+        matches!(
+            manifest.authorization,
+            Authorization::RenovateComment { .. }
+        ),
+    )
+}
+
+fn validate_pr_authorization_inner(
+    api: &GitHub,
+    policy: &Policy,
+    repository: &str,
+    number: u64,
+    sha: &str,
+    owner_requested: bool,
+    renovate_requested: bool,
+) -> Result<bool> {
     validate_repository(repository)?;
     validate_sha(sha)?;
     let repo = policy.repository(repository)?;
@@ -926,6 +1093,17 @@ pub fn validate_pr_authorization(
         }),
         "commit committer is not an allowed committer"
     );
+    if renovate_requested {
+        require_renovate_author(policy, &pr)?;
+        let bot = policy
+            .renovate_merge_bot
+            .as_ref()
+            .context("Renovate merge requests are disabled")?;
+        ensure!(
+            commits_match_principal(&commits, &github_signed, bot.id, &bot.login, "Bot"),
+            "Renovate merge requires every effective committer to be the configured bot"
+        );
+    }
     let files = api.paginate(&format!("/repos/{repository}/pulls/{number}/files"))?;
     ensure!(
         files.len() < 3000,
@@ -981,6 +1159,16 @@ fn sensitive_path_approval_exempt(
     let Some((id, login, kind)) = principal else {
         return false;
     };
+    commits_match_principal(commits, github_signed, id, login, kind)
+}
+
+fn commits_match_principal(
+    commits: &[Value],
+    github_signed: &HashSet<String>,
+    id: u64,
+    login: &str,
+    kind: &str,
+) -> bool {
     !commits.is_empty()
         && commits.iter().all(|commit| {
             let effective = if commit["committer"]["login"] == "web-flow" {
@@ -1174,6 +1362,139 @@ fn render_owner_marker(
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    #[test]
+    fn renovate_command_requires_exact_bot_unedited_merge_and_enabled_policy() {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.renovate_merge_bot = Some(crate::config::Principal {
+            id: 43,
+            login: "updater[bot]".into(),
+        });
+        let time = "2026-01-01T00:00:00Z";
+        let authorization = Authorization::RenovateComment {
+            comment_id: 19,
+            updated_at: DateTime::parse_from_rfc3339(time)
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let comment = json!({"id":19,"body":" /merge\n",
+            "user":{"id":43,"login":"updater[bot]","type":"Bot"},
+            "created_at":time,"updated_at":time,
+            "issue_url":"https://api.github.com/repos/civitaspo/example/issues/7"});
+        assert!(command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Merge,
+            &comment,
+            7
+        ));
+        assert!(!command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Approve,
+            &comment,
+            7
+        ));
+        assert!(!command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Merge,
+            &comment,
+            8
+        ));
+        for (pointer, value) in [
+            ("/user/id", json!(44)),
+            ("/user/login", json!("another[bot]")),
+            ("/user/type", json!("User")),
+            ("/body", json!("/merge please")),
+            ("/created_at", json!("2025-12-31T23:59:59Z")),
+            ("/updated_at", json!("2026-01-01T00:00:01Z")),
+        ] {
+            let mut changed = comment.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                !command_matches(&policy, &authorization, RequestKind::Merge, &changed, 7),
+                "{pointer}"
+            );
+        }
+        policy.renovate_merge_bot = None;
+        assert!(!command_matches(
+            &policy,
+            &authorization,
+            RequestKind::Merge,
+            &comment,
+            7
+        ));
+    }
+
+    #[test]
+    fn renovate_authorization_requires_own_pr_and_every_signed_effective_committer() {
+        let sha = "a".repeat(40);
+        let repository = "civitaspo/dbt-authorized-models";
+        let bot = json!({"id":43,"login":"updater[bot]","type":"Bot"});
+        for scenario in [
+            "valid",
+            "other-author",
+            "other-committer",
+            "unsigned",
+            "disabled",
+        ] {
+            let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+            policy.trusted_committers.push("updater[bot]".into());
+            policy.renovate_merge_bot = Some(crate::config::Principal {
+                id: 43,
+                login: "updater[bot]".into(),
+            });
+            if scenario == "disabled" {
+                policy.renovate_merge_bot = None;
+            }
+            let mut commit = json!({"sha":sha,"author":bot,"committer":bot,
+                "commit":{"verification":{"verified":true}}});
+            if scenario == "unsigned" {
+                commit["commit"]["verification"]["verified"] = json!(false);
+            }
+            if scenario == "other-committer" {
+                commit["committer"] = json!({"id":4525500,"login":"civitaspo","type":"User"});
+            }
+            let author = if scenario == "other-author" {
+                json!({"id":99,"login":"other","type":"User"})
+            } else {
+                bot.clone()
+            };
+            let mut routes = vec![
+                Route::get(
+                    format!("/repos/{repository}/pulls/7"),
+                    json!({"state":"open","user":author,"head":{"repo":{"full_name":repository},"sha":sha}}),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/pulls/7/commits?per_page=100&page=1"),
+                    json!([commit]),
+                ),
+            ];
+            if scenario == "valid" {
+                routes.push(Route::get(
+                    format!("/repos/{repository}/pulls/7/files?per_page=100&page=1"),
+                    json!([{"filename":"README.md"}]),
+                ));
+            }
+            let fixture = Fixture::new(routes);
+            let result = validate_pr_authorization_inner(
+                &fixture.api,
+                &policy,
+                repository,
+                7,
+                &sha,
+                false,
+                true,
+            );
+            assert_eq!(
+                result.is_ok(),
+                scenario == "valid",
+                "{scenario}: {result:?}"
+            );
+            fixture.finish();
+        }
+    }
 
     #[test]
     fn acknowledge_rechecks_owner_command_and_pr_before_reacting() {

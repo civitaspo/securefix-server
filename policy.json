@@ -198,5 +198,9 @@
     },
     "release_branch": "release/next",
     "runtime_update_branch": "automation/securefix-runtime"
+  },
+  "renovate_merge_bot": {
+    "id": 29139614,
+    "login": "renovate[bot]"
   }
 }

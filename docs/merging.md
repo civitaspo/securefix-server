@@ -1,7 +1,7 @@
 # Approval and merging
 
 Post the complete comment `/approve` or `/merge` on an open, non-draft PR targeting its repository's default branch.
-Only owner user ID `4525500` can authorize these commands.
+Owner user ID `4525500` can authorize both commands. The separately configured Renovate bot may request `/merge` on its own PRs as described below; it cannot issue owner authorization or `/approve`.
 The accepted head is the SHA observed by the intake workflow, which can run after the comment was posted.
 If that head changes, resolve the failure and post a new command.
 When automatic approval rejects a sensitive change, post `/approve` before `/merge` to obtain the bot review for that head; `/merge` still waits for a counted approval.
@@ -57,12 +57,24 @@ The contents-write token is created after readiness succeeds and is scoped to th
 The Merge API receives the accepted SHA as its optimistic precondition.
 HTTP 405, 422, and 503 retry within the same deadline after full revalidation; head conflicts fail immediately.
 The squash body retains the PR description and unique co-author trailers.
-For ordinary PRs, GitHub's review/check rules remain active and the Rust processor independently checks the review and required statuses before calling the Merge API. The controlled-merge rulesets name only the Server App with pull-request-only bypass; the dedicated repository-settings flow verifies that exact actor and mode. The bypass does not authorize a merge by itself: all protected mutations pass through the serialized server Actions lane and its Rust owner, review, check, exact-head, and control-identity checks. Runtime distribution opens reviewable caller PRs. Native Renovate auto-merge is disabled, so an owner must issue `/merge` for a Renovate PR after its required checks pass.
+For ordinary PRs, GitHub's review/check rules remain active and the Rust processor independently checks the review and required statuses before calling the Merge API. The controlled-merge rulesets name only the Server App with pull-request-only bypass; the dedicated repository-settings flow verifies that exact actor and mode. The bypass does not authorize a merge by itself: all protected mutations pass through the serialized server Actions lane and its Rust owner, review, check, exact-head, and control-identity checks. Runtime distribution opens reviewable caller PRs. Renovate uses comment requests, and the Server App performs their validated merges. Native auto-merge remains disabled.
 Comment/timeline reads and the Merge API are separate requests, so timeline visibility can lag; the SHA precondition prevents merging a different head.
 
 The Server App needs `actions: read`, `checks: write`, `statuses: read`, `contents: write`, `issues: write`, and `pull requests: write` on clients.
 Workflows narrow tokens by operation. The policy-result token is scoped to the target repository with `checks: write`, `issues: write`, and `pull requests: write` for check publication, PR failure comments, and hiding obsolete comments; it has no contents-write permission.
 Source-read tokens are read-only; authorization and notification tokens do not receive contents-write permission.
+
+## Renovate requests
+
+`renovate_merge_bot` configures one exact bot account ID/login independently of sensitive-path exemptions. Omission disables bot merge requests. A new, unedited `/merge` comment must come from that Bot account and trigger a successful first-attempt intake run by the same account. The current PR author must be that bot, the PR must be open, ready, same-repository and target the default branch, and every effective committer must match the bot. Verified GitHub web commits retain the additional GraphQL signature proof. The manifest records a separate `renovate-comment` authorization, accepted head and full control revision. It never creates an owner authorization receipt.
+
+The normal signature, sensitive-path policy, current-head review, required checks, timeline, expiry, replay and expected-head conditions apply throughout authorization, wait and apply. A bot merge request alone does not exempt sensitive paths; the separately configured author/committer exemption must still hold, or real owner authorization is required.
+
+Repositories use Renovate's [pr-comment automerge mode](https://docs.renovatebot.com/configuration-options/#automergetype), `automergeComment: "/merge"` and `platformAutomerge: false`. Eligible non-major and lockfile rules enable automerge; major rules keep it disabled. Renovate decides whether to submit a request under its repository rules and check results. The server validates that request rather than interpreting dependency changes or granting native merge access.
+
+Renovate does not repeat an identical existing command on every run. The hourly `renovate-merge-retry.yml` workflow uses the active verified runtime and repository-scoped Server App tokens with contents/pull-request read and issues write. Under `securefix-control`, it removes only unedited commands from the exact configured bot, at least two hours old, on its own still-open, ready PRs targeting the default branch. It rechecks the comment, PR and active control before deletion. Owner comments, other bots' comments and merged PR history are preserved. A later Renovate run reevaluates its current automerge rules and checks, then can post a fresh request; the server never replays the old manifest or posts a command on Renovate's behalf. Recovery timing depends on GitHub scheduling and the next Renovate run.
+
+Deploy in order: merge this source, verify the candidate in scratch, publish and activate the new runtime with its bundled policy, distribute its generated callers, then merge the repository Renovate settings. The active v0.2.26 runtime cannot accept bot merge requests or run the retry subcommands. Source changes and caller guards alone do not enable this feature; retry runs before activation fail closed. Keep the sole Server App ruleset entry and native auto-merge disabled throughout.
 
 ## Rollout
 

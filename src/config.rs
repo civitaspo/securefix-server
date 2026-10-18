@@ -123,6 +123,7 @@ pub struct TrustedConfig {
     pub owner_id: u64,
     pub client_bot_id: u64,
     pub server_bot_id: u64,
+    pub renovate_merge_bot: Option<Principal>,
     pub deployment: Deployment,
 }
 
@@ -154,6 +155,7 @@ fn loaded() -> Result<&'static (TrustedConfig, Vec<u8>)> {
                         owner_id: policy.owner_id,
                         client_bot_id: policy.client_bot_id,
                         server_bot_id: policy.server_bot_id,
+                        renovate_merge_bot: policy.renovate_merge_bot,
                         deployment: policy.deployment,
                     },
                     bytes,

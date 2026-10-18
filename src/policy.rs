@@ -101,6 +101,8 @@ pub struct Policy {
     pub server_bot_id: u64,
     pub trusted_committers: Vec<String>,
     #[serde(default)]
+    pub renovate_merge_bot: Option<crate::config::Principal>,
+    #[serde(default)]
     pub sensitive_path_approval_exemptions: SensitivePathApprovalExemptions,
     pub default_sensitive_paths: Vec<String>,
     pub merge_controls_enabled: bool,
@@ -134,6 +136,29 @@ impl Policy {
             "no trusted committers"
         );
         validate_sensitive_path_approval_exemptions(&policy)?;
+        if let Some(bot) = &policy.renovate_merge_bot {
+            ensure!(
+                bot.id > 0
+                    && ![
+                        policy.owner_id,
+                        policy.client_bot_id,
+                        policy.server_bot_id,
+                        policy.deployment.approval_reviewer.id
+                    ]
+                    .contains(&bot.id)
+                    && bot.login.ends_with("[bot]")
+                    && bot.login.len() <= 100
+                    && bot
+                        .login
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_[].".contains(&b))
+                    && policy
+                        .trusted_committers
+                        .iter()
+                        .any(|login| login.eq_ignore_ascii_case(&bot.login)),
+                "invalid Renovate merge bot"
+            );
+        }
         ensure!(
             !policy.default_sensitive_paths.is_empty(),
             "missing default sensitive paths"
@@ -324,6 +349,38 @@ pub fn run(command: Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn renovate_merge_authority_is_optional_separate_and_trusted() {
+        let mut value =
+            serde_json::to_value(Policy::load("tests/fixtures/policy.json").unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("renovate_merge_bot");
+        assert!(
+            Policy::parse(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .renovate_merge_bot
+                .is_none()
+        );
+        value["trusted_committers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("updater[bot]"));
+        value["renovate_merge_bot"] = serde_json::json!({"id":43,"login":"updater[bot]"});
+        assert!(Policy::parse(&serde_json::to_vec(&value).unwrap()).is_ok());
+        for bot in [
+            serde_json::json!({"id":0,"login":"updater[bot]"}),
+            serde_json::json!({"id":value["owner_id"],"login":"updater[bot]"}),
+            serde_json::json!({"id":value["client_bot_id"],"login":"updater[bot]"}),
+            serde_json::json!({"id":value["server_bot_id"],"login":"updater[bot]"}),
+            serde_json::json!({"id":43,"login":"untrusted[bot]"}),
+            serde_json::json!({"id":43,"login":"updater"}),
+        ] {
+            value["renovate_merge_bot"] = bot.clone();
+            assert!(
+                Policy::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "{bot}"
+            );
+        }
+    }
     #[test]
     fn central_policy_is_exact_and_has_no_duplicate_repositories() {
         let policy = Policy::load("tests/fixtures/policy.json").unwrap();

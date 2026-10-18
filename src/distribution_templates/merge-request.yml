@@ -16,7 +16,10 @@ jobs:
     if: >-
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '/merge') &&
-      github.event.comment.user.id == @OWNER_ID@ &&
+      (github.event.comment.user.id == @OWNER_ID@ ||
+       (github.event.comment.user.id == @RENOVATE_BOT_ID@ &&
+        github.event.comment.user.type == 'Bot' &&
+        github.event.issue.user.id == @RENOVATE_BOT_ID@)) &&
       github.run_attempt == 1
     permissions:
       actions: read
