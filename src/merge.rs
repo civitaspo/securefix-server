@@ -26,6 +26,7 @@ const INVALIDATING_EVENTS: &[&str] = &[
     "ready_for_review",
 ];
 const MAX_WAIT_SECONDS: i64 = 60 * 60;
+const RENOVATE_REBASE_MARKER: &str = "<!-- securefix-renovate-rebase:v1 -->";
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -35,8 +36,6 @@ pub enum Command {
     Apply,
     Notify,
     Cleanup,
-    RetryRenovateTargets,
-    RetryRenovate,
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -47,8 +46,6 @@ pub fn run(command: Command) -> Result<()> {
         Command::Apply => apply(),
         Command::Notify => notify(),
         Command::Cleanup => cleanup(),
-        Command::RetryRenovateTargets => retry_renovate_targets(),
-        Command::RetryRenovate => retry_renovate(),
     }
 }
 
@@ -500,7 +497,30 @@ fn merge_commit_message(body: &str, commit_messages: &[&str]) -> String {
 fn notify() -> Result<()> {
     let trusted = config::trusted()?;
     let server = trusted.deployment.server.repository.as_str();
-    let manifest = read_manifest()?;
+    let read = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
+    let policy = Policy::active(&read)?;
+    workflow::require_current_runtime(&read, ".github/workflows/merge.yml")?;
+    let manifest: RequestManifest = serde_json::from_slice(&std::fs::read("merge/manifest.json")?)?;
+    manifest.validate_notification()?;
+    let payload = event()?;
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY")? == server
+            && std::env::var("GITHUB_RUN_ATTEMPT")? == "1"
+            && manifest.kind == RequestKind::Merge
+            && policy.control.as_ref() == Some(&manifest.control)
+            && payload["action"] == "created"
+            && payload["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
+            && payload["label"]["name"] == format!("merge-request-{}", manifest.run_id)
+            && payload["label"]["description"]
+                == format!("{}/{}", manifest.repository.full_name, manifest.run_id)
+            && request::matches_principal(
+                &payload["sender"],
+                trusted.client_bot_id,
+                &trusted.deployment.client_bot_login,
+                "Bot",
+            ),
+        "notification is not the accepted merge workflow's first attempt"
+    );
     let token = GitHub::from_env("SECUREFIX_NOTIFY_TOKEN")?;
     let marker = format!("<!-- securefix-merge-request:{} -->", manifest.run_id);
     let comments = token.paginate(&format!(
@@ -520,7 +540,7 @@ fn notify() -> Result<()> {
     );
     let result = std::env::var("SECUREFIX_MERGE_RESULT").unwrap_or_else(|_| "failure".into());
     let sha = std::env::var("SECUREFIX_MERGE_SHA").unwrap_or_default();
-    let (message, terminal) = if result == "success" {
+    let (mut message, terminal) = if result == "success" {
         ensure!(
             sha.len() == 40
                 && sha
@@ -535,6 +555,21 @@ fn notify() -> Result<()> {
     } else {
         ("Securefix could not merge this request. Resolve the validation failure and post a new exact `/merge` comment.".to_owned(), false)
     };
+    if !terminal
+        && matches!(
+            manifest.authorization,
+            Authorization::RenovateComment { .. }
+        )
+    {
+        message = match request_renovate_rebase(&read, &token, &policy, &manifest) {
+            Ok(true) => "Securefix could not merge this request and added the `rebase` label. Renovate will reevaluate the PR after rebasing and rerunning CI. No further automatic rebase will be requested on this PR.".into(),
+            Ok(false) => "Securefix could not merge this request. Its automatic rebase was already requested or a rebase is pending. Resolve the failure and use Renovate's rebase/retry checkbox for another attempt.".into(),
+            Err(error) => {
+                eprintln!("Renovate rebase was not requested: {error:#}");
+                "Securefix could not merge this request and could not safely request a rebase. Inspect the server run, resolve the failure, and use Renovate's rebase/retry checkbox for another attempt.".into()
+            }
+        };
+    }
     let server_url =
         std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".into());
     let run_id = std::env::var("GITHUB_RUN_ID")?;
@@ -553,6 +588,61 @@ fn notify() -> Result<()> {
         output("notified", "rejected")?;
     }
     Ok(())
+}
+
+pub(crate) fn request_renovate_rebase(
+    read: &GitHub,
+    write: &GitHub,
+    policy: &Policy,
+    manifest: &RequestManifest,
+) -> Result<bool> {
+    manifest.validate_notification()?;
+    ensure!(
+        matches!(
+            manifest.authorization,
+            Authorization::RenovateComment { .. }
+        ),
+        "only an accepted Renovate request may request a rebase"
+    );
+    validate_state(read, policy, manifest)?;
+    request::validate_merge_policy(read, policy, manifest, false)?;
+    let repository = &manifest.repository.full_name;
+    let number = manifest.pull_request.number;
+    let comments = read.paginate(&format!("/repos/{repository}/issues/{number}/comments"))?;
+    if comments.iter().any(|comment| {
+        request::matches_principal(
+            &comment["user"],
+            policy.server_bot_id,
+            &policy.deployment.server_bot_login,
+            "Bot",
+        ) && comment["body"]
+            .as_str()
+            .is_some_and(|body| body.lines().any(|line| line == RENOVATE_REBASE_MARKER))
+    }) {
+        return Ok(false);
+    }
+    let pr: Value = read.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    if pr["labels"]
+        .as_array()
+        .is_some_and(|labels| labels.iter().any(|label| label["name"] == "rebase"))
+    {
+        return Ok(false);
+    }
+    validate_state(read, policy, manifest)?;
+    let _: Value = write.post(
+        &format!("/repos/{repository}/issues/{number}/comments"),
+        &json!({"body":format!("{RENOVATE_REBASE_MARKER}\nSecurefix is requesting this PR's one automatic Renovate rebase. Further failures require a manual Renovate rebase/retry.")}),
+    )?;
+    validate_state(read, policy, manifest)?;
+    let labels: Vec<Value> = write.post(
+        &format!("/repos/{repository}/issues/{number}/labels"),
+        &json!({"labels":["rebase"]}),
+    )?;
+    ensure!(
+        labels.iter().any(|label| label["name"] == "rebase"),
+        "GitHub did not confirm the rebase label"
+    );
+    Ok(true)
 }
 
 fn cleanup() -> Result<()> {
@@ -574,174 +664,10 @@ fn cleanup() -> Result<()> {
     }
 }
 
-// Renovate's pr-comment mode keeps an existing identical comment indefinitely.
-// Remove only expired bot requests so Renovate can reevaluate its own rules and
-// submit a new first-attempt request, bound to the then-current head and control.
-fn retry_renovate_policy() -> Result<(GitHub, Policy)> {
-    let read = GitHub::from_env("GITHUB_TOKEN")?;
-    let policy = Policy::active(&read)?;
-    workflow::require_current_runtime(&read, ".github/workflows/renovate-merge-retry.yml")?;
-    let deployment = &policy.deployment;
-    ensure!(
-        std::env::var("GITHUB_REPOSITORY")? == deployment.server.repository
-            && std::env::var("GITHUB_REF")?
-                == format!("refs/heads/{}", deployment.server.default_branch)
-            && std::env::var("GITHUB_WORKFLOW_REF")?
-                == format!(
-                    "{}/.github/workflows/renovate-merge-retry.yml@refs/heads/{}",
-                    deployment.server.repository, deployment.server.default_branch
-                )
-            && std::env::var("GITHUB_RUN_ATTEMPT")? == "1",
-        "Renovate retry must use the server default-branch workflow's first attempt"
-    );
-    match std::env::var("GITHUB_EVENT_NAME")?.as_str() {
-        "schedule" => {}
-        "workflow_dispatch" => ensure!(
-            std::env::var("GITHUB_ACTOR_ID")?.parse::<u64>()? == policy.owner_id,
-            "only the owner may dispatch Renovate retries"
-        ),
-        _ => anyhow::bail!("unsupported Renovate retry event"),
-    }
-    Ok((read, policy))
-}
-
-fn retry_renovate_targets() -> Result<()> {
-    let (_, policy) = retry_renovate_policy()?;
-    let repositories: Vec<_> = policy.repositories.iter()
-        .filter(|repo| policy.renovate_merge_bot.is_some() && repo.capabilities.contains(&Capability::Merge))
-        .map(|repo| json!({"repository": repo.repository, "name": repo.repository.rsplit('/').next().unwrap_or_default()})).collect();
-    output("repositories", serde_json::to_string(&repositories)?)
-}
-
-fn expired_renovate_command(
-    policy: &Policy,
-    comment: &Value,
-    number: u64,
-    cutoff: DateTime<Utc>,
-) -> Option<Authorization> {
-    let updated_at = DateTime::parse_from_rfc3339(comment["updated_at"].as_str()?)
-        .ok()?
-        .with_timezone(&Utc);
-    let comment_id = comment["id"].as_u64().filter(|id| *id > 0)?;
-    let authorization = Authorization::RenovateComment {
-        comment_id,
-        updated_at,
-    };
-    (updated_at < cutoff
-        && request::command_matches(policy, &authorization, RequestKind::Merge, comment, number))
-    .then_some(authorization)
-}
-
-fn retry_renovate() -> Result<()> {
-    let (read, policy) = retry_renovate_policy()?;
-    let control = policy
-        .control
-        .as_ref()
-        .context("missing active control revision")?;
-    let bot = policy
-        .renovate_merge_bot
-        .as_ref()
-        .context("Renovate merge requests are disabled")?;
-    let repository = std::env::var("SECUREFIX_REPOSITORY")?;
-    policy.repository(&repository)?.require(Capability::Merge)?;
-    let api = GitHub::from_env("SECUREFIX_RENOVATE_TOKEN")?;
-    let repo: Value = api.get(&format!("/repos/{repository}"))?;
-    ensure!(
-        repo["full_name"] == repository
-            && repo["owner"]["id"].as_u64() == Some(policy.deployment.repository_owner.id),
-        "retry repository identity differs from the configured owner"
-    );
-    let eligible = |pr: &Value| {
-        pr["state"] == "open"
-            && pr["draft"] == false
-            && pr["head"]["repo"]["full_name"] == repository
-            && pr["base"]["ref"] == repo["default_branch"]
-            && request::matches_principal(&pr["user"], bot.id, &bot.login, "Bot")
-    };
-    let cutoff = Utc::now() - chrono::Duration::hours(2);
-    for pr in api.paginate(&format!("/repos/{repository}/pulls?state=open"))? {
-        if !eligible(&pr) {
-            continue;
-        }
-        let number = pr["number"].as_u64().context("missing PR number")?;
-        for comment in api.paginate(&format!("/repos/{repository}/issues/{number}/comments"))? {
-            let Some(authorization) = expired_renovate_command(&policy, &comment, number, cutoff)
-            else {
-                continue;
-            };
-            let (comment_id, _) = request::command_identity(&authorization)?;
-            let current_pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
-            if !eligible(&current_pr) {
-                break;
-            }
-            let current_comment: Value =
-                api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
-            if current_comment["id"].as_u64() != Some(comment_id)
-                || !request::command_matches(
-                    &policy,
-                    &authorization,
-                    RequestKind::Merge,
-                    &current_comment,
-                    number,
-                )
-            {
-                continue;
-            }
-            securefix::control::ControlRevision::require_current(&read, control)?;
-            api.delete(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
-            println!(
-                "Removed expired Renovate merge request {repository}#{number} comment {comment_id}"
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
-
-    #[test]
-    fn renovate_retry_selects_only_expired_unedited_configured_bot_commands() {
-        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
-        policy.renovate_merge_bot = Some(crate::config::Principal {
-            id: 43,
-            login: "updater[bot]".into(),
-        });
-        let cutoff = DateTime::parse_from_rfc3339("2026-01-01T02:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let comment = json!({"id":8,"body":"/merge","user":{"id":43,"login":"updater[bot]","type":"Bot"},
-            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
-            "issue_url":"https://api.github.com/repos/civitaspo/example/issues/7"});
-        assert!(expired_renovate_command(&policy, &comment, 7, cutoff).is_some());
-        for (pointer, value) in [
-            ("/id", json!(0)),
-            (
-                "/user",
-                json!({"id":policy.owner_id,"login":policy.deployment.owner_login,"type":"User"}),
-            ),
-            ("/body", json!("/approve")),
-            ("/created_at", json!("2025-12-31T23:59:59Z")),
-            ("/updated_at", json!("invalid")),
-        ] {
-            let mut changed = comment.clone();
-            *changed.pointer_mut(pointer).unwrap() = value;
-            assert!(
-                expired_renovate_command(&policy, &changed, 7, cutoff).is_none(),
-                "{pointer}"
-            );
-        }
-        for time in ["2026-01-01T02:00:00Z", "2026-01-01T03:00:00Z"] {
-            let mut fresh = comment.clone();
-            fresh["created_at"] = json!(time);
-            fresh["updated_at"] = json!(time);
-            assert!(expired_renovate_command(&policy, &fresh, 7, cutoff).is_none());
-        }
-        policy.renovate_merge_bot = None;
-        assert!(expired_renovate_command(&policy, &comment, 7, cutoff).is_none());
-    }
 
     fn state_manifest() -> RequestManifest {
         RequestManifest {
@@ -800,6 +726,140 @@ mod tests {
         json!({"state":"open","draft":false,
             "base":{"repo":{"full_name":"civitaspo/dbt-authorized-models"},"ref":"main"},
             "head":{"repo":{"full_name":"civitaspo/dbt-authorized-models"},"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+    }
+
+    fn renovate_manifest() -> RequestManifest {
+        let mut manifest = state_manifest();
+        let control = Fixture::control_revision();
+        manifest.authorization = Authorization::RenovateComment {
+            comment_id: 8,
+            updated_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        manifest.accepted_at = Utc::now();
+        manifest.workflow_sha = control.source_sha.clone();
+        manifest.control = control;
+        manifest
+    }
+
+    fn renovate_policy(manifest: &RequestManifest) -> Policy {
+        let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        policy.control = Some(manifest.control.clone());
+        policy.renovate_merge_bot = Some(crate::config::Principal {
+            id: 43,
+            login: "updater[bot]".into(),
+        });
+        policy.trusted_committers.push("updater[bot]".into());
+        policy
+    }
+
+    fn renovate_pr(manifest: &RequestManifest) -> Value {
+        json!({"state":"open","draft":false,
+            "user":{"id":43,"login":"updater[bot]","type":"Bot"},
+            "labels":[],
+            "base":{"repo":{"full_name":manifest.repository.full_name},"ref":manifest.pull_request.base_ref},
+            "head":{"repo":{"full_name":manifest.repository.full_name},"sha":manifest.pull_request.head_sha}})
+    }
+
+    fn renovate_command(manifest: &RequestManifest) -> Value {
+        let (comment_id, updated_at) = request::command_identity(&manifest.authorization).unwrap();
+        let updated_at = updated_at.unwrap().to_rfc3339();
+        json!({"id":comment_id,"body":"/merge",
+            "user":{"id":43,"login":"updater[bot]","type":"Bot"},
+            "issue_url":format!("https://api.github.com/repos/{}/issues/{}", manifest.repository.full_name, manifest.pull_request.number),
+            "created_at":updated_at.clone(),
+            "updated_at":updated_at})
+    }
+
+    fn renovate_state_routes(manifest: &RequestManifest, pr: Value) -> Vec<Route> {
+        let repository = &manifest.repository.full_name;
+        vec![
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"id":1,"default_branch":"main"}),
+            ),
+            Route::get(format!("/repos/{repository}/pulls/7"), pr),
+            Route::get(
+                format!(
+                    "/repos/{repository}/issues/comments/{}",
+                    request::command_identity(&manifest.authorization)
+                        .unwrap()
+                        .0
+                ),
+                renovate_command(manifest),
+            ),
+            Route::get(
+                format!("/repos/{repository}/issues/7/timeline?per_page=100&page=1"),
+                json!([]),
+            ),
+        ]
+    }
+
+    fn renovate_policy_routes(manifest: &RequestManifest) -> Vec<Route> {
+        let repository = &manifest.repository.full_name;
+        vec![
+            Route::get(
+                format!("/repos/{repository}/pulls/7"),
+                renovate_pr(manifest),
+            ),
+            Route::get(
+                format!("/repos/{repository}/pulls/7/commits?per_page=100&page=1"),
+                json!([{
+                    "sha":manifest.pull_request.head_sha,
+                    "commit":{"verification":{"verified":true}},
+                    "author":{"id":43,"login":"updater[bot]","type":"Bot"},
+                    "committer":{"id":43,"login":"updater[bot]","type":"Bot"}
+                }]),
+            ),
+            Route::get(
+                format!("/repos/{repository}/pulls/7/files?per_page=100&page=1"),
+                json!([]),
+            ),
+        ]
+    }
+
+    fn renovate_validation_routes(manifest: &RequestManifest, pr: Value) -> Vec<Route> {
+        let mut routes = renovate_state_routes(manifest, pr);
+        routes.extend(renovate_policy_routes(manifest));
+        routes
+    }
+
+    fn append_rebase_success_routes(
+        routes: &mut Vec<Route>,
+        manifest: &RequestManifest,
+        marker_comments: Value,
+        labels: Value,
+    ) {
+        let repository = &manifest.repository.full_name;
+        routes.push(Route::get(
+            format!("/repos/{repository}/issues/7/comments?per_page=100&page=1"),
+            marker_comments,
+        ));
+        routes.push(Route::get(format!("/repos/{repository}/pulls/7"), {
+            let mut pr = renovate_pr(manifest);
+            pr["labels"] = labels;
+            pr
+        }));
+        routes.extend(renovate_state_routes(manifest, renovate_pr(manifest)));
+        routes.push(Route::active_control(&manifest.control));
+        routes.push(Route::request(
+            "POST",
+            format!("/repos/{repository}/issues/7/comments"),
+            201,
+            json!({"id":99}),
+        ).with_request_body(json!({"body":format!("{RENOVATE_REBASE_MARKER}\nSecurefix is requesting this PR's one automatic Renovate rebase. Further failures require a manual Renovate rebase/retry.")})));
+        routes.extend(renovate_state_routes(manifest, renovate_pr(manifest)));
+        routes.push(Route::active_control(&manifest.control));
+        routes.push(
+            Route::request(
+                "POST",
+                format!("/repos/{repository}/issues/7/labels"),
+                200,
+                json!([{"name":"rebase"}]),
+            )
+            .with_request_body(json!({"labels":["rebase"]})),
+        );
     }
 
     fn validate_state_with(api_routes: Vec<Route>) -> Result<()> {
@@ -898,6 +958,128 @@ mod tests {
             json!({"message":"Not Found"}),
         ));
         assert!(validate_state_with(routes).is_err());
+    }
+
+    #[test]
+    fn accepted_renovate_failure_records_pr_budget_and_adds_rebase_label_once() {
+        let manifest = renovate_manifest();
+        let policy = renovate_policy(&manifest);
+        let mut routes = renovate_validation_routes(&manifest, renovate_pr(&manifest));
+        append_rebase_success_routes(
+            &mut routes,
+            &manifest,
+            json!([{"user":{"id":999,"login":"human","type":"User"},"body":RENOVATE_REBASE_MARKER}]),
+            json!([]),
+        );
+        let fixture = Fixture::new(routes);
+        assert!(request_renovate_rebase(&fixture.api, &fixture.api, &policy, &manifest).unwrap());
+        fixture.finish();
+    }
+
+    #[test]
+    fn replacement_head_and_command_do_not_reset_rebase_budget_for_pr() {
+        let mut manifest = renovate_manifest();
+        manifest.pull_request.head_sha = "d".repeat(40);
+        manifest.authorization = Authorization::RenovateComment {
+            comment_id: 91,
+            updated_at: DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let policy = renovate_policy(&manifest);
+        let mut routes = renovate_validation_routes(&manifest, renovate_pr(&manifest));
+        routes.push(Route::get(
+            "/repos/civitaspo/dbt-authorized-models/issues/7/comments?per_page=100&page=1",
+            json!([{"user":{"id":crate::config::trusted().unwrap().server_bot_id,
+                "login":crate::config::trusted().unwrap().deployment.server_bot_login,"type":"Bot"},
+                "body":RENOVATE_REBASE_MARKER}]),
+        ));
+        let fixture = Fixture::new(routes);
+        assert!(!request_renovate_rebase(&fixture.api, &fixture.api, &policy, &manifest).unwrap());
+        fixture.finish();
+    }
+
+    #[test]
+    fn preexisting_rebase_label_does_not_consume_another_budget() {
+        let manifest = renovate_manifest();
+        let policy = renovate_policy(&manifest);
+        let mut routes = renovate_validation_routes(&manifest, renovate_pr(&manifest));
+        routes.push(Route::get(
+            "/repos/civitaspo/dbt-authorized-models/issues/7/comments?per_page=100&page=1",
+            json!([]),
+        ));
+        let mut pr = renovate_pr(&manifest);
+        pr["labels"] = json!([{"name":"rebase"}]);
+        routes.push(Route::get(
+            "/repos/civitaspo/dbt-authorized-models/pulls/7",
+            pr,
+        ));
+        let fixture = Fixture::new(routes);
+        assert!(!request_renovate_rebase(&fixture.api, &fixture.api, &policy, &manifest).unwrap());
+        fixture.finish();
+    }
+
+    #[test]
+    fn changed_head_is_rejected_before_any_rebase_write() {
+        let manifest = renovate_manifest();
+        let policy = renovate_policy(&manifest);
+        let mut pr = renovate_pr(&manifest);
+        pr["head"]["sha"] = json!("e".repeat(40));
+        let routes = vec![
+            Route::get(
+                "/repos/civitaspo/dbt-authorized-models",
+                json!({"id":1,"default_branch":"main"}),
+            ),
+            Route::get("/repos/civitaspo/dbt-authorized-models/pulls/7", pr),
+        ];
+        let fixture = Fixture::new(routes);
+        assert!(request_renovate_rebase(&fixture.api, &fixture.api, &policy, &manifest).is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn current_policy_without_merge_capability_rejects_rebase_before_api_access() {
+        let manifest = renovate_manifest();
+        let mut policy = renovate_policy(&manifest);
+        policy
+            .repositories
+            .iter_mut()
+            .find(|repository| repository.repository == manifest.repository.full_name)
+            .unwrap()
+            .capabilities
+            .retain(|capability| *capability != Capability::Merge);
+        let fixture = Fixture::new(vec![]);
+        assert!(request_renovate_rebase(&fixture.api, &fixture.api, &policy, &manifest).is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn signature_and_effective_committer_failures_never_write_rebase_marker() {
+        let manifest = renovate_manifest();
+        let policy = renovate_policy(&manifest);
+        for (verified, committer) in [(false, "updater[bot]"), (true, "human")] {
+            let mut routes = renovate_validation_routes(&manifest, renovate_pr(&manifest));
+            routes[5] = Route::get(
+                "/repos/civitaspo/dbt-authorized-models/pulls/7/commits?per_page=100&page=1",
+                json!([{
+                    "sha":manifest.pull_request.head_sha,
+                    "commit":{"verification":{"verified":verified}},
+                    "author":{"id":43,"login":"updater[bot]","type":"Bot"},
+                    "committer":{"id":43,"login":committer,"type":"Bot"}
+                }]),
+            );
+            routes.truncate(6);
+            let mut case_policy = policy.clone();
+            if committer == "human" {
+                case_policy.trusted_committers.push("human".into());
+            }
+            let fixture = Fixture::new(routes);
+            assert!(
+                request_renovate_rebase(&fixture.api, &fixture.api, &case_policy, &manifest)
+                    .is_err()
+            );
+            fixture.finish();
+        }
     }
 
     #[test]

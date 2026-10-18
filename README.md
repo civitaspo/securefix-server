@@ -80,7 +80,7 @@ The operation documents list the required App permissions.
 
 [`renovate.json`](renovate.json) manages dependency updates using signed platform commits.
 Non-major updates and lockfile maintenance use Renovate comment requests through the server merge lane; major updates remain manual.
-Renovate posts `/merge`; the Server App merges. The hourly retry workflow removes expired, unedited bot commands from open Renovate PRs so a later Renovate run can reevaluate and request again. See [merging.md](docs/merging.md#renovate-requests).
+Renovate posts `/merge`; the Server App merges. After an authorized merge attempt fails, the server can request one Renovate rebase per PR if the current head still meets the merge policy. See [merging.md](docs/merging.md#renovate-requests).
 Dependabot version-update configuration has been removed. Dependabot vulnerability alerts are a separate repository setting.
 
 ## Development and rollout

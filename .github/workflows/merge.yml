@@ -239,6 +239,7 @@ jobs:
       - name: Report the terminal result
         if: always() && steps.notify-token.outcome == 'success' && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
         env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
           SECUREFIX_NOTIFY_TOKEN: ${{ steps.notify-token.outputs.token }}
           SECUREFIX_MERGE_RESULT: ${{ needs.wait.result == 'success' && steps.apply.outcome || 'wait-failed' }}
           SECUREFIX_MERGE_SHA: ${{ steps.apply.outputs.merge_sha }}

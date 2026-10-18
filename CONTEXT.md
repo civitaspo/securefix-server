@@ -36,6 +36,10 @@ _Avoid_: approval (when describing authorization to run the server operation)
 A merge request from the configured Renovate bot for its own pull request, bound to one accepted head and one active control revision.
 _Avoid_: owner authorization
 
+**Renovate rebase retry**:
+One server-requested rebase after a failed authorized merge attempt for a Renovate PR. The allowance belongs to the PR and does not reset when its head or merge command changes.
+_Avoid_: per-head retry
+
 **Sensitive change**:
 A change to a path that requires owner authorization for automatic approval.
 _Avoid_: trusted change

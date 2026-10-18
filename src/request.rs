@@ -160,6 +160,15 @@ pub(crate) fn command_matches(
 
 impl RequestManifest {
     pub fn validate(&self) -> Result<()> {
+        self.validate_notification()?;
+        if self.kind == RequestKind::Merge {
+            let age = Utc::now().signed_duration_since(self.accepted_at);
+            ensure!(age.num_minutes() < 60, "merge request has expired");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_notification(&self) -> Result<()> {
         ensure!(
             self.version == 1 && self.run_id > 0 && self.run_attempt == 1,
             "invalid request version or attempt"
@@ -204,9 +213,6 @@ impl RequestManifest {
             age.num_seconds() >= 0,
             "request acceptance time is in the future"
         );
-        if self.kind == RequestKind::Merge {
-            ensure!(age.num_minutes() < 60, "merge request has expired");
-        }
         Ok(())
     }
 }
@@ -1827,6 +1833,10 @@ mod tests {
         let mut stale = manifest();
         stale.accepted_at = Utc::now() - chrono::Duration::hours(1);
         assert!(stale.validate().is_err());
+        assert!(stale.validate_notification().is_ok());
+        let mut future = manifest();
+        future.accepted_at = Utc::now() + chrono::Duration::hours(1);
+        assert!(future.validate_notification().is_err());
         let mut automatic = manifest();
         automatic.authorization = Authorization::Automatic {
             actor_id: crate::config::trusted().unwrap().client_bot_id,
@@ -1836,6 +1846,10 @@ mod tests {
         let mut retry = manifest();
         retry.run_attempt = 2;
         assert!(retry.validate().is_err());
+        assert!(retry.validate_notification().is_err());
+        let mut malformed = stale;
+        malformed.pull_request.head_sha = "not-a-sha".into();
+        assert!(malformed.validate_notification().is_err());
     }
 
     #[test]
