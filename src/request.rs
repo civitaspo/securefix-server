@@ -495,6 +495,18 @@ fn dispatch() -> Result<()> {
         label.len() <= 50 && description.len() <= 100,
         "request label exceeds GitHub limits"
     );
+    if matches!(
+        manifest.authorization,
+        Authorization::RenovateComment { .. }
+    ) {
+        repo_policy.require(Capability::Approve)?;
+        // Renew automatic review for this exact head/control through the existing
+        // approval job. The merge request grants no owner authorization.
+        let _: Value = app.post(
+            &format!("/repos/{}/labels", config::trusted()?.deployment.server.repository),
+            &json!({"name":format!("approve-request-renovate-{}", manifest.run_id),"color":"1f6feb","description":description}),
+        )?;
+    }
     let _: Value = app.post(
         &format!(
             "/repos/{}/labels",
