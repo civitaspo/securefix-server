@@ -185,7 +185,11 @@ The candidate executes in a digest-pinned Ubuntu container with an unprivileged 
 The separate `client-smoke` job exercises the actual composite client Action. Its
 action checkout and candidate binary are bound to the successful credential-free
 build's source SHA and immutable artifact ID. A trusted controller generates a
-scratch deployment policy and one fixed input file. The Action receives only a
+scratch deployment policy and one fixed input file.
+Client-only policies omit approval exemptions and the optional Renovate merge
+principal, so the published baseline can parse the fixture before a schema update
+is activated. These fixtures grant only the scratch `securefix` capability.
+The Action receives only a
 Client App token restricted to scratch `issues:write`, uploads the real envelope,
 and creates its request label in scratch. The trusted verifier independently reads
 the source artifact and scratch label, checks exact metadata and file bytes, and
