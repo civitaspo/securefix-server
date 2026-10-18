@@ -25,6 +25,57 @@ pub fn run(command: Command) -> Result<()> {
     }
 }
 
+fn approval_source(label: &str) -> Result<(u64, RequestKind)> {
+    let suffix = label
+        .strip_prefix("approve-request-")
+        .context("unexpected approval request label")?;
+    let (run, kind) = if let Some(run) = suffix.strip_prefix("renovate-") {
+        (run, RequestKind::Merge)
+    } else {
+        (suffix, RequestKind::Approve)
+    };
+    let run_id = run.parse()?;
+    ensure!(run_id > 0, "invalid approval source run");
+    Ok((run_id, kind))
+}
+
+fn approval_authorization_allowed(kind: RequestKind, authorization: &Authorization) -> bool {
+    matches!(
+        (kind, authorization),
+        (
+            RequestKind::Approve,
+            Authorization::OwnerComment { .. } | Authorization::Automatic { .. }
+        ) | (RequestKind::Merge, Authorization::RenovateComment { .. })
+    )
+}
+
+fn validate_approval_policy(
+    api: &GitHub,
+    policy: &Policy,
+    manifest: &RequestManifest,
+) -> Result<bool> {
+    ensure!(
+        approval_authorization_allowed(manifest.kind, &manifest.authorization),
+        "request cannot authorize an approval"
+    );
+    if matches!(
+        manifest.authorization,
+        Authorization::RenovateComment { .. }
+    ) {
+        crate::merge::validate_state(api, policy, manifest)?;
+        request::validate_merge_policy(api, policy, manifest, false)
+    } else {
+        request::validate_pr_authorization(
+            api,
+            policy,
+            &manifest.repository.full_name,
+            manifest.pull_request.number,
+            &manifest.pull_request.head_sha,
+            matches!(manifest.authorization, Authorization::OwnerComment { .. }),
+        )
+    }
+}
+
 fn validate() -> Result<()> {
     let deployment = &config::trusted()?.deployment;
     let server = deployment.server.repository.as_str();
@@ -50,10 +101,7 @@ fn validate() -> Result<()> {
     let label = payload["label"]["name"]
         .as_str()
         .context("missing label name")?;
-    let run_id: u64 = label
-        .strip_prefix("approve-request-")
-        .context("unexpected approval request label")?
-        .parse()?;
+    let (run_id, kind) = approval_source(label)?;
     ensure!(
         request::matches_principal(
             &payload["sender"],
@@ -75,8 +123,7 @@ fn validate() -> Result<()> {
     );
     let repo_policy = policy.repository(repository)?;
     repo_policy.require(Capability::Approve)?;
-    let manifest =
-        request::load_source_request(&api, &policy, repository, run_id, RequestKind::Approve)?;
+    let manifest = request::load_source_request(&api, &policy, repository, run_id, kind)?;
     let pr: Value = api.get(&format!(
         "/repos/{repository}/pulls/{}",
         manifest.pull_request.number
@@ -88,15 +135,7 @@ fn validate() -> Result<()> {
             && pr["base"]["ref"] == manifest.pull_request.base_ref,
         "pull request changed after the approval request was captured"
     );
-    let owner_requested = matches!(&manifest.authorization, Authorization::OwnerComment { .. });
-    request::validate_pr_authorization(
-        &api,
-        &policy,
-        repository,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-        owner_requested,
-    )?;
+    validate_approval_policy(&api, &policy, &manifest)?;
     securefix::workflow::write_json("approval/manifest.json", &manifest)?;
     output("repository", repository)?;
     output(
@@ -117,7 +156,8 @@ fn apply() -> Result<()> {
         serde_json::from_slice(&std::fs::read("approval/manifest.json")?)?;
     manifest.validate()?;
     ensure!(
-        manifest.kind == RequestKind::Approve && manifest.workflow_sha == policy.revision,
+        approval_authorization_allowed(manifest.kind, &manifest.authorization)
+            && manifest.workflow_sha == policy.revision,
         "approval manifest is invalid or stale"
     );
     securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
@@ -126,7 +166,7 @@ fn apply() -> Result<()> {
         &policy,
         &manifest.repository.full_name,
         manifest.run_id,
-        RequestKind::Approve,
+        manifest.kind,
     )?;
     ensure!(
         source == manifest,
@@ -148,14 +188,7 @@ fn apply() -> Result<()> {
         "pull request changed before approval"
     );
     let owner_requested = matches!(&manifest.authorization, Authorization::OwnerComment { .. });
-    request::validate_pr_authorization(
-        &read,
-        &policy,
-        repository,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-        owner_requested,
-    )?;
+    validate_approval_policy(&read, &policy, &manifest)?;
     let write = GitHub::from_env("SECUREFIX_WRITE_TOKEN")?;
     if owner_requested
         && let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization
@@ -201,14 +234,7 @@ fn apply() -> Result<()> {
             && current_pr["head"]["sha"] == manifest.pull_request.head_sha,
         "pull request head changed before policy check publication"
     );
-    let sensitive = request::validate_pr_authorization(
-        &read,
-        &current_policy,
-        repository,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-        owner_requested,
-    )?;
+    let sensitive = validate_approval_policy(&read, &current_policy, &manifest)?;
     crate::policy_check::publish(
         &write,
         repository,
@@ -365,13 +391,10 @@ fn cleanup() -> Result<()> {
     let Some(label) = payload["label"]["name"].as_str() else {
         return Ok(());
     };
-    let Some(suffix) = label.strip_prefix("approve-request-") else {
+    if !label.starts_with("approve-request-") {
         return Ok(());
-    };
-    ensure!(
-        suffix.parse::<u64>().is_ok(),
-        "invalid approval request label"
-    );
+    }
+    approval_source(label)?;
     let api = GitHub::from_env("GITHUB_TOKEN")?;
     securefix::workflow::require_current_runtime(&api, ".github/workflows/approve.yml")?;
     match api.delete(&format!(
@@ -387,6 +410,50 @@ fn cleanup() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renovate_review_refresh_accepts_only_the_separate_merge_authorization() {
+        let owner = Authorization::OwnerComment {
+            comment_id: 7,
+            updated_at: None,
+        };
+        let automatic = Authorization::Automatic {
+            actor_id: 9,
+            actor_login: "updater[bot]".into(),
+        };
+        let bot = Authorization::RenovateComment {
+            comment_id: 8,
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(approval_authorization_allowed(RequestKind::Approve, &owner));
+        assert!(approval_authorization_allowed(
+            RequestKind::Approve,
+            &automatic
+        ));
+        assert!(!approval_authorization_allowed(RequestKind::Approve, &bot));
+        assert!(approval_authorization_allowed(RequestKind::Merge, &bot));
+        assert!(!approval_authorization_allowed(RequestKind::Merge, &owner));
+        assert!(!approval_authorization_allowed(
+            RequestKind::Merge,
+            &automatic
+        ));
+        assert_eq!(
+            approval_source("approve-request-12").unwrap(),
+            (12, RequestKind::Approve)
+        );
+        assert_eq!(
+            approval_source("approve-request-renovate-12").unwrap(),
+            (12, RequestKind::Merge)
+        );
+        for invalid in [
+            "approve-request-renovate-0",
+            "approve-request-0",
+            "merge-request-12",
+            "approve-request-renovate-12-extra",
+        ] {
+            assert!(approval_source(invalid).is_err(), "{invalid}");
+        }
+    }
 
     fn reviewer() -> config::Principal {
         config::Principal {
