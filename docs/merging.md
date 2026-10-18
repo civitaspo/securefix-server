@@ -37,6 +37,7 @@ The machine user's identity must be `civitaspo-bot`, and it cannot approve its o
 Only a non-author approval for the current head counts; a reviewer's later dismissal or change request supersedes an earlier approval.
 
 The separate `policy-check.yml` client wrapper calls `reusable-policy-check.yml` on PR-target events and default-branch pushes, granting `contents: read`, `attestations: read`, `actions: read`, and `pull-requests: read`.
+The server workflow handles its own PR-target events and Client App request labels; default-branch push requests are supported only for callers. Server-local pushes do not invoke that caller-only capture path.
 The Server App alone publishes the stable required `securefix-policy-check` result for that SHA; its check metadata binds the full active control identity, and merge validation requires that identity for the same head.
 It verifies source signatures, sensitive-path owner authorization, and current-head approval.
 Approval and merge authorization can refresh that check after an owner command.
