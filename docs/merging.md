@@ -83,7 +83,7 @@ The notifier records a durable Server App marker for the exact PR before it adds
 
 The request's 60-minute expiry still prevents a later merge. The same-run accepted manifest may be read after expiry only for notification and recovery checks; that validation does not renew merge authorization. If the active control changes while the merge workflow runs, the old runtime cannot write the marker or label. Submit a fresh merge request under the new active runtime or retry Renovate manually.
 
-Deploy in order: merge this source, verify the candidate in scratch, publish and activate runtime v0.2.32 with its bundled policy, distribute its generated callers, then merge the repository Renovate settings. The active v0.2.26 runtime cannot request a Renovate rebase after a failed merge. Source changes and caller guards alone do not enable this feature; recovery before activation fails closed. Keep the sole Server App ruleset entry and native auto-merge disabled throughout.
+Generation four selects runtime v0.2.32 after final-source scratch qualification, ordinary publication and activation. Its generated callers and repository Renovate settings are deployed. See the [2026-10-18 verification report](renovate-merge-verification-2026-10-18.md) for the actual Renovate merge and separate scratch retry evidence. The Server App remains the sole controlled-merge bypass actor and native auto-merge remains disabled. Source changes and caller guards alone do not activate a runtime.
 
 ## Rollout
 

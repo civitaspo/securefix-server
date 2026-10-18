@@ -216,10 +216,11 @@ in the bootstrap authority needs a separately reviewed recovery; the bounded
 repair lane cannot rewrite its own trust root. Repair does not restore old-runtime
 availability and permanently stops once generation one exists.
 
-Generation three is active at immutable runtime v0.2.26, source
-`9865421823a451a8a7fe443e1896710971869fbc`, after successful ordinary successor
-activation. See `docs/control-successor-verification-2026-10-17.md` for the recovery
-history, ordinary activation and caller rollout evidence. Bootstrap and repair
+Generation four is active at immutable runtime v0.2.32, source
+`673dd9254150a3271b09798481f616900c56191a`, after ordinary successor
+activation. All nine canonical callers and nine Renovate configurations are deployed.
+See `docs/renovate-merge-verification-2026-10-18.md` for activation, rollout,
+actual Renovate merge evidence and bounded recovery limitations. Bootstrap and repair
 reject further use. Candidate testing uses a secret-free validator built from the
 captured signed current main; the tested published runtime remains the one selected
 by the active descriptor.
