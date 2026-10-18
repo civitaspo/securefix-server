@@ -105,16 +105,16 @@ scratch integration fixtures and runs the scratch-only control probe. This avoid
 the current-main `validate-producer` path as its own initial trust baseline. It verifies
 the bootstrap test path, not production publication, activation, or distribution.
 
-Generation three is active at immutable runtime v0.2.26, source
-`9865421823a451a8a7fe443e1896710971869fbc`. After a separately approved
-generation-two recovery, the complete ordinary successor cycle passed: source
-merge, scratch verification, normal publication, descriptor review, Bot approval
-and separate owner commands through the normal merge lane. The generation-three
-descriptor merged in [PR #106](https://github.com/civitaspo/securefix-server/pull/106).
-All nine canonical caller migrations and their post-merge CI and default-branch
-PolicyChecks have passed. Bootstrap and bounded repair remain retired. See the
-[dated verification report](control-successor-verification-2026-10-17.md) for the
-failed attempts, corrections, activation and caller rollout evidence.
+Generation four is active at immutable runtime v0.2.32, source
+`673dd9254150a3271b09798481f616900c56191a`. Final-source scratch qualification,
+normal publication, descriptor review, required CI, Bot approval and separate owner
+commands passed through the ordinary controller. Descriptor
+[PR #116](https://github.com/civitaspo/securefix-server/pull/116) activated this generation.
+All nine canonical caller migrations, their post-merge CI, and the nine configured
+Renovate settings are deployed. An actual Renovate comment request completed through
+the existing approval job and Server App merge lane. Bootstrap and bounded repair
+remain retired. See the [dated verification report](renovate-merge-verification-2026-10-18.md)
+for exact activation, rollout, policy and hosted-service evidence, including recovery limits.
 If the active descriptor becomes missing or invalid, ordinary operations fail closed;
 the settings administrator credential does not supply a replacement runtime.
 
