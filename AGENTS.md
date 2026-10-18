@@ -228,12 +228,17 @@ candidate code with production credentials.
 
 Renovate remains a PR author and requests eligible non-major and lockfile merges
 using `automergeType: pr-comment` and `/merge`. Only the separately configured
-`renovate_merge_bot` may request its own PRs; never mint owner authorization from
+`renovate_merge_bot` in `src/renovate_merge_policy.json` may request its own PRs;
+never mint owner authorization from
 that request. Preserve signatures, effective-committer identity, current-head
 review, required checks, full control identity, and the serialized Server App merge
 lane. Expired bot commands may be removed by the bounded retry workflow so
 Renovate reevaluates its rules. Native auto-merge stays disabled and major updates
 remain manual. Do not add overlapping Dependabot version-update configuration.
+The separate merge policy is embedded in the executable and bound by source and
+attested archive digests. Keep it out of the base `policy.json`, which predecessor
+controllers must parse strictly before successor activation. Its changes require
+a new runtime version and the ordinary reviewed promotion flow.
 
 Keep completion reports precise: what changed, what passed, and any remaining
 unverified condition. Reuse saved evidence and clean up disposable test fixtures.
