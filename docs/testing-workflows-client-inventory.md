@@ -1,6 +1,6 @@
 # Testing client workflow inventory
 
-Snapshot of the 14 workflows in the previously captured `testing-securefix-server/.github/workflows` directory. This records the current routes and the next reviewed caller change; it does not claim that the route changes have been applied. The three old testing callers pin pre.1 source while the active test control selects pre.2; their source mismatch is rejected before normal processing. The runtime column records their declared route, not successful execution.
+**Historical inventory before the corrected migration.** Snapshot of the 14 workflows in the previously captured `testing-securefix-server/.github/workflows` directory. This preserves the routes and planned changes at that time. The deployed configuration below supersedes this historical snapshot. The three old testing callers pin pre.1 source while the active test control selects pre.2; their source mismatch is rejected before normal processing. The runtime column records their declared route, not successful execution.
 
 | File / feature | Trigger | Calls | Current runtime | Actual run repository | Planned change |
 |---|---|---|---|---|---|
@@ -20,3 +20,25 @@ Snapshot of the 14 workflows in the previously captured `testing-securefix-serve
 | `fixture-validation.yml` — fixture diff check | PR opened/synchronize/reopened | Checkout and `git diff --check` | No Securefix runtime | `civitaspo/testing-securefix-server` | Keep unchanged as fixture CI. |
 
 The three `testing-*` feature callers already target testing reusable workflows, but they are pinned to the earlier `pre.1` revision. The three release callers still invoke the production `v0.2.33` reusable workflows. The next reviewed consumer change should pin all six feature callers to the reviewed testing reusable revision and remove the three production release callers plus the four smoke/verify workflows listed above. The two CI workflows and fixture validation remain in place.
+
+
+## Deployed configuration after PR276 and PR279
+
+Independent readback: `/private/tmp/securefix-phaseb-native-corrected-evidence/final-native-caller-routing.json` and `normal-recovery-independent.json`.
+All six feature callers have `testing-` file/display names and pin `civitaspo/securefix-server/.github/workflows/testing-reusable-*.yml@18163e82ad5c6938676ab6cf008e765cd0c7383b`.
+Their selected qualified runtime is `v0.2.34-pre.6`; isolated control generation six is `5396753b8b5e8e9efe15acf191da8ebc47aac9fad0ec728fed43567fbc2e05aa`.
+The independent protected-main host is `a18a496fce397bfde57a0f901107e1d634e4d36f`.
+Workflow-file location does not imply the reusable job runs in the server repository.
+
+| Caller / trigger | Testing reusable suffix | Actual CLI execution repository and shared production commands | Actual evidence |
+|---|---|---|---|
+| `testing-approve-request.yml`: PR target events; owner `/approve` | `approve-request` | Caller captures/dispatches in testing-securefix-server; server runs normal approve validate/apply with existing User bot PAT | Caller39244411457 → server39244474088; exact-head User review5570826725; fresh PR279 User review5570915919 |
+| `testing-merge-request.yml`: eligible `/merge` comment | `merge-request` | Caller captures/dispatches; server runs normal merge authorize/wait/apply | Caller39245747840 → server39245820011; PR279 merged |
+| `testing-policy-check.yml`: PR target events; main push | `policy-check` | Caller runs check capture/dispatch; server runs check locate/validate/apply | Callers39244409105/39245400753 and server39245608824 passed; source/control recorded in process log |
+| `testing-release-pr.yml`: main push; optional explicit-version dispatch | `release-pr` | Caller runs release prepare and native client preparation/dispatch; server performs the shared CSM signed write/PR flow | Caller39244432886 → server39244505228 → PR278, v0.1.0-pre.4 |
+| `testing-release-pr-sync.yml`: manual dispatch | `release-pr-sync` | Caller runs normal release sync-pr with the same GITHUB_TOKEN permission as production | Run39244710083 passed |
+| `testing-release-tag.yml`: merged release/testing-next PR; explicit PR retry | `release-tag` | Caller resolves/builds/tags and requests release; server signs/publishes | Run39245879033 tag/build passed; request-server rejected before label; minimal shared-code fix and new qualified runtime pending |
+
+The final directory contains exactly ten workflows: these six callers and the four existing CI/fixture workflows retained for the reasons in the historical inventory.
+PR279 removed the three production release callers and four obsolete smoke/verify workflows; no unprefixed production Securefix caller remains.
+No server-wide execution centralization, split-review command, additional auth platform, dedicated App, secret relocation, or extra Environment approval is used.
