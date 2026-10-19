@@ -1,0 +1,116 @@
+name: testing-Reusable Policy Check
+on:
+  workflow_call:
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  runtime:
+    uses: ./.github/workflows/testing-load-cli.yml
+    permissions:
+      contents: read
+
+  capture:
+    needs: runtime
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.manifest.outputs.artifact-id }}
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/testing-candidate
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.validator-artifact-id }}
+          path: ${{ runner.temp }}/testing-host
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/testing-host/securefix
+      - name: Capture the native event inside the existing candidate sandbox
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/testing-output" "$RUNNER_TEMP/testing-exec"
+          install -m 0555 "$RUNNER_TEMP/testing-candidate/securefix" "$RUNNER_TEMP/testing-exec/securefix"
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /output \
+            --mount "type=bind,source=$RUNNER_TEMP/testing-exec/securefix,target=/candidate/securefix,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/testing-candidate/policy.json,target=/candidate/policy.json,readonly" \
+            --mount "type=bind,source=$GITHUB_EVENT_PATH,target=/event.json,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/testing-output,target=/output" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e GITHUB_EVENT_PATH=/event.json -e GITHUB_TOKEN -e GITHUB_REPOSITORY \
+            -e GITHUB_EVENT_NAME -e GITHUB_SHA -e GITHUB_REF -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT \
+            -e SECUREFIX_SOURCE_SHA -e SECUREFIX_CONTROL_ID -e SECUREFIX_WORKFLOW_SHA \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            /candidate/securefix check capture
+      - name: Validate the bounded candidate output with the trusted host validator
+        run: securefix integration validate-testing-capture --kind policy --directory "$RUNNER_TEMP/testing-output/policy-request" --source-sha "$SECUREFIX_SOURCE_SHA" --control-id "$SECUREFIX_CONTROL_ID"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: manifest
+        with:
+          name: securefix-policy-request-${{ github.run_id }}
+          path: ${{ runner.temp }}/testing-output/policy-request/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  dispatch:
+    needs: [runtime, capture]
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.validator-artifact-id }}
+          path: ${{ runner.temp }}/testing-host
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/testing-host/securefix
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.capture.outputs.artifact-id }}
+          path: ${{ runner.temp }}/testing-output/policy-request
+          merge-multiple: true
+      - name: Revalidate the exact uploaded manifest before issuing label authority
+        run: securefix integration validate-testing-capture --kind policy --directory "$RUNNER_TEMP/testing-output/policy-request" --source-sha "$SECUREFIX_SOURCE_SHA" --control-id "$SECUREFIX_CONTROL_ID"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-token
+        with:
+          app-id: '3872492'
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-issues: write
+      - name: Dispatch the qualified request label with trusted host code
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_APP_TOKEN: ${{ steps.client-token.outputs.token }}
+        run: securefix integration dispatch-testing-request --kind policy --directory "$RUNNER_TEMP/testing-output/policy-request" --source-sha "$SECUREFIX_SOURCE_SHA" --control-id "$SECUREFIX_CONTROL_ID"

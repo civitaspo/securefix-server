@@ -224,14 +224,14 @@ pub(crate) fn validate_promotion(
         "/repos/{server_repository}/actions/runs/{publisher_run_id}"
     ))?;
     let run_attempt = run["run_attempt"].as_u64();
-    let bootstrap_publisher = workflow_path(&run["path"], BOOTSTRAP_WORKFLOW, default_branch);
+    let bootstrap_publisher = workflow_path(&run["path"], BOOTSTRAP_WORKFLOW, default_branch)?;
     ensure!(
         run["id"].as_u64() == Some(publisher_run_id)
             && run["repository"]["full_name"] == server_repository
             && run["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
             && run["head_repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
             && run["head_repository"]["full_name"] == server_repository
-            && (workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)
+            && (workflow_path(&run["path"], PUBLISHER_WORKFLOW, default_branch)?
                 || bootstrap_publisher)
             && run["event"] == "workflow_dispatch"
             && run["head_branch"] == default_branch
@@ -326,21 +326,22 @@ fn validate_distributor_context(publisher_run_id: u64) -> Result<()> {
     Ok(())
 }
 
-fn workflow_path(actual: &Value, expected: &str, default_branch: &str) -> bool {
-    actual.as_str().is_some_and(|path| {
+fn workflow_path(actual: &Value, expected: &str, default_branch: &str) -> Result<bool> {
+    let expected = crate::config::workflow_path(expected)?;
+    Ok(actual.as_str().is_some_and(|path| {
         let (path, reference) = path.split_once('@').unwrap_or((path, ""));
         path == expected
             && (reference.is_empty()
                 || reference == default_branch
                 || reference == format!("refs/heads/{default_branch}"))
-    })
+    }))
 }
 
 fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: bool) -> Result<()> {
     let path = ".github/workflows/approve-request.yml";
     let approve: serde_yaml::Value = serde_yaml::from_slice(
         files
-            .get(path)
+            .get(&crate::config::workflow_path(path)?)
             .context("managed approval workflow is missing")?,
     )?;
     let job = approve["jobs"]
@@ -357,7 +358,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
     let check_path = ".github/workflows/policy-check.yml";
     let check: serde_yaml::Value = serde_yaml::from_slice(
         files
-            .get(check_path)
+            .get(&crate::config::workflow_path(check_path)?)
             .context("managed policy-check workflow missing")?,
     )?;
     let event_key = serde_yaml::Value::Bool(true);
@@ -593,9 +594,9 @@ fn validate_automation_branch(
     }
     validate_previous_generation(
         &branch_files,
-        migration
-            .files
-            .contains_key(".github/workflows/release-pr.yml"),
+        migration.files.contains_key(&crate::config::workflow_path(
+            ".github/workflows/release-pr.yml",
+        )?),
     )?;
     let desired = branch_files == migration.files;
     if !desired {

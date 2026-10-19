@@ -1,5 +1,260 @@
 # Candidate scratch integration
 
+## Independent workflow-fixture readback
+
+The workflow-level migration harness is being implemented separately from the
+direct scratch probes below. Its plan and deployment prerequisites are recorded
+in `testing-workflows-plan.md` and `testing-workflows-isolation-review.md`.
+The following read-only commands capture and compare the configured integration
+repository's protected state:
+
+```sh
+securefix integration workflow-snapshot --pull-request <number> --state-file evidence/before.json
+# Trigger the recorded scenario, then wait for its exact run and attempt.
+securefix integration workflow-snapshot --pull-request <number> --state-file evidence/after.json
+securefix integration compare-workflow-snapshots --before evidence/before.json --after evidence/after.json --protect all
+```
+
+Run these commands with the trusted host validator and a test-repository read
+token in `GITHUB_TOKEN`. Keep the evidence directory outside candidate-writable
+mounts; never accept candidate-produced snapshots as independent readback.
+The repository identity comes from the validator's trusted deployment policy,
+not a command-line repository argument. Paths must be relative without traversal.
+
+Each bounded snapshot records the default head, PR head/state/merged flag, and
+fingerprints of every review, issue comment, commit status and check run on that
+head. Missing fields, duplicate IDs, incomplete check pagination or a branch/PR
+move during capture fail the command. Snapshot files larger than 16 KiB fail
+rather than being truncated. Comparison requires the same initially open,
+unmerged fixture and unchanged default head and PR state. `--protect all` also
+requires identical review, comment, status and check fingerprints; use it for
+non-owner dispatch. `--protect branch-and-pull` allows those auxiliary records to
+change, for scenarios whose intended rejection emits checks or feedback.
+
+These commands do not certify a rejection. The parent harness must separately
+bind the snapshot artifacts to the exact scenario, prepare producer, candidate,
+source revision, control identity, event chronology and workflow run/attempt,
+and require the expected rejection reason. A passing comparison after an API,
+setup, artifact or runner failure is not a passing scenario.
+
+## Trusted User review and candidate continuation
+
+The development workflow keeps `civitaspo-bot` as its automatic User reviewer.
+Two testing-only CLI operations separate its PAT mutation from candidate execution:
+
+- `securefix approve review-for-testing` independently validates the source
+  request, current policy, accepted head, control and owner authorization, then
+  authenticates the configured User and invokes the existing exact-head,
+  control-bound review core. Only the trusted host binary runs this command with
+  `SECUREFIX_APPROVE_TOKEN`; it needs no candidate App write token.
+- `securefix approve apply-reviewed-for-testing` repeats request/policy/control
+  validation, requires the current User review for that head and control, and
+  performs the existing owner-marker and policy-result operations with the
+  limited test App token. It does not load or authenticate the bot PAT.
+
+Both require a trusted testing policy with `workflow_prefix: testing-` and
+`control_repository` equal to the configured integration repository. That policy
+cannot grant production-repository operations or settings authority. The ordinary
+`approve apply` flow retains its existing combined behavior and configured User.
+
+The local `testing-process-request.yml` now wires these operations into an
+label-triggered development controller. Its separately built, captured-main
+host validator checks the exact first-attempt Client App label event and run
+before any App token is issued. It retrieves the successful native source artifact independently and
+reuses its complete request/provenance/head/control validation. Only trusted
+host code receives the PAT. The candidate continuation runs in the existing
+restricted container with singleton test-repository tokens and read-only request
+data. A policy continuation re-fetches its exact native source; approval requires
+the trusted User review; merge reuses authorization, readiness and expected-head
+apply. Neither keys nor PAT, host GitHub token, Actions command files, home or a
+privileged socket are mounted or passed into that container.
+
+This is local wiring, not a deployed or successfully executed native flow.
+The trusted caller dispatch job creates the native testing label on the server;
+that event starts processing automatically. Parent scenario orchestration must
+record both the caller run and the server label run and check the resulting state.
+The owner's trusted-server threat model retains the repository Client key and
+excludes deliberate remote secret retrieval by approved server code; the direct
+host/container credential boundary remains required.
+
+The host must use the reviewed trusted binary and independently retrieved source
+manifest in its own directory; a candidate-generated manifest or executable is
+not trusted authority. Preserve the existing container restrictions and never
+mount host credentials, PAT/key files, workflow command files, or a privileged
+socket into candidate execution. Merely running these as separate runner steps
+does not establish that boundary. A passing unit test of the split does not
+establish native automatic approval or recovery.
+
+## Development runtime and native capture
+
+`testing-load-cli.yml` builds a credential-free validator from captured current
+server main. With the caller's test-repository read token, it reads only that
+client's isolated `control/active.json`. Public server metadata, source, immutable
+release and attestation retrieval use an anonymous API client. It requires a
+signed current validator baseline, signed candidate ancestor and successful CI,
+an exact `pre.N` publisher/source/main run, and equality of source, release/asset
+IDs and archive/policy digests with the test descriptor. The defining reusable
+revision must equal the selected test runtime source; there is no fallback to
+the production runtime or acceptance of an old caller.
+
+Attestation verification passes repository-bound inline bundles to
+[`gh attestation verify --bundle`](https://cli.github.com/manual/gh_attestation_verify)
+with exact signer workflow, source digest/ref, issuer and hosted-runner checks.
+It removes token variables and uses empty GitHub configuration and a temporary
+cache. Missing inline bundles, absent or truncated lists, wrong repository IDs
+and verification errors fail closed. This avoids giving a candidate a production
+repository token. The bounded Rust archive reader selects only the binary and
+policy as data; it never extracts arbitrary archive paths or executes the binary
+on the host. A final control/main read detects movement before outputs.
+
+`testing-reusable-approve-request.yml`, `testing-reusable-merge-request.yml` and
+`testing-reusable-policy-check.yml` retain the existing named
+`SECUREFIX_CLIENT_PRIVATE_KEY` contract and call that loader. Only a separate
+trusted dispatch job uses the key. It downloads the exact
+uploaded manifest and trusted validator by immutable artifact IDs, revalidates
+the manifest, and invokes the pinned token action. No candidate executable or
+Action runs in that job. It mints a Client App token limited to
+`securefix-server` and `issues:write`. The trusted host's
+`integration dispatch-testing-request` checks the current isolated control and
+creates the native request label. The candidate never gets that key or token.
+The caller's repository secret remains required; reusable placement does not
+supply the server repository's secrets to caller jobs.
+
+The candidate receives the native event file and the test caller's token inside
+the existing restricted Docker sandbox. Approval/merge capture needs test issues
+write only for the validated command acknowledgement; policy capture needs read
+access. The host's `integration validate-testing-capture` checks a single regular
+manifest of at most 16 KiB, rejects symlinks and extra files, and binds repository,
+run/attempt, request kind, source and full control identity before uploading it.
+
+The labels are `testing-approve-request-{run}`, `testing-merge-request-{run}` and
+`testing-policy-request-{run}`. Renovate merge requests also send
+`testing-approve-request-renovate-{run}` to renew the configured User review.
+Production label handlers do not match these names. The server-hosted
+`testing-process-request.yml` is triggered by `label:created`, not owner dispatch.
+Before App issuance, its trusted host checks the exact Client App sender, server
+repository, label/locator, current signed main, workflow path and first attempt.
+It independently retrieves the original successful caller run and artifact,
+including its exact reusable/source/control provenance. The existing source-run
+poller handles label arrival before the caller completes.
+
+The configured User PAT stays in trusted host review; candidate continuation gets
+only operation-specific test-client tokens. Only merge shares `securefix-control`;
+review/policy jobs can complete while a merge waits for them. Cleanup uses the
+host's server `GITHUB_TOKEN` with `issues:write` and an API fence that permits only
+DELETE of this exact validated testing label. It runs after failure as well when
+preflight succeeded. No server token is forwarded to the candidate.
+
+These definitions remain undeployed until fixture control and the indirect
+client-secret exposure during candidate workflow mutation are resolved. Keeping
+the native key contract does not resolve that GitHub-side exposure. Local checks
+do not establish the new testing publisher or any of the ten live scenarios.
+
+## Development dedicated caller migration
+
+`testing-merge-caller-migration.yml` stays on `securefix-server` and reuses the
+existing `caller-migration` Rust commands. Its inputs retain the exact client,
+PR/head, full control identity, separate owner command IDs and selected publisher
+run. The trusted host checks first-attempt owner dispatch, exact defining workflow
+and current signed main before minting a singleton test-client read token. It
+qualifies the isolated runtime as data, then runs `target` and `prepare` with the
+reviewed host executable and isolated policy. The candidate does not supply its
+own plan or trusted executable.
+
+The candidate's `authorize`, `ready` and `merge` commands run in the same restricted
+container with read-only plan, policy, binary and dispatch event mounts. Host
+credentials and workflow command files are excluded. The authorization token is
+limited to test checks/issues/PRs; the contents/PR merge token is minted only after
+readiness. Each command reuses the existing canonical-file, owner review, command,
+signature, control, replay and expected-head checks. Both privileged jobs have
+owner/main/first-attempt guards, and the mutation job shares `securefix-control`.
+
+This workflow is local and undeployed. No Client-key cutover is required under
+the owner's threat model. Independent fixture initialization and reviewed
+successors, parent prepare/verify evidence, exact rejection reasons and all ten
+hosted scenarios remain required. No production control or settings are fixtures.
+
+## Reviewed isolated control fixture
+
+`testing-control-fixture.yml` lives on `securefix-server`. It builds its trusted
+host from the exact protected-main workflow source in a secret-free job. The
+credentialed job executes only that trusted host and treats the qualified runtime
+archive as data. It mints a singleton `testing-securefix-server` token; there is
+no candidate process or production write token in this controller.
+
+`integration testing-control propose` validates current signed server main,
+first-attempt owner dispatch/run provenance, source ancestry/signature/CI, exact
+`testing-publish-runtime.yml` evidence, immutable release/archive/attestation,
+source-bound testing policy and successful scratch verification artifacts using
+the existing validators. It proposes only `control/active.json` in a signed
+Server App PR on the test client. Expected test main and control are rechecked
+before writes. A missing descriptor permits initialization only if its path has
+no history on that main; deletion cannot reopen initialization.
+
+`integration testing-control merge` repeats evidence qualification, requires the
+exact one-file PR, expected main/head, Server App author/branch/repository,
+verified commit signatures, owner review bound to the accepted control and
+successful required `status-check`. Initial generation has no preceding active
+test runtime, so its dedicated initial merge requires owner review bound to the
+proposed descriptor; both command IDs must be zero. This follows the existing
+reviewed bootstrap distinction, without changing production bootstrap authority.
+Successors require review after the current fixture generation's activation and
+fresh, separate, unedited `/approve` and `/merge` comments after that review.
+Consumed IDs are rejected. The trusted controller publishes its exact-head,
+control-bound policy result, rechecks state, and uses expected-head squash merge;
+the activated descriptor is independently read back. A rollback is a new reviewed
+generation, never a direct descriptor write.
+
+This implementation does not certify a hosted fixture or migration. The parent
+prepare/verify evidence and all ten scenarios still need actual Actions runs.
+The existing Client repository secret stays in place under the owner's explicit
+trusted-server threat model; no Environment move or per-job approval is required.
+
+After initialization, `testing-control-fixture.yml` phase `propose-callers`
+requalifies the active test descriptor and proposes the initial caller setup.
+It reuses the existing strict production wrapper/minimal-CI validator and canonical
+testing renderer. The signed Server App PR adds the three `testing-*` native
+callers and `testing-ci.yml`, and deletes only the three old production caller
+wrappers so owner commands cannot enter both deployments. The existing `ci.yml`
+and other direct-harness workflows remain. This phase receives a separate
+singleton test token with contents/PR/workflow write, without check or issue write.
+Review and merge this initial setup through the existing production caller lane;
+it is setup, not proof of migration from an unavailable caller.
+
+`testing-distribute-runtime.yml` subsequently qualifies the isolated active
+runtime with the trusted protected-main host. The candidate runs the existing
+`distribute validate-promotion`, `prepare-caller` and `apply-caller` only in the
+restricted container. Preparation gets a test read token; signed PR creation gets
+only test contents/PR/workflow write after successful preparation. The workflow
+opens the canonical migration PR and never merges it. Use the separate reviewed
+testing migration lane. Owner/main/first-attempt guards and `securefix-control`
+serialization apply before credential issuance or mutation.
+
+## Isolated legacy client smoke
+
+The direct scratch harness now runs the selected candidate or verified stable
+client CLI in the existing restricted container with networking disabled and no
+credentials. It mounts only the executable, scratch policy, fixed input, event
+and output directory. Candidate Action code no longer executes on the host or
+replaces the trusted host CLI. This smoke verifies the client CLI/artifact
+protocol; it does not claim execution of the candidate composite Action itself.
+The separate native testing callers remain the workflow recovery acceptance path.
+
+`validate-client-stage` admits only the fixed bounded three-file smoke artifact,
+rejecting extra files and symlinks, and parses it with the existing artifact
+validator before immutable upload. `dispatch-client-smoke` independently retrieves
+and validates that uploaded artifact/run before the trusted host uses a Client
+App token restricted to test-client `issues:write`. The ordinary smoke readback
+then verifies both artifact and label. Candidate output never supplies a host
+command-file path or the label destination.
+
+## Existing direct scratch probes
+
+The owner rejected the historical Client-key cutover proposal recorded in
+`testing-workflows-isolation-review.md`. Keep the existing repository secret.
+The legacy client smoke now uses the isolated CLI path described above; candidate
+Action code does not execute on the credentialed host.
+
 The native integration command runs the candidate CLI against only
 `civitaspo/testing-securefix-server`. It does not publish a runtime release or
 write to another repository. The scratch Server App token is checked against
@@ -193,16 +448,16 @@ default-branch revision write checks remain unchanged.
 
 The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
 
-The separate `client-smoke` job exercises the actual composite client Action. Its
-action checkout and candidate binary are bound to the successful credential-free
-build's source SHA and immutable artifact ID. A trusted controller generates a
-scratch deployment policy and one fixed input file.
+The separate `client-smoke` job exercises CLI preparation in the restricted
+credential-free container described above. Its candidate binary is bound to the
+successful credential-free build's source SHA and immutable artifact ID. A trusted
+controller generates a scratch deployment policy and one fixed input file.
 Client-only policies omit approval exemptions and the optional Renovate merge
 principal, so the published baseline can parse the fixture before a schema update
 is activated. These fixtures grant only the scratch `securefix` capability.
-The Action receives only a
-Client App token restricted to scratch `issues:write`, uploads the real envelope,
-and creates its request label in scratch. The trusted verifier independently reads
+After bounded validation and upload, only the trusted host receives a Client App
+token restricted to scratch `issues:write` and creates the request label in
+scratch. The trusted verifier independently reads
 the source artifact and scratch label, checks exact metadata and file bytes, and
 uploads `client-verification.json`.
 

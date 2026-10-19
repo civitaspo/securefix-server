@@ -7,6 +7,10 @@ inputs:
   default-branch:
     description: Publisher branch required by the attestation
     required: true
+  workflow-prefix:
+    description: Trusted deployment workflow namespace (empty or testing-)
+    default: ''
+    required: false
   token:
     description: Read-only token for runtime contents, action runs, and attestations
     required: true
@@ -33,4 +37,5 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         REPOSITORY: ${{ inputs.repository }}
         DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        WORKFLOW_PREFIX: ${{ inputs.workflow-prefix }}
       run: bash "$ACTION_PATH/load.sh"

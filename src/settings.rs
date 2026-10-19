@@ -547,11 +547,11 @@ fn validate_wrapper_pin(
     let branch = repo["default_branch"]
         .as_str()
         .context("default branch missing")?;
-    let bytes = api.content(repository, path, branch)?;
+    let bytes = api.content(repository, &crate::config::workflow_path(path)?, branch)?;
     let yaml: Value = serde_yaml::from_slice(&bytes)
         .with_context(|| format!("invalid workflow {repository}/{path}"))?;
     let uses = find_uses(&yaml);
-    let expected = wrapper_pin(server_repository, reusable, expected_sha);
+    let expected = wrapper_pin(server_repository, reusable, expected_sha)?;
     ensure!(
         uses.iter().filter(|value| **value == expected).count() == 1 && uses.len() == 1,
         "{repository}/{path} must call {reusable} at the current server revision"
@@ -559,8 +559,9 @@ fn validate_wrapper_pin(
     Ok(())
 }
 
-fn wrapper_pin(server_repository: &str, reusable: &str, expected_sha: &str) -> String {
-    format!("{server_repository}/.github/workflows/{reusable}@{expected_sha}")
+fn wrapper_pin(server_repository: &str, reusable: &str, expected_sha: &str) -> Result<String> {
+    let path = crate::config::workflow_path(&format!(".github/workflows/{reusable}"))?;
+    Ok(format!("{server_repository}/{path}@{expected_sha}"))
 }
 
 fn find_uses(value: &Value) -> Vec<&str> {
@@ -1775,7 +1776,8 @@ mod tests {
                 "forge/securefix",
                 "reusable-approve-request.yml",
                 &"a".repeat(40)
-            ),
+            )
+            .unwrap(),
             format!(
                 "forge/securefix/.github/workflows/reusable-approve-request.yml@{}",
                 "a".repeat(40)

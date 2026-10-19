@@ -20,6 +20,9 @@ enum WriteContext {
     ClientLabel {
         server: String,
     },
+    TestingLabelCleanup {
+        path: String,
+    },
     Production {
         revision: Option<String>,
         control_id: Option<String>,
@@ -70,6 +73,37 @@ impl GitHub {
         };
         Ok(api)
     }
+    /// Trusted host only: no general server write authority or production label deletion.
+    pub fn testing_label_cleanup_from_env(name: &str, label: &str) -> Result<Self> {
+        let valid = [
+            "testing-approve-request-renovate-",
+            "testing-approve-request-",
+            "testing-merge-request-",
+            "testing-policy-request-",
+        ]
+        .iter()
+        .any(|prefix| {
+            label
+                .strip_prefix(prefix)
+                .and_then(|run| run.parse::<u64>().ok())
+                .is_some_and(|run| run > 0 && label == format!("{prefix}{run}"))
+        });
+        ensure!(
+            valid,
+            "cleanup target is not a canonical testing request label"
+        );
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let mut api = Self::new("https://api.github.com", token)?;
+        api.writes = WriteContext::TestingLabelCleanup {
+            path: format!(
+                "/repos/{}/labels/{label}",
+                crate::config::trusted()?.deployment.server.repository
+            ),
+        };
+        Ok(api)
+    }
+
     pub fn from_env(name: &str) -> Result<Self> {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
@@ -174,6 +208,14 @@ impl GitHub {
         }
         if let WriteContext::Scratch { candidate_sha } = &self.writes {
             crate::policy::validate_sha(candidate_sha)?;
+        }
+        let isolated = matches!(&self.writes, WriteContext::Scratch { .. })
+            || (matches!(&self.writes, WriteContext::Production { .. })
+                && crate::config::trusted()?
+                    .deployment
+                    .control_repository
+                    .is_some());
+        if isolated {
             let prefix = format!(
                 "/repos/{}/",
                 crate::config::trusted()?.deployment.integration.repository
@@ -216,6 +258,12 @@ impl GitHub {
                 "client may only create configured server request labels"
             );
         }
+        if let WriteContext::TestingLabelCleanup { path: target } = &self.writes {
+            ensure!(
+                method == Method::DELETE && path == target,
+                "testing cleanup may only delete its exact validated request label"
+            );
+        }
         let read_only_graphql = path == "/graphql"
             && method == Method::POST
             && body
@@ -254,7 +302,9 @@ impl GitHub {
     fn require_current_revision(&self) -> Result<()> {
         let (expected, expected_control) = match &self.writes {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
-            WriteContext::ClientLabel { .. } => return Ok(()),
+            WriteContext::ClientLabel { .. } | WriteContext::TestingLabelCleanup { .. } => {
+                return Ok(());
+            }
             WriteContext::Scratch { .. } => return Ok(()),
             WriteContext::Production {
                 revision,
@@ -269,7 +319,7 @@ impl GitHub {
             ),
         };
         crate::policy::validate_sha(expected)?;
-        let server = &crate::config::trusted()?.deployment.server;
+        let server = crate::config::trusted()?.deployment.control_repository();
         let bytes = self.content(
             &server.repository,
             "control/active.json",
@@ -1011,6 +1061,46 @@ mod tests {
         fixture.finish();
     }
     #[test]
+    fn testing_label_cleanup_cannot_read_write_or_delete_any_other_target() {
+        use crate::fixtures::{Fixture, Route};
+        let server = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let path = format!("/repos/{server}/labels/testing-approve-request-7");
+        let mut fixture = Fixture::new(vec![Route::request("DELETE", &path, 204, Value::Null)]);
+        fixture.api.writes = WriteContext::TestingLabelCleanup { path: path.clone() };
+        for wrong in [
+            format!("/repos/{server}/labels/approve-request-7"),
+            format!("/repos/{server}/labels/testing-approve-request-8"),
+            "/repos/other/server/labels/testing-approve-request-7".into(),
+        ] {
+            assert!(fixture.api.delete(&wrong).is_err());
+        }
+        assert!(fixture.api.get::<Value>(&path).is_err());
+        assert!(fixture.api.post::<Value>(&path, &Value::Null).is_err());
+        assert!(fixture.api.patch::<Value>(&path, &Value::Null).is_err());
+        fixture.api.delete(&path).unwrap();
+        for label in [
+            "approve-request-7",
+            "testing-approve-request-0",
+            "testing-approve-request-07",
+            "testing-approve-request-7/extra",
+            "testing-policy-request-+7",
+        ] {
+            assert!(
+                GitHub::testing_label_cleanup_from_env("UNUSED_TESTING_TOKEN", label)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("not a canonical testing request label")
+            );
+        }
+        fixture.finish();
+    }
+
+    #[test]
     fn scratch_writes_cannot_escape_the_fixed_repository() {
         let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
         api.writes = WriteContext::Scratch {
@@ -1198,6 +1288,99 @@ mod tests {
             fixture.finish();
         }
     }
+    #[test]
+    fn testing_control_readback_and_write_fence_use_only_the_fixture_state() {
+        use crate::fixtures::{Fixture, Route};
+        use base64::Engine;
+        use serde_json::json;
+        const CHILD: &str = "SECUREFIX_TEST_CONTROL_STORAGE";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let mut policy: Value =
+                serde_json::from_slice(include_bytes!("../tests/fixtures/policy.json")).unwrap();
+            policy["deployment"]["workflow_prefix"] = json!("testing-");
+            policy["deployment"]["control_repository"] =
+                policy["deployment"]["integration"].clone();
+            let repository = policy["deployment"]["integration"]["repository"].clone();
+            policy["repositories"] = json!([{"repository":repository,"capabilities":["approve","merge","securefix"],"release":null,"protect_tags":false}]);
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("policy.json");
+            std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::tests::testing_control_readback_and_write_fence_use_only_the_fixture_state", "--nocapture"])
+                .env(CHILD, "1").env("SECUREFIX_POLICY_PATH", path).status().unwrap().success());
+            return;
+        }
+        let deployment = &crate::config::trusted().unwrap().deployment;
+        let state = deployment.control_repository();
+        assert_ne!(state, &deployment.server);
+        let current = Fixture::control_revision();
+        let default_head = "c".repeat(40);
+        let content = json!({"encoding":"base64", "content":base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&current).unwrap())});
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{}", state.repository),
+                json!({"id":state.id,"default_branch":state.default_branch}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/commits/{}",
+                    state.repository, state.default_branch
+                ),
+                json!({"sha":default_head}),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{}/contents/control/active.json?ref={default_head}",
+                    state.repository
+                ),
+                content,
+            ),
+            Route::active_control(&current),
+            Route::request(
+                "POST",
+                format!("/repos/{}/labels", state.repository),
+                201,
+                json!({"id":1}),
+            ),
+        ]);
+        assert_eq!(
+            crate::control::ControlRevision::load(&fixture.api).unwrap(),
+            current
+        );
+        for path in [
+            format!("/repos/{}/labels", deployment.server.repository),
+            format!("/repos/{}-other/labels", state.repository),
+            format!("/repos/{}/../securefix-server/labels", state.repository),
+            format!("/repos/{}/%2e%2e/labels", state.repository),
+        ] {
+            assert!(fixture.api.require_write_target(&path).is_err());
+        }
+        let _: Value = fixture
+            .api
+            .post(
+                &format!("/repos/{}/labels", state.repository),
+                &json!({"name":"testing-fixture"}),
+            )
+            .unwrap();
+        fixture.finish();
+        let successor = crate::control::ControlRevision {
+            generation: 2,
+            previous: current.identity().unwrap(),
+            source_sha: "b".repeat(40),
+            ..current
+        };
+        let fixture = Fixture::new(vec![Route::active_control(&successor)]);
+        assert!(
+            fixture
+                .api
+                .post::<Value>(&format!("/repos/{}/labels", state.repository), &json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("control revision is no longer current")
+        );
+        fixture.finish();
+    }
+
     #[test]
     fn unchanged_active_control_allows_write_without_a_main_tip_lookup() {
         use crate::fixtures::{Fixture, Route};

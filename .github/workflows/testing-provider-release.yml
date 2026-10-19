@@ -1,4 +1,4 @@
-name: Test Provider Release Without Publishing
+name: testing-Provider Release Without Publishing
 
 on:
   workflow_call:

@@ -4,6 +4,22 @@ The Rust runtime contains no deployment-specific account, repository or GitHub A
 
 The `deployment` section declares the server and integration repository names, immutable IDs and default branches; the repository-owning account; the human maintainer login; Client and Server App IDs and bot logins; the approval reviewer ID/login; the required check producers; and release/runtime-update branch names. Top-level `owner_id`, `client_bot_id` and `server_bot_id` bind the corresponding identities. `trusted_committers`, repository capabilities, release strategies and sensitive paths are also deployment policy. A Terraform provider release is selected by the repository's release strategy, rather than its name.
 
+`deployment.workflow_prefix` optionally selects the workflow namespace: omit it for the existing paths, or set it to `testing-` for an isolated test deployment. Other values are rejected. The canonical caller renderer prefixes filenames, display names and this deployment's reusable workflow references; already prefixed names remain singly prefixed. Provenance validators require the selected exact paths and do not accept the other namespace. The trusted runtime loader and client Action take the matching `workflow-prefix` input and reject a bundled policy with a different namespace before executing the runtime. This setting supplies no repository or App authority: configure and verify those identities separately. Existing deployment policy serialization omits the empty value. A predecessor that does not support this field cannot qualify a testing policy; development initialization requires reviewed testing evidence qualification and must not reuse production bootstrap or activation as a fixture.
+
+`deployment.control_repository` optionally separates test descriptor storage from
+the workflow/source host in `deployment.server`. It must exactly equal
+`deployment.integration`, including ID and default branch, and requires the
+`testing-` namespace. Such a policy grants operations only on that test repository
+and cannot grant settings capability. Descriptor readback, control activation time
+and per-write control checks use this storage identity; workflow and runtime
+provenance continue to use `deployment.server`. The API write guard also confines
+these test operations to that repository. Omitting the field preserves production
+storage and serialized policy bytes. This is a local readback/fencing unit: the
+production loader and activation commands do not implement development artifact
+qualification or fixture activation. The latter explicitly reject this split
+configuration until the testing controller implements those operations. Do not
+use the production active descriptor or bootstrap as a development fixture.
+
 `sensitive_path_approval_exemptions` is an optional, server-wide list of principals that may skip the extra owner approval required when a pull request changes a sensitive path. Omitted lists default to empty. Configure a human under `users` with its immutable GitHub user `id` and `login`, or a GitHub App under `github_apps` with its bot account `bot_id` and `bot_login` (which must end in `[bot]`). IDs must be nonzero, and principals must be unique. Every listed login must also appear in `trusted_committers`; this option does not add trust by itself. The request authorization layer verifies the pull request author's actual GitHub `User` or `Bot` type and identity. An exemption applies only when that author and every commit's effective committer are the same configured principal. Ordinary commits use their GitHub committer identity; verified GitHub-signed `web-flow` commits use their GitHub author identity. Sensitive path matching remains in force; the exemption removes only the additional owner approval requirement. This setting applies to all repositories managed by this server.
 
 The separate [`src/renovate_merge_policy.json`](../src/renovate_merge_policy.json) optionally declares `renovate_merge_bot`, the single Bot account permitted to request merges of its own PRs, using its immutable `id` and `login`. See the [organization example](renovate-merge-policy.example.json). It must be a trusted committer, have a `[bot]` login and differ from the owner, Client App, Server App and approval reviewer. Omit the key or set it to `null` to disable this authority. This setting is separate from `sensitive_path_approval_exemptions` and does not grant owner authorization. See [merging.md](merging.md#renovate-requests) for comment provenance, committer constraints and automatic retry.

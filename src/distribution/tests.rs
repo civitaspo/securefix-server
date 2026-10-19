@@ -1,6 +1,237 @@
 use super::caller::validate_existing;
 use super::*;
 
+#[test]
+fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_ci() {
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+    let trusted = crate::config::trusted().unwrap();
+    let isolated = Policy::parse(include_bytes!("../../.github/testing-policy.json")).unwrap();
+    let repository = &trusted.deployment.integration.repository;
+    let source = "a".repeat(40);
+    let main = "b".repeat(40);
+    let tag = "v0.2.34-pre.1";
+    let mut legacy = rendered_files(&source, tag, "main", false).unwrap();
+    let ci = "name: CI\non:\n  pull_request:\n    types: [opened, synchronize, reopened]\n  push:\n    branches: [main]\n  workflow_dispatch:\npermissions: {}\njobs:\n  ok:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: exit 0\n  status-check:\n    needs: [ok]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    if: always()\n    steps:\n      - name: Require successful checks\n        env:\n          JOB_RESULT: ${{ needs.ok.result }}\n        run: test \"$JOB_RESULT\" = success\n";
+    legacy.insert(".github/workflows/ci.yml".into(), ci.as_bytes().to_vec());
+    let content = |bytes: &[u8]| json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)});
+    let version_path = format!(
+        "/repos/{}/contents/Cargo.toml?ref={source}",
+        trusted.deployment.server.repository
+    );
+    let manifest = b"[package]\nname = \"securefix\"\nversion = \"0.2.34-pre.1\"\n";
+    let mut version = content(manifest);
+    version["path"] = json!("Cargo.toml");
+    version["type"] = json!("file");
+    version["size"] = json!(manifest.len());
+    let missing = |path: &str| {
+        Route::request(
+            "GET",
+            format!("/repos/{repository}/contents/{path}?ref={main}"),
+            404,
+            json!({"message":"Not Found"}),
+        )
+    };
+    let mut routes = vec![
+        Route::get(
+            format!("/repos/{repository}"),
+            json!({"full_name":repository,"owner":{"id":trusted.deployment.repository_owner.id},"default_branch":"main"}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/commits/main"),
+            json!({"sha":main}),
+        ),
+        Route::get(&version_path, version.clone()),
+        missing(".github/workflows/push.yml"),
+        Route::get(
+            format!("/repos/{repository}/contents/.github/workflows/ci.yml?ref={main}"),
+            content(ci.as_bytes()),
+        ),
+        missing(".github/workflows/wc-autofix.yml"),
+    ];
+    for (path, bytes) in &legacy {
+        routes.push(Route::get(
+            format!("/repos/{repository}/contents/{path}?ref={main}"),
+            content(bytes),
+        ));
+    }
+    routes.push(Route::get(version_path, version));
+    for path in ["approve-request", "ci", "merge-request", "policy-check"] {
+        routes.push(missing(&format!(".github/workflows/testing-{path}.yml")));
+    }
+    let fixture = Fixture::new(routes);
+    let files = caller::initial_testing_files(&fixture.api, &isolated, &source, &main).unwrap();
+    assert_eq!(files.len(), 4);
+    assert!(!files.contains_key(".github/workflows/ci.yml"));
+    for (path, bytes) in files {
+        assert!(path.starts_with(".github/workflows/testing-"));
+        let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+        assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
+        if !path.ends_with("testing-ci.yml") {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+            assert!(text.contains("testing-reusable-"));
+            assert!(text.contains(&source));
+        }
+    }
+    fixture.finish();
+}
+
+#[test]
+fn testing_deployment_canonical_callers_round_trip() {
+    const CHILD: &str = "SECUREFIX_TEST_NAMESPACE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policy.json");
+        std::fs::write(&path, include_bytes!("../../.github/testing-policy.json")).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "distribution::tests::testing_deployment_canonical_callers_round_trip",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("SECUREFIX_POLICY_PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let deployment = &crate::config::trusted().unwrap().deployment;
+    assert_eq!(deployment.workflow_prefix, "testing-");
+    assert_eq!(deployment.server.repository, "civitaspo/securefix-server");
+    assert_eq!(deployment.control_repository(), &deployment.integration);
+    let sha = "a".repeat(40);
+    let mut files = rendered_files(&sha, "v0.2.34-pre.1", "main", true).unwrap();
+    // This test covers native approval/merge callers. The client Action fixture
+    // retains a separate credential migration prerequisite.
+    files.insert(
+        deployment
+            .workflow_path(".github/workflows/push.yml")
+            .unwrap(),
+        caller::rendered_push_fixture("main").unwrap(),
+    );
+    validate_previous_generation(&files, true).unwrap();
+    for (path, bytes) in &files {
+        validate_existing(path, bytes, "main").unwrap();
+        let unprefixed = path.replace("/testing-", "/");
+        assert!(validate_existing(&unprefixed, bytes, "main").is_err());
+        let value: serde_yaml::Value = serde_yaml::from_slice(bytes).unwrap();
+        assert!(value["name"].as_str().unwrap().starts_with("testing-"));
+        if value["jobs"].as_mapping().unwrap().values().any(|job| {
+            job["uses"].as_str().is_some_and(|uses| {
+                uses.contains("/testing-reusable-")
+                    && !uses.contains("testing-reusable-release-pr-sync.yml")
+            })
+        }) {
+            assert!(String::from_utf8_lossy(bytes).contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+        }
+    }
+    let path = deployment
+        .workflow_path(".github/workflows/merge-request.yml")
+        .unwrap();
+    let wrong = String::from_utf8(files[&path].clone())
+        .unwrap()
+        .replace("/testing-reusable-", "/reusable-");
+    assert!(validate_existing(&path, wrong.as_bytes(), "main").is_err());
+    let missing_key = String::from_utf8_lossy(&files[&path]).replace(
+        "    secrets:\n      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}\n", "");
+    assert!(validate_existing(&path, missing_key.as_bytes(), "main").is_err());
+    let wrong_key = String::from_utf8_lossy(&files[&path]).replace(
+        "secrets.SECUREFIX_CLIENT_PRIVATE_KEY",
+        "secrets.SECUREFIX_SERVER_PRIVATE_KEY",
+    );
+    assert!(validate_existing(&path, wrong_key.as_bytes(), "main").is_err());
+
+    // Exercise release detection in automation-branch reuse, not only the
+    // renderer with its explicit releases=true argument.
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+    let policy = Policy::load(std::env::var("SECUREFIX_POLICY_PATH").unwrap()).unwrap();
+    let repository = &deployment.integration.repository;
+    let head = "b".repeat(40);
+    let base = "c".repeat(40);
+    let tree = "d".repeat(40);
+    let migration = CallerMigration {
+        repository: repository.clone(),
+        default_branch: "main".into(),
+        source_sha: sha,
+        runtime_tag: "v0.2.34-pre.1".into(),
+        files,
+        default_current: false,
+    };
+    for tamper in [false, true] {
+        let mut routes = vec![
+            Route::get(
+                format!(
+                    "/repos/{repository}/git/ref/heads/{}",
+                    deployment.runtime_update_branch
+                ),
+                json!({"object":{"sha":head}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/main"),
+                json!({"sha":base}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/compare/{base}...{head}"),
+                json!({"status":"ahead","total_commits":1,"commits":[{"sha":head}],
+                    "files":[{"filename":deployment.workflow_path(".github/workflows/release-pr.yml").unwrap(),"status":"modified"}]}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/{head}"),
+                json!({"author":{"id":policy.server_bot_id},"commit":{"verification":{"verified":true}}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/git/commits/{head}"),
+                json!({"tree":{"sha":tree}}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/git/trees/{tree}?recursive=1"),
+                json!({"truncated":false,"tree":migration.files.keys().map(|path|
+                    json!({"path":path,"type":"blob","mode":"100644"})).collect::<Vec<_>>()}),
+            ),
+        ];
+        for (path, bytes) in &migration.files {
+            let mut bytes = bytes.clone();
+            if tamper
+                && *path
+                    == deployment
+                        .workflow_path(".github/workflows/release-pr.yml")
+                        .unwrap()
+            {
+                bytes = String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("name: \"testing-Release PR\"", "name: Unauthorized")
+                    .into_bytes();
+                assert_ne!(bytes, migration.files[path]);
+            }
+            routes.push(Route::get(
+                format!("/repos/{repository}/contents/{path}?ref={head}"),
+                json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+            ));
+        }
+        let fixture = Fixture::new(routes);
+        let result = validate_automation_branch(&fixture.api, &policy, &migration);
+        if tamper {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("previously generated canonical workflow")
+            );
+        } else {
+            assert_eq!(result.unwrap(), (true, Some(head.clone())));
+        }
+        fixture.finish();
+    }
+}
+
 fn promotion_control(
     publisher_run_id: u64,
     source_sha: &str,

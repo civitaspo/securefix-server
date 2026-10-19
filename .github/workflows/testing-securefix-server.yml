@@ -1,4 +1,4 @@
-name: Test Candidate Runtime
+name: testing-Candidate Runtime
 
 on:
   workflow_dispatch:
@@ -375,8 +375,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  client-baseline:
+    if: inputs.phase == 'prepare' && inputs.client_runtime == 'published-release' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1
+    uses: ./.github/workflows/load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+
   client-smoke:
-    needs: [baseline-build, build]
+    needs: [baseline-build, build, client-baseline]
     if: always() && inputs.phase == 'prepare' && needs.build.result == 'success' && needs.baseline-build.result == 'success'
     runs-on: ubuntu-24.04
     environment: main
@@ -403,20 +411,18 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: securefix integration validate-producer --workflow-sha "$WORKFLOW_SHA"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: civitaspo/securefix-server
-          ref: ${{ needs.build.outputs.source-sha }}
-          path: candidate
-          persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.client_runtime == 'candidate-artifact'
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: candidate-runtime
           merge-multiple: true
-      - uses: $/.github/actions/install-cli
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: inputs.client_runtime == 'published-release'
         with:
-          binary: candidate-runtime/securefix
+          artifact-ids: ${{ needs.client-baseline.outputs.artifact-id }}
+          path: candidate-runtime
+          merge-multiple: true
       - name: Resolve the exact published baseline tag
         id: runtime
         env:
@@ -434,6 +440,36 @@ jobs:
           [[ -z "$PRODUCER_TAG" || "$RESOLVED_TAG" == "$PRODUCER_TAG" ]] || { echo 'resolved runtime tag differs from trusted producer' >&2; exit 1; }
       - name: Prepare the trusted scratch deployment and client input
         run: securefix integration prepare-client-input
+      - name: Prepare client artifact inside the candidate sandbox without credentials
+        run: |
+          mkdir -p client-output candidate-exec
+          install -m 0555 candidate-runtime/securefix candidate-exec/securefix
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --network none --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /output \
+            --mount "type=bind,source=$PWD/candidate-exec/securefix,target=/candidate/securefix,readonly" \
+            --mount "type=bind,source=$PWD/scratch-policy.json,target=/candidate/policy.json,readonly" \
+            --mount "type=bind,source=$PWD/.securefix-client-smoke,target=/input/.securefix-client-smoke,readonly" \
+            --mount "type=bind,source=$GITHUB_EVENT_PATH,target=/event.json,readonly" \
+            --mount "type=bind,source=$PWD/client-output,target=/output" \
+            -e GITHUB_WORKSPACE=/input -e GITHUB_EVENT_PATH=/event.json \
+            -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SHA \
+            -e GITHUB_WORKFLOW -e GITHUB_REF -e GITHUB_EVENT_NAME -e GITHUB_ACTOR -e GITHUB_SERVER_URL \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            /candidate/securefix securefix client-prepare \
+            --files .securefix-client-smoke/request.txt --repository civitaspo/testing-securefix-server \
+            --branch "securefix-client-smoke-$GITHUB_RUN_ID" --commit-message 'test: Securefix client Action' \
+            --output-dir artifacts
+      - name: Validate the bounded candidate client stage with trusted host code
+        id: request
+        run: securefix integration validate-client-stage --directory client-output/artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: ${{ steps.request.outputs.artifact_path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: client
         with:
@@ -442,25 +478,18 @@ jobs:
           owner: civitaspo
           repositories: testing-securefix-server
           permission-issues: write
-      - uses: ./candidate/.github/actions/client
-        id: request
-        with:
-          runtime-sha: ${{ inputs.client_runtime == 'candidate-artifact' && needs.build.outputs.source-sha || steps.producer.outputs.published_runtime_sha }}
-          runtime-directory: ${{ inputs.client_runtime == 'candidate-artifact' && 'candidate-runtime' || '' }}
-          runtime-repository: civitaspo/securefix-server
-          runtime-default-branch: main
-          server-repository: civitaspo/testing-securefix-server
-          client-token: ${{ steps.client.outputs.token }}
-          policy-path: scratch-policy.json
-          files: .securefix-client-smoke/request.txt
-          repository: civitaspo/testing-securefix-server
-          branch: securefix-client-smoke-${{ github.run_id }}
-          commit-message: 'test: Securefix client Action'
+      - name: Revalidate the uploaded artifact and dispatch with trusted host code
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
+          ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: securefix integration dispatch-client-smoke --artifact-name "$ARTIFACT_NAME" --workflow-sha "$WORKFLOW_SHA"
       - name: Verify the real client artifact and scratch request label
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
-          ARTIFACT_NAME: ${{ steps.request.outputs.artifact-name }}
+          ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: securefix integration verify-client --artifact-name "$ARTIFACT_NAME" --run-id "$GITHUB_RUN_ID" --workflow-sha "$WORKFLOW_SHA"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -512,9 +541,8 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.artifact-id || needs.reuse.outputs.artifact-id }}
           path: candidate-runtime
           merge-multiple: true
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: candidate-runtime/securefix
+      - name: Set candidate file permissions without installing it on host PATH
+        run: chmod 0555 candidate-runtime/securefix
       - name: Resolve the exact published baseline tag
         id: runtime
         env:
@@ -575,8 +603,8 @@ jobs:
           docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
             --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /fixtures \
-            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/usr/local/bin/securefix,readonly" \
-            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/policy.json,target=/usr/local/bin/policy.json,readonly" \
+            --mount "type=bind,source=$PWD/candidate-runtime/securefix,target=/usr/local/bin/securefix,readonly" \
+            --mount "type=bind,source=$PWD/candidate-runtime/policy.json,target=/usr/local/bin/policy.json,readonly" \
             --mount "type=bind,source=$PWD/fixtures,target=/fixtures" \
             --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
             -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_CLIENT_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e SECUREFIX_PUBLISHED_RUNTIME_SHA -e SECUREFIX_PUBLISHED_RUNTIME_TAG \
@@ -606,10 +634,6 @@ jobs:
           SECUREFIX_PUBLISHED_RUNTIME_SHA: ${{ steps.producer.outputs.published_runtime_sha }}
           SECUREFIX_PUBLISHED_RUNTIME_TAG: ${{ steps.runtime.outputs.published_runtime_tag }}
         run: securefix integration validate-outputs --candidate-sha "$CANDIDATE_SHA" --phase "$TEST_PHASE" --state-file fixtures/state.json
-      - uses: $/.github/actions/install-cli
-        if: steps.validate-outputs.outcome == 'success'
-        with:
-          binary: candidate-runtime/securefix
       - name: Execute scratch control probe
         id: control-probe
         if: steps.validate-outputs.outcome == 'success'
@@ -623,8 +647,8 @@ jobs:
           docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
             --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /control-probe \
-            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/securefix,target=/candidate/securefix,readonly" \
-            --mount "type=bind,source=$RUNNER_TEMP/securefix-bin/policy.json,target=/candidate/policy.json,readonly" \
+            --mount "type=bind,source=$PWD/candidate-runtime/securefix,target=/candidate/securefix,readonly" \
+            --mount "type=bind,source=$PWD/candidate-runtime/policy.json,target=/candidate/policy.json,readonly" \
             --mount "type=bind,source=$PWD/control-probe,target=/control-probe" \
             --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
             -e SECUREFIX_SERVER_APP_TOKEN -e SECUREFIX_TEST_WORKFLOW_SHA -e CANDIDATE_SHA \

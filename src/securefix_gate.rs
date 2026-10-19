@@ -1236,7 +1236,7 @@ fn validate_prepared_source(
         default_branch,
     )?;
     ensure!(
-        !is_release || workflow_file == RELEASE_PR_WORKFLOW,
+        !is_release || workflow_file == securefix::config::workflow_path(RELEASE_PR_WORKFLOW)?,
         "default-branch Securefix runs are limited to the release PR workflow"
     );
     if is_release {
@@ -1248,7 +1248,8 @@ fn validate_prepared_source(
         }
     } else {
         ensure!(
-            workflow_file == CLIENT_CI_WORKFLOW && workflow_run["event"] == "pull_request",
+            workflow_file == securefix::config::workflow_path(CLIENT_CI_WORKFLOW)?
+                && workflow_run["event"] == "pull_request",
             "client PR fixes must come from the pull-request CI workflow"
         );
         ensure!(
@@ -1305,7 +1306,11 @@ fn validate_release_provenance(
         current_sha == source_sha,
         "release PR caller is not at the current default-branch head"
     );
-    let wrapper = api.content(repository, RELEASE_PR_WORKFLOW, source_sha)?;
+    let wrapper = api.content(
+        repository,
+        &securefix::config::workflow_path(RELEASE_PR_WORKFLOW)?,
+        source_sha,
+    )?;
     securefix::workflow::require_reusable_pin(&wrapper, REUSABLE_RELEASE_PR, &policy.revision)?;
     let referenced: Vec<securefix::workflow::ReferencedWorkflow> =
         serde_json::from_value(run["referenced_workflows"].clone())
@@ -1389,13 +1394,15 @@ fn source_pr_matches(pr: &Value, repository: &str, default_branch: &str, branch:
 }
 
 fn normalize_source_workflow(path: &str) -> Option<&str> {
-    if path == CLIENT_CI_WORKFLOW || path == RELEASE_PR_WORKFLOW {
+    let client = securefix::config::workflow_path(CLIENT_CI_WORKFLOW).ok()?;
+    let release = securefix::config::workflow_path(RELEASE_PR_WORKFLOW).ok()?;
+    if path == client || path == release {
         return Some(path);
     }
     let (workflow, reference) = path.split_once('@')?;
     (!reference.is_empty()
         && !reference.contains('@')
-        && (workflow == CLIENT_CI_WORKFLOW || workflow == RELEASE_PR_WORKFLOW))
+        && (workflow == client || workflow == release))
         .then_some(workflow)
 }
 

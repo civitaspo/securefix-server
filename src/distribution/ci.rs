@@ -18,7 +18,11 @@ pub(super) fn migrate(source: &[u8], mode: Mode, default_branch: &str) -> Result
 
 fn migrate_push(source: &str, workflow: &Value, default_branch: &str) -> Result<Vec<u8>> {
     ensure!(
-        workflow["name"].as_str() == Some("Push"),
+        workflow["name"]
+            == format!(
+                "{}Push",
+                crate::config::trusted()?.deployment.workflow_prefix
+            ),
         "unsupported caller push workflow name"
     );
     validate_base_permissions(workflow)?;
@@ -44,7 +48,7 @@ fn migrate_push(source: &str, workflow: &Value, default_branch: &str) -> Result<
 
 fn migrate_minimal_ci(source: &str, workflow: &Value, default_branch: &str) -> Result<Vec<u8>> {
     ensure!(
-        workflow["name"].as_str() == Some("CI"),
+        workflow["name"] == format!("{}CI", crate::config::trusted()?.deployment.workflow_prefix),
         "unsupported minimal CI workflow name"
     );
     validate_base_permissions(workflow)?;
@@ -136,7 +140,11 @@ fn validate_checks_job(job: &Value) -> Result<()> {
             map.len() == 2
                 && map.contains_key(Value::String("uses".to_owned()))
                 && map.contains_key(Value::String("permissions".to_owned()))
-        }) && job["uses"].as_str() == Some("./.github/workflows/workflow_call_push.yml")
+        }) && job["uses"]
+            == format!(
+                "./{}",
+                crate::config::workflow_path(".github/workflows/workflow_call_push.yml")?
+            )
             && job["permissions"].as_mapping().is_some_and(|map| {
                 map.len() == 1
                     && map.get(Value::String("contents".to_owned()))

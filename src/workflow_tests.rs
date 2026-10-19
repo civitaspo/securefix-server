@@ -28,6 +28,564 @@ fn workflow(name: &str) -> Value {
 }
 
 #[test]
+fn testing_workflows_have_testing_file_and_display_names() {
+    for (path, value) in workflows() {
+        if path.starts_with(".github/workflows/testing-") {
+            assert!(
+                value["name"].as_str().unwrap().starts_with("testing-"),
+                "{path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn testing_publication_executes_only_trusted_qualification_and_stable_publisher() {
+    let value = workflow("testing-publish-runtime.yml");
+    for job in value["jobs"].as_object().unwrap().values() {
+        let guard = job["if"].as_str().unwrap();
+        for condition in [
+            "github.repository == 'civitaspo/securefix-server'",
+            "github.ref == 'refs/heads/main'",
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+        ] {
+            assert!(guard.contains(condition), "{condition}");
+        }
+    }
+    let publish = &value["jobs"]["publish"];
+    assert_eq!(publish["environment"], "main");
+    assert_eq!(publish["concurrency"]["group"], "securefix-control");
+    let steps = publish["steps"].as_array().unwrap();
+    let attestation = steps
+        .iter()
+        .position(|s| s["name"] == "Verify exact testing publisher attestation")
+        .unwrap();
+    let qualify = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|s| s.contains("integration validate-testing-publication"))
+        })
+        .unwrap();
+    let stable = steps
+        .iter()
+        .position(|s| {
+            s["uses"] == "$/.github/actions/install-cli"
+                && s["with"]["binary"] == "${{ runner.temp }}/active-controller/securefix"
+        })
+        .unwrap();
+    let publish_archive = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("securefix runtime publish "))
+        })
+        .unwrap();
+    assert!(attestation < qualify && qualify < stable && stable < publish_archive);
+    assert_eq!(
+        steps[stable]["with"]["binary"],
+        "${{ runner.temp }}/active-controller/securefix"
+    );
+    let text = serde_json::to_string(publish).unwrap();
+    assert!(text.contains(".github/workflows/testing-publish-runtime.yml"));
+    for forbidden in [
+        "secrets.",
+        "tar -x",
+        "candidate-runtime/securefix",
+        "./runtime/securefix",
+        "control activate",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn testing_fixture_controller_and_client_smoke_keep_candidate_out_of_credentialed_host_execution() {
+    let value = workflow("testing-control-fixture.yml");
+    let host = &value["jobs"]["host"];
+    assert!(!serde_json::to_string(host).unwrap().contains("secrets."));
+    let fixture = &value["jobs"]["fixture"];
+    assert_eq!(fixture["concurrency"]["group"], "securefix-control");
+    for id in ["host", "fixture"] {
+        let guard = value["jobs"][id]["if"].as_str().unwrap();
+        for clause in [
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+            "refs/heads/main",
+        ] {
+            assert!(guard.contains(clause));
+        }
+    }
+    let steps = fixture["steps"].as_array().unwrap();
+    let check = steps
+        .iter()
+        .position(|s| s["run"] == "securefix integration testing-control validate")
+        .unwrap();
+    let mint = steps.iter().position(|s| s["id"] == "test-token").unwrap();
+    assert!(check < mint);
+    assert_eq!(
+        steps[mint]["with"]["repositories"],
+        "testing-securefix-server"
+    );
+    let smoke = workflow("testing-securefix-server.yml");
+    let steps = smoke["jobs"]["client-smoke"]["steps"].as_array().unwrap();
+    assert!(
+        !steps
+            .iter()
+            .any(|s| s["uses"] == "./candidate/.github/actions/client")
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|s| s["with"]["binary"] == "candidate-runtime/securefix")
+    );
+    let capture = steps
+        .iter()
+        .position(|s| {
+            s["name"] == "Prepare client artifact inside the candidate sandbox without credentials"
+        })
+        .unwrap();
+    let validate = steps.iter().position(|s| s["id"] == "request").unwrap();
+    let mint = steps.iter().position(|s| s["id"] == "client").unwrap();
+    assert!(capture < validate && validate < mint);
+    let sandbox = steps[capture]["run"].as_str().unwrap();
+    for required in [
+        "docker run",
+        "--network none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+    ] {
+        assert!(sandbox.contains(required));
+    }
+    for forbidden in [
+        "-e GITHUB_TOKEN",
+        "-e SECUREFIX_CLIENT_APP_TOKEN",
+        "GITHUB_OUTPUT",
+        "docker.sock",
+        "PRIVATE_KEY",
+        "APPROVE_TOKEN",
+    ] {
+        assert!(!sandbox.contains(forbidden));
+    }
+}
+
+#[test]
+fn testing_loader_has_only_client_read_access_and_never_installs_candidate() {
+    let value = workflow("testing-load-cli.yml");
+    assert!(value["on"]["workflow_call"].get("secrets").is_none());
+    let load = &value["jobs"]["load"];
+    assert_eq!(
+        load["if"],
+        "github.repository == 'civitaspo/testing-securefix-server'"
+    );
+    assert_eq!(load["permissions"], serde_json::json!({"contents":"read"}));
+    let steps = load["steps"].as_array().unwrap();
+    let qualifier = steps.iter().find(|step| step["id"] == "runtime").unwrap();
+    assert_eq!(
+        qualifier["run"],
+        "target/release/securefix integration load-testing-runtime --workflow-sha \"$DEFINING_WORKFLOW_SHA\""
+    );
+    let text = serde_json::to_string(load).unwrap();
+    for forbidden in [
+        "secrets.",
+        "install-cli",
+        "create-github-app-token",
+        "tar -x",
+        "contents\\\":\\\"write",
+        "docker.sock",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn testing_native_capture_keeps_candidate_inside_key_free_container() {
+    for (file, command, kind) in [
+        (
+            "testing-reusable-approve-request.yml",
+            "request capture-approve",
+            "approve",
+        ),
+        (
+            "testing-reusable-merge-request.yml",
+            "request capture-merge",
+            "merge",
+        ),
+        (
+            "testing-reusable-policy-check.yml",
+            "check capture",
+            "policy",
+        ),
+    ] {
+        let value = workflow(file);
+        assert_eq!(
+            value["on"]["workflow_call"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"]["required"],
+            true
+        );
+        assert_eq!(
+            value["jobs"]["runtime"]["uses"],
+            "./.github/workflows/testing-load-cli.yml"
+        );
+        let capture = &value["jobs"]["capture"];
+        assert_eq!(capture["permissions"]["contents"], "read");
+        let steps = capture["steps"].as_array().unwrap();
+        let candidate = steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("docker run"))
+            })
+            .unwrap();
+        let run = steps[candidate]["run"].as_str().unwrap();
+        for required in [
+            "--rm --read-only --cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--user",
+            "--pids-limit 64",
+            "target=/candidate/securefix,readonly",
+            "target=/candidate/policy.json,readonly",
+            "target=/event.json,readonly",
+            "-e GITHUB_EVENT_PATH=/event.json",
+            "ubuntu@sha256:",
+            &format!("/candidate/securefix {command}"),
+        ] {
+            assert!(run.contains(required), "{file}: {required}");
+        }
+        let qualify = steps
+            .iter()
+            .position(|step| {
+                step["run"].as_str().is_some_and(|run| {
+                    run.contains(&format!("validate-testing-capture --kind {kind}"))
+                })
+            })
+            .unwrap();
+        let upload = steps
+            .iter()
+            .position(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
+            })
+            .unwrap();
+        assert!(candidate < qualify && qualify < upload);
+        for step in steps {
+            if step["uses"] == "$/.github/actions/install-cli" {
+                assert_eq!(
+                    step["with"]["binary"],
+                    "${{ runner.temp }}/testing-host/securefix"
+                );
+            }
+        }
+        let dispatch_job = &value["jobs"]["dispatch"];
+        assert_eq!(
+            dispatch_job["needs"],
+            serde_json::json!(["runtime", "capture"])
+        );
+        assert_eq!(
+            capture["outputs"]["artifact-id"],
+            "${{ steps.manifest.outputs.artifact-id }}"
+        );
+        let trusted_steps = dispatch_job["steps"].as_array().unwrap();
+        let mint = trusted_steps
+            .iter()
+            .position(|step| step["id"] == "client-token")
+            .unwrap();
+        let dispatch = trusted_steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("dispatch-testing-request"))
+            })
+            .unwrap();
+        let revalidate = trusted_steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("validate-testing-capture"))
+            })
+            .unwrap();
+        assert!(revalidate < mint && mint < dispatch);
+        assert_eq!(
+            trusted_steps[mint]["with"]["repositories"],
+            "securefix-server"
+        );
+        assert_eq!(trusted_steps[mint]["with"]["permission-issues"], "write");
+        assert_eq!(trusted_steps[mint]["with"].as_object().unwrap().len(), 5);
+        assert!(
+            trusted_steps[dispatch]["run"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("--kind {kind}"))
+        );
+        assert!(
+            trusted_steps
+                .iter()
+                .any(|step| step["with"]["artifact-ids"]
+                    == "${{ needs.capture.outputs.artifact-id }}")
+        );
+        for text in [
+            serde_json::to_string(capture).unwrap(),
+            serde_json::to_string(dispatch_job).unwrap(),
+        ] {
+            if text.contains("create-github-app-token") {
+                assert!(
+                    !text.contains("docker run")
+                        && !text.contains("testing-candidate")
+                        && !text.contains("candidate/securefix")
+                );
+            } else {
+                assert!(
+                    !text.contains("secrets.")
+                        && !text.contains("PRIVATE_KEY")
+                        && !text.contains("SECUREFIX_APP_TOKEN")
+                );
+            }
+        }
+        let candidate_env = serde_json::to_string(&steps[candidate]["env"]).unwrap();
+        for text in [run, candidate_env.as_str()] {
+            for forbidden in [
+                "secrets.",
+                "PRIVATE_KEY",
+                "SECUREFIX_APP_TOKEN",
+                "APPROVE_TOKEN",
+                "docker.sock",
+                "--privileged",
+                "--pid=host",
+                "--env-file",
+            ] {
+                assert!(!text.contains(forbidden), "{file}: {forbidden}");
+            }
+        }
+    }
+}
+
+#[test]
+fn testing_migration_uses_the_existing_lane_with_only_test_container_tokens() {
+    let value = workflow("testing-merge-caller-migration.yml");
+    for job in value["jobs"].as_object().unwrap().values() {
+        let guard = job["if"].as_str().unwrap();
+        for required in [
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+            "github.ref == 'refs/heads/main'",
+        ] {
+            assert!(guard.contains(required));
+        }
+    }
+    let merge = &value["jobs"]["merge"];
+    assert_eq!(merge["environment"], "main");
+    assert_eq!(merge["concurrency"]["group"], "securefix-control");
+    let steps = merge["steps"].as_array().unwrap();
+    let position = |needle: &str| {
+        steps
+            .iter()
+            .position(|step| step["run"].as_str().is_some_and(|s| s.contains(needle)))
+            .unwrap()
+    };
+    let preflight = position("validate-testing-processor --kind caller-migration");
+    let read = steps.iter().position(|s| s["id"] == "read").unwrap();
+    let qualify = position("load-testing-control --kind caller-migration");
+    let prepare = position("securefix caller-migration prepare");
+    let authorize = position("testing-run-candidate\" authorize");
+    let ready = position("testing-run-candidate\" ready");
+    let mint = steps.iter().position(|s| s["id"] == "write").unwrap();
+    let apply = position("testing-run-candidate\" merge");
+    assert!(
+        preflight < read
+            && read < qualify
+            && qualify < prepare
+            && prepare < authorize
+            && authorize < ready
+            && ready < mint
+            && mint < apply
+    );
+    let launcher = steps[position("docker run")]["run"].as_str().unwrap();
+    for required in [
+        "--read-only --cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--user",
+        "--pids-limit 64",
+        "target=/operation,readonly",
+        "target=/event.json,readonly",
+        "-e GITHUB_EVENT_PATH=/event.json",
+        "/candidate/securefix caller-migration \"$@\"",
+    ] {
+        assert!(launcher.contains(required), "{required}");
+    }
+    for forbidden in [
+        "-e GITHUB_TOKEN",
+        "-e GH_TOKEN",
+        "PRIVATE_KEY",
+        "APPROVE_TOKEN",
+        "docker.sock",
+        "--privileged",
+        "--pid=host",
+        "--env-file",
+    ] {
+        assert!(!launcher.contains(forbidden), "{forbidden}");
+    }
+    for step in steps {
+        if step["uses"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("actions/create-github-app-token@"))
+        {
+            assert_eq!(step["with"]["repositories"], "testing-securefix-server");
+            assert!(step["with"].get("permission-workflows").is_none());
+        }
+        if step["uses"] == "$/.github/actions/install-cli" {
+            assert_eq!(
+                step["with"]["binary"],
+                "${{ runner.temp }}/testing-host/securefix"
+            );
+        }
+        if step["run"]
+            .as_str()
+            .is_some_and(|s| s.contains("testing-run-candidate\" "))
+        {
+            let env = serde_json::to_string(&step["env"]).unwrap();
+            assert!(!env.contains("github.token") && !env.contains("secrets."));
+        }
+    }
+}
+
+#[test]
+fn testing_processor_keeps_pat_and_keys_outside_candidate_continuation() {
+    let value = workflow("testing-process-request.yml");
+    for job in value["jobs"].as_object().unwrap().values() {
+        let guard = job["if"].as_str().unwrap();
+        for expected in [
+            "github.repository == 'civitaspo/securefix-server'",
+            "github.ref == 'refs/heads/main'",
+            "github.event_name == 'label'",
+            "github.actor_id == '288068203'",
+            "github.event.sender.id == 288068203",
+            "github.run_attempt == 1",
+        ] {
+            assert!(guard.contains(expected), "{expected}");
+        }
+    }
+    assert!(value["on"].get("workflow_dispatch").is_none());
+    assert_eq!(
+        value["on"]["label"]["types"],
+        serde_json::json!(["created"])
+    );
+    let process = &value["jobs"]["process"];
+    assert_eq!(process["permissions"]["issues"], "write");
+    assert_eq!(process["environment"], "main");
+    assert_eq!(
+        process["concurrency"]["group"],
+        "${{ startsWith(github.event.label.name, 'testing-merge-request-') && 'securefix-control' || format('testing-request-{0}', github.run_id) }}"
+    );
+    let steps = process["steps"].as_array().unwrap();
+    let preflight = steps
+        .iter()
+        .position(|step| step["run"] == "securefix integration validate-testing-processor")
+        .unwrap();
+    let mint = steps.iter().position(|step| step["id"] == "read").unwrap();
+    let qualify = steps
+        .iter()
+        .position(|step| step["id"] == "runtime")
+        .unwrap();
+    let prepare = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("prepare-testing-request"))
+        })
+        .unwrap();
+    assert_eq!(steps[preflight]["id"], "preflight");
+    let review = steps
+        .iter()
+        .position(|step| step["env"]["SECUREFIX_APPROVE_TOKEN"].is_string())
+        .unwrap();
+    let candidate = steps
+        .iter()
+        .position(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("docker run"))
+        })
+        .unwrap();
+    assert!(
+        preflight < mint
+            && mint < qualify
+            && qualify < prepare
+            && prepare < review
+            && review < candidate
+    );
+    assert!(
+        steps[review]["run"]
+            .as_str()
+            .unwrap()
+            .contains("securefix approve review-for-testing")
+    );
+    assert_eq!(
+        steps[review]["if"],
+        "steps.preflight.outputs.kind == 'approve'"
+    );
+    let cleanup = steps.last().unwrap();
+    assert_eq!(
+        cleanup["run"],
+        "securefix integration cleanup-testing-request"
+    );
+    assert_eq!(
+        cleanup["if"],
+        "always() && steps.preflight.outcome == 'success'"
+    );
+    let continuation = steps[candidate]["run"].as_str().unwrap();
+    for required in [
+        "--rm --read-only --cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit 64",
+        "target=/operation,readonly",
+        "target=/candidate/securefix,readonly",
+        "target=/candidate/policy.json,readonly",
+        "/candidate/securefix integration continue-testing-request",
+    ] {
+        assert!(continuation.contains(required), "{required}");
+    }
+    for forbidden in [
+        "-e GITHUB_TOKEN",
+        "-e GH_TOKEN",
+        "APPROVE_TOKEN",
+        "PRIVATE_KEY",
+        "docker.sock",
+        "--pid=host",
+        "--privileged",
+        "--env-file",
+    ] {
+        assert!(!continuation.contains(forbidden), "{forbidden}");
+    }
+    let environment = serde_json::to_string(&steps[candidate]["env"]).unwrap();
+    for forbidden in ["github.token", "secrets.", "APPROVE_TOKEN", "PRIVATE_KEY"] {
+        assert!(!environment.contains(forbidden), "{forbidden}");
+    }
+    for step in steps {
+        if step["uses"]
+            .as_str()
+            .is_some_and(|action| action.starts_with("actions/create-github-app-token@"))
+        {
+            assert_eq!(step["with"]["repositories"], "testing-securefix-server");
+            assert!(step["with"].get("permission-workflows").is_none());
+        }
+        if step["uses"] == "$/.github/actions/install-cli" {
+            assert_eq!(
+                step["with"]["binary"],
+                "${{ runner.temp }}/testing-host/securefix"
+            );
+        }
+    }
+}
+
+#[test]
 #[cfg(unix)]
 fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
     use std::{os::unix::fs::PermissionsExt, process::Command};
@@ -37,7 +595,7 @@ fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
     let policy_sha = "b".repeat(64);
     let archive_sha = "c".repeat(64);
     let control_id = "d".repeat(64);
-    for scenario in [
+    for (scenario, testing) in [
         "success",
         "success-no-pin",
         "success-unsuffixed-publisher",
@@ -63,7 +621,14 @@ fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
         "bad-digest",
         "bad-attestation",
         "bad-metadata",
-    ] {
+        "wrong-workflow-namespace",
+        "wrong-policy-namespace",
+        "invalid-workflow-prefix",
+    ]
+    .into_iter()
+    .flat_map(|scenario| [(scenario, false), (scenario, true)])
+    {
+        let prefix = if testing { "testing-" } else { "" };
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("bin");
         fs::create_dir(&bin).unwrap();
@@ -115,6 +680,7 @@ printf '%s  %s\n' "$digest" "$1"
 set -euo pipefail
 echo extraction >> "$TRACE"
 cp "$VERIFIER" "$4/securefix"
+printf '{"deployment":{"workflow_prefix":"%s"}}\n' "$MOCK_POLICY_PREFIX" > "$4/policy.json"
 "#,
             ),
             (
@@ -197,6 +763,15 @@ fi
             ".github/workflows/publish-runtime.yml@refs/heads/main"
         };
         let publisher_run_path_file = temp.path().join("publisher-run.json");
+        let publisher_prefix = if scenario == "wrong-workflow-namespace" {
+            if testing { "" } else { "testing-" }
+        } else {
+            prefix
+        };
+        let publisher_run_path = publisher_run_path.replace(
+            ".github/workflows/",
+            &format!(".github/workflows/{publisher_prefix}"),
+        );
         fs::write(
             &publisher_run_path_file,
             serde_json::to_vec(&serde_json::json!({
@@ -253,6 +828,22 @@ fi
             .env("CONTROL_ID", &control_id)
             .env("REPOSITORY", "example/runtime")
             .env("DEFAULT_BRANCH", "main")
+            .env(
+                "WORKFLOW_PREFIX",
+                if scenario == "invalid-workflow-prefix" {
+                    "test-"
+                } else {
+                    prefix
+                },
+            )
+            .env(
+                "MOCK_POLICY_PREFIX",
+                if scenario == "wrong-policy-namespace" {
+                    if testing { "" } else { "testing-" }
+                } else {
+                    prefix
+                },
+            )
             .env("SCENARIO", scenario)
             .env("CONTENT_RESPONSE", content_path)
             .env("REPOSITORY_JSON", repository_path)
@@ -304,6 +895,7 @@ fi
                 "download\nattestation\nextraction\nruntime-verify\ncontrol-identify\n"
             }
             "bad-attestation" => "download\nattestation\n",
+            "wrong-policy-namespace" => "download\nattestation\nextraction\n",
             "wrong-source"
             | "malformed-pin"
             | "wrong-publisher-source"
@@ -341,6 +933,8 @@ fi
             } else {
                 "example/runtime/.github/workflows/publish-runtime.yml"
             };
+            let expected_signer = expected_signer
+                .replace(".github/workflows/", &format!(".github/workflows/{prefix}"));
             assert!(
                 args.lines().any(|line| line == expected_signer),
                 "{scenario}: {args}"
@@ -514,6 +1108,8 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                 } else {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 }
+                            } else if path == ".github/workflows/testing-load-cli.yml" {
+                                "${{ steps.baseline.outputs.sha }}"
                             } else {
                                 if path == ".github/workflows/control-bootstrap.yml" {
                                     "${{ github.workflow_sha }}"
@@ -955,6 +1551,13 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/ci.yml",
             ".github/workflows/control-bootstrap.yml",
             ".github/workflows/publish-runtime.yml",
+            ".github/workflows/testing-control-fixture.yml",
+            ".github/workflows/testing-distribute-runtime.yml",
+            ".github/workflows/testing-load-cli.yml",
+            ".github/workflows/testing-merge-caller-migration.yml",
+            ".github/workflows/testing-process-request.yml",
+            ".github/workflows/testing-publish-runtime.yml",
+            ".github/workflows/testing-publish-runtime.yml",
             ".github/workflows/testing-release-pr.yml",
             ".github/workflows/testing-securefix-server.yml",
             ".github/workflows/testing-securefix-server.yml"
@@ -1002,6 +1605,79 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert!(install.contains("install -D -m 755"));
     assert!(install.contains("$GITHUB_PATH"));
     assert!(installer["inputs"].get("binary").is_some());
+}
+
+#[test]
+fn testing_distributor_proposes_only_through_test_scoped_candidate_containers() {
+    let value = workflow("testing-distribute-runtime.yml");
+    assert!(
+        !serde_json::to_string(&value["jobs"]["host"])
+            .unwrap()
+            .contains("secrets.")
+    );
+    for id in ["host", "distribute"] {
+        let guard = value["jobs"][id]["if"].as_str().unwrap();
+        for clause in [
+            "refs/heads/main",
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+        ] {
+            assert!(guard.contains(clause));
+        }
+    }
+    let job = &value["jobs"]["distribute"];
+    assert_eq!(job["concurrency"]["group"], "securefix-control");
+    let steps = job["steps"].as_array().unwrap();
+    let preflight = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                == "securefix integration validate-testing-processor --kind caller-distribution"
+        })
+        .unwrap();
+    let first_mint = steps.iter().position(|s| s["id"] == "read").unwrap();
+    let prepare = steps
+        .iter()
+        .position(|s| {
+            s["name"]
+                == "Validate publisher and prepare canonical test caller files in the container"
+        })
+        .unwrap();
+    let writer = steps.iter().position(|s| s["id"] == "write").unwrap();
+    assert!(preflight < first_mint && first_mint < prepare && prepare < writer);
+    for step in steps {
+        if step["uses"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("actions/create-github-app-token@"))
+        {
+            assert_eq!(step["with"]["repositories"], "testing-securefix-server");
+        }
+        if let Some(run) = step["run"].as_str() {
+            assert!(!run.contains("securefix-bin/securefix distribute"));
+            if run.contains("docker run") {
+                for forbidden in [
+                    "docker.sock",
+                    "GITHUB_OUTPUT",
+                    "GITHUB_PATH",
+                    "PRIVATE_KEY",
+                    "APPROVE_TOKEN",
+                    "HOME",
+                    "--privileged",
+                ] {
+                    assert!(!run.contains(forbidden), "{forbidden}");
+                }
+                for required in [
+                    "--read-only",
+                    "--cap-drop=ALL",
+                    "no-new-privileges",
+                    "--user",
+                    "/candidate/securefix distribute",
+                ] {
+                    assert!(run.contains(required));
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -1567,7 +2243,7 @@ fn workflow_local_actions_have_a_prior_matching_checkout() {
         .iter()
         .position(|step| {
             step["uses"] == "$/.github/actions/install-cli"
-                && step["with"]["binary"] == "candidate-runtime/securefix"
+                && step["with"]["binary"] == "trusted-runtime/securefix"
         })
         .unwrap();
     assert!(installer < probe);
@@ -1589,14 +2265,21 @@ fn control_probe_containers_mount_candidate_policy_beside_the_binary() {
             .find(|step| step["name"] == step_name)
             .unwrap_or_else(|| panic!("{job_id}: missing {step_name}"));
         let run = step["run"].as_str().unwrap();
+        let source = if job_id == "scratch" {
+            "$PWD/candidate-runtime"
+        } else {
+            "$RUNNER_TEMP/securefix-bin"
+        };
         assert!(
-            run.contains(
-                "source=$RUNNER_TEMP/securefix-bin/securefix,target=/candidate/securefix,readonly"
-            ),
+            run.contains(&format!(
+                "source={source}/securefix,target=/candidate/securefix,readonly"
+            )),
             "{job_id}: candidate executable must be mounted read-only at /candidate/securefix"
         );
         assert!(
-            run.contains("source=$RUNNER_TEMP/securefix-bin/policy.json,target=/candidate/policy.json,readonly"),
+            run.contains(&format!(
+                "source={source}/policy.json,target=/candidate/policy.json,readonly"
+            )),
             "{job_id}: matching candidate policy must be mounted read-only beside the executable"
         );
         assert!(run.contains("/candidate/securefix integration control-probe"));
@@ -1911,13 +2594,22 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
                 && step["with"]["binary"] == "trusted-runtime/securefix"
         })
         .unwrap();
-    let candidate_install = steps
+    let candidate_download = steps
         .iter()
         .position(|step| {
-            step["uses"] == "$/.github/actions/install-cli"
-                && step["with"]["binary"] == "candidate-runtime/securefix"
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+                && step["with"]["path"] == "candidate-runtime"
         })
         .unwrap();
+    assert!(
+        !steps
+            .iter()
+            .any(|step| step["uses"] == "$/.github/actions/install-cli"
+                && step["with"]["binary"] == "candidate-runtime/securefix"),
+        "the candidate must not replace the trusted CLI on host PATH"
+    );
     let runtime_resolution = steps
         .iter()
         .position(|step| step["id"] == "runtime")
@@ -1932,19 +2624,19 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
             step["name"] == "Execute candidate against the isolated scratch repository"
         })
         .unwrap();
-    assert!(trusted_install < trusted_fetch && trusted_fetch < candidate_install);
+    assert!(trusted_install < trusted_fetch && trusted_fetch < candidate_download);
     let producer_check = steps
         .iter()
         .position(|step| {
             step["name"] == "Validate the defining workflow before minting credentials"
         })
         .unwrap();
-    assert!(trusted_install < producer_check && producer_check < candidate_install);
+    assert!(trusted_install < producer_check && producer_check < candidate_download);
     assert_eq!(
         steps[producer_check]["env"]["GITHUB_TOKEN"],
         "${{ github.token }}"
     );
-    assert!(candidate_install < runtime_resolution && runtime_resolution < server_token);
+    assert!(candidate_download < runtime_resolution && runtime_resolution < server_token);
     assert!(server_token < candidate_run);
     assert!(
         steps[trusted_fetch]["run"]
@@ -1958,6 +2650,12 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
     assert!(steps[candidate_run]["env"]["SECUREFIX_SERVER_APP_TOKEN"].is_string());
     assert!(steps[candidate_run]["env"]["SECUREFIX_CLIENT_APP_TOKEN"].is_string());
     let isolated_run = steps[candidate_run]["run"].as_str().unwrap();
+    assert!(isolated_run.contains(
+        "source=$PWD/candidate-runtime/securefix,target=/usr/local/bin/securefix,readonly"
+    ));
+    assert!(isolated_run.contains(
+        "source=$PWD/candidate-runtime/policy.json,target=/usr/local/bin/policy.json,readonly"
+    ));
     for guard in [
         "docker run --rm --read-only",
         "--cap-drop=ALL",
@@ -2221,21 +2919,25 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     !run.contains("${{ github.event."),
                     "{path}/{job_id}: event data must enter through env or the event file"
                 );
-                let bounded_baseline_reads = path
-                    == ".github/workflows/testing-securefix-server.yml"
-                    && job_id == "baseline-build"
-                    && run.contains("gh api")
-                    && (run.contains("repo=civitaspo/securefix-server")
-                        || run.contains(
-                            "gh api repos/civitaspo/securefix-server/commits/main --jq .sha",
-                        ))
-                    && (run.contains("repos/$repo/commits/main")
-                        || run.contains("repos/civitaspo/securefix-server/commits/main"))
-                    && !run.contains("gh api -X")
-                    && !run.contains("--method")
-                    && !run.contains("gh release")
-                    && !run.contains("jq -e")
-                    && !run.contains("jq -r '.content'");
+                let bounded_baseline_reads = (path == ".github/workflows/testing-load-cli.yml"
+                    && job_id == "load"
+                    && step["id"] == "baseline"
+                    && run
+                        == "echo \"sha=$(gh api repos/civitaspo/securefix-server/commits/main --jq .sha)\" >> \"$GITHUB_OUTPUT\"")
+                    || (path == ".github/workflows/testing-securefix-server.yml"
+                        && job_id == "baseline-build"
+                        && run.contains("gh api")
+                        && (run.contains("repo=civitaspo/securefix-server")
+                            || run.contains(
+                                "gh api repos/civitaspo/securefix-server/commits/main --jq .sha",
+                            ))
+                        && (run.contains("repos/$repo/commits/main")
+                            || run.contains("repos/civitaspo/securefix-server/commits/main"))
+                        && !run.contains("gh api -X")
+                        && !run.contains("--method")
+                        && !run.contains("gh release")
+                        && !run.contains("jq -e")
+                        && !run.contains("jq -r '.content'"));
                 let bounded_legacy_runtime_reads = path
                     == ".github/workflows/testing-securefix-server.yml"
                     && job_id == "bootstrap-legacy-runtime"
@@ -2273,7 +2975,11 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
                 assert!(
-                    !run.contains("chmod") || !run.contains("securefix"),
+                    !run.contains("chmod")
+                        || !run.contains("securefix")
+                        || (path == ".github/workflows/testing-securefix-server.yml"
+                            && job_id == "scratch"
+                            && run == "chmod 0555 candidate-runtime/securefix"),
                     "{path}/{job_id}: CLI permissions belong in installer action"
                 );
                 let invokes_cli = run

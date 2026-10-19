@@ -163,7 +163,12 @@ fn server_repository_name() -> Result<&'static str> {
 
 fn require_activation_workflow() -> Result<()> {
     let trusted = config::trusted()?;
+    ensure!(
+        trusted.deployment.control_repository.is_none(),
+        "isolated test control activation requires the testing fixture controller"
+    );
     let server = &trusted.deployment.server;
+    let control_workflow = trusted.deployment.workflow_path(CONTROL_WORKFLOW)?;
     ensure!(
         std::env::var("GITHUB_REPOSITORY").is_ok_and(|value| value == server.repository)
             && std::env::var("GITHUB_REF")
@@ -172,7 +177,7 @@ fn require_activation_workflow() -> Result<()> {
             && std::env::var("GITHUB_WORKFLOW_REF").is_ok_and(|value| {
                 value
                     == format!(
-                        "{}/{CONTROL_WORKFLOW}@refs/heads/{}",
+                        "{}/{control_workflow}@refs/heads/{}",
                         server.repository, server.default_branch
                     )
             })
@@ -265,7 +270,12 @@ fn validate_request(
     Ok((current, successor))
 }
 
-fn require_ancestor(api: &GitHub, repository: &str, source: &str, main: &str) -> Result<()> {
+pub(crate) fn require_ancestor(
+    api: &GitHub,
+    repository: &str,
+    source: &str,
+    main: &str,
+) -> Result<()> {
     let compare: Value = api.get(&format!("/repos/{repository}/compare/{source}...{main}"))?;
     ensure!(
         compare["base_commit"]["sha"] == source
@@ -276,7 +286,7 @@ fn require_ancestor(api: &GitHub, repository: &str, source: &str, main: &str) ->
     Ok(())
 }
 
-fn verify_source_commit(api: &GitHub, repository: &str, source: &str) -> Result<()> {
+pub(crate) fn verify_source_commit(api: &GitHub, repository: &str, source: &str) -> Result<()> {
     let commit: Value = api.get(&format!("/repos/{repository}/commits/{source}"))?;
     ensure!(
         commit["sha"] == source && commit["commit"]["verification"]["verified"] == true,
@@ -285,7 +295,7 @@ fn verify_source_commit(api: &GitHub, repository: &str, source: &str) -> Result<
     Ok(())
 }
 
-fn verify_ci_status(api: &GitHub, repository: &str, source: &str) -> Result<()> {
+pub(crate) fn verify_ci_status(api: &GitHub, repository: &str, source: &str) -> Result<()> {
     let status: Value = api.get(&format!("/repos/{repository}/commits/{source}/status"))?;
     let status_count = status["total_count"]
         .as_u64()
@@ -335,10 +345,58 @@ fn verify_publisher(
     source: &str,
     run_id: u64,
 ) -> Result<(runtime::Publication, tempfile::NamedTempFile)> {
+    let (publication, archive, workflow) = publisher_archive(
+        api,
+        repository,
+        source,
+        run_id,
+        &[PUBLISH_WORKFLOW, BOOTSTRAP_WORKFLOW],
+    )?;
+    verify_archive_attestation_for_workflow(
+        archive.path(),
+        repository,
+        source,
+        &config::trusted()?.deployment.server.default_branch,
+        workflow,
+    )?;
+    Ok((publication, archive))
+}
+
+pub(crate) fn verify_testing_publisher(
+    api: &GitHub,
+    repository: &str,
+    source: &str,
+    run_id: u64,
+) -> Result<(runtime::Publication, tempfile::NamedTempFile)> {
+    let (publication, archive, workflow) = publisher_archive(
+        api,
+        repository,
+        source,
+        run_id,
+        &[".github/workflows/testing-publish-runtime.yml"],
+    )?;
+    verify_public_attestation(
+        api,
+        archive.path(),
+        repository,
+        source,
+        workflow,
+        &publication.archive_sha256,
+    )?;
+    Ok((publication, archive))
+}
+
+fn publisher_archive<'a>(
+    api: &GitHub,
+    repository: &str,
+    source: &str,
+    run_id: u64,
+    workflows: &[&'a str],
+) -> Result<(runtime::Publication, tempfile::NamedTempFile, &'a str)> {
     let trusted = config::trusted()?;
     let run: Value = api.get(&format!("/repos/{repository}/actions/runs/{run_id}"))?;
-    let workflow = [PUBLISH_WORKFLOW, BOOTSTRAP_WORKFLOW]
-        .into_iter()
+    let workflow = workflows
+        .iter().copied()
         .find(|workflow| {
             validate_owner_dispatch_run(
                 &run,
@@ -366,14 +424,85 @@ fn verify_publisher(
     let mut archive = tempfile::NamedTempFile::new()?;
     std::io::Write::write_all(&mut archive, &bytes)?;
     let publication = runtime::verify_publication(api, source, repository, archive.path())?;
-    verify_archive_attestation_for_workflow(
-        archive.path(),
-        repository,
-        source,
-        &trusted.deployment.server.default_branch,
-        workflow,
-    )?;
-    Ok((publication, archive))
+    Ok((publication, archive, workflow))
+}
+
+fn verify_public_attestation(
+    api: &GitHub,
+    archive: &Path,
+    repository: &str,
+    source: &str,
+    workflow: &str,
+    digest: &str,
+) -> Result<()> {
+    let response: Value = api.get(&format!(
+        "/repos/{repository}/attestations/sha256:{digest}?per_page=100"
+    ))?;
+    let bytes = public_bundles(&response, config::trusted()?.deployment.server.id)?;
+    let mut bundles = tempfile::NamedTempFile::new()?;
+    std::io::Write::write_all(&mut bundles, &bytes)?;
+    let empty_config = tempfile::tempdir()?;
+    let branch = &config::trusted()?.deployment.server.default_branch;
+    let status = Process::new("gh")
+        .args(["attestation", "verify"])
+        .arg(archive)
+        .arg("--bundle")
+        .arg(bundles.path())
+        .args([
+            "--repo",
+            repository,
+            "--source-digest",
+            source,
+            "--source-ref",
+            &format!("refs/heads/{branch}"),
+            "--signer-workflow",
+            &format!("{repository}/{workflow}"),
+            "--signer-digest",
+            source,
+            "--cert-oidc-issuer",
+            "https://token.actions.githubusercontent.com",
+            "--predicate-type",
+            "https://slsa.dev/provenance/v1",
+            "--deny-self-hosted-runners",
+        ])
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .env("GH_CONFIG_DIR", empty_config.path())
+        .env("XDG_CACHE_HOME", empty_config.path().join("cache"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    ensure!(
+        status.success(),
+        "public testing runtime attestation verification failed"
+    );
+    Ok(())
+}
+
+fn public_bundles(response: &Value, repository_id: u64) -> Result<Vec<u8>> {
+    let attestations = response["attestations"]
+        .as_array()
+        .context("public attestation list is missing")?;
+    ensure!(
+        !attestations.is_empty() && attestations.len() < 100,
+        "public attestations are absent or truncated"
+    );
+    let mut bytes = Vec::new();
+    for attestation in attestations {
+        ensure!(
+            attestation["repository_id"].as_u64() == Some(repository_id)
+                && attestation["bundle"].is_object(),
+            "public attestation repository or inline bundle is invalid"
+        );
+        serde_json::to_writer(&mut bytes, &attestation["bundle"])?;
+        bytes.push(b'\n');
+        ensure!(
+            bytes.len() <= 16 * 1024 * 1024,
+            "public attestation bundles exceed size limit"
+        );
+    }
+    Ok(bytes)
 }
 
 fn verify_archive_attestation(
@@ -392,6 +521,7 @@ fn verify_archive_attestation_for_workflow(
     branch: &str,
     workflow: &str,
 ) -> Result<()> {
+    let workflow = config::workflow_path(workflow)?;
     let output = Process::new("gh")
         .arg("attestation")
         .arg("verify")
@@ -423,37 +553,7 @@ fn verify_archive_attestation_for_workflow(
 }
 
 fn policy_from_archive(path: &Path) -> Result<Vec<u8>> {
-    let mut child = Process::new("tar")
-        .arg("-xOf")
-        .arg(path)
-        .arg("./policy.json")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("extract policy.json from the attested runtime archive")?;
-    let mut bytes = Vec::new();
-    let read_result = child
-        .stdout
-        .take()
-        .context("tar stdout missing")?
-        .take(256 * 1024 + 1)
-        .read_to_end(&mut bytes);
-    if let Err(error) = read_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error.into());
-    }
-    if bytes.len() > 256 * 1024 {
-        let _ = child.kill();
-        let _ = child.wait();
-        anyhow::bail!("archived policy exceeds size limit");
-    }
-    ensure!(
-        child.wait()?.success(),
-        "runtime archive does not contain one readable policy.json"
-    );
-    Ok(bytes)
+    securefix::runtime_archive::policy(&read_bounded(path, 128 * 1024 * 1024)?)
 }
 
 fn owner_dispatch_run(
@@ -485,6 +585,7 @@ fn validate_owner_dispatch_run(
     workflow: &str,
     branch: &str,
 ) -> Result<()> {
+    let workflow = config::workflow_path(workflow)?;
     ensure!(
         run["id"].as_u64() == Some(run_id)
             && run["repository"]["full_name"] == repository
@@ -540,7 +641,12 @@ struct Verification {
     closed_or_merged: bool,
 }
 
-fn verify_candidate_test(api: &GitHub, repository: &str, source: &str, run_id: u64) -> Result<()> {
+pub(crate) fn verify_candidate_test(
+    api: &GitHub,
+    repository: &str,
+    source: &str,
+    run_id: u64,
+) -> Result<()> {
     let run = owner_dispatch_run(api, repository, run_id, TEST_WORKFLOW)?;
     let trusted = config::trusted()?;
     ensure!(
@@ -1039,10 +1145,11 @@ pub(crate) fn validate_activation_merge(
     manifest: &crate::request::RequestManifest,
 ) -> Result<()> {
     let trusted = config::trusted()?;
-    if manifest.repository.full_name != trusted.deployment.server.repository {
+    let control_repository = trusted.deployment.control_repository();
+    if manifest.repository.full_name != control_repository.repository {
         return Ok(());
     }
-    let repository = &trusted.deployment.server.repository;
+    let repository = &control_repository.repository;
     let current = securefix::control::ControlRevision::load(api)?;
     let bytes = api.content(repository, ACTIVE_PATH, &manifest.pull_request.head_sha)?;
     ensure!(
@@ -1053,6 +1160,10 @@ pub(crate) fn validate_activation_merge(
     if proposed == current {
         return Ok(());
     }
+    ensure!(
+        trusted.deployment.control_repository.is_none(),
+        "isolated control successors require development evidence qualification"
+    );
     current.validate_successor(&proposed)?;
     ensure!(
         current.identity()? == manifest.control.identity()?
@@ -1164,6 +1275,30 @@ fn valid_digest(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_attestation_bundles_require_complete_inline_repository_bound_data() {
+        let valid = serde_json::json!({"attestations": [
+            {"repository_id": 7, "bundle": {"mediaType": "first"}},
+            {"repository_id": 7, "bundle": {"mediaType": "second"}}
+        ]});
+        let bytes = super::public_bundles(&valid, 7).unwrap();
+        let lines: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["mediaType"], "first");
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"attestations": []}),
+            serde_json::json!({"attestations": [{"repository_id": 8, "bundle": {}}]}),
+            serde_json::json!({"attestations": [{"repository_id": 7, "bundle_url": "https://example.invalid/bundle"}]}),
+            serde_json::json!({"attestations": vec![serde_json::json!({"repository_id": 7, "bundle": {}}); 100]}),
+        ] {
+            assert!(super::public_bundles(&invalid, 7).is_err());
+        }
+    }
     use super::*;
     use crate::fixtures::Route;
     use std::io::Write;

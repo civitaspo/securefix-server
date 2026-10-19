@@ -4,6 +4,7 @@ pub mod control;
 #[cfg(test)]
 mod fixtures;
 pub mod policy;
+pub mod runtime_archive;
 pub mod workflow;
 
 use anyhow::{Result, ensure};

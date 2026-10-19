@@ -219,13 +219,14 @@ pub(crate) fn run(command: Command) -> Result<()> {
 fn require_context(api: &GitHub) -> Result<String> {
     let config = config::trusted()?;
     let server = &config.deployment.server;
+    let workflow = config.deployment.workflow_path(WORKFLOW)?;
     ensure!(
         std::env::var("GITHUB_REPOSITORY")? == server.repository
             && std::env::var("GITHUB_REF")? == format!("refs/heads/{}", server.default_branch)
             && std::env::var("GITHUB_EVENT_NAME")? == "workflow_dispatch"
             && std::env::var("GITHUB_WORKFLOW_REF")?
                 == format!(
-                    "{}/{WORKFLOW}@refs/heads/{}",
+                    "{}/{workflow}@refs/heads/{}",
                     server.repository, server.default_branch
                 )
             && std::env::var("GITHUB_ACTOR_ID")?.parse::<u64>()? == config.owner_id
@@ -251,6 +252,7 @@ fn require_context(api: &GitHub) -> Result<String> {
 fn validate_producer(run: &Value, id: u64, source: &str) -> Result<()> {
     let trusted = config::trusted()?;
     let server = &trusted.deployment.server;
+    let workflow = trusted.deployment.workflow_path(WORKFLOW)?;
     ensure!(
         run["id"] == id
             && run["repository"]["id"] == server.id
@@ -259,7 +261,7 @@ fn validate_producer(run: &Value, id: u64, source: &str) -> Result<()> {
             && run["head_repository"]["full_name"] == server.repository
             && run["head_sha"] == source
             && run["head_branch"] == server.default_branch
-            && run["path"] == WORKFLOW
+            && run["path"] == workflow
             && run["event"] == "workflow_dispatch"
             && run["run_attempt"] == 1
             && run["status"] == "in_progress"

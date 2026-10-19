@@ -98,10 +98,22 @@ pub fn referenced_revision(
     path: &str,
     expected: &str,
 ) -> Result<()> {
-    let prefix = format!(
-        "{}/{path}@",
-        crate::config::trusted()?.deployment.server.repository
-    );
+    referenced_revision_for(
+        &crate::config::trusted()?.deployment,
+        workflows,
+        path,
+        expected,
+    )
+}
+
+fn referenced_revision_for(
+    deployment: &crate::config::Deployment,
+    workflows: &[ReferencedWorkflow],
+    path: &str,
+    expected: &str,
+) -> Result<()> {
+    let path = deployment.workflow_path(path)?;
+    let prefix = format!("{}/{path}@", deployment.server.repository);
     let matching: Vec<_> = workflows
         .iter()
         .filter(|w| w.path.starts_with(&prefix))
@@ -116,14 +128,21 @@ pub fn referenced_revision(
 }
 
 pub fn require_reusable_pin(bytes: &[u8], path: &str, revision: &str) -> Result<()> {
+    require_reusable_pin_for(&crate::config::trusted()?.deployment, bytes, path, revision)
+}
+
+fn require_reusable_pin_for(
+    deployment: &crate::config::Deployment,
+    bytes: &[u8],
+    path: &str,
+    revision: &str,
+) -> Result<()> {
+    let path = deployment.workflow_path(path)?;
     let yaml: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
     let jobs = yaml["jobs"]
         .as_mapping()
         .context("caller workflow has no jobs")?;
-    let prefix = format!(
-        "{}/{path}@",
-        crate::config::trusted()?.deployment.server.repository
-    );
+    let prefix = format!("{}/{path}@", deployment.server.repository);
     let calls: Vec<_> = jobs
         .values()
         .filter_map(|job| job["uses"].as_str())
@@ -140,6 +159,57 @@ pub fn require_reusable_pin(bytes: &[u8], path: &str, revision: &str) -> Result<
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn testing_provenance_rejects_production_paths_wrong_revisions_and_duplicates() {
+        let mut deployment = crate::config::trusted().unwrap().deployment.clone();
+        deployment.workflow_prefix = "testing-".into();
+        deployment.server.repository = "civitaspo/testing-securefix-control".into();
+        let path = ".github/workflows/reusable-merge-request.yml";
+        let sha = "a".repeat(40);
+        let expected = format!(
+            "{}/{}@{sha}",
+            deployment.server.repository,
+            deployment.workflow_path(path).unwrap()
+        );
+        let reference = |value: &str| ReferencedWorkflow {
+            path: value.into(),
+            sha: sha.clone(),
+        };
+        assert!(referenced_revision_for(&deployment, &[reference(&expected)], path, &sha).is_ok());
+        let wrapper = |value: &str| format!("jobs:\n  request:\n    uses: {value}\n");
+        assert!(
+            require_reusable_pin_for(&deployment, wrapper(&expected).as_bytes(), path, &sha)
+                .is_ok()
+        );
+        for invalid in [
+            expected.replace("testing-reusable", "reusable"),
+            expected.replace(&sha, "main"),
+            expected.replace("testing-securefix-control", "securefix-server"),
+            expected.replace(&sha, &"b".repeat(40)),
+        ] {
+            assert!(
+                referenced_revision_for(&deployment, &[reference(&invalid)], path, &sha).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                require_reusable_pin_for(&deployment, wrapper(&invalid).as_bytes(), path, &sha)
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            referenced_revision_for(
+                &deployment,
+                &[reference(&expected), reference(&expected)],
+                path,
+                &sha
+            )
+            .is_err()
+        );
+        let duplicate = format!("{}  second:\n    uses: {expected}\n", wrapper(&expected));
+        assert!(require_reusable_pin_for(&deployment, duplicate.as_bytes(), path, &sha).is_err());
+    }
 
     #[derive(Debug, Deserialize, PartialEq)]
     #[serde(deny_unknown_fields)]

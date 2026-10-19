@@ -299,12 +299,17 @@ fn changed_files_require_runtime(bytes: &[u8]) -> Result<bool> {
         );
         requires_runtime |= matches!(
             path,
-            "Cargo.toml" | "Cargo.lock" | "rust-toolchain.toml" | "policy.json"
+            "Cargo.toml"
+                | "Cargo.lock"
+                | "rust-toolchain.toml"
+                | "policy.json"
+                | ".github/testing-policy.json"
+                | ".github/workflows/testing-publish-runtime.yml"
         ) || path.starts_with(".cargo/")
             || path.starts_with("src/")
             || path.starts_with("repo-settings/")
             || path.starts_with(".github/actions/setup-cli/")
-            || path == ".github/workflows/publish-runtime.yml";
+            || path == crate::config::workflow_path(".github/workflows/publish-runtime.yml")?;
     }
     Ok(requires_runtime)
 }
@@ -489,7 +494,7 @@ fn ensure_version_tag(api: &GitHub, source_sha: &str, version: &RuntimeVersion) 
     }
 }
 
-fn read_archive(path: &Path) -> Result<(Vec<u8>, String)> {
+pub(crate) fn read_archive(path: &Path) -> Result<(Vec<u8>, String)> {
     let mut file = File::open(path).context("open runtime archive")?;
     ensure!(
         file.metadata()?.len() <= MAX_ARCHIVE_SIZE,
@@ -796,6 +801,8 @@ mod tests {
             b".cargo/config.toml\0",
             b"src/main.rs\0",
             b"policy.json\0",
+            b".github/testing-policy.json\0",
+            b".github/workflows/testing-publish-runtime.yml\0",
             b"repo-settings/rulesets/base.json\0",
             b".github/actions/setup-cli/action.yml\0",
             b".github/workflows/publish-runtime.yml\0",

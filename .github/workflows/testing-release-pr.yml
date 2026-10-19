@@ -1,4 +1,4 @@
-name: Test Managed Release PR Refresh
+name: testing-Managed Release PR Refresh
 
 on:
   workflow_dispatch:
