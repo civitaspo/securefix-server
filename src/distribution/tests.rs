@@ -89,6 +89,137 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
 }
 
 #[test]
+fn releases_enabled_migration_adds_release_callers_but_requires_approve_merge_and_ci() {
+    const CHILD: &str = "SECUREFIX_RELEASE_CALLER_MIGRATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policy.json");
+        std::fs::write(&path, include_bytes!("../../.github/testing-policy.json")).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "distribution::tests::releases_enabled_migration_adds_release_callers_but_requires_approve_merge_and_ci",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("SECUREFIX_POLICY_PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+
+    let trusted = crate::config::trusted().unwrap();
+    let policy = Policy::load(std::env::var("SECUREFIX_POLICY_PATH").unwrap()).unwrap();
+    let repository = &trusted.deployment.integration.repository;
+    let source = "a".repeat(40);
+    let prior_source = "b".repeat(40);
+    let main = "c".repeat(40);
+    let manifest = b"[package]\nname = \"securefix\"\nversion = \"0.2.34-pre.5\"\n";
+    let manifest_content = json!({
+        "encoding":"base64",
+        "content":base64::engine::general_purpose::STANDARD.encode(manifest),
+        "path":"Cargo.toml",
+        "type":"file",
+        "size":manifest.len()
+    });
+    let version_path = format!(
+        "/repos/{}/contents/Cargo.toml?ref={source}",
+        trusted.deployment.server.repository
+    );
+    let ci = "name: testing-CI\non:\n  pull_request:\n    types: [opened, synchronize, reopened]\n  push:\n    branches: [main]\n  workflow_dispatch:\npermissions: {}\njobs:\n  ok:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: exit 0\n  status-check:\n    needs: [ok]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    if: always()\n    steps:\n      - name: Require successful checks\n        env:\n          JOB_RESULT: ${{ needs.ok.result }}\n        run: test \"$JOB_RESULT\" = success\n";
+    let mut previous =
+        caller::rendered_files(&prior_source, "v0.2.34-pre.4", "main", false).unwrap();
+    previous.insert(
+        ".github/workflows/testing-ci.yml".into(),
+        ci.as_bytes().to_vec(),
+    );
+
+    let missing = |path: &str| {
+        Route::request(
+            "GET",
+            format!("/repos/{repository}/contents/{path}?ref={main}"),
+            404,
+            json!({"message":"Not Found"}),
+        )
+    };
+    let make_routes = |previous: &std::collections::BTreeMap<String, Vec<u8>>,
+                       omit_approve: bool| {
+        let content = |bytes: &[u8]| {
+            json!({
+                "encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(bytes)
+            })
+        };
+        let mut routes = vec![
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"full_name":repository,"owner":{"id":trusted.deployment.repository_owner.id},"default_branch":"main"}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/main"),
+                json!({"sha":main}),
+            ),
+            Route::get(&version_path, manifest_content.clone()),
+            missing(".github/workflows/testing-push.yml"),
+            Route::get(
+                format!("/repos/{repository}/contents/.github/workflows/testing-ci.yml?ref={main}"),
+                content(ci.as_bytes()),
+            ),
+            missing(".github/workflows/testing-wc-autofix.yml"),
+        ];
+        let mut expected = caller::rendered_files(&source, "v0.2.34-pre.5", "main", true).unwrap();
+        expected.insert(".github/workflows/testing-ci.yml".into(), Vec::new());
+        for path in expected.keys() {
+            if omit_approve && path.ends_with("testing-approve-request.yml") {
+                routes.push(missing(path));
+                break;
+            } else if let Some(bytes) = previous.get(path) {
+                routes.push(Route::get(
+                    format!("/repos/{repository}/contents/{path}?ref={main}"),
+                    content(bytes),
+                ));
+            } else {
+                routes.push(missing(path));
+            }
+        }
+        routes
+    };
+
+    let fixture = Fixture::new(make_routes(&previous, false));
+    let migration = caller::prepare_caller(&fixture.api, &policy, repository, &source).unwrap();
+    assert_eq!(migration.files.len(), 7);
+    assert!(!migration.default_current);
+    for name in ["release-pr.yml", "release-pr-sync.yml", "release-tag.yml"] {
+        assert!(
+            migration
+                .files
+                .contains_key(&format!(".github/workflows/testing-{name}"))
+        );
+    }
+    fixture.finish();
+
+    previous.remove(".github/workflows/testing-approve-request.yml");
+    let fixture = Fixture::new(make_routes(&previous, true));
+    assert!(
+        caller::prepare_caller(&fixture.api, &policy, repository, &source)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("required managed caller workflow is missing")
+    );
+    fixture.finish();
+}
+
+#[test]
 fn testing_deployment_canonical_callers_round_trip() {
     const CHILD: &str = "SECUREFIX_TEST_NAMESPACE_CHILD";
     if std::env::var_os(CHILD).is_none() {
