@@ -59,14 +59,15 @@ fn qualify(workflow_sha: &str, client: &GitHub) -> Result<()> {
     validate_policy(trusted)?;
     let policy = Policy::parse(POLICY)?;
     let fixture = policy.deployment.control_repository();
-    // Keep the test installation token separate from server metadata reads.
+    // Server hosts keep the test installation token separate from server metadata reads.
+    // Callers reuse their read-only GITHUB_TOKEN for public server metadata.
     let server = &trusted.deployment.server;
     let public = if std::env::var("GITHUB_REPOSITORY")
         .is_ok_and(|repository| repository == server.repository)
     {
         super::integration_read_api()?
     } else {
-        GitHub::anonymous()?
+        client.clone()
     };
     let baseline = std::env::var("SECUREFIX_TEST_BASELINE_SHA")?;
     let main = || -> Result<Value> {
