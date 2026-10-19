@@ -160,29 +160,6 @@ pub enum Command {
         #[arg(long)]
         state_file: PathBuf,
     },
-    /// Verify the final stable client action smoke artifact and request label.
-    VerifyClient {
-        #[arg(long)]
-        artifact_name: String,
-        #[arg(long)]
-        run_id: u64,
-        #[arg(long)]
-        workflow_sha: String,
-    },
-    /// Prepare the exact scratch policy and file used by the client action smoke test.
-    PrepareClientInput,
-    /// Trusted host: validate sandboxed client output before artifact upload.
-    ValidateClientStage {
-        #[arg(long)]
-        directory: PathBuf,
-    },
-    /// Trusted host: qualify the uploaded smoke artifact before creating its label.
-    DispatchClientSmoke {
-        #[arg(long)]
-        artifact_name: String,
-        #[arg(long)]
-        workflow_sha: String,
-    },
     /// Exercise refresh of the same managed release PR after main advances.
     ReleasePr {
         #[arg(long, value_enum)]
@@ -259,21 +236,6 @@ struct Verification {
     managed_files: Vec<String>,
     annotated_tag_verified: bool,
     closed_or_merged: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ClientVerification {
-    version: u32,
-    source_repository: String,
-    run_id: u64,
-    workflow_sha: String,
-    artifact_name: String,
-    destination_repository: String,
-    destination_branch: String,
-    request_label: String,
-    request_label_description: String,
-    verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,29 +386,6 @@ pub fn run(command: Command) -> Result<()> {
             securefix::output("published_runtime_sha", &published_runtime_sha)?;
             securefix::output("published_runtime_tag", &tag)
         }
-        Command::VerifyClient {
-            artifact_name,
-            run_id,
-            workflow_sha,
-        } => {
-            validate_sha(&workflow_sha)?;
-            verify_client(&artifact_name, run_id, &workflow_sha)
-        }
-        Command::PrepareClientInput => prepare_client_input(),
-        Command::ValidateClientStage { directory } => validate_client_stage(&directory),
-        Command::DispatchClientSmoke {
-            artifact_name,
-            workflow_sha,
-        } => {
-            let run_id = std::env::var("GITHUB_RUN_ID")?.parse()?;
-            verify_client_artifact(&artifact_name, run_id, &workflow_sha)?;
-            let api = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", &workflow_sha)?;
-            let _: Value = api.post(
-                &format!("/repos/{}/labels", integration_repository()?),
-                &json!({"name":artifact_name,"description":format!("{}/{run_id}",server_repository()?)}),
-            )?;
-            Ok(())
-        }
         Command::ReleasePr {
             phase,
             candidate_sha,
@@ -485,127 +424,6 @@ pub fn run(command: Command) -> Result<()> {
             control_probe(&candidate_sha, &state_path)
         }
     }
-}
-
-fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result<()> {
-    verify_client_artifact(artifact_name, run_id, workflow_sha)?;
-    let trusted = crate::config::trusted()?;
-    let server = &trusted.deployment.server;
-    let scratch = &trusted.deployment.integration;
-    let branch = format!("securefix-client-smoke-{run_id}");
-    let expected_description = format!("{}/{run_id}", server.repository);
-    let scratch_api = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", workflow_sha)?;
-    let scratch_repo: Value = scratch_api.get(&format!("/repos/{}", scratch.repository))?;
-    ensure!(
-        scratch_repo["id"].as_u64() == Some(scratch.id)
-            && scratch_repo["full_name"] == scratch.repository,
-        "client token destination repository identity changed"
-    );
-    let label: Value = scratch_api.get(&format!(
-        "/repos/{}/labels/{artifact_name}",
-        scratch.repository
-    ))?;
-    ensure!(
-        label["name"] == artifact_name && label["description"] == expected_description,
-        "client smoke request label does not match its source run and destination"
-    );
-    workflow::write_json(
-        "client-verification.json",
-        &ClientVerification {
-            version: 1,
-            source_repository: server.repository.clone(),
-            run_id,
-            workflow_sha: workflow_sha.to_owned(),
-            artifact_name: artifact_name.to_owned(),
-            destination_repository: scratch.repository.clone(),
-            destination_branch: branch,
-            request_label: artifact_name.to_owned(),
-            request_label_description: expected_description,
-            verified: true,
-        },
-    )?;
-    println!("Verified client smoke artifact and request label for workflow run {run_id}.");
-    Ok(())
-}
-
-fn verify_client_artifact(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result<()> {
-    ensure!(run_id > 0, "invalid client smoke workflow run ID");
-    ensure!(
-        crate::securefix_gate::artifact::valid_artifact_name_for_cli(artifact_name),
-        "invalid client smoke artifact name"
-    );
-    let trusted = crate::config::trusted()?;
-    let server = &trusted.deployment.server;
-    let scratch = &trusted.deployment.integration;
-    ensure!(
-        std::env::var("GITHUB_REPOSITORY").is_ok_and(|repository| repository == server.repository)
-            && std::env::var("GITHUB_RUN_ID")
-                .is_ok_and(|id| id.parse::<u64>().ok() == Some(run_id))
-            && std::env::var("GITHUB_SHA").is_ok_and(|sha| sha == workflow_sha),
-        "client verification must run in the matching Securefix Server workflow context"
-    );
-    let api = integration_read_api()?;
-    let run: Value = api.get(&format!(
-        "/repos/{}/actions/runs/{run_id}",
-        server.repository
-    ))?;
-    let server_repo: Value = api.get(&format!("/repos/{}", server.repository))?;
-    validate_client_source_run(
-        &run,
-        run_id,
-        workflow_sha,
-        &server.repository,
-        server.id,
-        trusted.owner_id,
-    )?;
-    ensure!(
-        server_repo["id"].as_u64() == Some(server.id),
-        "configured source repository ID does not match GitHub"
-    );
-    let artifacts: Value = api.get(&format!(
-        "/repos/{}/actions/runs/{run_id}/artifacts",
-        server.repository
-    ))?;
-    let matching = artifacts["artifacts"]
-        .as_array()
-        .context("client smoke artifact list is malformed")?
-        .iter()
-        .filter(|artifact| artifact["name"] == artifact_name)
-        .collect::<Vec<_>>();
-    ensure!(
-        matching.len() == 1,
-        "client smoke artifact is missing or duplicated"
-    );
-    let artifact = matching[0];
-    ensure!(
-        artifact["expired"] == false
-            && artifact["size_in_bytes"]
-                .as_u64()
-                .is_some_and(|size| size > 0 && size <= 16 * 1024 * 1024),
-        "client smoke artifact is expired or oversized"
-    );
-    let artifact_id = artifact["id"]
-        .as_u64()
-        .context("client smoke artifact has no ID")?;
-    let bytes = api.download(
-        &format!(
-            "/repos/{}/actions/artifacts/{artifact_id}/zip",
-            server.repository
-        ),
-        16 * 1024 * 1024,
-    )?;
-    let source_branch = run["head_branch"]
-        .as_str()
-        .context("workflow run has no source branch")?;
-    let fix = crate::securefix_gate::artifact::parse(
-        &bytes,
-        artifact_name,
-        &server.repository,
-        run_id,
-        workflow_sha,
-        source_branch,
-    )?;
-    validate_client_smoke_artifact(&fix, &scratch.repository, run_id, workflow_sha)
 }
 
 fn release_pr(
@@ -1255,183 +1073,6 @@ fn cleanup_release_pr(
     Ok(())
 }
 
-fn validate_client_stage(directory: &Path) -> Result<()> {
-    let run_id: u64 = std::env::var("GITHUB_RUN_ID")?.parse()?;
-    let source = std::env::var("GITHUB_SHA")?;
-    validate_sha(&source)?;
-    ensure!(
-        fs::symlink_metadata(directory)?.file_type().is_dir(),
-        "client stage is not a regular directory"
-    );
-    let entries = fs::read_dir(directory)?
-        .take(2)
-        .collect::<std::io::Result<Vec<_>>>()?;
-    ensure!(entries.len() == 1, "client stage must contain one artifact");
-    let stage = &entries[0];
-    ensure!(
-        stage.file_type()?.is_dir(),
-        "client artifact stage is not a regular directory"
-    );
-    let name = stage
-        .file_name()
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("invalid client artifact name"))?;
-    ensure!(
-        crate::securefix_gate::artifact::valid_artifact_name_for_cli(&name),
-        "invalid client artifact name"
-    );
-    let expected = [
-        format!("{name}.json"),
-        format!("{name}_files.txt"),
-        ".securefix-client-smoke/request.txt".to_owned(),
-    ];
-    // Fixed three-file fixture: no candidate-selected paths, symlinks or host command files.
-    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    for path in &expected {
-        ensure_no_smoke_symlinks(&stage.path(), Path::new(path))?;
-        let metadata = fs::symlink_metadata(stage.path().join(path))?;
-        ensure!(
-            metadata.is_file() && metadata.len() <= 16 * 1024,
-            "client stage file is not bounded and regular"
-        );
-        let bytes = fs::read(stage.path().join(path))?;
-        ensure!(
-            bytes.len() <= 16 * 1024,
-            "client stage file grew beyond its bound"
-        );
-        archive.start_file(path, zip::write::SimpleFileOptions::default())?;
-        std::io::Write::write_all(&mut archive, &bytes)?;
-    }
-    let mut actual = Vec::new();
-    for entry in fs::read_dir(stage.path())? {
-        let entry = entry?;
-        let text = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("invalid client stage path"))?;
-        if text == ".securefix-client-smoke" {
-            ensure!(
-                entry.file_type()?.is_dir(),
-                "client input directory is not regular"
-            );
-            let files = fs::read_dir(entry.path())?.collect::<std::io::Result<Vec<_>>>()?;
-            ensure!(
-                files.len() == 1 && files[0].file_name() == "request.txt",
-                "unexpected client input file"
-            );
-            actual.push(".securefix-client-smoke/request.txt".to_owned());
-        } else {
-            actual.push(text);
-        }
-    }
-    actual.sort();
-    let mut sorted = expected.to_vec();
-    sorted.sort();
-    ensure!(actual == sorted, "unexpected client stage file");
-    let bytes = archive.finish()?.into_inner();
-    let fix = crate::securefix_gate::artifact::parse(
-        &bytes,
-        &name,
-        server_repository()?,
-        run_id,
-        &source,
-        &std::env::var("GITHUB_REF_NAME")?,
-    )?;
-    validate_client_smoke_artifact(&fix, integration_repository()?, run_id, &source)?;
-    securefix::output("artifact_name", &name)?;
-    securefix::output("artifact_path", stage.path().display().to_string())
-}
-
-fn ensure_no_smoke_symlinks(base: &Path, path: &Path) -> Result<()> {
-    ensure!(
-        fs::symlink_metadata(base)?.is_dir(),
-        "client stage is not regular"
-    );
-    let mut current = base.to_owned();
-    for part in path.components() {
-        ensure!(
-            matches!(part, std::path::Component::Normal(_)),
-            "invalid client stage path"
-        );
-        current.push(part);
-        ensure!(
-            !fs::symlink_metadata(&current)?.file_type().is_symlink(),
-            "client stage contains a symlink"
-        );
-    }
-    Ok(())
-}
-
-fn prepare_client_input() -> Result<()> {
-    let trusted = crate::config::trusted()?;
-    let server = &trusted.deployment.server;
-    let workflow_sha = std::env::var("GITHUB_SHA").context("missing GITHUB_SHA")?;
-    validate_sha(&workflow_sha)?;
-    let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
-    let run_id = std::env::var("GITHUB_RUN_ID")
-        .context("missing GITHUB_RUN_ID")?
-        .parse::<u64>()
-        .context("invalid GITHUB_RUN_ID")?;
-    ensure!(
-        run_id > 0
-            && std::env::var("GITHUB_REPOSITORY")
-                .is_ok_and(|repository| repository == server.repository)
-            && std::env::var("GITHUB_EVENT_NAME").is_ok_and(|event| event == "workflow_dispatch")
-            && std::env::var("GITHUB_ACTOR_ID")
-                .is_ok_and(|actor| actor.parse::<u64>().ok() == Some(trusted.owner_id))
-            && std::env::var("GITHUB_RUN_ATTEMPT").is_ok_and(|attempt| attempt == "1"),
-        "client input must be prepared by the first owner-triggered server workflow run"
-    );
-    validate_workflow_ref(&workflow_sha, &workflow_ref)?;
-
-    let policy_bytes = scratch_client_policy(&crate::config::trusted_policy_bytes()?)?;
-    ensure!(
-        policy_bytes.len() <= 256 * 1024,
-        "scratch policy is oversized"
-    );
-    fs::write("scratch-policy.json", policy_bytes)?;
-    fs::create_dir_all(".securefix-client-smoke")?;
-    fs::write(
-        ".securefix-client-smoke/request.txt",
-        format!("Securefix client smoke {run_id}\n"),
-    )?;
-    Ok(())
-}
-
-fn validate_client_source_run(
-    run: &Value,
-    run_id: u64,
-    workflow_sha: &str,
-    server_repository: &str,
-    server_repository_id: u64,
-    owner_id: u64,
-) -> Result<()> {
-    let workflow_matches = workflow_run_matches(run, workflow_sha)?;
-    let actual_run_id = run["id"].as_u64();
-    let repo_full_name = run["repository"]["full_name"].as_str().unwrap_or_default();
-    let repo_id = run["repository"]["id"].as_u64();
-    let head_repo_id = run["head_repository"]["id"].as_u64();
-    let head_sha = run["head_sha"].as_str().unwrap_or_default();
-    let event = run["event"].as_str().unwrap_or_default();
-    let attempt = run["run_attempt"].as_u64();
-    let actor_id = run["actor"]["id"].as_u64();
-    let triggering_actor_id = run["triggering_actor"]["id"].as_u64();
-    ensure!(
-        run["id"].as_u64() == Some(run_id)
-            && run["repository"]["full_name"] == server_repository
-            && repo_id == Some(server_repository_id)
-            && head_repo_id == Some(server_repository_id)
-            && head_sha == workflow_sha
-            && event == "workflow_dispatch"
-            && attempt == Some(1)
-            && actor_id == Some(owner_id)
-            && triggering_actor_id == Some(owner_id)
-            && workflow_matches,
-        "client smoke run {run_id} provenance mismatch: actual_run_id={actual_run_id:?}, repository={repo_full_name}, repo_id={repo_id:?}, head_repo_id={head_repo_id:?}, head_sha={head_sha}, event={event}, attempt={attempt:?}, actor_id={actor_id:?}, triggering_actor_id={triggering_actor_id:?}, workflow_matches={workflow_matches}"
-    );
-    Ok(())
-}
-
 fn scratch_client_policy(trusted_policy: &[u8]) -> Result<Vec<u8>> {
     let mut policy: Value = serde_json::from_slice(trusted_policy)?;
     // Client-only fixtures have no approval capability and must also work with
@@ -1453,27 +1094,6 @@ fn scratch_client_policy(trusted_policy: &[u8]) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec_pretty(&policy)?;
     crate::policy::Policy::parse(&bytes)?;
     Ok(bytes)
-}
-
-fn validate_client_smoke_artifact(
-    fix: &crate::securefix_gate::artifact::FixArtifact,
-    scratch_repository: &str,
-    run_id: u64,
-    workflow_sha: &str,
-) -> Result<()> {
-    let expected_contents = format!("Securefix client smoke {run_id}\n").into_bytes();
-    ensure!(
-        fix.repository == scratch_repository
-            && fix.branch == format!("securefix-client-smoke-{run_id}")
-            && fix.source_sha == workflow_sha
-            && fix.run_id == run_id
-            && fix.deletions.is_empty()
-            && fix.create_pull_request.is_none()
-            && fix.additions.len() == 1
-            && fix.additions.get(".securefix-client-smoke/request.txt") == Some(&expected_contents),
-        "client smoke artifact does not match the exact scratch fixture"
-    );
-    Ok(())
 }
 
 fn validate_producer(workflow_sha: &str) -> Result<()> {
@@ -5287,46 +4907,7 @@ mod tests {
     }
 
     #[test]
-    fn client_smoke_artifact_must_match_the_exact_source_and_fixture() {
-        let run_id = 42;
-        let workflow_sha = "a".repeat(40);
-        let mut additions = BTreeMap::new();
-        additions.insert(
-            ".securefix-client-smoke/request.txt".into(),
-            format!("Securefix client smoke {run_id}\n").into_bytes(),
-        );
-        let fix = crate::securefix_gate::artifact::FixArtifact {
-            repository: integration_repository().unwrap().to_owned(),
-            branch: format!("securefix-client-smoke-{run_id}"),
-            run_id,
-            source_sha: workflow_sha.clone(),
-            commit_message: "test fixture".into(),
-            create_pull_request: None,
-            additions,
-            deletions: Vec::new(),
-        };
-        assert!(
-            validate_client_smoke_artifact(
-                &fix,
-                integration_repository().unwrap(),
-                run_id,
-                &workflow_sha
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_client_smoke_artifact(
-                &fix,
-                integration_repository().unwrap(),
-                run_id + 1,
-                &workflow_sha
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn client_smoke_policy_swaps_only_server_and_scratch_deployments() {
+    fn scratch_client_policy_swaps_only_server_and_scratch_deployments() {
         let mut original: Value =
             serde_json::from_slice(&crate::config::trusted_policy_bytes().unwrap()).unwrap();
         original["sensitive_path_approval_exemptions"] = json!({"users":[],"github_apps":[]});
@@ -5353,61 +4934,6 @@ mod tests {
             json!(["securefix"])
         );
         assert_eq!(scratch["owner_id"], original["owner_id"]);
-    }
-
-    #[test]
-    fn client_source_run_accepts_nonterminal_status_but_rejects_identity_mismatches() {
-        let trusted = trusted_config().unwrap();
-        let server = &trusted.deployment.server;
-        let run_id = 42;
-        let workflow_sha = "a".repeat(40);
-        let branch = format!("integration/native-{}", &workflow_sha[..12]);
-        let run = json!({
-            "id": run_id,
-            "repository": {"full_name": server.repository, "id": server.id},
-            "head_repository": {"id": server.id},
-            "head_sha": workflow_sha,
-            "head_branch": branch,
-            "path": format!("{WORKFLOW_PATH}@refs/heads/{branch}"),
-            "event": "workflow_dispatch",
-            "run_attempt": 1,
-            "status": "queued",
-            "actor": {"id": trusted.owner_id},
-            "triggering_actor": {"id": trusted.owner_id}
-        });
-        assert!(
-            validate_client_source_run(
-                &run,
-                run_id,
-                &workflow_sha,
-                &server.repository,
-                server.id,
-                trusted.owner_id
-            )
-            .is_ok()
-        );
-
-        let mut wrong_actor = run.clone();
-        wrong_actor["actor"]["id"] = json!(trusted.owner_id + 1);
-        let mut wrong_sha = run.clone();
-        wrong_sha["head_sha"] = json!("b".repeat(40));
-        let mut wrong_repository = run.clone();
-        wrong_repository["repository"]["id"] = json!(server.id + 1);
-        let mut wrong_attempt = run.clone();
-        wrong_attempt["run_attempt"] = json!(2);
-        for wrong in [wrong_actor, wrong_sha, wrong_repository, wrong_attempt] {
-            assert!(
-                validate_client_source_run(
-                    &wrong,
-                    run_id,
-                    &workflow_sha,
-                    &server.repository,
-                    server.id,
-                    trusted.owner_id
-                )
-                .is_err()
-            );
-        }
     }
 
     #[test]

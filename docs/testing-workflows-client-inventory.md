@@ -22,7 +22,7 @@
 The three `testing-*` feature callers already target testing reusable workflows, but they are pinned to the earlier `pre.1` revision. The three release callers still invoke the production `v0.2.33` reusable workflows. The next reviewed consumer change should pin all six feature callers to the reviewed testing reusable revision and remove the three production release callers plus the four smoke/verify workflows listed above. The two CI workflows and fixture validation remain in place.
 
 
-## Deployed configuration after PR276 and PR279
+## Historical deployed configuration after PR276 and PR279
 
 Independent readback: `/private/tmp/securefix-phaseb-native-corrected-evidence/final-native-caller-routing.json` and `normal-recovery-independent.json`.
 All six feature callers have `testing-` file/display names and pin `civitaspo/securefix-server/.github/workflows/testing-reusable-*.yml@18163e82ad5c6938676ab6cf008e765cd0c7383b`.
@@ -42,3 +42,23 @@ Workflow-file location does not imply the reusable job runs in the server reposi
 The final directory contains exactly ten workflows: these six callers and the four existing CI/fixture workflows retained for the reasons in the historical inventory.
 PR279 removed the three production release callers and four obsolete smoke/verify workflows; no unprefixed production Securefix caller remains.
 No server-wide execution centralization, split-review command, additional auth platform, dedicated App, secret relocation, or extra Environment approval is used.
+
+## Current deployed configuration — Phase B complete
+
+This section supersedes the historical inventories above. Exactly ten workflow files remain: six feature callers below, plus unchanged `ci.yml`, `testing-ci.yml`, `fixture-validation.yml` and the bounded refusal fixture `testing-required-ci-fixture.yml`.
+All six caller file/display names start with `testing-` and reference `civitaspo/securefix-server/.github/workflows/testing-reusable-*.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94`.
+All actual feature executions below selected qualified immutable `v0.2.34-pre.9` and isolated control7 (`0165196de8c2d3bb6221275eb6cf1f2673792a6b9d6a12ce3ab4c89f0a35f5e0`). Independent qualification host `fcf36237c8ea2d331f5c2d8e24d3cc41fe495030` includes the host-only directory/metadata corrections.
+
+| Caller / trigger | Testing reusable suffix | Actual execution repository and shared normal processing | Successful source9 evidence |
+|---|---|---|---|
+| `testing-approve-request.yml`: PR target events, owner `/approve` | `approve-request` | Caller captures/dispatches in testing-securefix-server; server runs approve validate/apply with existing User bot PAT | Caller39250588840 → server39250675449 → exact-head civitaspo-bot User review5571392727 |
+| `testing-merge-request.yml`: eligible `/merge` comment | `merge-request` | Caller captures/dispatches; server runs merge authorize/wait/apply | Caller39250834291 → server39250919292 → PR289 merged |
+| `testing-policy-check.yml`: PR target events, main push | `policy-check` | Caller captures/dispatches; server runs check locate/validate/apply | Native server39252589546; source9/control7 process log |
+| `testing-release-pr.yml`: main push, optional version dispatch | `release-pr` | Caller release prepare/native client dispatch; server shared CSM signed commit and PR | Caller39252099978 → server39252200081 → signed PR290, v0.1.0-pre.5 |
+| `testing-release-pr-sync.yml`: manual dispatch | `release-pr-sync` | Caller runs normal release sync-pr with the same GITHUB_TOKEN permissions as production | Caller39252447574 passed |
+| `testing-release-tag.yml`: merged release/testing-next PR, explicit PR retry | `release-tag` | Caller resolves/builds/tags/requests; original Client App creates server label; server preflights/signs/publishes | Caller39253227847 → server39253690614 → immutable v0.1.0-pre.5, release417276895 |
+
+The reusable files live in securefix-server; caller jobs actually run in testing-securefix-server. Server event workflows actually run in securefix-server. No server-wide execution move or split-review CLI remains.
+Production stable v0.2.33/control and settings were not changed. Shared Apps, existing Client secret, User reviewer and original Client App label transport remain; operations/tokens target the required test repositories/permissions. The three temporarily suspended notifications are active.
+
+Independent final routing/content-identity and workflow/control readback: `/private/tmp/securefix-phaseb-native-corrected-evidence/phaseb-final-caller-routing.json` and `phaseb-final-independent-readback.json`. Overall evidence index: `phaseb-completion.json`. Current same-source two-run CLI reuse proof: `host10-multi-run-build-reuse.json`; prepare and sync reuse exact artifact12185653021 without recompilation, while revalidating current runtime/control/authority.

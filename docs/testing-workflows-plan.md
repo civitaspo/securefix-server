@@ -1,5 +1,7 @@
 # Workflow integration test implementation plan
 
+> **Current status (2026-10-19): Phase B complete.** The final evidence and current configuration are in “Phase B completion — native testing routes” at the end of this record and `testing-workflows-client-inventory.md`. Earlier pending statements and the withdrawn server-wide centralization / approved-development-PAT prohibition describe historical states, not the adopted configuration.
+
 ## Current direction — supersedes historical routing and credential restrictions (2026-10-19)
 
 The owner withdrew **server-wide execution centralization**. Testing follows the
@@ -1199,3 +1201,51 @@ code and does not change the normal migration authority or guard.
 - Tag retry39250588180 refused at resolve with owner authorization for this exact pull request head is missing. PR278 was authorized under control6; current control7 correctly does not accept that old marker. Preserve the existing pre.4 tag and failed runs; create a fresh normal managed release PR from current control instead of forging/rebinding historical authorization.
 - Sync39250644322 failed in caller runtime qualification: anonymous GET securefix-server/commits/main returned403, after the same job's authenticated baseline capture succeeded. An independent caller PR-event loader also failed while other native caller loaders passed. Do not attribute this conclusively to rate limits because response headers/body were not retained.
 - Minimal host-only correction: caller qualification reuses its existing read-only GITHUB_TOKEN connection for public server metadata instead of an anonymous connection. Server hosts retain their separate authenticated server metadata API; scratch App token scope, source/control/digest/producer assertions and selected pre.9 runtime are unchanged. No new credentials, scopes or auth infrastructure. Review/merge this host fix before fresh native sync/release work; no selected-runtime rebuild or control successor is required.
+
+### Fresh selected pre.9 native recovery
+
+- Fresh signed PR289/head46aa555f16f38e81d1cbdb09f5bd5a934e90e6c2 merged normally at1ea04a45dde183bff91ba22cc6131645fb829ccb: owner approve6266962220 → native caller39250588840 → server39250675449 → exact-head civitaspo-bot User review5571392727; owner merge6266996453 → caller39250834291 → server39250919292. The successful approve process log explicitly runs normal securefix approve apply with selected sourcec1195a1/control7. No split CLI or replacement review identity.
+- Independent pre9-normal-recovery-independent.json confirms merged exact head, review/checks, Client App-triggered normal server runs, current test descriptor and unchanged production descriptor. Cases.json retains original pre.6 refusal proofs and separately records fresh pre.9 old-pin/migration/recovery successes; no source-version relabeling.
+- Existing managed release PR280 retained control6 in its head tree. Trusted-owner cleanup checked exact Server App author/branch/head, closed it unmerged and deleted only release/testing-next at5e14bd7229c38e89b69d63d9f9f9e3facadea693. Independent main/control readbacks were unchanged. Fresh normal release preparation will start from current control7 instead of relaxing the successor/authorization guards.
+
+### Authenticated caller metadata host correction merged
+
+- PR129/headf20ed42b65538eb01406c43a375d1f608948f7d2 passed CI39251067890, User review and normal merge39251339678. Protected main isfcf36237c8ea2d331f5c2d8e24d3cc41fe495030 (host-only versionpre.10); selected runtime remains immutable pre.9/control7. Wait for main CI39251543971 to make its exact source artifact reusable before the next caller qualification.
+- Automatic post-recovery release preparation39251371858 failed before the host fix at another anonymous public metadata GET (sourcec1195a1/check-runs page5,403). Preserve this distinct failure beside sync39250644322; do not silently relabel it as success. The reviewed existing-connection fix addresses both reads without added scope.
+
+### Host fix verified in native release preparation and sync
+
+- Main CI39251543971 passed; hostsourcefcf3623 artifact12185653021 digest03689a0c31da1ad79f5782b6febb97637284f81fb61ec67c587641e2f61de967 is reused in separate real release-prepare39252099978 and sync39252447574 setup jobs. Exact source/build/digest/producer matches and absence of compiler/toolchain installation are recorded in host10-multi-run-build-reuse.json. Per-run full metadata/control qualification still executes.
+- Native release prepare39252099978 and normal server CSM39252200081 passed. Fresh Server App PR290/head086e2d2bfdb126c980147926f5007340c409e045 starts from current control7, has a verified signature and changes only .release-version/CHANGELOG.md for v0.1.0-pre.5. Sync39252447574 passed. Review, merge, tag and actual signature/publication remain pending; do not count preparation as those successes.
+
+### Actual native release tag and Client App server request
+
+- Release PR290 received exact-head civitaspo-bot User review5571554318 and current-control policy check. Owner merge6267288190 → caller39252871330 → normal server39252971258 passed; merged commitc47ddd187a9e016f634e921910e05d920118ddb5.
+- Automatic closed-PR caller39253227847 passed every job: qualified selected pre.9/control7, resolved the actual reviewed merged PR, built provider bundle12186985469, tagged exact merged commit as v0.1.0-pre.5, and executed shared securefix release request-server successfully. Manifest12187545032 and release-pre5-tag-process.log bind source/run/PR/tag. The old failed pre.4 attempts remain separate.
+- Independent annotated-tag readback confirms exact merged target; testing-Release server39253690614 was triggered by Client App actor288068203 and testing-release-request-39253227847. This demonstrates the corrected original Client App/server-label route; actual signature/publication is still pending and not inferred from tag success.
+
+### Phase B completion — native testing routes
+
+Current policy:
+
+1. Match production execution locations and shared CLI commands. Six testing-prefixed caller/reusable routes cover approve, merge, policy, release PR, release sync and release tag. Server-wide centralization is withdrawn.
+2. Trust approved protected-main development source and its verified source-bound runtime. Selected operational runtime is immutable v0.2.34-pre.9/sourcec1195a1; independent qualification host isfcf3623 (host-only pre.10). Same selected CLI performs approve apply with the existing civitaspo-bot User PAT. No split review/continuation, substitute reviewer, or host/candidate normal-operation implementation.
+3. Preserve shared Apps, existing Client repository secret, Client App → server label path and existing authentication Actions. App tokens and actual operations are fenced to required test targets/permissions. No dedicated App, new auth service, secret relocation, or extra Environment approval.
+4. Isolated test control7/policy remains separate. Production control blobef2dcc1ed591fc6c4e7815f5e5d40794933b254f and production activation/settings are unchanged; ordinary production runtime remains stable v0.2.33.
+5. Preserve exact source/workflow/runtime/full-control/provenance checks and fresh per-run authorization/PR/check validation. Reuse exact-source/build/digest/producer CLI artifacts across runs; rebuild only when those inputs change or no qualified artifact exists.
+
+Actual acceptance:
+
+- Source9 old-pin refusal39249781355, reviewed canonical migration39250161481/PR288, and fresh native recovery39250675449 +39250919292/PR289 passed with independent state/review/control readbacks. All three temporarily suspended notification workflows are restored active.
+- Policy server39252589546 executes normal check apply with source9/control7. Native release prepare39252099978 → CSM39252200081 → signed PR290 and caller sync39252447574 passed. Exact User review5571554318 and fresh owner merge6267288190 led to normal merge39252971258 atc47ddd187a9e016f634e921910e05d920118ddb5.
+- Automatic release-tag39253227847 passed resolve/build/tag/request. Original Client App actor288068203 created testing-release-request-39253227847; server39253690614 passed cli/resolve/preflight/sign/publish/cleanup with selected source9/control7 and shared release sign/publish commands.
+- Independently published immutable pre-release v0.1.0-pre.5, release417276895: 16 assets (13 provider zips, provider manifest, canonical SHA256SUMS and detached signature). Exact annotated tag points to merged PR290 commit. Fourteen checksum entries match independent GitHub asset digests; checksum/signature downloads match their published digests. Normal selected-runtime signing verifies the configured signer before publication; no separate local public-key verification is claimed.
+- Final directory has exactly six canonical testing feature callers and four retained CI/fixture workflows. All six sourcec1195a1 blob identities/display prefixes are independently confirmed; three old production release callers and four obsolete smoke/verify workflows remain absent. Latest feature inventory distinguishes reusable file location from actual caller/server execution.
+- All ten case rows passed in corrected-evidence/cases.json, including old pin/migration/recovery and nine additional refusals, each with exact reason and independent protected-state proof. Preserve exact per-result source: the unchanged nine guard refusals remain native pre.6 (changed-control uses pre.5), while fresh source9 old-pin/migration/recovery and all six source9 functions have separate evidence. The source9 runtime change is only the shared release-request POST constructor; host directory/metadata fixes do not modify these mutation guards. Never relabel historical split-path or failed-run evidence as current success.
+- Latest hostsourcefcf3623 CI39251543971 artifact12185653021/digest03689a0c31da1ad79f5782b6febb97637284f81fb61ec67c587641e2f61de967 was reused without compiler/toolchain installation in distinct real prepare39252099978 and sync39252447574. Existing selected-source9 publisher/prepare reuse proof also remains saved. Every run still revalidates full control and operation authority.
+
+Evidence root: /private/tmp/securefix-phaseb-native-corrected-evidence. Entry point: phaseb-completion.json; final independent release/control/workflow readback: phaseb-final-independent-readback.json; routing: phaseb-final-caller-routing.json; published asset consistency: release-pre5-published-verification.json; refusals: cases.json; latest two-run reuse: host10-multi-run-build-reuse.json. Failed runs and fixture corrections remain distinct in this record and evidence files. No required Phase B operation remains pending; normal future managed release PRs are repository operation output, not unfinished fixtures.
+
+### Follow-up: retire the old standalone client smoke
+
+The owner identified the Docker step “Prepare client artifact inside the candidate sandbox without credentials” after Phase B acceptance. It belonged to the older optional `client-smoke` harness, not the six native feature routes; the previous completion report did not make that remaining split explicit. Remove the entire redundant `client-smoke`/`client-baseline` pair, `client_runtime` input and their four dedicated host CLI commands/validators. Keep the shared scratch client policy and normal client Action used by distribution fixtures. Keep sandboxing for unreviewed scratch/bootstrap/provider probes; do not replace them with credentialed host execution. Normal six-feature processing, selected pre.9/control7, recorded acceptance and production control/settings remain unchanged. Update existing workflow assertions and current integration documentation; deployment status is recorded after the normal source PR merge.
