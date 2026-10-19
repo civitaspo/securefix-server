@@ -251,3 +251,7 @@ a new runtime version and the ordinary reviewed promotion flow.
 
 Keep completion reports precise: what changed, what passed, and any remaining
 unverified condition. Reuse saved evidence and clean up disposable test fixtures.
+
+## Owner-selected development scratch probes (2026-10-20 clarification)
+
+For testing-securefix-server.yml, trust owner-selected development code under the securefix-server change-management boundary. The owner explicitly excludes owner-account/server-code compromise from this test threat model. Do not reintroduce a separate trusted/candidate CLI or container boundary merely because the owner can select an unmerged source SHA. Use one source-bound CLI and retain producer/source/runtime/control checks, independent state checks and test-only installation scopes. This clarification supersedes earlier candidate-sandbox requirements for these direct scratch/bootstrap probes; it does not remove client build-hook/signing isolation or production runtime qualification.

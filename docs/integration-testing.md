@@ -223,32 +223,22 @@ credential restriction. Their dedicated prepare/stage/dispatch/verify CLI comman
 were removed as well. Normal client artifact preparation and Client App server
 label creation remain in the production-shared testing callers; actual native
 acceptance is recorded in [the workflow inventory](testing-workflows-client-inventory.md).
-Unreviewed candidate scratch/bootstrap/provider probes retain their isolation.
+The direct scratch/bootstrap probes now run the owner-selected development CLI on the runner; their former candidate container boundary is retired. Provider build/signing separation has a separate role and remains unchanged.
 
 ## Existing direct scratch probes
 
 The owner rejected the historical Client-key cutover proposal recorded in
 `testing-workflows-isolation-review.md`. Keep the existing repository secret.
-The legacy client smoke now uses the isolated CLI path described above; candidate
-Action code does not execute on the credentialed host.
+The legacy client smoke is retired. Owner-dispatched development code is trusted under the securefix-server change-management boundary.
 
 The native integration command runs the candidate CLI against only
 `civitaspo/testing-securefix-server`. It does not publish a runtime release or
 write to another repository. The scratch Server App token is checked against
 the installation repository list and each mutation is restricted by the API
 client to the fixed scratch repository. The Client App token is checked the
-same way. Do not pass a user token or a production installation token to the
-candidate process.
+same way. These scratch probes require only test-scoped installation tokens; ordinary approved-development workflows continue to use the existing User reviewer PAT where required.
 
-The trusted workflow builds the candidate without credentials, then runs the
-artifact in an isolated job. On main or an integration branch, it separately captures
-the exact signed protected server default-branch SHA, builds that read-only test validator with locked
-dependencies, and uploads a distinct immutable artifact. Baseline commands
-validate the producer and retrieve fixture state; candidate commands exercise and verify the isolated scratch mutations.
-The validator's baseline SHA must remain current throughout the test. Read-only
-producer and fixture-state commands require
-`SECUREFIX_TEST_BASELINE_SHA` to match signed current main at entry. This test-only
-build receives no production credentials and does not select an operational runtime.
+The workflow builds or reuses one source-bound development CLI without secrets and installs it on the runner PATH. The same CLI validates provenance, retrieves fixture state, runs scratch operations/control probes and validates the resulting files. There is no separate trusted-baseline binary, candidate Docker container or verify-run artifact relay. The existing setup-cli main CI artifact reuse still checks source/build identity, producer and digest; control/authority/fixture checks run afresh. A metadata-only baseline job captures signed current main for `SECUREFIX_TEST_BASELINE_SHA`; it does not build another executable. That revision must remain current throughout the test.
 The published test runtime is selected independently from `control/active.json`:
 its source, immutable release/asset IDs, archive digest and canonical tag must
 match. An ordinary main advance does not require a new runtime release.
@@ -422,7 +412,7 @@ trusted runtime policy, narrowed to the scratch repository, and assigned the can
 SHA. This is an explicit test context; production `Policy::active` and
 default-branch revision write checks remain unchanged.
 
-The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
+The owner-selected development CLI executes directly on the GitHub runner. The same CLI checks output bounds, symlinks and fixture/provenance bindings before artifacts are uploaded. Repository/token scope and independent protected-state checks remain required. This is not isolation against an attacker who controls the owner account or approved server code; those threats are outside this test environment's agreed scope.
 
 The former standalone client smoke and published-baseline selector are retired;
 they are not part of runtime qualification. Native testing callers exercise the
