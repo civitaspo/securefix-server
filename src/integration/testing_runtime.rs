@@ -119,7 +119,10 @@ fn qualify(workflow_sha: &str, client: &GitHub) -> Result<()> {
     );
     super::validate_test_baseline(&baseline, &main()?)?;
     // Never extract arbitrary archive members, install on PATH, or execute the binary.
-    let directory = tempfile::tempdir()?;
+    // Artifact uploads exclude files below dot-prefixed directories by default.
+    let directory = tempfile::Builder::new()
+        .prefix("securefix-testing-runtime-")
+        .tempdir()?;
     fs::write(directory.path().join("securefix"), binary)?;
     fs::write(directory.path().join("policy.json"), contents.policy)?;
     fs::write(
