@@ -673,3 +673,22 @@ CI/policy, owner approve `6261142759` and separate merge `6261202402`. Its norma
 merge was requested only after both direct qualifications completed and the
 descriptor retry failed without writing. A fresh expected-main read is required
 for the next initial descriptor proposal.
+
+### Attestation cause identified (2026-10-19T06:43:15Z)
+
+Reproducing the Rust verifier’s extensionless temporary filenames locally gives
+`bundle file extension not supported, must be json or jsonl`. Earlier local
+commands used `bundles.jsonl`, which explains their success. The minimum fix
+creates the same bounded public bundle bytes using a `.jsonl` temporary file; all
+cryptographic/provenance constraints remain unchanged. PR #122 includes this fix
+and stderr visibility. Its prior merge request must not authorize the changed
+head; obtain a fresh exact-head review and commands. Reuse both qualified runtimes
+and run the actual initial control proposal after this corrected source merges.
+
+PR #122 had already merged as `45672d80f0572556f909a926ec747a6ca18bccb7`
+before the suffix commit reached its old branch. Therefore the suffix fix uses
+a new PR based on that main, fresh version `0.2.34-pre.4` for the unchanged
+version gate, and fresh head-bound commands. The merged diagnostic source has
+not been dispatched for another failing proposal. Neither pre.3 nor pre.4 needs
+publication: these are trusted host fixes, while the existing two qualified
+runtime payloads remain selected for the planned test.
