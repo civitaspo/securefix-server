@@ -1136,7 +1136,7 @@ fn request_server() -> Result<()> {
                 .downcast_ref::<ApiError>()
                 .is_some_and(|api_error| api_error.status == reqwest::StatusCode::NOT_FOUND) =>
         {
-            let _: Value = api.post(
+            let _: Value = GitHub::client_from_env("GH_TOKEN")?.post(
                 &format!("/repos/{server_repository}/labels"),
                 &json!({"name":label,"color":"1f6feb","description":description}),
             )?;
