@@ -1094,3 +1094,66 @@ gets pre.7 for source-version discipline; the selected, qualified runtime remain
 pre.6, whose source is an ancestor of current protected main. This preserves the
 existing independent host/source/runtime/control checks and does not require
 republishing an unchanged selected runtime. Native distributor success is pending.
+
+### Native corrected-path migration evidence (2026-10-19)
+
+PR #126 merged via 39235812268 after CI 39235379605 and civitaspo-bot approval.
+Trusted host source b8b62bb1411041af3db100de2e67aa169b6260d9 passed main CI
+39235978876; reusable artifact 12179481654 has digest
+1b13c8c81df63ed9977d1d8e5587690c186929319e8b9a810626b6d18fe28849.
+With selected runtime/control still pre.6/generation four, distributor
+39236477323 succeeded and created canonical signed test PR #270, exact head
+557ac581bd00293a1aadf6c06687ef591be05328. Diff inspection confirms all six
+feature callers target testing reusable source 18163e8; existing CI is preserved.
+The separate retirement branch a1bac5c0e0287daeb25d6817fd1098ba21e1ce6a prepares
+seven obsolete production-release/smoke/verify workflow deletions for normal review
+after migration, without relaxing the canonical migration file guard.
+
+Old-pin run 39236858381 refused with `testing caller workflow source differs
+from active test control`; independent oldpin-before/after snapshots preserve
+branch and PR state (including unchanged main, anchoring the test descriptor).
+Non-owner run 39237055064, dispatched by fenced fixture 39237007126, skipped
+both jobs with zero steps; all protected state was independently unchanged.
+Revoked-review run 39237345632 refused with `current-head owner review for the
+active control is missing`; all protected state independently unchanged.
+These are fresh native-path results in corrected-evidence/cases.json; reviewed
+migration, recovery and the other refusal scenarios remain pending.
+
+Additional fresh native refusals passed: edited command 39237688897 (all state
+unchanged), failing required CI 39237925355 (branch/PR unchanged; expected
+authorization markers and policy check recorded), consumed-command replay
+39238218995 (same IDs, separate first-attempt run; all state unchanged).
+
+For the actual control-change scenario, PR #271 advanced test control to generation
+five using already qualified pre.5 (merge 39238635303), after fresh review and
+commands for canonical PR #270 under generation four. Run 39238784960 then refused
+with `requested control identity changed`; all state independently unchanged.
+PR #272 restored the already qualified pre.6 tuple as generation six via
+39239139406. Identity 5396753b8b5e8e9efe15acf191da8ebc47aac9fad0ec728fed43567fbc2e05aa;
+main 757c4004d864855ac383e97b8db68ab02267cc11; descriptor blob
+2121f3c53a34ec3b4127cddcc268cc0450546945. No runtime rebuild/republication was
+needed for either reviewed successor; production control was not changed.
+
+GitHub PR #270 retained its old base SHA ba1944c after these required control
+fixture merges. Existing mutation/cleanup fixture requires base == current main;
+that guard remains intact. The trusted owner separately checked exact test repo,
+Server App author, fixed automation branch/head, old base, current main/control,
+closed #270 unmerged and deleted only that exact branch, rechecking current
+main/control around writes. Evidence: pr270-owner-cleanup-before/closed.json.
+Distributor 39239348425 recreates a canonical PR at the current base for the three
+remaining mutation refusals. This owner-only fixture cleanup executes no candidate
+code and does not change the normal migration authority or guard.
+
+### Corrected-path refusal and build-reuse milestone
+
+- All nine native refusal scenarios now passed, separately from earlier split-path results. Managed bytes: run 39239891844, exact canonical-signed-migration refusal; stale head: 39240732773, changed/non-open server-owned PR refusal; unmanaged file: 39241590819, exact unmanaged path refusal. Each has independent before/after snapshots with all protected state unchanged.
+- Stale-head fixture 39240403313 and unmanaged fixture 39241280998 failed after their successful writes because immediate PR reads returned the previous head. Later independent PR/ref/commit/file/signature and main/control readback confirmed the intended fixtures; no mutation was replayed. These failed setup runs remain separate evidence.
+- Current trusted host source b8b62bb reused CI artifact 12179481654 from run 39235978876 in real runs 39236477323 and 39240732773. Exact digest 1b13c8c81df63ed9977d1d8e5587690c186929319e8b9a810626b6d18fe28849 matched; neither selected setup job executed compiler/toolchain installation. Per-run runtime/control/authorization checks remained active.
+- Evidence: /private/tmp/securefix-phaseb-native-corrected-evidence/cases.json and host7-multi-run-build-reuse.json. Positive reviewed migration, normal recovery, retirement of seven obsolete routes, and actual testing release execution remain pending.
+
+### Reviewed migration and native runtime-upload blocker
+
+- Reviewed caller migration run 39242678798 passed and merged PR276 at 24644889677f1faa44a0db200a38c14fe96a902a. The signed exact head acbd100503e9b8415ccecf4c90f972b6c1e91194 was reviewed with a standalone generation-six control marker and new owner commands; all six canonical feature callers are deployed. Independent PR/main/control/workflow readback is saved in migration-independent-readback.json.
+- Ordinary PR277 deletes only the seven obsolete production release and smoke/verify workflows. It uses the normal Client App/server-label/owner-command route; it is not merged through the migration fixture.
+- First native release PR run 39242975406 and push-policy run 39242975401 qualified the selected pre.6 runtime, then failed artifact upload: no files at /tmp/.tmp…/. The host deliberately keeps its temp directory, but the pinned upload-artifact action excludes files under dot-prefixed directories by default (its pinned README confirms this). These are distinct failed native results, not acceptance.
+- Minimal host-only correction: choose a non-hidden securefix-testing-runtime- temporary directory. Keep archive members, source/digest/publisher/control checks, selected pre.6 runtime and test control unchanged. The current protected-main host supplies caller qualification independently of the pinned reusable source, so no new runtime release or control migration is required for this host fix. Native recovery/release will be rerun only after the corrected host is reviewed and merged.
