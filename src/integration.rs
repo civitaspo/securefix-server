@@ -23,6 +23,11 @@ use securefix::{
 };
 
 const WORKFLOW_PATH: &str = ".github/workflows/testing-securefix-server.yml";
+mod testing_control;
+mod testing_processor;
+mod testing_publication;
+mod testing_runtime;
+mod workflow_state;
 const FIX_PATH_PREFIX: &str = ".securefix-integration/";
 const BRANCH_PREFIX: &str = "securefix-integration-";
 const STATE_VERSION: u32 = 2;
@@ -57,6 +62,87 @@ fn owner_id() -> Result<u64> {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Trusted host: propose or merge an independently stored test control fixture.
+    TestingControl {
+        #[command(subcommand)]
+        command: testing_control::Command,
+    },
+    /// Trusted host: validate the exact first-attempt testing processor before credentials.
+    ValidateTestingProcessor {
+        #[arg(long, value_enum, default_value = "request")]
+        kind: testing_processor::HostKind,
+    },
+    /// Trusted host: qualify the active isolated control's runtime as data.
+    LoadTestingControl {
+        #[arg(long, value_enum, default_value = "request")]
+        kind: testing_processor::HostKind,
+    },
+    /// Trusted host: independently retrieve a native request from the fixed client.
+    PrepareTestingRequest {
+        #[arg(long, value_enum)]
+        kind: testing_runtime::CaptureKind,
+        #[arg(long)]
+        source_run_id: u64,
+    },
+    /// Candidate container: continue a host-qualified native request with test-only tokens.
+    ContinueTestingRequest {
+        #[arg(long, value_enum)]
+        kind: testing_runtime::CaptureKind,
+        #[arg(long)]
+        source_run_id: u64,
+    },
+    /// Trusted host: qualify an isolated test control's pre-release without executing it.
+    LoadTestingRuntime {
+        #[arg(long)]
+        workflow_sha: String,
+    },
+    /// Trusted host: validate the bounded output of a native capture container.
+    ValidateTestingCapture {
+        #[arg(long, value_enum)]
+        kind: testing_runtime::CaptureKind,
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        control_id: String,
+    },
+    /// Trusted host: dispatch a bounded native capture using only Client App label authority.
+    DispatchTestingRequest {
+        #[arg(long, value_enum)]
+        kind: testing_runtime::CaptureKind,
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        control_id: String,
+    },
+    /// Trusted host: delete only this run's validated testing request label.
+    CleanupTestingRequest,
+    /// Trusted host: qualify a testing pre-release archive as data before publication.
+    ValidateTestingPublication {
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Read protected state in the fixed test client before or after a workflow event.
+    WorkflowSnapshot {
+        #[arg(long)]
+        pull_request: u64,
+        #[arg(long)]
+        state_file: PathBuf,
+    },
+    /// Compare independently captured snapshots; this does not prove a rejection reason.
+    CompareWorkflowSnapshots {
+        #[arg(long)]
+        before: PathBuf,
+        #[arg(long)]
+        after: PathBuf,
+        #[arg(long, value_enum)]
+        protect: workflow_state::Protection,
+    },
     /// Prepare or verify live integration fixtures in the one scratch repository.
     Run {
         #[arg(long, value_enum)]
@@ -109,6 +195,18 @@ pub enum Command {
     },
     /// Prepare the exact scratch policy and file used by the client action smoke test.
     PrepareClientInput,
+    /// Trusted host: validate sandboxed client output before artifact upload.
+    ValidateClientStage {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Trusted host: qualify the uploaded smoke artifact before creating its label.
+    DispatchClientSmoke {
+        #[arg(long)]
+        artifact_name: String,
+        #[arg(long)]
+        workflow_sha: String,
+    },
     /// Exercise refresh of the same managed release PR after main advances.
     ReleasePr {
         #[arg(long, value_enum)]
@@ -246,6 +344,54 @@ struct ControlProbeVerification {
 pub fn run(command: Command) -> Result<()> {
     crate::config::trusted()?;
     match command {
+        Command::TestingControl { command } => testing_control::run(command),
+        Command::ValidateTestingProcessor { kind } => testing_processor::require_context(kind),
+        Command::LoadTestingControl { kind } => {
+            testing_processor::require_context(kind)?;
+            testing_runtime::load_for_host()
+        }
+        Command::PrepareTestingRequest {
+            kind,
+            source_run_id,
+        } => testing_processor::prepare(kind, source_run_id),
+        Command::ContinueTestingRequest {
+            kind,
+            source_run_id,
+        } => testing_processor::continue_request(kind, source_run_id),
+        Command::LoadTestingRuntime { workflow_sha } => testing_runtime::load(&workflow_sha),
+        Command::ValidateTestingCapture {
+            kind,
+            directory,
+            source_sha,
+            control_id,
+        } => testing_runtime::validate_capture(kind, &directory, &source_sha, &control_id),
+        Command::DispatchTestingRequest {
+            kind,
+            directory,
+            source_sha,
+            control_id,
+        } => testing_runtime::dispatch(kind, &directory, &source_sha, &control_id),
+        Command::CleanupTestingRequest => testing_processor::cleanup(),
+        Command::ValidateTestingPublication {
+            source_sha,
+            archive,
+        } => testing_publication::validate(&source_sha, &archive),
+        Command::WorkflowSnapshot {
+            pull_request,
+            state_file,
+        } => {
+            validate_state_path(&state_file)?;
+            workflow_state::capture(pull_request, &state_file)
+        }
+        Command::CompareWorkflowSnapshots {
+            before,
+            after,
+            protect,
+        } => {
+            validate_state_path(&before)?;
+            validate_state_path(&after)?;
+            workflow_state::compare(&before, &after, protect)
+        }
         Command::Run {
             phase,
             candidate_sha,
@@ -317,6 +463,20 @@ pub fn run(command: Command) -> Result<()> {
             verify_client(&artifact_name, run_id, &workflow_sha)
         }
         Command::PrepareClientInput => prepare_client_input(),
+        Command::ValidateClientStage { directory } => validate_client_stage(&directory),
+        Command::DispatchClientSmoke {
+            artifact_name,
+            workflow_sha,
+        } => {
+            let run_id = std::env::var("GITHUB_RUN_ID")?.parse()?;
+            verify_client_artifact(&artifact_name, run_id, &workflow_sha)?;
+            let api = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", &workflow_sha)?;
+            let _: Value = api.post(
+                &format!("/repos/{}/labels", integration_repository()?),
+                &json!({"name":artifact_name,"description":format!("{}/{run_id}",server_repository()?)}),
+            )?;
+            Ok(())
+        }
         Command::ReleasePr {
             phase,
             candidate_sha,
@@ -358,6 +518,47 @@ pub fn run(command: Command) -> Result<()> {
 }
 
 fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result<()> {
+    verify_client_artifact(artifact_name, run_id, workflow_sha)?;
+    let trusted = crate::config::trusted()?;
+    let server = &trusted.deployment.server;
+    let scratch = &trusted.deployment.integration;
+    let branch = format!("securefix-client-smoke-{run_id}");
+    let expected_description = format!("{}/{run_id}", server.repository);
+    let scratch_api = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", workflow_sha)?;
+    let scratch_repo: Value = scratch_api.get(&format!("/repos/{}", scratch.repository))?;
+    ensure!(
+        scratch_repo["id"].as_u64() == Some(scratch.id)
+            && scratch_repo["full_name"] == scratch.repository,
+        "client token destination repository identity changed"
+    );
+    let label: Value = scratch_api.get(&format!(
+        "/repos/{}/labels/{artifact_name}",
+        scratch.repository
+    ))?;
+    ensure!(
+        label["name"] == artifact_name && label["description"] == expected_description,
+        "client smoke request label does not match its source run and destination"
+    );
+    workflow::write_json(
+        "client-verification.json",
+        &ClientVerification {
+            version: 1,
+            source_repository: server.repository.clone(),
+            run_id,
+            workflow_sha: workflow_sha.to_owned(),
+            artifact_name: artifact_name.to_owned(),
+            destination_repository: scratch.repository.clone(),
+            destination_branch: branch,
+            request_label: artifact_name.to_owned(),
+            request_label_description: expected_description,
+            verified: true,
+        },
+    )?;
+    println!("Verified client smoke artifact and request label for workflow run {run_id}.");
+    Ok(())
+}
+
+fn verify_client_artifact(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result<()> {
     ensure!(run_id > 0, "invalid client smoke workflow run ID");
     ensure!(
         crate::securefix_gate::artifact::valid_artifact_name_for_cli(artifact_name),
@@ -434,41 +635,7 @@ fn verify_client(artifact_name: &str, run_id: u64, workflow_sha: &str) -> Result
         workflow_sha,
         source_branch,
     )?;
-    let branch = format!("securefix-client-smoke-{run_id}");
-    validate_client_smoke_artifact(&fix, &scratch.repository, run_id, workflow_sha)?;
-    let expected_description = format!("{}/{run_id}", server.repository);
-    let scratch_api = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", workflow_sha)?;
-    let scratch_repo: Value = scratch_api.get(&format!("/repos/{}", scratch.repository))?;
-    ensure!(
-        scratch_repo["id"].as_u64() == Some(scratch.id)
-            && scratch_repo["full_name"] == scratch.repository,
-        "client token destination repository identity changed"
-    );
-    let label: Value = scratch_api.get(&format!(
-        "/repos/{}/labels/{artifact_name}",
-        scratch.repository
-    ))?;
-    ensure!(
-        label["name"] == artifact_name && label["description"] == expected_description,
-        "client smoke request label does not match its source run and destination"
-    );
-    workflow::write_json(
-        "client-verification.json",
-        &ClientVerification {
-            version: 1,
-            source_repository: server.repository.clone(),
-            run_id,
-            workflow_sha: workflow_sha.to_owned(),
-            artifact_name: artifact_name.to_owned(),
-            destination_repository: scratch.repository.clone(),
-            destination_branch: branch,
-            request_label: artifact_name.to_owned(),
-            request_label_description: expected_description,
-            verified: true,
-        },
-    )?;
-    println!("Verified client smoke artifact and request label for workflow run {run_id}.");
-    Ok(())
+    validate_client_smoke_artifact(&fix, &scratch.repository, run_id, workflow_sha)
 }
 
 fn release_pr(
@@ -1115,6 +1282,107 @@ fn cleanup_release_pr(
     delete_branch?;
     delete_tag?;
     fs::remove_file(state_file)?;
+    Ok(())
+}
+
+fn validate_client_stage(directory: &Path) -> Result<()> {
+    let run_id: u64 = std::env::var("GITHUB_RUN_ID")?.parse()?;
+    let source = std::env::var("GITHUB_SHA")?;
+    validate_sha(&source)?;
+    let entries = fs::read_dir(directory)?.collect::<std::io::Result<Vec<_>>>()?;
+    ensure!(entries.len() == 1, "client stage must contain one artifact");
+    let stage = &entries[0];
+    ensure!(
+        stage.file_type()?.is_dir(),
+        "client artifact stage is not a regular directory"
+    );
+    let name = stage
+        .file_name()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("invalid client artifact name"))?;
+    ensure!(
+        crate::securefix_gate::artifact::valid_artifact_name_for_cli(&name),
+        "invalid client artifact name"
+    );
+    let expected = [
+        format!("{name}.json"),
+        format!("{name}_files.txt"),
+        ".securefix-client-smoke/request.txt".to_owned(),
+    ];
+    // Fixed three-file fixture: no candidate-selected paths, symlinks or host command files.
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for path in &expected {
+        ensure_no_smoke_symlinks(&stage.path(), Path::new(path))?;
+        let metadata = fs::symlink_metadata(stage.path().join(path))?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= 16 * 1024,
+            "client stage file is not bounded and regular"
+        );
+        let bytes = fs::read(stage.path().join(path))?;
+        ensure!(
+            bytes.len() <= 16 * 1024,
+            "client stage file grew beyond its bound"
+        );
+        archive.start_file(path, zip::write::SimpleFileOptions::default())?;
+        std::io::Write::write_all(&mut archive, &bytes)?;
+    }
+    let mut actual = Vec::new();
+    for entry in fs::read_dir(stage.path())? {
+        let entry = entry?;
+        let text = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("invalid client stage path"))?;
+        if text == ".securefix-client-smoke" {
+            ensure!(
+                entry.file_type()?.is_dir(),
+                "client input directory is not regular"
+            );
+            let files = fs::read_dir(entry.path())?.collect::<std::io::Result<Vec<_>>>()?;
+            ensure!(
+                files.len() == 1 && files[0].file_name() == "request.txt",
+                "unexpected client input file"
+            );
+            actual.push(".securefix-client-smoke/request.txt".to_owned());
+        } else {
+            actual.push(text);
+        }
+    }
+    actual.sort();
+    let mut sorted = expected.to_vec();
+    sorted.sort();
+    ensure!(actual == sorted, "unexpected client stage file");
+    let bytes = archive.finish()?.into_inner();
+    let fix = crate::securefix_gate::artifact::parse(
+        &bytes,
+        &name,
+        server_repository()?,
+        run_id,
+        &source,
+        &std::env::var("GITHUB_REF_NAME")?,
+    )?;
+    validate_client_smoke_artifact(&fix, integration_repository()?, run_id, &source)?;
+    securefix::output("artifact_name", &name)?;
+    securefix::output("artifact_path", stage.path().display().to_string())
+}
+
+fn ensure_no_smoke_symlinks(base: &Path, path: &Path) -> Result<()> {
+    ensure!(
+        fs::symlink_metadata(base)?.is_dir(),
+        "client stage is not regular"
+    );
+    let mut current = base.to_owned();
+    for part in path.components() {
+        ensure!(
+            matches!(part, std::path::Component::Normal(_)),
+            "invalid client stage path"
+        );
+        current.push(part);
+        ensure!(
+            !fs::symlink_metadata(&current)?.file_type().is_symlink(),
+            "client stage contains a symlink"
+        );
+    }
     Ok(())
 }
 
@@ -3572,10 +3840,11 @@ fn distribution_fixture_files(
     ensure!(
         files
             .insert(
-                ".github/workflows/ci.yml".to_owned(),
-                include_str!("integration_templates/ci.yml")
-                    .as_bytes()
-                    .to_vec(),
+                crate::config::workflow_path(".github/workflows/ci.yml")?,
+                crate::config::trusted()?
+                    .deployment
+                    .render_workflow(include_str!("integration_templates/ci.yml"))?
+                    .into_bytes(),
             )
             .is_none(),
         "distribution fixture unexpectedly contains the scratch CI workflow"
@@ -3595,10 +3864,16 @@ fn distribution_fixture_files(
         "    name: scratch-push-status-check\n",
         ".github/workflows/push.yml",
     )?;
-    files.insert(".github/workflows/push.yml".to_owned(), push.into_bytes());
     files.insert(
-        ".github/workflows/workflow_call_push.yml".to_owned(),
-        include_bytes!("integration_templates/workflow_call_push.yml").to_vec(),
+        crate::config::workflow_path(".github/workflows/push.yml")?,
+        push.into_bytes(),
+    );
+    files.insert(
+        crate::config::workflow_path(".github/workflows/workflow_call_push.yml")?,
+        crate::config::trusted()?
+            .deployment
+            .render_workflow(include_str!("integration_templates/workflow_call_push.yml"))?
+            .into_bytes(),
     );
     Ok(files)
 }
@@ -3620,7 +3895,7 @@ fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Resu
     let policy_base64 = base64::engine::general_purpose::STANDARD.encode(scratch_policy);
 
     let ci = files
-        .get_mut(".github/workflows/ci.yml")
+        .get_mut(&crate::config::workflow_path(".github/workflows/ci.yml")?)
         .context("scratch CI workflow is missing")?;
     let ci = replace_once(
         std::str::from_utf8(ci)?,
@@ -3628,9 +3903,13 @@ fn overlay_scratch_client_fixture(files: &mut BTreeMap<String, Vec<u8>>) -> Resu
         "      actions: read\n      contents: read\n      attestations: read\n      pull-requests: read\n",
         ".github/workflows/ci.yml",
     )?;
-    files.insert(".github/workflows/ci.yml".to_owned(), ci.into_bytes());
+    files.insert(
+        crate::config::workflow_path(".github/workflows/ci.yml")?,
+        ci.into_bytes(),
+    );
 
-    let autofix_path = ".github/workflows/wc-autofix.yml";
+    let autofix_path = crate::config::workflow_path(".github/workflows/wc-autofix.yml")?;
+    let autofix_path = autofix_path.as_str();
     let bytes = files
         .get_mut(autofix_path)
         .context("scratch autofix workflow is missing")?;

@@ -79,7 +79,14 @@ impl ControlRevision {
 
     pub fn load(api: &GitHub) -> Result<Self> {
         let trusted = config::trusted()?;
-        let server = &trusted.deployment.server;
+        Self::load_from_repository(api, trusted.deployment.control_repository())
+    }
+
+    /// Read-only descriptor lookup with an identity selected by a trusted host policy.
+    pub fn load_from_repository(api: &GitHub, server: &config::Repository) -> Result<Self> {
+        crate::policy::validate_repository(&server.repository)?;
+        config::validate_branch(&server.default_branch)?;
+        ensure!(server.id > 0, "control repository identity is missing");
         let repository: serde_json::Value = api.get(&format!("/repos/{}", server.repository))?;
         ensure!(
             repository["default_branch"] == server.default_branch

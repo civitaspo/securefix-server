@@ -97,6 +97,27 @@ impl Manifest {
     }
 }
 
+pub(crate) fn validate_testing_capture(
+    bytes: &[u8],
+    repository: &str,
+    repository_id: u64,
+    source: &str,
+    control: &str,
+    run_id: u64,
+) -> Result<()> {
+    let manifest: Manifest = serde_json::from_slice(bytes)?;
+    manifest.validate()?;
+    ensure!(
+        manifest.repository == repository
+            && manifest.repository_id == repository_id
+            && manifest.source_sha == source
+            && manifest.control.identity()? == control
+            && manifest.run_id == run_id,
+        "testing policy capture differs from the qualified runtime or client run"
+    );
+    Ok(())
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     Capture,
@@ -104,6 +125,11 @@ pub enum Command {
     Locate,
     Validate,
     Apply,
+    /// Candidate sandbox: process a host-relayed policy run with test-only credentials.
+    ApplyForTesting {
+        #[arg(long)]
+        source_run_id: u64,
+    },
     Cleanup,
 }
 
@@ -113,7 +139,8 @@ pub fn run(command: Command) -> Result<()> {
         Command::Dispatch => dispatch(),
         Command::Locate => locate(),
         Command::Validate => validate(),
-        Command::Apply => apply(),
+        Command::Apply => apply(None),
+        Command::ApplyForTesting { source_run_id } => apply(Some(source_run_id)),
         Command::Cleanup => cleanup(),
     }
 }
@@ -301,12 +328,20 @@ fn locate() -> Result<()> {
 }
 
 fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
+    let (repository, run_id) = label(policy)?;
+    source_for(api, policy, &repository, run_id)
+}
+
+fn source_for(api: &GitHub, policy: &Policy, repository: &str, run_id: u64) -> Result<Manifest> {
     let deployment = &config::trusted()?.deployment;
     let server = deployment.server.repository.as_str();
-    let (repository, run_id) = label(policy)?;
-    let run = workflow::successful_source_run(api, &repository, run_id)?;
+    securefix::policy::validate_repository(repository)?;
+    ensure!(run_id > 0, "invalid policy source run");
+    policy.repository(repository)?.require(Capability::Merge)?;
+    let run = workflow::successful_source_run(api, repository, run_id)?;
     ensure!(
-        run["path"] == WRAPPER && run["head_repository"]["full_name"] == repository,
+        run["path"] == config::workflow_path(WRAPPER)?
+            && run["head_repository"]["full_name"] == repository,
         "policy source run is not a successful default workflow"
     );
     let repo: Value = api.get(&format!("/repos/{repository}"))?;
@@ -373,7 +408,7 @@ fn source(api: &GitHub, policy: &Policy) -> Result<Manifest> {
         matches!(compare["status"].as_str(), Some("ahead" | "identical")),
         "policy caller is not from default branch history"
     );
-    let wrapper = api.content(&repository, WRAPPER, caller_sha)?;
+    let wrapper = api.content(repository, &config::workflow_path(WRAPPER)?, caller_sha)?;
     if repository != server {
         workflow::require_reusable_pin(&wrapper, REUSABLE, &policy.revision)?;
         let referenced: Vec<workflow::ReferencedWorkflow> =
@@ -482,11 +517,38 @@ fn validate() -> Result<()> {
     )
 }
 
-fn apply() -> Result<()> {
+pub(crate) fn prepare_testing_request(
+    api: &GitHub,
+    policy: &Policy,
+    repository: &str,
+    run_id: u64,
+) -> Result<()> {
+    let manifest = source_for(api, policy, repository, run_id)?;
+    securefix::control::ControlRevision::require_current(api, &manifest.control)?;
+    workflow::write_json("policy-check/manifest.json", &manifest)
+}
+
+fn apply(testing_run: Option<u64>) -> Result<()> {
     let read = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&read)?;
     workflow::require_current_runtime(&read, WRAPPER)?;
-    let manifest = source(&read, &policy)?;
+    let manifest = if let Some(run_id) = testing_run {
+        let deployment = &config::trusted()?.deployment;
+        ensure!(
+            deployment.workflow_prefix == "testing-"
+                && deployment.control_repository.as_ref() == Some(&deployment.integration),
+            "relayed policy apply requires isolated testing configuration"
+        );
+        let requested: Manifest = serde_json::from_slice(&fs::read("policy-check/manifest.json")?)?;
+        let manifest = source_for(&read, &policy, &deployment.integration.repository, run_id)?;
+        ensure!(
+            serde_json::to_value(&requested)? == serde_json::to_value(&manifest)?,
+            "relayed policy source changed after host qualification"
+        );
+        manifest
+    } else {
+        source(&read, &policy)?
+    };
     securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let result: Result<()> = (|| match &manifest.target {
         Target::PullRequest {

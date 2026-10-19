@@ -563,10 +563,10 @@ pub fn load_source_request(
         run_repository.eq_ignore_ascii_case(repository),
         "source run repository mismatch"
     );
-    let caller_path = match kind {
+    let caller_path = crate::config::workflow_path(match kind {
         RequestKind::Approve => ".github/workflows/approve-request.yml",
         RequestKind::Merge => ".github/workflows/merge-request.yml",
-    };
+    })?;
     ensure!(
         run["path"] == caller_path,
         "source run used an unexpected workflow"
@@ -656,7 +656,7 @@ pub fn load_source_request(
         matches!(comparison["status"].as_str(), Some("ahead" | "identical")),
         "caller workflow SHA is not on default-branch history"
     );
-    let wrapper = api.content(repository, caller_path, &manifest.caller_workflow_sha)?;
+    let wrapper = api.content(repository, &caller_path, &manifest.caller_workflow_sha)?;
     require_exact_reusable_pin(
         &wrapper,
         kind,
@@ -788,10 +788,10 @@ fn require_exact_reusable_pin(
 ) -> Result<()> {
     let yaml: serde_yaml::Value =
         serde_yaml::from_slice(bytes).context("caller workflow YAML is invalid")?;
-    let reusable = match kind {
+    let reusable = crate::config::workflow_path(match kind {
         RequestKind::Approve => ".github/workflows/reusable-approve-request.yml",
         RequestKind::Merge => ".github/workflows/reusable-merge-request.yml",
-    };
+    })?;
     let expected = if local {
         format!("./{reusable}")
     } else {
@@ -883,7 +883,10 @@ pub(crate) fn control_activated_at(
     api: &GitHub,
     control: &securefix::control::ControlRevision,
 ) -> Result<DateTime<Utc>> {
-    let server = &crate::config::trusted()?.deployment.server.repository;
+    let server = &crate::config::trusted()?
+        .deployment
+        .control_repository()
+        .repository;
     let commits: Value = api.get(&format!(
         "/repos/{server}/commits?path=control/active.json&per_page=1"
     ))?;

@@ -1,6 +1,13 @@
 # Candidate integration tests
 
-Use `Test Candidate Runtime` on the server's trusted main workflow with a full reviewed candidate SHA. The candidate does not need a merged production revision or a Runtime Release.
+The workflow-level migration environment is being implemented in
+[the Phase B plan](testing-workflows-plan.md). The owner-defined trusted-server threat model and credential boundary are recorded
+in [the isolation review](testing-workflows-isolation-review.md). The Environment
+move and per-job approvals were rejected; keep the existing client repository key.
+Candidates still run only in the restricted container with test-only tokens.
+The following commands describe the existing direct scratch harness.
+
+Use `testing-Candidate Runtime` on the server's trusted main workflow with a full reviewed candidate SHA. The candidate does not need a merged production revision or a Runtime Release.
 
 ```sh
 gh workflow run testing-securefix-server.yml --repo civitaspo/securefix-server --ref main -f candidate_sha="$CANDIDATE_SHA" -f phase=prepare
@@ -23,3 +30,16 @@ See [the harness contract](integration-testing.md) for the boundary between live
 The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
 
 The former PAT-based live merge test has been replaced by the candidate integration workflow. Live writes use only repository-scoped installation tokens and clean up their fixtures. The optional known signed-commit regression remains read-only.
+
+## Development pre-release publication
+
+`testing-publish-runtime.yml` publishes the exact reviewed protected-main source
+with `.github/testing-policy.json` bundled as `policy.json`. The captured trusted
+validator requires a `vX.Y.Z-pre.N` version and verifies the publisher, source and
+policy before the stable active controller publishes the attested archive. The
+candidate archive remains data in that credentialed job. No production control is
+activated, and no caller is automatically distributed. The development runtime
+loader and native capture/host relay now have local implementations described in
+`integration-testing.md`. Fixture-control initialization, reviewed successor
+activation and hosted migration scenarios remain unfinished. Publication alone
+does not establish a working testing deployment.

@@ -1,0 +1,138 @@
+name: testing-Reviewed Control Fixture
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Propose or merge a reviewed descriptor on the test client only
+        type: choice
+        options: [propose, merge]
+        required: true
+      expected_main_sha:
+        description: Exact current main of testing-securefix-server
+        type: string
+        required: true
+      expected_control_id:
+        description: Full current test control identity; 64 zeros for initial absence
+        type: string
+        required: true
+      source_sha:
+        description: Qualified pre-release source (propose)
+        type: string
+      publisher_run_id:
+        description: Successful testing publisher run (propose)
+        type: string
+      verification_run_id:
+        description: Successful candidate scratch verification run (propose)
+        type: string
+      pull_request:
+        description: Exact Server App fixture PR (merge)
+        type: string
+      expected_head_sha:
+        description: Exact owner-reviewed fixture PR head (merge)
+        type: string
+      approve_comment_id:
+        description: Fresh separate owner approve command after review; zero for initialization
+        type: string
+      merge_comment_id:
+        description: Fresh separate owner merge command; zero for initialization
+        type: string
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  host:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: testing-fixture-host
+          path: |
+            target/release/securefix
+            target/release/policy.json
+          if-no-files-found: error
+          retention-days: 1
+  fixture:
+    needs: host
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    timeout-minutes: 15
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SECUREFIX_TEST_BASELINE_SHA: ${{ needs.host.outputs.source-sha }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.host.outputs.source-sha }}
+      EXPECTED_MAIN: ${{ inputs.expected_main_sha }}
+      EXPECTED_CONTROL: ${{ inputs.expected_control_id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/testing-host
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/testing-host/securefix
+      - name: Validate exact trusted controller before issuing test credentials
+        run: securefix integration testing-control validate
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: test-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-checks: write
+          permission-statuses: read
+      - name: Qualify evidence and propose the signed test descriptor PR
+        if: inputs.phase == 'propose'
+        env:
+          SECUREFIX_TEST_WRITE_TOKEN: ${{ steps.test-token.outputs.token }}
+          SOURCE: ${{ inputs.source_sha }}
+          PUBLISHER: ${{ inputs.publisher_run_id }}
+          VERIFICATION: ${{ inputs.verification_run_id }}
+        run: >-
+          securefix integration testing-control propose
+          --source-sha "$SOURCE" --publisher-run-id "$PUBLISHER"
+          --verification-run-id "$VERIFICATION" --expected-main-sha "$EXPECTED_MAIN"
+          --expected-control-id "$EXPECTED_CONTROL"
+      - name: Requalify exact reviewed test descriptor and merge with expected head
+        if: inputs.phase == 'merge'
+        env:
+          SECUREFIX_TEST_WRITE_TOKEN: ${{ steps.test-token.outputs.token }}
+          PR: ${{ inputs.pull_request }}
+          HEAD: ${{ inputs.expected_head_sha }}
+          APPROVE: ${{ inputs.approve_comment_id }}
+          MERGE: ${{ inputs.merge_comment_id }}
+        run: >-
+          securefix integration testing-control merge
+          --pull-request "$PR" --expected-head-sha "$HEAD"
+          --expected-main-sha "$EXPECTED_MAIN" --expected-control-id "$EXPECTED_CONTROL"
+          --approve-comment-id "$APPROVE" --merge-comment-id "$MERGE"

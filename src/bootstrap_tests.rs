@@ -56,6 +56,41 @@ fn run_fixture(workflow: &str, complete: bool) -> Value {
         "status":if complete {"completed"} else {"in_progress"},"conclusion":if complete {json!("success")} else {Value::Null}})
 }
 
+#[test]
+fn testing_bootstrap_requires_the_exact_test_workflow_and_owner_provenance() {
+    let mut policy = policy();
+    policy.deployment.workflow_prefix = "testing-".into();
+    let expected = policy.deployment.workflow_path(BOOTSTRAP_WORKFLOW).unwrap();
+    for path in [expected.clone(), format!("{expected}@refs/heads/main")] {
+        let run = run_fixture(&path, true);
+        validate_run(&run, &policy, 77, BOOTSTRAP_WORKFLOW, &main_sha(), false).unwrap();
+        for (pointer, invalid) in [
+            ("/path", json!(BOOTSTRAP_WORKFLOW)),
+            ("/path", json!(format!("{expected}@refs/heads/feature"))),
+            ("/actor/id", json!(999)),
+            ("/triggering_actor/id", json!(999)),
+            ("/run_attempt", json!(2)),
+            ("/repository/id", json!(999)),
+            ("/head_sha", json!(head_sha())),
+        ] {
+            let mut invalid_run = run.clone();
+            *invalid_run.pointer_mut(pointer).unwrap() = invalid;
+            assert!(
+                validate_run(
+                    &invalid_run,
+                    &policy,
+                    77,
+                    BOOTSTRAP_WORKFLOW,
+                    &main_sha(),
+                    false
+                )
+                .is_err(),
+                "{pointer}"
+            );
+        }
+    }
+}
+
 fn main_route() -> Route {
     Route::get(path("commits/main"), json!({"sha":main_sha()}))
 }
@@ -283,6 +318,14 @@ fn archive_reads_policy_without_executing_candidate_and_rejects_unsafe_entries()
         ("./securefix", b'0', b"not an executable"),
     ]);
     assert_eq!(archive_policy(&bytes).unwrap(), br#"{"trusted":true}"#);
+    let contents = securefix::runtime_archive::contents(&bytes).unwrap();
+    assert_eq!(contents.binary.unwrap(), b"not an executable");
+    assert!(
+        securefix::runtime_archive::contents(&archive(&[("policy.json", b'0', b"{}")]))
+            .unwrap()
+            .binary
+            .is_none()
+    );
     for (name, kind) in [
         ("../escape", b'0'),
         ("././policy.json", b'0'),

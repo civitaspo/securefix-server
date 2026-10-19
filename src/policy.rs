@@ -175,6 +175,17 @@ impl Policy {
                 Glob::new(pattern)?;
             }
         }
+        if policy.deployment.control_repository.is_some() {
+            ensure!(
+                policy.repositories.len() == 1
+                    && policy.repositories[0].repository
+                        == policy.deployment.integration.repository
+                    && !policy.repositories[0]
+                        .capabilities
+                        .contains(&Capability::Settings),
+                "isolated testing policy must grant only test-repository operations without settings authority"
+            );
+        }
         Ok(policy)
     }
 
@@ -359,6 +370,34 @@ pub fn run(command: Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_testing_policy_has_no_production_or_settings_authority() {
+        let testing = Policy::parse(include_bytes!("../.github/testing-policy.json")).unwrap();
+        let production = Policy::parse(include_bytes!("../policy.json")).unwrap();
+        assert_eq!(testing.deployment.server, production.deployment.server);
+        assert_eq!(
+            testing.deployment.approval_reviewer,
+            production.deployment.approval_reviewer
+        );
+        assert_eq!(
+            testing.deployment.control_repository(),
+            &testing.deployment.integration
+        );
+        assert_eq!(testing.repositories.len(), 1);
+        let mut policy: Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/policy.json")).unwrap();
+        policy["deployment"]["workflow_prefix"] = serde_json::json!("testing-");
+        policy["deployment"]["control_repository"] = policy["deployment"]["integration"].clone();
+        assert!(Policy::parse(&serde_json::to_vec(&policy).unwrap()).is_err());
+        let repository = policy["deployment"]["integration"]["repository"].clone();
+        policy["repositories"] = serde_json::json!([{"repository":repository,"capabilities":["approve","merge","securefix"],"release":null,"protect_tags":false}]);
+        Policy::parse(&serde_json::to_vec(&policy).unwrap()).unwrap();
+        policy["repositories"][0]["capabilities"] =
+            serde_json::json!(["approve", "merge", "securefix", "settings"]);
+        assert!(Policy::parse(&serde_json::to_vec(&policy).unwrap()).is_err());
+    }
+
     #[test]
     fn renovate_merge_authority_is_optional_separate_and_trusted() {
         let mut policy = Policy::load("tests/fixtures/policy.json").unwrap();

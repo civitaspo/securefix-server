@@ -1,6 +1,86 @@
 use serde_json::{Value, json};
 use std::{fs, process::Command};
 
+#[test]
+fn sandboxed_smoke_stage_is_validated_before_upload_and_rejects_extra_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".securefix-client-smoke")).unwrap();
+    fs::write(
+        dir.path().join(".securefix-client-smoke/request.txt"),
+        "Securefix client smoke 123\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("event.json"),
+        r#"{"repository":{"full_name":"civitaspo/securefix-server"}}"#,
+    )
+    .unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_securefix"))
+            .current_dir(dir.path())
+            .args(args)
+            .env_remove("GITHUB_OUTPUT")
+            .env("GITHUB_WORKSPACE", dir.path())
+            .env("GITHUB_EVENT_PATH", dir.path().join("event.json"))
+            .env("GITHUB_REPOSITORY", "civitaspo/securefix-server")
+            .env("GITHUB_RUN_ID", "123")
+            .env("GITHUB_RUN_ATTEMPT", "1")
+            .env("GITHUB_SHA", "a".repeat(40))
+            .env("GITHUB_REF", "refs/heads/main")
+            .env("GITHUB_REF_NAME", "main")
+            .output()
+            .unwrap()
+    };
+    let prepared = invoke(&[
+        "securefix",
+        "client-prepare",
+        "--files",
+        ".securefix-client-smoke/request.txt",
+        "--repository",
+        "civitaspo/testing-securefix-server",
+        "--branch",
+        "securefix-client-smoke-123",
+        "--output-dir",
+        "artifacts",
+    ]);
+    assert!(
+        prepared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let validate = || {
+        invoke(&[
+            "integration",
+            "validate-client-stage",
+            "--directory",
+            "artifacts",
+        ])
+    };
+    let valid = validate();
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    let artifact = fs::read_dir(dir.path().join("artifacts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let extra = artifact.join("unexpected");
+    fs::write(&extra, "unexpected").unwrap();
+    assert!(!validate().status.success());
+    fs::remove_file(extra).unwrap();
+    let file = artifact.join(".securefix-client-smoke/request.txt");
+    fs::remove_file(&file).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(dir.path().join("event.json"), &file).unwrap();
+        assert!(!validate().status.success());
+    }
+}
+
 fn client(workspace: &std::path::Path, files: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_securefix"))
         .current_dir(workspace)

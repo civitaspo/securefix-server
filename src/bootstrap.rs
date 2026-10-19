@@ -27,8 +27,6 @@ const BOOTSTRAP_WORKFLOW: &str = ".github/workflows/control-bootstrap.yml";
 const TEST_WORKFLOW: &str = ".github/workflows/testing-securefix-server.yml";
 const MAX_ARCHIVE: usize = 128 * 1024 * 1024;
 const MAX_ARTIFACT: usize = 64 * 1024;
-const MAX_UNPACKED: u64 = 512 * 1024 * 1024;
-const MAX_MEMBERS: usize = 4096;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -218,6 +216,7 @@ struct Dispatch {
 impl Dispatch {
     fn validate(&self, host: &Host, source: &str, phase: &str, workflow: &str) -> Result<()> {
         validate_sha(source)?;
+        let workflow = host.policy.deployment.workflow_path(workflow)?;
         let branch = &host.policy.deployment.server.default_branch;
         ensure!(
             self.repository == host.repository()
@@ -588,7 +587,8 @@ impl Host {
             "refs/heads/{}",
             self.policy.deployment.server.default_branch
         );
-        let signer = format!("{}/{BOOTSTRAP_WORKFLOW}", self.repository());
+        let workflow = self.policy.deployment.workflow_path(BOOTSTRAP_WORKFLOW)?;
+        let signer = format!("{}/{workflow}", self.repository());
         let status = Process::new("gh")
             .args(["attestation", "verify"])
             .arg(archive)
@@ -1156,6 +1156,7 @@ fn validate_run(
     source: &str,
     in_progress: bool,
 ) -> Result<()> {
+    let workflow = policy.deployment.workflow_path(workflow)?;
     let server = &policy.deployment.server;
     ensure!(
         run["id"].as_u64() == Some(id)
@@ -1369,79 +1370,7 @@ fn immutable_asset(release: &Value) -> Result<&Value> {
 }
 
 fn archive_policy(bytes: &[u8]) -> Result<Vec<u8>> {
-    ensure!(bytes.len() <= MAX_ARCHIVE, "candidate archive is oversized");
-    let decoder = flate2::read::MultiGzDecoder::new(bytes);
-    let mut bounded = decoder.take(MAX_UNPACKED + MAX_MEMBERS as u64 * 512 + 1024 * 1024 + 1);
-    let mut seen = BTreeSet::new();
-    let mut policy = None;
-    let mut unpacked = 0u64;
-    {
-        let mut archive = tar::Archive::new(&mut bounded);
-        for (index, entry) in archive.entries()?.raw(true).enumerate() {
-            ensure!(
-                index < MAX_MEMBERS,
-                "candidate archive has too many entries"
-            );
-            let mut entry = entry?;
-            let path = entry.path_bytes();
-            let path = std::str::from_utf8(&path)?;
-            let normalized = path
-                .strip_prefix("./")
-                .unwrap_or(path)
-                .trim_end_matches('/');
-            ensure!(
-                !path.starts_with('/')
-                    && !path.contains('\\')
-                    && (normalized.is_empty()
-                        || normalized == "."
-                        || normalized.split('/').all(|p| !matches!(p, "" | "." | "..")))
-                    && seen.insert(normalized.to_owned()),
-                "candidate archive contains an unsafe or duplicate path"
-            );
-            let kind = entry.header().entry_type();
-            ensure!(
-                kind.is_file() || kind.is_dir(),
-                "candidate archive contains a link or special entry"
-            );
-            let size = entry.size();
-            ensure!(
-                (!kind.is_dir() || size == 0)
-                    && (kind.is_dir()
-                        || (!path.ends_with('/') && !normalized.is_empty() && normalized != ".")),
-                "candidate archive entry type or size is invalid"
-            );
-            unpacked = unpacked
-                .checked_add(size)
-                .context("archive size overflow")?;
-            ensure!(
-                unpacked <= MAX_UNPACKED,
-                "candidate archive expands beyond size limit"
-            );
-            if normalized == "policy.json" {
-                ensure!(
-                    kind.is_file() && size <= 256 * 1024 && policy.is_none(),
-                    "candidate archive has unsafe or duplicate policy.json"
-                );
-                let mut raw = Vec::new();
-                entry.by_ref().take(256 * 1024 + 1).read_to_end(&mut raw)?;
-                ensure!(
-                    raw.len() as u64 == size,
-                    "candidate archive policy size mismatch"
-                );
-                policy = Some(raw);
-            }
-        }
-    }
-    let mut tail = Vec::new();
-    bounded
-        .by_ref()
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut tail)?;
-    ensure!(
-        tail.len() <= 1024 * 1024 && tail.iter().all(|b| *b == 0) && bounded.limit() > 0,
-        "candidate archive has excess or invalid trailing data"
-    );
-    policy.context("candidate archive is missing policy.json")
+    securefix::runtime_archive::policy(bytes)
 }
 
 fn version_only_change(path: &str, before: &[u8], after: &[u8]) -> Result<()> {

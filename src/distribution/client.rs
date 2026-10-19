@@ -20,18 +20,19 @@ pub(super) fn validate_previous_generation(
     files: &std::collections::BTreeMap<String, Vec<u8>>,
     runtime_sha: &str,
 ) -> Result<()> {
-    let Some(autofix) = files.get(AUTOFIX_PATH) else {
+    let Some(autofix) = files.get(&crate::config::workflow_path(AUTOFIX_PATH)?) else {
         ensure!(
-            !files.contains_key(CALLER_PATH) && !files.contains_key(PULL_REQUEST_PATH),
+            !files.contains_key(&crate::config::workflow_path(CALLER_PATH)?)
+                && !files.contains_key(&crate::config::workflow_path(PULL_REQUEST_PATH)?),
             "automation branch has a partial Securefix client workflow generation"
         );
         return Ok(());
     };
     let pull_request = files
-        .get(PULL_REQUEST_PATH)
+        .get(&crate::config::workflow_path(PULL_REQUEST_PATH)?)
         .context("automation branch client workflow generation is incomplete")?;
     let workflow_call = files
-        .get(CALLER_PATH)
+        .get(&crate::config::workflow_path(CALLER_PATH)?)
         .context("automation branch client workflow generation is incomplete")?;
     let migrated = migrate_autofix(autofix, runtime_sha, "v0.0.0")?;
     // Compare a previously generated native workflow after normalizing only the
@@ -233,6 +234,10 @@ pub(super) fn validate_call_file(source: &[u8], path: &str) -> Result<()> {
 
 fn add_permission_to_call(source: &[u8], reusable: &str, description: &str) -> Result<Vec<u8>> {
     validate_call_permission(source, reusable, description)?;
+    let reusable = format!(
+        "./{}",
+        crate::config::workflow_path(reusable.trim_start_matches("./"))?
+    );
     let text =
         std::str::from_utf8(source).with_context(|| format!("{description} is not UTF-8"))?;
     let workflow: Value =
@@ -242,7 +247,7 @@ fn add_permission_to_call(source: &[u8], reusable: &str, description: &str) -> R
         .context("caller jobs are missing")?;
     let matches = jobs
         .iter()
-        .filter_map(|(name, job)| (job["uses"].as_str() == Some(reusable)).then_some(name.as_str()))
+        .filter_map(|(name, job)| (job["uses"] == reusable).then_some(name.as_str()))
         .collect::<Vec<_>>();
     ensure!(
         matches.len() == 1,
@@ -255,6 +260,10 @@ fn add_permission_to_call(source: &[u8], reusable: &str, description: &str) -> R
 }
 
 fn validate_call_permission(source: &[u8], reusable: &str, description: &str) -> Result<bool> {
+    let reusable = format!(
+        "./{}",
+        crate::config::workflow_path(reusable.trim_start_matches("./"))?
+    );
     let text =
         std::str::from_utf8(source).with_context(|| format!("{description} is not UTF-8"))?;
     let workflow: Value =
@@ -264,7 +273,7 @@ fn validate_call_permission(source: &[u8], reusable: &str, description: &str) ->
         .context("caller jobs are missing")?;
     let matches = jobs
         .iter()
-        .filter_map(|(name, job)| (job["uses"].as_str() == Some(reusable)).then_some(name.as_str()))
+        .filter_map(|(name, job)| (job["uses"] == reusable).then_some(name.as_str()))
         .collect::<Vec<_>>();
     ensure!(
         matches.len() == 1,
@@ -439,8 +448,14 @@ fn validate_legacy_or_native_action(
     let native = step["with"]
         .as_mapping()
         .context("native Securefix action inputs are missing")?;
+    let prefix = &crate::config::trusted()?.deployment.workflow_prefix;
     ensure!(
-        native.len() == 6
+        native.len() == 6 + usize::from(!prefix.is_empty())
+            && (if prefix.is_empty() {
+                native.get("workflow-prefix").is_none()
+            } else {
+                native.get("workflow-prefix").and_then(Value::as_str) == Some(prefix)
+            })
             && native.get("runtime-sha").and_then(Value::as_str) == Some(native_sha)
             && native.get("server-repository").and_then(Value::as_str) == Some(server_repository)
             && native.get("runtime-default-branch").and_then(Value::as_str) == Some(default_branch)
@@ -532,9 +547,17 @@ fn render_native_steps(
     let client_app_id = serde_json::to_string(&client_app_id.to_string())?;
     let action_name = serde_json::to_string(action_name)?;
     let commit_message = serde_json::to_string(commit_message)?;
-    Ok(format!(
+    let mut rendered = format!(
         "      - name: Create Securefix client token\n        id: securefix-client-token\n        if: {condition}\n        uses: {TOKEN_ACTION} {TOKEN_ACTION_COMMENT}\n        with:\n          app-id: {client_app_id}\n          private-key: ${{{{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}}}\n          owner: {server_owner}\n          repositories: {server_name}\n          permission-issues: write\n\n      - name: {action_name}\n        if: {condition}\n        uses: {action_ref} # {runtime_version}\n        with:\n          runtime-sha: {runtime_sha}\n          server-repository: {server_repository_yaml}\n          runtime-default-branch: {default_branch}\n          client-token: ${{{{ steps.securefix-client-token.outputs.token }}}}\n          files: ${{{{ steps.securefix-files.outputs.files }}}}\n          commit-message: {commit_message}\n\n"
-    ))
+    );
+    if !config.deployment.workflow_prefix.is_empty() {
+        let prefix = serde_json::to_string(&config.deployment.workflow_prefix)?;
+        rendered = rendered.replace(
+            "          client-token:",
+            &format!("          workflow-prefix: {prefix}\n          client-token:"),
+        );
+    }
+    Ok(rendered)
 }
 
 fn add_capture_step(source: &str, detection_id: &str, detection_index: usize) -> Result<String> {

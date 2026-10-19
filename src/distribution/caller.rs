@@ -18,6 +18,9 @@ pub(crate) fn rendered_push_fixture(default_branch: &str) -> Result<Vec<u8>> {
         "branches: [main]",
         &format!("branches: [{}]", serde_json::to_string(default_branch)?),
     );
+    let template = crate::config::trusted()?
+        .deployment
+        .render_workflow(&template)?;
     ci::migrate(template.as_bytes(), ci::Mode::Push, default_branch)
 }
 
@@ -25,19 +28,28 @@ pub(crate) fn rendered_client_fixture_files(
     source_sha: &str,
     runtime_tag: &str,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
+    let deployment = &crate::config::trusted()?.deployment;
     let autofix = client::migrate_autofix(
-        include_bytes!("../integration_templates/wc-autofix.yml"),
+        deployment
+            .render_workflow(include_str!("../integration_templates/wc-autofix.yml"))?
+            .as_bytes(),
         source_sha,
         runtime_tag,
     )?;
     let (outer, inner) = client::migrate_call_chain(
-        include_bytes!("../integration_templates/pull_request.yml"),
-        include_bytes!("../integration_templates/workflow_call_pr.yml"),
+        deployment
+            .render_workflow(include_str!("../integration_templates/pull_request.yml"))?
+            .as_bytes(),
+        deployment
+            .render_workflow(include_str!(
+                "../integration_templates/workflow_call_pr.yml"
+            ))?
+            .as_bytes(),
     )?;
     Ok(BTreeMap::from([
-        (client::AUTOFIX_PATH.to_owned(), autofix),
-        (client::PULL_REQUEST_PATH.to_owned(), outer),
-        (client::CALLER_PATH.to_owned(), inner),
+        (deployment.workflow_path(client::AUTOFIX_PATH)?, autofix),
+        (deployment.workflow_path(client::PULL_REQUEST_PATH)?, outer),
+        (deployment.workflow_path(client::CALLER_PATH)?, inner),
     ]))
 }
 
@@ -87,34 +99,58 @@ pub(super) fn prepare_caller(
         .contains(&Capability::Release);
     let runtime_tag = crate::runtime::version_at_source(api, source_sha)?.tag();
     let mut files = rendered_files(source_sha, &runtime_tag, default_branch, release_client)?;
-    if let Some(push) = optional_content(api, repository, ".github/workflows/push.yml", base_sha)? {
+    let workflow_path = |path| config.deployment.workflow_path(path);
+    if let Some(push) = optional_content(
+        api,
+        repository,
+        &workflow_path(".github/workflows/push.yml")?,
+        base_sha,
+    )? {
         files.insert(
-            ".github/workflows/push.yml".to_owned(),
+            workflow_path(".github/workflows/push.yml")?,
             ci::migrate(&push, ci::Mode::Push, default_branch)?,
         );
-    } else if let Some(minimal) =
-        optional_content(api, repository, ".github/workflows/ci.yml", base_sha)?
-    {
+    } else if let Some(minimal) = optional_content(
+        api,
+        repository,
+        &workflow_path(".github/workflows/ci.yml")?,
+        base_sha,
+    )? {
         files.insert(
-            ".github/workflows/ci.yml".to_owned(),
+            workflow_path(".github/workflows/ci.yml")?,
             ci::migrate(&minimal, ci::Mode::MinimalCi, default_branch)?,
         );
     } else {
         anyhow::bail!("caller has no supported default-head CI workflow");
     }
-    if let Some(autofix) = optional_content(api, repository, client::AUTOFIX_PATH, base_sha)? {
+    if let Some(autofix) = optional_content(
+        api,
+        repository,
+        &workflow_path(client::AUTOFIX_PATH)?,
+        base_sha,
+    )? {
         files.insert(
-            client::AUTOFIX_PATH.to_owned(),
+            workflow_path(client::AUTOFIX_PATH)?,
             client::migrate_autofix(&autofix, source_sha, &runtime_tag)?,
         );
-        let pull_request = optional_content(api, repository, client::PULL_REQUEST_PATH, base_sha)?
-            .context("autofix workflow has no pull request entry workflow")?;
-        let workflow_call = optional_content(api, repository, client::CALLER_PATH, base_sha)?
-            .context("autofix workflow has no workflow-call PR workflow")?;
+        let pull_request = optional_content(
+            api,
+            repository,
+            &workflow_path(client::PULL_REQUEST_PATH)?,
+            base_sha,
+        )?
+        .context("autofix workflow has no pull request entry workflow")?;
+        let workflow_call = optional_content(
+            api,
+            repository,
+            &workflow_path(client::CALLER_PATH)?,
+            base_sha,
+        )?
+        .context("autofix workflow has no workflow-call PR workflow")?;
         let (pull_request, workflow_call) =
             client::migrate_call_chain(&pull_request, &workflow_call)?;
-        files.insert(client::PULL_REQUEST_PATH.to_owned(), pull_request);
-        files.insert(client::CALLER_PATH.to_owned(), workflow_call);
+        files.insert(workflow_path(client::PULL_REQUEST_PATH)?, pull_request);
+        files.insert(workflow_path(client::CALLER_PATH)?, workflow_call);
     }
     let mut default_current = true;
     for (path, expected) in &files {
@@ -126,7 +162,7 @@ pub(super) fn prepare_caller(
             None => {
                 default_current = false;
                 ensure!(
-                    path == ".github/workflows/policy-check.yml",
+                    *path == workflow_path(".github/workflows/policy-check.yml")?,
                     "required managed caller workflow is missing"
                 );
             }
@@ -167,13 +203,25 @@ pub(crate) fn rendered_files(
     default_branch: &str,
     releases: bool,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
+    rendered_files_for(
+        crate::config::trusted()?,
+        source_sha,
+        runtime_tag,
+        default_branch,
+        releases,
+    )
+}
+
+fn rendered_files_for(
+    config: &crate::config::TrustedConfig,
+    source_sha: &str,
+    runtime_tag: &str,
+    default_branch: &str,
+    releases: bool,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     validate_sha(source_sha)?;
     validate_branch(default_branch)?;
     let branch = serde_json::to_string(default_branch)?;
-    let config = crate::config::trusted()?;
-    let server_repository = config.deployment.server.repository.as_str();
-    let release_branch = config.deployment.release_branch.as_str();
-    let owner_id = config.owner_id.to_string();
     let templates = [
         (".github/workflows/approve-request.yml", APPROVE),
         (".github/workflows/merge-request.yml", MERGE),
@@ -182,17 +230,8 @@ pub(crate) fn rendered_files(
     let mut files = BTreeMap::new();
     for (path, template) in templates {
         files.insert(
-            path.to_owned(),
-            render(
-                template,
-                source_sha,
-                runtime_tag,
-                &branch,
-                server_repository,
-                release_branch,
-                &owner_id,
-            )?
-            .into_bytes(),
+            config.deployment.workflow_path(path)?,
+            render(config, template, source_sha, runtime_tag, &branch)?.into_bytes(),
         );
     }
     if releases {
@@ -202,17 +241,8 @@ pub(crate) fn rendered_files(
             (".github/workflows/release-tag.yml", RELEASE_TAG),
         ] {
             files.insert(
-                path.to_owned(),
-                render(
-                    template,
-                    source_sha,
-                    runtime_tag,
-                    &branch,
-                    server_repository,
-                    release_branch,
-                    &owner_id,
-                )?
-                .into_bytes(),
+                config.deployment.workflow_path(path)?,
+                render(config, template, source_sha, runtime_tag, &branch)?.into_bytes(),
             );
         }
     }
@@ -220,14 +250,15 @@ pub(crate) fn rendered_files(
 }
 
 fn render(
+    config: &crate::config::TrustedConfig,
     template: &str,
     source_sha: &str,
     runtime_tag: &str,
     branch: &str,
-    server_repository: &str,
-    release_branch: &str,
-    owner_id: &str,
 ) -> Result<String> {
+    let server_repository = &config.deployment.server.repository;
+    let release_branch = &config.deployment.release_branch;
+    let owner_id = config.owner_id.to_string();
     validate_runtime_annotation(runtime_tag, source_sha)?;
     let rendered = template
         .replace("@SECUREFIX_RUNTIME_SHA@", source_sha)
@@ -235,10 +266,10 @@ fn render(
         .replace("@DEFAULT_BRANCH@", branch)
         .replace("@SERVER_REPOSITORY@", server_repository)
         .replace("@RELEASE_BRANCH@", release_branch)
-        .replace("@OWNER_ID@", owner_id)
+        .replace("@OWNER_ID@", &owner_id)
         .replace(
             "@RENOVATE_BOT_ID@",
-            &crate::config::trusted()?
+            &config
                 .renovate_merge_bot
                 .as_ref()
                 .map_or(0, |bot| bot.id)
@@ -254,7 +285,7 @@ fn render(
             && !rendered.contains("@RENOVATE_BOT_ID@"),
         "template contains an unresolved placeholder"
     );
-    Ok(rendered)
+    config.deployment.render_workflow(&rendered)
 }
 
 pub(super) fn write_migration(directory: &Path, migration: &CallerMigration) -> Result<()> {
@@ -311,6 +342,24 @@ pub(super) fn validate_migration_files(
 }
 
 pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &str) -> Result<()> {
+    let actual_path = path;
+    let deployment = &crate::config::trusted()?.deployment;
+    // Select only this deployment's managed namespace before using canonical
+    // labels internally. An unprefixed observed path must never pass in testing.
+    let canonical;
+    let path = if deployment.workflow_prefix.is_empty() {
+        path
+    } else {
+        let name = path
+            .strip_prefix(".github/workflows/testing-")
+            .context("managed workflow is outside the testing namespace")?;
+        canonical = format!(".github/workflows/{name}");
+        ensure!(
+            deployment.workflow_path(&canonical)? == actual_path,
+            "managed workflow namespace mismatch"
+        );
+        canonical.as_str()
+    };
     match path {
         ".github/workflows/push.yml" => {
             ci::migrate(contents, ci::Mode::Push, default_branch)?;
@@ -343,7 +392,7 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
         _ => anyhow::bail!("unexpected managed workflow path"),
     };
     ensure!(
-        workflow_name == expected_name,
+        workflow_name == format!("{}{expected_name}", deployment.workflow_prefix),
         "managed workflow name changed: {path}"
     );
     for key in value
@@ -405,7 +454,10 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
         .server
         .repository
         .as_str();
-    let expected = format!("{server_repository}/.github/workflows/{expected_reusable}");
+    let expected = format!(
+        "{server_repository}/{}",
+        deployment.workflow_path(&format!(".github/workflows/{expected_reusable}"))?
+    );
     let uses = uses.context("managed workflow must call its exact reusable workflow")?;
     let (reusable, sha) = uses
         .rsplit_once('@')
@@ -418,7 +470,7 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
     let releases = path.starts_with(".github/workflows/release-");
     let canonical = rendered_files(sha, "v0.0.0", default_branch, releases)?;
     let expected_bytes = canonical
-        .get(path)
+        .get(actual_path)
         .context("managed workflow missing from canonical template set")?;
     let mut expected_yaml: serde_yaml::Value = serde_yaml::from_slice(expected_bytes)?;
     legacy_workflow_shape(path, &value, &mut expected_yaml);
@@ -485,7 +537,7 @@ pub(super) fn validate_previous_client_generation(
         (".github/workflows/push.yml", ci::Mode::Push),
         (".github/workflows/ci.yml", ci::Mode::MinimalCi),
     ] {
-        if let Some(contents) = files.get(path) {
+        if let Some(contents) = files.get(&crate::config::workflow_path(path)?) {
             ci::migrate(contents, mode, default_branch)?;
         }
     }
@@ -814,6 +866,38 @@ fn optional_content(
 #[cfg(test)]
 mod tests {
     use super::rendered_files;
+
+    #[test]
+    fn testing_callers_use_only_the_selected_repository_and_namespace() {
+        let mut config = crate::config::trusted().unwrap().clone();
+        config.deployment.workflow_prefix = "testing-".into();
+        config.deployment.control_repository = Some(config.deployment.integration.clone());
+        let sha = "a".repeat(40);
+        let files =
+            super::rendered_files_for(&config, &sha, "v0.2.34-pre.1", "main", true).unwrap();
+        assert_eq!(files.len(), 6);
+        for (path, bytes) in files {
+            assert!(path.starts_with(".github/workflows/testing-"));
+            let text = String::from_utf8(bytes).unwrap();
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
+            let jobs = yaml["jobs"].as_mapping().unwrap();
+            let uses = jobs.values().next().unwrap()["uses"].as_str().unwrap();
+            assert!(
+                uses.starts_with("civitaspo/securefix-server/.github/workflows/testing-reusable-")
+            );
+            assert!(text.contains(&format!("@{sha} # v0.2.34-pre.1")));
+            assert!(!text.contains("testing-securefix-control"));
+            if text.contains("testing-reusable-release-pr-sync.yml") {
+                assert!(!text.contains("PRIVATE_KEY"));
+            } else {
+                assert!(text.contains(
+                    "SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+                ));
+            }
+            assert_eq!(config.deployment.render_workflow(&text).unwrap(), text);
+        }
+    }
 
     #[test]
     fn generated_reusable_workflow_pins_have_exact_runtime_version_comments() {

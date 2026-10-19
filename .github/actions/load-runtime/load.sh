@@ -2,6 +2,8 @@
 set -euo pipefail
 [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'repository must be owner/name' >&2; exit 1; }
 [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || { echo 'default-branch is invalid' >&2; exit 1; }
+WORKFLOW_PREFIX="${WORKFLOW_PREFIX:-}"
+[[ "$WORKFLOW_PREFIX" == '' || "$WORKFLOW_PREFIX" == testing- ]] || { echo 'workflow-prefix is invalid' >&2; exit 1; }
 
 descriptor="$(mktemp "$RUNNER_TEMP/control-descriptor.XXXXXX")"
 archive="$(mktemp "$RUNNER_TEMP/runtime-archive.XXXXXX")"
@@ -50,11 +52,11 @@ repository_id="$(jq -er '.id' <<<"$repo")"
 }
 publisher_path="$(jq -er '.path' <<<"$publisher_run")"
 case "$publisher_path" in
-  ".github/workflows/publish-runtime.yml"|".github/workflows/publish-runtime.yml@refs/heads/$DEFAULT_BRANCH")
-    signer_workflow="$REPOSITORY/.github/workflows/publish-runtime.yml" ;;
-  ".github/workflows/control-bootstrap.yml"|".github/workflows/control-bootstrap.yml@refs/heads/$DEFAULT_BRANCH")
+  ".github/workflows/${WORKFLOW_PREFIX}publish-runtime.yml"|".github/workflows/${WORKFLOW_PREFIX}publish-runtime.yml@refs/heads/$DEFAULT_BRANCH")
+    signer_workflow="$REPOSITORY/.github/workflows/${WORKFLOW_PREFIX}publish-runtime.yml" ;;
+  ".github/workflows/${WORKFLOW_PREFIX}control-bootstrap.yml"|".github/workflows/${WORKFLOW_PREFIX}control-bootstrap.yml@refs/heads/$DEFAULT_BRANCH")
     [[ "$(jq -r '.run_attempt' <<<"$publisher_run")" == 1 ]] || { echo 'bootstrap publisher must be the first run attempt' >&2; exit 1; }
-    signer_workflow="$REPOSITORY/.github/workflows/control-bootstrap.yml" ;;
+    signer_workflow="$REPOSITORY/.github/workflows/${WORKFLOW_PREFIX}control-bootstrap.yml" ;;
   *) echo 'active runtime publisher workflow is not trusted' >&2; exit 1 ;;
 esac
 
@@ -73,6 +75,7 @@ tar -xzf "$archive" -C "$runtime_dir" --no-same-owner
 cp "$descriptor" "$runtime_dir/control.json"
 policy_sha="$(sha256sum "$runtime_dir/policy.json" | cut -d ' ' -f 1)"
 [[ "$policy_sha" == "$(jq -r '.policy_sha256' "$descriptor")" ]] || { echo 'runtime policy digest differs from active descriptor' >&2; exit 1; }
+[[ "$(jq -r '.deployment.workflow_prefix // ""' "$runtime_dir/policy.json")" == "$WORKFLOW_PREFIX" ]] || { echo 'runtime workflow namespace differs from the trusted loader configuration' >&2; exit 1; }
 "$runtime_dir/securefix" runtime verify --source-sha "$source_sha" --repository "$REPOSITORY" --archive "$archive"
 control_outputs="$("$runtime_dir/securefix" control identify --descriptor "$runtime_dir/control.json")"
 control_id="$(sed -n 's/^control-id=//p' <<<"$control_outputs")"

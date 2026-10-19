@@ -14,13 +14,26 @@ use securefix::{
 pub enum Command {
     Validate,
     Apply,
+    /// Trusted testing host only: validate the request and create the configured User review.
+    ReviewForTesting,
+    /// Candidate testing container: require the trusted User review without receiving its PAT.
+    ApplyReviewedForTesting,
     Cleanup,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyMode {
+    Full,
+    ReviewOnly,
+    Reviewed,
 }
 
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Validate => validate(),
-        Command::Apply => apply(),
+        Command::Apply => apply(ApplyMode::Full),
+        Command::ReviewForTesting => apply(ApplyMode::ReviewOnly),
+        Command::ApplyReviewedForTesting => apply(ApplyMode::Reviewed),
         Command::Cleanup => cleanup(),
     }
 }
@@ -49,7 +62,7 @@ fn approval_authorization_allowed(kind: RequestKind, authorization: &Authorizati
     )
 }
 
-fn validate_approval_policy(
+pub(crate) fn validate_approval_policy(
     api: &GitHub,
     policy: &Policy,
     manifest: &RequestManifest,
@@ -148,8 +161,46 @@ fn validate() -> Result<()> {
     Ok(())
 }
 
-fn apply() -> Result<()> {
+fn require_testing_review_split(deployment: &config::Deployment) -> Result<()> {
+    ensure!(
+        deployment.workflow_prefix == "testing-"
+            && deployment.control_repository.as_ref() == Some(&deployment.integration),
+        "split review operations require the isolated testing deployment"
+    );
+    Ok(())
+}
+
+fn authenticate_reviewer(api: &GitHub, reviewer: &config::Principal) -> Result<()> {
+    let approver: Value = api.get("/user")?;
+    ensure!(
+        approver["login"] == reviewer.login
+            && approver["id"].as_u64() == Some(reviewer.id)
+            && approver["type"] == "User",
+        "approval token must authenticate as the configured review account"
+    );
+    Ok(())
+}
+
+fn create_configured_review(read: &GitHub, manifest: &RequestManifest) -> Result<()> {
+    let reviewer = &config::trusted()?.deployment.approval_reviewer;
+    let approve = GitHub::from_env("SECUREFIX_APPROVE_TOKEN")?;
+    authenticate_reviewer(&approve, reviewer)?;
+    approve_current_head(
+        read,
+        &approve,
+        &manifest.repository.full_name,
+        manifest.pull_request.number,
+        &manifest.pull_request.head_sha,
+        (reviewer, "User"),
+        &manifest.control,
+    )
+}
+
+fn apply(mode: ApplyMode) -> Result<()> {
     let deployment = &config::trusted()?.deployment;
+    if mode != ApplyMode::Full {
+        require_testing_review_split(deployment)?;
+    }
     let read = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&read)?;
     let manifest: RequestManifest =
@@ -189,6 +240,21 @@ fn apply() -> Result<()> {
     );
     let owner_requested = matches!(&manifest.authorization, Authorization::OwnerComment { .. });
     validate_approval_policy(&read, &policy, &manifest)?;
+    if mode == ApplyMode::ReviewOnly {
+        return create_configured_review(&read, &manifest);
+    }
+    if mode == ApplyMode::Reviewed {
+        ensure!(
+            request::has_current_head_approval_for_control(
+                &read,
+                repository,
+                manifest.pull_request.number,
+                &manifest.pull_request.head_sha,
+                &manifest.control,
+            )?,
+            "trusted User review is not attached to the accepted head and control"
+        );
+    }
     let write = GitHub::from_env("SECUREFIX_WRITE_TOKEN")?;
     if owner_requested
         && let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization
@@ -202,23 +268,9 @@ fn apply() -> Result<()> {
             &manifest.control,
         )?;
     }
-    let approve = GitHub::from_env("SECUREFIX_APPROVE_TOKEN")?;
-    let approver: Value = approve.get("/user")?;
-    ensure!(
-        approver["login"] == deployment.approval_reviewer.login
-            && approver["id"].as_u64() == Some(deployment.approval_reviewer.id)
-            && approver["type"] == "User",
-        "approval token must authenticate as the configured review account"
-    );
-    approve_current_head(
-        &read,
-        &approve,
-        repository,
-        manifest.pull_request.number,
-        &manifest.pull_request.head_sha,
-        (&deployment.approval_reviewer, "User"),
-        &manifest.control,
-    )?;
+    if mode == ApplyMode::Full {
+        create_configured_review(&read, &manifest)?;
+    }
     let current_policy = Policy::active(&read)?;
     ensure!(
         current_policy.revision == manifest.workflow_sha,
@@ -410,6 +462,42 @@ fn cleanup() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_review_modes_require_isolated_state_without_changing_the_user() {
+        let mut deployment = config::trusted().unwrap().deployment.clone();
+        let reviewer = deployment.approval_reviewer.clone();
+        assert!(require_testing_review_split(&deployment).is_err());
+        deployment.workflow_prefix = "testing-".into();
+        assert!(require_testing_review_split(&deployment).is_err());
+        deployment.control_repository = Some(deployment.integration.clone());
+        require_testing_review_split(&deployment).unwrap();
+        assert_eq!(deployment.approval_reviewer, reviewer);
+        deployment.control_repository = Some(deployment.server.clone());
+        assert!(require_testing_review_split(&deployment).is_err());
+    }
+
+    #[test]
+    fn trusted_review_authentication_requires_the_exact_configured_user() {
+        use crate::fixtures::{Fixture, Route};
+        let reviewer = &config::trusted().unwrap().deployment.approval_reviewer;
+        for (kind, id, login, expected) in [
+            ("User", reviewer.id, reviewer.login.as_str(), true),
+            ("Bot", reviewer.id, reviewer.login.as_str(), false),
+            ("User", reviewer.id + 1, reviewer.login.as_str(), false),
+            ("User", reviewer.id, "another-user", false),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(
+                "/user",
+                json!({"type":kind,"id":id,"login":login}),
+            )]);
+            assert_eq!(
+                authenticate_reviewer(&fixture.api, reviewer).is_ok(),
+                expected
+            );
+            fixture.finish();
+        }
+    }
 
     #[test]
     fn renovate_review_refresh_accepts_only_the_separate_merge_authorization() {

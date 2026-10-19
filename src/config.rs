@@ -29,6 +29,10 @@ pub struct Checks {
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
     pub server: Repository,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workflow_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_repository: Option<Repository>,
     pub owner_login: String,
     pub repository_owner: Principal,
     pub client_app_id: u64,
@@ -44,6 +48,10 @@ pub struct Deployment {
 
 impl Deployment {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(self.workflow_prefix.as_str(), "" | "testing-"),
+            "workflow prefix must be empty or testing-"
+        );
         for repository in [&self.server, &self.integration] {
             crate::policy::validate_repository(&repository.repository)?;
             ensure!(repository.id > 0, "repository ID must be nonzero");
@@ -59,6 +67,12 @@ impl Deployment {
                 && self.server.repository != self.integration.repository,
             "integration repository must differ from production server"
         );
+        if let Some(control) = &self.control_repository {
+            ensure!(
+                self.workflow_prefix == "testing-" && control == &self.integration,
+                "separate control storage must be the exact configured test repository in the testing namespace"
+            );
+        }
         ensure!(
             self.client_app_id > 0
                 && self.server_app_id > 0
@@ -98,6 +112,108 @@ impl Deployment {
         );
         Ok(())
     }
+
+    /// Descriptor state may be isolated without changing workflow/source authority.
+    pub fn control_repository(&self) -> &Repository {
+        self.control_repository.as_ref().unwrap_or(&self.server)
+    }
+
+    /// Map a canonical expected path, never an observed source-run path.
+    pub fn workflow_path(&self, canonical: &str) -> Result<String> {
+        ensure!(
+            matches!(self.workflow_prefix.as_str(), "" | "testing-"),
+            "workflow prefix must be empty or testing-"
+        );
+        let name = canonical
+            .strip_prefix(".github/workflows/")
+            .context("canonical workflow path must be under .github/workflows")?;
+        let stem = name
+            .strip_suffix(".yml")
+            .context("canonical workflow path must end in .yml")?;
+        ensure!(
+            !stem.is_empty()
+                && stem
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)),
+            "invalid canonical workflow name"
+        );
+        let prefix = if name.starts_with("testing-") {
+            ""
+        } else {
+            &self.workflow_prefix
+        };
+        Ok(format!(".github/workflows/{prefix}{name}"))
+    }
+
+    /// Render a canonical workflow definition while preserving pin comments.
+    /// This is for generated definitions, never for normalizing run evidence.
+    pub fn render_workflow(&self, source: &str) -> Result<String> {
+        if self.workflow_prefix.is_empty() {
+            return Ok(source.to_owned());
+        }
+        ensure!(
+            self.workflow_prefix == "testing-",
+            "invalid workflow prefix"
+        );
+        let yaml: serde_yaml::Value = serde_yaml::from_str(source)?;
+        let name = yaml["name"].as_str().context("workflow name missing")?;
+        let names = source
+            .lines()
+            .filter(|line| line.starts_with("name:"))
+            .count();
+        ensure!(names == 1, "workflow name source anchor is ambiguous");
+        let name = if name.starts_with("testing-") {
+            name.to_owned()
+        } else {
+            format!("testing-{name}")
+        };
+        let mut rendered = String::new();
+        for line in source.split_inclusive('\n') {
+            if line.starts_with("name:") {
+                rendered.push_str(&format!("name: {}", serde_json::to_string(&name)?));
+                if line.ends_with('\n') {
+                    rendered.push('\n');
+                }
+            } else {
+                rendered.push_str(line);
+            }
+        }
+        // Preserve literal pins and comments; external workflow authorities are
+        // not part of this deployment's namespace.
+        let mut output = String::new();
+        let mut remaining = rendered.as_str();
+        while let Some(start) = remaining.find(".github/workflows/") {
+            let before = &remaining[..start];
+            let external = before.ends_with('/')
+                && !before.ends_with("./")
+                && !before.ends_with(&format!("{}/", self.server.repository));
+            output.push_str(&remaining[..start]);
+            remaining = &remaining[start..];
+            let rest = &remaining[".github/workflows/".len()..];
+            let length = rest
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || b"-_.".contains(b))
+                .count();
+            ensure!(
+                external || !rest[length..].starts_with('/'),
+                "workflow reference is not a canonical file path"
+            );
+            let path_length = ".github/workflows/".len() + length;
+            let path = &remaining[..path_length];
+            if path.ends_with(".yml") && !external {
+                output.push_str(&self.workflow_path(path)?);
+            } else {
+                output.push_str(path);
+            }
+            remaining = &remaining[path_length..];
+        }
+        output.push_str(remaining);
+        Ok(output)
+    }
+}
+
+pub fn workflow_path(canonical: &str) -> Result<String> {
+    trusted()?.deployment.workflow_path(canonical)
 }
 
 pub fn validate_branch(value: &str) -> Result<()> {
@@ -194,6 +310,123 @@ pub fn trusted_policy_bytes() -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_workflow_namespace_preserves_pins_and_is_idempotent() {
+        let mut deployment = crate::config::trusted().unwrap().deployment.clone();
+        deployment.server.repository = "owner/server".into();
+        let source = "# source comment\nname: Merge Request\non: workflow_dispatch\njobs:\n  runtime:\n    uses: ./.github/workflows/load-cli.yml\n  request:\n    uses: owner/server/.github/workflows/reusable-merge-request.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v0.2.33\n";
+        assert_eq!(deployment.render_workflow(source).unwrap(), source);
+        deployment.workflow_prefix = "testing-".into();
+        let rendered = deployment.render_workflow(source).unwrap();
+        assert!(rendered.starts_with("# source comment\nname: \"testing-Merge Request\"\n"));
+        assert!(rendered.contains("./.github/workflows/testing-load-cli.yml"));
+        assert!(rendered.contains("owner/server/.github/workflows/testing-reusable-merge-request.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v0.2.33"));
+        assert_eq!(deployment.render_workflow(&rendered).unwrap(), rendered);
+        let external = "name: External\njobs:\n  baseline:\n    uses: other/server/.github/workflows/publish-runtime.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # pinned baseline\n";
+        assert!(deployment.render_workflow(external).unwrap().contains("other/server/.github/workflows/publish-runtime.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # pinned baseline"));
+        assert!(deployment.render_workflow("jobs: {}\n").is_err());
+        assert!(
+            deployment
+                .render_workflow("name: one\nname: two\njobs: {}\n")
+                .is_err()
+        );
+        assert!(
+            deployment
+                .render_workflow(
+                    "name: Invalid\njobs:\n  bad:\n    uses: ./.github/workflows/../merge.yml\n"
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn separate_control_storage_preserves_the_workflow_host_and_reviewer() {
+        let mut deployment =
+            crate::policy::Policy::parse(include_bytes!("../tests/fixtures/policy.json"))
+                .unwrap()
+                .deployment;
+        let original = deployment.clone();
+        assert_eq!(deployment.control_repository(), &deployment.server);
+        assert!(
+            serde_json::to_value(&deployment)
+                .unwrap()
+                .get("control_repository")
+                .is_none()
+        );
+        deployment.control_repository = Some(deployment.integration.clone());
+        assert!(deployment.validate().is_err());
+        deployment.workflow_prefix = "testing-".into();
+        deployment.validate().unwrap();
+        assert_eq!(deployment.control_repository(), &deployment.integration);
+        assert_eq!(deployment.server, original.server);
+        assert_eq!(deployment.approval_reviewer, original.approval_reviewer);
+        for field in ["repository", "id", "default_branch"] {
+            let mut altered = serde_json::to_value(&deployment).unwrap();
+            altered["control_repository"][field] = match field {
+                "id" => serde_json::json!(123),
+                "repository" => serde_json::json!("civitaspo/other-test"),
+                _ => serde_json::json!("other"),
+            };
+            assert!(
+                serde_json::from_value::<Deployment>(altered)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        deployment.control_repository = Some(original.server);
+        assert!(deployment.validate().is_err());
+    }
+
+    #[test]
+    fn workflow_namespace_is_one_exact_trusted_deployment_choice() {
+        let mut deployment =
+            crate::policy::Policy::parse(include_bytes!("../tests/fixtures/policy.json"))
+                .unwrap()
+                .deployment;
+        assert!(deployment.workflow_prefix.is_empty());
+        assert!(
+            serde_json::to_value(&deployment)
+                .unwrap()
+                .get("workflow_prefix")
+                .is_none()
+        );
+        let canonical = ".github/workflows/merge-caller-migration.yml";
+        assert_eq!(deployment.workflow_path(canonical).unwrap(), canonical);
+        deployment.workflow_prefix = "testing-".into();
+        deployment.validate().unwrap();
+        assert_eq!(
+            deployment.workflow_path(canonical).unwrap(),
+            ".github/workflows/testing-merge-caller-migration.yml"
+        );
+        assert_ne!(deployment.workflow_path(canonical).unwrap(), canonical);
+        let existing = ".github/workflows/testing-securefix-server.yml";
+        assert_eq!(deployment.workflow_path(existing).unwrap(), existing);
+        for invalid in ["test-", "../", "testing-/", "Testing-", "testing-\n"] {
+            deployment.workflow_prefix = invalid.into();
+            assert!(deployment.validate().is_err());
+            assert!(deployment.workflow_path(canonical).is_err());
+        }
+    }
+
+    #[test]
+    fn expected_workflow_mapping_rejects_paths_refs_and_traversal() {
+        let deployment =
+            crate::policy::Policy::parse(include_bytes!("../tests/fixtures/policy.json"))
+                .unwrap()
+                .deployment;
+        for invalid in [
+            "merge.yml",
+            ".github/workflows/../merge.yml",
+            ".github/workflows/nested/merge.yml",
+            ".github/workflows/merge.yml@main",
+            ".github/workflows/merge.yml?ref=main",
+            ".github/workflows/.yml",
+        ] {
+            assert!(deployment.workflow_path(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn embedded_renovate_policy_is_optional_strict_and_separate_from_base_policy() {

@@ -1423,7 +1423,11 @@ fn validate_source_manifest_provenance(
         manifest.source_run_id.0
     ))?;
     ensure!(
-        run["name"] == "Release Tag"
+        run["name"]
+            == format!(
+                "{}Release Tag",
+                crate::config::trusted()?.deployment.workflow_prefix
+            )
             && run["status"] == "completed"
             && run["conclusion"] == "success",
         "source Release Tag run is not successful"
@@ -1555,8 +1559,10 @@ fn validate_source_manifest_provenance(
 }
 
 fn ensure_valid_caller_path(path: &str) -> Result<()> {
+    let prefix = &crate::config::trusted()?.deployment.workflow_prefix;
     ensure!(
         path.starts_with(".github/workflows/")
+            && (prefix.is_empty() || path.starts_with(".github/workflows/testing-"))
             && path.ends_with(".yml")
             && path.len() <= 200
             && !path.contains(['\\', '@', '?', '#'])
@@ -1666,7 +1672,11 @@ fn validated_source(
 ) -> Result<ReleaseManifestV2> {
     let run = successful_source_run(api, repo.as_str(), run_id.0)?;
     ensure!(
-        run["name"] == "Release Tag",
+        run["name"]
+            == format!(
+                "{}Release Tag",
+                crate::config::trusted()?.deployment.workflow_prefix
+            ),
         "source workflow is not named Release Tag"
     );
     ensure!(
@@ -1688,13 +1698,14 @@ fn validated_source(
         &policy.revision,
     )?;
     let server_repository = &crate::config::trusted()?.deployment.server.repository;
+    let reusable_path = crate::config::workflow_path(".github/workflows/reusable-release-tag.yml")?;
     let source_revision = CommitSha::parse(
         &referenced
             .iter()
             .find(|workflow| {
-                workflow.path.starts_with(&format!(
-                    "{server_repository}/.github/workflows/reusable-release-tag.yml@"
-                ))
+                workflow
+                    .path
+                    .starts_with(&format!("{server_repository}/{reusable_path}@"))
             })
             .context("source workflow did not call pinned Release Tag reusable")?
             .sha,
@@ -4305,11 +4316,20 @@ mod tests {
         let server_repository = trusted.deployment.server.repository.as_str();
         let release_branch = trusted.deployment.release_branch.as_str();
         let default_branch = trusted.deployment.server.default_branch.as_str();
+        let name = format!("{}Release Tag", trusted.deployment.workflow_prefix);
+        let wrapper_path = trusted
+            .deployment
+            .workflow_path(".github/workflows/release-tag.yml")
+            .unwrap();
+        let reusable_path = trusted
+            .deployment
+            .workflow_path(".github/workflows/reusable-release-tag.yml")
+            .unwrap();
         let head = "b".repeat(40);
         let base = "c".repeat(40);
         let merge = "d".repeat(40);
         let workflow = format!(
-            "name: Release Tag\non:\n  pull_request:\njobs:\n  tag:\n    uses: {server_repository}/.github/workflows/reusable-release-tag.yml@{}\n",
+            "name: {name}\non:\n  pull_request:\njobs:\n  tag:\n    uses: {server_repository}/{reusable_path}@{}\n",
             wrapper_pin
         );
         let content = |path: &str, sha: &str, text: &str| {
@@ -4325,7 +4345,7 @@ mod tests {
             Route::get(
                 format!("/repos/{repo}/actions/runs/99"),
                 json!({
-                    "name":"Release Tag",
+                    "name":name,
                     "status":"completed",
                     "conclusion":"success",
                     "repository":{"full_name":repo},
@@ -4333,11 +4353,11 @@ mod tests {
                     "head_sha":head,
                     "head_branch":release_branch,
                     "run_attempt":1,
-                    "path":".github/workflows/release-tag.yml",
+                    "path":wrapper_path,
                     "event":"pull_request",
                     "pull_requests":[{"number":115}],
                     "referenced_workflows":[{
-                        "path":format!("{server_repository}/.github/workflows/reusable-release-tag.yml@{}", "a".repeat(40)),
+                        "path":format!("{server_repository}/{reusable_path}@{}", "a".repeat(40)),
                         "sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     }]
                 }),
@@ -4382,7 +4402,7 @@ mod tests {
                 format!("/repos/{repo}/compare/{merge}...{default_branch}"),
                 json!({"status":"identical"}),
             ),
-            content(".github/workflows/release-tag.yml", &merge, &workflow),
+            content(&wrapper_path, &merge, &workflow),
             Route::get(
                 format!("/repos/{repo}/git/ref/tags/v1.2.3"),
                 json!({"object":{"type":"tag","sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}),
@@ -4392,6 +4412,39 @@ mod tests {
                 json!({"object":{"type":"commit","sha":merge}}),
             ),
         ]
+    }
+
+    #[test]
+    fn testing_deployment_release_provenance_round_trip() {
+        const CHILD: &str = "SECUREFIX_TEST_RELEASE_NAMESPACE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("policy.json");
+            let mut policy: Value =
+                serde_json::from_slice(include_bytes!("../policy.json")).unwrap();
+            policy["deployment"]["workflow_prefix"] = json!("testing-");
+            std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "release::tests::testing_deployment_release_provenance_round_trip",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("SECUREFIX_POLICY_PATH", path)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        merged_pr_provenance_uses_merged_wrapper_and_verified_version();
+        assert!(ensure_valid_caller_path(".github/workflows/testing-release-tag.yml").is_ok());
+        assert!(ensure_valid_caller_path(".github/workflows/release-tag.yml").is_err());
     }
 
     #[test]

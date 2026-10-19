@@ -27,7 +27,10 @@ impl Route {
     #[allow(dead_code)]
     pub fn active_control(control: &crate::control::ControlRevision) -> Self {
         use base64::Engine;
-        let server = &crate::config::trusted().unwrap().deployment.server;
+        let server = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .control_repository();
         let path = format!(
             "/repos/{}/contents/control/active.json?ref={}",
             server.repository, server.default_branch
