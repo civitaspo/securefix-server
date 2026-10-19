@@ -824,7 +824,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                     "${{ steps.resolve.outputs.sha }}"
                                 } else if job_id == "build" {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
-                                } else if job_id == "bootstrap-scratch" {
+                                } else if job_id == "bootstrap-scratch" || job_id == "scratch" {
                                     "${{ github.workflow_sha }}"
                                 } else {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
@@ -1280,7 +1280,6 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/testing-publish-runtime.yml",
             ".github/workflows/testing-publish-runtime.yml",
             ".github/workflows/testing-release-pr.yml",
-            ".github/workflows/testing-securefix-server.yml",
             ".github/workflows/testing-securefix-server.yml"
         ],
         "only secret-free CI and runtime producer compile CLI"
@@ -1973,56 +1972,29 @@ fn workflow_local_actions_have_a_prior_matching_checkout() {
     }
 
     let testing = workflow("testing-securefix-server.yml");
-    let scratch = &testing["jobs"]["scratch"];
-    let steps = scratch["steps"].as_array().unwrap();
-    let probe = steps
-        .iter()
-        .position(|step| step["name"] == "Execute scratch control probe")
-        .unwrap();
-    let installer = steps
-        .iter()
-        .position(|step| {
-            step["uses"] == "$/.github/actions/install-cli"
-                && step["with"]["binary"] == "trusted-runtime/securefix"
-        })
-        .unwrap();
-    assert!(installer < probe);
-}
-
-#[test]
-fn control_probe_containers_mount_candidate_policy_beside_the_binary() {
-    let testing = workflow("testing-securefix-server.yml");
-    for (job_id, step_name) in [
+    for (job_id, probe_name) in [
+        ("scratch", "Execute scratch control probe"),
         (
             "bootstrap-scratch",
             "Probe candidate control generation and CAS before approval",
         ),
-        ("scratch", "Execute scratch control probe"),
     ] {
         let steps = testing["jobs"][job_id]["steps"].as_array().unwrap();
-        let step = steps
+        let install = steps
             .iter()
-            .find(|step| step["name"] == step_name)
-            .unwrap_or_else(|| panic!("{job_id}: missing {step_name}"));
-        let run = step["run"].as_str().unwrap();
-        let source = if job_id == "scratch" {
-            "$PWD/candidate-runtime"
-        } else {
-            "$RUNNER_TEMP/securefix-bin"
-        };
+            .position(|step| step["with"]["binary"] == "candidate-runtime/securefix")
+            .unwrap();
+        let probe = steps
+            .iter()
+            .position(|step| step["name"] == probe_name)
+            .unwrap();
+        assert!(install < probe);
         assert!(
-            run.contains(&format!(
-                "source={source}/securefix,target=/candidate/securefix,readonly"
-            )),
-            "{job_id}: candidate executable must be mounted read-only at /candidate/securefix"
+            steps[probe]["run"]
+                .as_str()
+                .unwrap()
+                .contains("securefix integration control-probe")
         );
-        assert!(
-            run.contains(&format!(
-                "source={source}/policy.json,target=/candidate/policy.json,readonly"
-            )),
-            "{job_id}: matching candidate policy must be mounted read-only beside the executable"
-        );
-        assert!(run.contains("/candidate/securefix integration control-probe"));
     }
 }
 
@@ -2483,11 +2455,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
                 assert!(
-                    !run.contains("chmod")
-                        || !run.contains("securefix")
-                        || (path == ".github/workflows/testing-securefix-server.yml"
-                            && job_id == "scratch"
-                            && run == "chmod 0555 candidate-runtime/securefix"),
+                    !run.contains("chmod") || !run.contains("securefix"),
                     "{path}/{job_id}: CLI permissions belong in installer action"
                 );
                 let invokes_cli = run
