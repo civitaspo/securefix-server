@@ -1046,3 +1046,51 @@ The pre.6 correction passed all 32 distribution tests, including a release-enabl
 migration from the existing three feature callers plus CI and explicit rejection
 when approve is missing. Formatting and whitespace checks passed. The signed
 source change proceeds through the ordinary owner-command review/merge path.
+
+### pre.6 source and authorization-fixture correction (2026-10-19)
+
+PR #125 merged through normal owner commands after source CI 39232014590 and
+civitaspo-bot approval. Source is 18163e82ad5c6938676ab6cf008e765cd0c7383b; main
+CI 39232718114 passed and produced artifact 12177172100 (sha256
+f74d7ba8b500d74833d414cdecfd1827c56f207a6f2c632143e867e055a85e5a). Publisher
+39233150440 created immutable v0.2.34-pre.6 release 417133476 / asset 655872741,
+archive ea902f2225b4b1d9151957b018162444b6c96beaa60854d1cc992248e45a8cee.
+Production control blob remains ef2dcc1ed591fc6c4e7815f5e5d40794933b254f.
+
+Prepare 39233150589 passed. Verify 39233367334 failed with `current-head owner
+review for the active control is missing`: the owner-posted fixture review put
+the control marker inline with prose, but request.rs requires a whole line equal
+to the marker. This is an authorization-fixture setup mistake, not a CLI defect.
+The harness cleaned PRs #263/#264/#265; independent reads confirmed all closed
+unmerged and test main stayed 98abbe820338c9960e076a2a1262877d72cb6329.
+Fresh prepare 39233752633 reuses the same source/build; review markers will be
+standalone lines before separate owner commands. Failed and subsequent runs
+remain separate evidence. No source change or blind retry is needed.
+
+Corrected review setup passed verify 39234041451 with fresh prepare 39233752633;
+positive PR #266 merged and stale/distribution fixtures were cleaned. Reviewed
+test-control PR #269 then merged via 39234622839 with owner commands
+6264665998/6264666316. Independent readback confirms generation four identity
+7568cc8b9b05f0c43521c9efc899c58545daeb815f24e5d1df701cf3bfeea8d5, source
+18163e82ad5c6938676ab6cf008e765cd0c7383b, test main
+ba1944ca8ece8b158460fd5939de6bd52a501dd7. Native distributor 39234909196 uses
+this qualified control. Qualification alone is not native caller acceptance.
+
+### Trusted-host public metadata failure (2026-10-19)
+
+Distributor 39234909196 failed before writes in `Qualify isolated source, runtime
+and control as data`: anonymous GET of securefix-server commits/main returned
+403. The same run's preceding exact-host validator successfully fetched that
+endpoint with existing server GITHUB_TOKEN (integration_read_api). The error did
+not retain response-body/rate-limit headers, so a specific rate-limit cause is
+not asserted. It is not evidence that the test installation token needs access
+to production: the failed request used GitHub::anonymous(), not that token.
+
+The minimum correction reuses integration_read_api for server metadata when the
+loader runs in the exact server repository, retaining anonymous caller metadata
+behavior and the separate test-only installation token. No new credential,
+permission, fixture, or authentication service is added. The trusted host source
+gets pre.7 for source-version discipline; the selected, qualified runtime remains
+pre.6, whose source is an ancestor of current protected main. This preserves the
+existing independent host/source/runtime/control checks and does not require
+republishing an unchanged selected runtime. Native distributor success is pending.
