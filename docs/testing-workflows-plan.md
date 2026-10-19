@@ -673,3 +673,14 @@ CI/policy, owner approve `6261142759` and separate merge `6261202402`. Its norma
 merge was requested only after both direct qualifications completed and the
 descriptor retry failed without writing. A fresh expected-main read is required
 for the next initial descriptor proposal.
+
+### Attestation cause identified (2026-10-19T06:43:15Z)
+
+Reproducing the Rust verifier’s extensionless temporary filenames locally gives
+`bundle file extension not supported, must be json or jsonl`. Earlier local
+commands used `bundles.jsonl`, which explains their success. The minimum fix
+creates the same bounded public bundle bytes using a `.jsonl` temporary file; all
+cryptographic/provenance constraints remain unchanged. PR #122 includes this fix
+and stderr visibility. Its prior merge request must not authorize the changed
+head; obtain a fresh exact-head review and commands. Reuse both qualified runtimes
+and run the actual initial control proposal after this corrected source merges.
