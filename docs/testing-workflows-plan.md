@@ -148,8 +148,12 @@ This is a test fixture configuration repair, not a relaxed verification gate.
 Fresh prepare `39207258822` passed using the same candidate source. Legacy
 approve/policy jobs were skipped and the positive head had no premature review
 or policy check. Owner review `5567499478` and separate commands
-`6260775361`, `6260777158`, `6260777386` precede verify `39207675252`, which
-is in progress.
+`6260775361`, `6260777158`, `6260777386` preceded successful verify
+`39207675252`. Its immutable `scratch-fixtures` artifact `12166706073` has digest
+`7b4827600173d0d34ba75678ca8884a71781771d87c8e00ea44c6857f4378ce1`.
+The Server App merged positive PR #245 as `ee182e58e7afdf2a432144fb3ddbca88f3ea0f1d`;
+stale #246 and distribution #247 were independently read back closed/unmerged.
+The direct assertions and failed earlier run remain recorded.
 
 ## Execution checklist
 
@@ -347,11 +351,14 @@ ordinary owner `/approve` comment succeeded with the exact-head User review and
 policy result. No provenance condition was relaxed.
 
 [Scratch prepare 39206238831](https://github.com/civitaspo/securefix-server/actions/runs/39206238831)
-passed the deployed candidate artifact at that exact main source. Follow-up verify
-`39206649129` failed because the old native callers also processed the direct
-fixtures; see the hosted qualification section above and repair PR #244. No testing
-pre-release, descriptor or canonical testing-caller deployment has been created,
-and the ten hosted workflow cases remain unverified.
+passed the deployed candidate artifact at that exact main source. The first verify
+`39206649129` failed on competing legacy callers; reviewed test PR #244 repaired
+only that fixture configuration. Fresh prepare `39207258822` and verify
+`39207675252` then passed with unchanged assertions. Testing publication
+`39208311685` produced immutable `v0.2.34-pre.1` at source one. No isolated
+descriptor or canonical testing-caller deployment exists yet; the ten native
+hosted workflow cases remain unverified. The second source is advancing through
+ordinary server PR #121. See the newer execution sections for exact evidence.
 
 The following paragraphs record implementation progress before that deployment;
 their earlier local-only/undeployed statements are historical.
@@ -595,3 +602,74 @@ build-job inventory; the expected list was ordered correctly and all assertions
 were retained. Logs: `/private/tmp/securefix-phaseb-fixture-verified.log` and
 `/private/tmp/securefix-phaseb-fixture-clippy.log`. No native hosted acceptance
 case is certified by these local results.
+
+### First immutable test publication and second source
+
+Testing publisher [39208311685](https://github.com/civitaspo/securefix-server/actions/runs/39208311685)
+succeeded from exact signed source `f0a8090a66b05d3c0e048a75e80d2e5fb6374edd`.
+Release [v0.2.34-pre.1](https://github.com/civitaspo/securefix-server/releases/tag/v0.2.34-pre.1)
+is a published immutable pre-release: release ID `416960439`, asset `655408620`,
+size `4266388`, archive SHA-256
+`814b28ceaf487b7331916aff258b09af634c1010be734c3e70b59cdb16701943`.
+The trusted validator qualified the testing policy/archive, exact publisher
+attestation passed, and the stable active controller published it. No production
+activation occurred. This qualifies source one for an isolated descriptor;
+it does not certify the ten native workflow cases.
+
+[Server PR #121](https://github.com/civitaspo/securefix-server/pull/121) stages the
+second source at signed head `425a854fddb5ab1fad51b5eecd6ff17156c2b278`.
+Its actual CI `39207754316` passed, and fresh owner approve `6260870452` produced
+exact-head User review `5567558891` and policy success. The normal separate merge
+command was sent only after source-one publication finished. Source two still
+needs merged-source direct qualification/publication. Keep the temporary legacy
+caller fixture fence until both direct candidates are qualified, then restore
+saved exact wrappers before proposing canonical testing callers.
+
+### Second source deployed (2026-10-19T06:16:06Z)
+
+PR #121 merged through normal server run `39208651493`, separate owner merge
+comment `6260908348`, as signed main `10334dcb2b5f2e119f1b8724660df29c6a2f0f2a`.
+Second-source prepare is `39208842850`; initial isolated descriptor proposal for
+qualified source one is `39208912143`. Both are pending execution evidence.
+Production active control is unchanged; no native acceptance result is claimed.
+
+### Second direct qualification (2026-10-19T06:29:57Z)
+
+Prepare `39208842850` and verify `39209719785` passed at exact source
+`10334dcb2b5f2e119f1b8724660df29c6a2f0f2a`. Positive #248 merged as
+`a31799aa572f63002e165451648bc23631364e5e`; stale #249 and distribution #250
+were closed unmerged. Verify artifact `12166927282` has digest
+`9bb650122a5e5e169f253b553a54a77b70bd7878f16f4378a1cfe76634ba739b`.
+Testing publisher `39210164274` is running. The failed initial descriptor
+proposal `39208912143` stopped at public attestation verification before a write;
+local token-free verification of the exact archive/bundles succeeds. Fresh proposal
+`39210117405` retains identical verification conditions and is pending.
+
+Test PR #251 restores the exact three saved legacy wrappers after both direct
+qualifications and adds a credential-free target required-CI fixture. It is held
+unmerged until the initial descriptor operation has finished, to preserve its
+expected-main fence. This is setup, not native acceptance.
+
+### Source two published; attestation diagnostic follow-up (2026-10-19T06:33:34Z)
+
+Testing publisher `39210164274` succeeded at source
+`10334dcb2b5f2e119f1b8724660df29c6a2f0f2a`. `v0.2.34-pre.2` is published,
+pre-release and immutable: release `416977455`, asset `655448383`, size `4276372`,
+archive SHA-256 `b802142b8b77b05d7ff15f990b0ac48484143c59329b672b68e506d979bf2d73`.
+Both distinct sources now have direct qualification and immutable publications.
+Production generation five is unchanged.
+
+Initial descriptor retry `39210117405` again stopped before any write with
+`public testing runtime attestation verification failed`. The same public bundle,
+archive, full source/workflow/digest constraints and CLI 2.102.0 pass locally with
+no token and an empty config/cache. Hosted root cause is not established. A minimal
+follow-up inherits stderr for this already token-free public verifier; credentials
+remain removed and every verification argument remains exact. This is diagnostic
+visibility, not an attestation bypass or a passed native case. No further runtime
+publication is needed for that trusted-host-only diagnostic increment.
+
+Test PR #251 has exact-head civitaspo-bot review `5567692803`, successful required
+CI/policy, owner approve `6261142759` and separate merge `6261202402`. Its normal
+merge was requested only after both direct qualifications completed and the
+descriptor retry failed without writing. A fresh expected-main read is required
+for the next initial descriptor proposal.

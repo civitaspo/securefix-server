@@ -471,7 +471,7 @@ fn verify_public_attestation(
         .env("XDG_CACHE_HOME", empty_config.path().join("cache"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .status()?;
     ensure!(
         status.success(),
