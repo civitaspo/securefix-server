@@ -186,6 +186,15 @@ pub(super) fn prepare_caller(
         files.insert(workflow_path(client::PULL_REQUEST_PATH)?, pull_request);
         files.insert(workflow_path(client::CALLER_PATH)?, workflow_call);
     }
+    let additive_workflows = [
+        ".github/workflows/policy-check.yml",
+        ".github/workflows/release-pr.yml",
+        ".github/workflows/release-pr-sync.yml",
+        ".github/workflows/release-tag.yml",
+    ]
+    .into_iter()
+    .map(workflow_path)
+    .collect::<Result<Vec<_>>>()?;
     let mut default_current = true;
     for (path, expected) in &files {
         match optional_content(api, repository, path, base_sha)? {
@@ -196,7 +205,7 @@ pub(super) fn prepare_caller(
             None => {
                 default_current = false;
                 ensure!(
-                    *path == workflow_path(".github/workflows/policy-check.yml")?,
+                    additive_workflows.contains(path),
                     "required managed caller workflow is missing"
                 );
             }

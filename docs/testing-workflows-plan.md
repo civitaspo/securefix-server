@@ -983,3 +983,66 @@ CLI, 22 bootstrap and 3 integration tests (2 CLI tests ignored). Clippy with
 full run and focused corrections remain separate logs; its stale permission
 assertion was fixed before this successful full run. Production `control/active.json`
 and `policy.json` have no local changes. Hosted acceptance remains pending.
+
+### Reviewed source and runtime milestone (2026-10-19)
+
+PR #124 merged through the normal User bot approval and `/merge` path to
+`a0725a954715c840fedfb841c0edcd9612636056`. PR CI 39228547288 and main CI
+39229307199 passed. Initial automatic pull_request_target approval 39228606592
+failed with the exact reusable-source revision reason; the separate owner-command
+approval 39228636479 succeeded. Both remain distinct evidence. Production control
+blob remains `ef2dcc1ed591fc6c4e7815f5e5d40794933b254f`.
+
+Main CI published artifact 12175922566, SHA-256
+`e164a2114e3cf0242a457b1890c21351544d3c1fe1a7a2fa452179426134a7b7`.
+Publisher 39229862034 and fixture cleanup 39229864332 independently reused it;
+their setup logs contain the same source/producer/digest and no compile commands.
+This satisfies multi-run identical-source CLI reuse. Prepare 39229859747 passed
+and the qualified pre-release v0.2.34-pre.5 was published by 39229862034.
+These successes are prerequisites, not native recovery or migration acceptance.
+
+Cleanup closed invalid disposable PR #258 unmerged and deleted only its exact
+accepted automation branch. Independent readback confirmed test main
+`588ab2b354642bf0cc3b41c0b2e248a55a7766fa` and control blob
+`887d2ed6278df1df79074a286460b8d42c568001` unchanged.
+Corrected-path evidence lives separately in
+`/private/tmp/securefix-phaseb-native-corrected-evidence`; all prior path results
+remain historical. All ten acceptance scenario entries start pending there.
+
+Corrected-source verify 39230155449 passed, reusing prepare 39229859747.
+The owner independently reviewed signed positive PR #259 at
+`14d2e01794e395a191bd3c02547ed3a7bd2114ed` with structural scratch control
+`44b321613fcdd86999e6e23502112b81c15bc16dffe3b3c62237c91398da7a96`
+(review 5569467291), then posted separate commands 6264051787/6264052159;
+stale PR #260 had command 6264052473. The scratch harness merged only the
+positive fixture and cleaned the stale/distribution fixtures. Test main is now
+`aa7acebe537b6f2ca401bb70848b80fcd2301f74`; the isolated active descriptor
+remains generation two until its separately reviewed successor merges. This is
+qualification evidence, not the native caller recovery result.
+
+### Additive release-caller migration failure (2026-10-19)
+
+Reviewed control PR #262 merged via 39230946790 after review 5569518100 and
+commands 6264133296/6264133702. Independent descriptor readback identifies
+generation three `65629f1ab698348cebe378fe80f0d6d369f885d828bde34f42d0727ee2df956c`,
+source a0725a9, with test main `98abbe820338c9960e076a2a1262877d72cb6329`.
+
+Distributor 39231133319 then failed in “Validate publisher and prepare canonical
+test caller files” with `required managed caller workflow is missing`. The old
+testing deployment has three feature callers and CI; release is newly enabled,
+so its three exact generated release callers must be added. Existing prepare_caller
+permits a missing policy-check workflow only. Failure preceded write-token issuance
+and PR creation; no migration PR exists. Do not repeat this run unchanged.
+
+The minimum correction is to admit the three exact canonical release paths as
+additions when rendered for a release-enabled policy. Existing caller and CI
+requirements, validation of present files, canonical bytes, source/control, owner
+review and ready/merge checks remain. This is a normal distributor feature addition
+and uses the same implementation in production/testing. No new fixture/auth/build
+framework is introduced. A changed CLI source requires a new pre.6 qualification;
+pre.5 results are preserved and are not acceptance of the fixed distributor.
+
+The pre.6 correction passed all 32 distribution tests, including a release-enabled
+migration from the existing three feature callers plus CI and explicit rejection
+when approve is missing. Formatting and whitespace checks passed. The signed
+source change proceeds through the ordinary owner-command review/merge path.
