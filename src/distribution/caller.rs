@@ -71,13 +71,13 @@ pub(crate) fn initial_testing_files(
     let legacy = prepare_caller(api, isolated, &fixture.repository, source)?;
     let ci = ".github/workflows/ci.yml";
     ensure!(
-        legacy.files.len() == 4 && legacy.files.contains_key(ci),
+        matches!(legacy.files.len(), 4 | 7) && legacy.files.contains_key(ci),
         "initial testing caller setup requires the supported minimal CI layout"
     );
     let mut trusted = crate::config::trusted()?.clone();
     trusted.deployment = isolated.deployment.clone();
     let tag = crate::runtime::version_at_source(api, source)?.tag();
-    let mut files = rendered_files_for(&trusted, source, &tag, &fixture.default_branch, false)?;
+    let mut files = rendered_files_for(&trusted, source, &tag, &fixture.default_branch, true)?;
     files.insert(
         trusted.deployment.workflow_path(ci)?,
         trusted

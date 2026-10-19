@@ -329,7 +329,10 @@ fn client_prepare(args: ClientPrepareArgs) -> Result<()> {
         .take(6)
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let artifact_name = format!("securefix-{run_id}-{suffix}");
+    let artifact_name = format!(
+        "{}securefix-{run_id}-{suffix}",
+        crate::config::trusted()?.deployment.workflow_prefix
+    );
     let stage = output_dir.join(&artifact_name);
     let cwd = std::env::current_dir()?;
     ensure_no_symlink_components(&cwd, &output_dir)?;
@@ -438,6 +441,10 @@ fn client_dispatch(artifact_name: &str, server_repository: &str) -> Result<()> {
         artifact::valid_artifact_name_for_cli(artifact_name),
         "invalid Securefix artifact name"
     );
+    ensure!(
+        artifact_name.starts_with(&trusted.deployment.label_prefix(LABEL_PREFIX)),
+        "Securefix artifact label has the wrong deployment prefix"
+    );
     let repository = std::env::var("GITHUB_REPOSITORY")?;
     validate_repository(&repository)?;
     let run_id = std::env::var("GITHUB_RUN_ID")?;
@@ -520,8 +527,9 @@ fn parse_label_event(p: &Policy, payload: &Value, repo: &str) -> Result<(String,
         "label was not created by Securefix Client"
     );
     let label = payload["label"]["name"].as_str().context("missing label")?;
+    let label_prefix = trusted.deployment.label_prefix(LABEL_PREFIX);
     ensure!(
-        label.starts_with(LABEL_PREFIX) && label.len() <= 50,
+        label.starts_with(&label_prefix) && label.len() <= 50,
         "invalid Securefix label"
     );
     let description = payload["label"]["description"]
@@ -534,7 +542,7 @@ fn parse_label_event(p: &Policy, payload: &Value, repo: &str) -> Result<(String,
     let run_id: u64 = run.parse().context("invalid source run ID")?;
     ensure!(
         run_id > 0
-            && label[LABEL_PREFIX.len()..]
+            && label[label_prefix.len()..]
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
         "invalid Securefix artifact label"

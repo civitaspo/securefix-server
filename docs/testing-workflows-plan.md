@@ -1,5 +1,40 @@
 # Workflow integration test implementation plan
 
+## Current direction — supersedes historical routing and credential restrictions (2026-10-19)
+
+The owner withdrew **server-wide execution centralization**. Testing follows the
+production execution locations and existing commands: caller capture, release
+preparation/build/tag and sync remain on the caller; server approval/merge/policy,
+CSM writes and release signing/publication remain on the server. The six testing
+reusables are production counterparts with testing names/references, qualified
+development runtime, test-only targets/permissions and isolated control/policy.
+Existing caller distribution generates all six testing callers, including release.
+
+Reviewed server source and verified pre-release binaries bound to it are trusted.
+Normal `securefix approve apply` uses the existing civitaspo-bot User PAT in the
+same development CLI. Earlier blanket bans covering approved development code,
+review-only/continuation CLI splits and server-wide routing are **historical and
+not current policy**. Unreviewed code and unqualified artifacts remain untrusted.
+Shared Apps, existing Client secret, normal Client App server labels and no extra
+Environment approval remain final decisions. Production active control/settings
+are not fixtures. Test installation tokens and actual mutations stay test-scoped.
+
+Reuse identical-source/identical-build CLI artifacts with source, digest and exact
+producer workflow/run verification. Rebuild only if no qualified reusable artifact
+exists or source/build conditions differ. Runtime/control/PR/permission checks
+still run on each operation. Prove reuse across multiple real Actions runs.
+
+Current implementation removes the server-only metadata notification/release
+adapter and dedicated aggregate processor, as well as review split commands and
+its containers/transfers. Qualification and negative-case fixtures remain where
+they serve independent provenance or scenario validation. Earlier split-route
+successes are retained as historical evidence, not validation of this correction.
+All reviewed-migration, native recovery and recorded refusal requirements remain.
+
+Parallel work is now explicitly permitted by the owner; the primary agent owns
+integration and final design decisions. Independent agents edit disjoint caller,
+server, namespace and build-reuse areas; no duplicate investigation is requested.
+
 ## Completion criteria
 
 Run a caller migration through real GitHub Actions in isolated test repositories.
@@ -692,3 +727,259 @@ version gate, and fresh head-bound commands. The merged diagnostic source has
 not been dispatched for another failing proposal. Neither pre.3 nor pre.4 needs
 publication: these are trusted host fixes, while the existing two qualified
 runtime payloads remain selected for the planned test.
+
+### Attestation fix verified on Actions (2026-10-19T06:54:28Z)
+
+PR #123 merged as `2b0616521197329cf9281f607cea89c94831ac9c` after exact-head
+review `5567802405`, approve `6261366626`, merge `6261423882` and successful
+CI `39211634197`. Fixed control proposal `39212336684` succeeded with the same
+source-one archive and all original checks. Earlier failed runs `39208912143` and
+`39210117405` remain separate failed setup evidence. The `.jsonl` filename fixes
+the reproduced CLI protocol error; attestation was not bypassed.
+
+Descriptor-only test PR #252 selects qualified pre.1 at generation one, proposed
+control `bb0f6bb9427ff257097a7d7f85369beb504494644f5ffb8036c0005628878d8f`,
+head `b3192bf85c38df427ccd45bc1aa5ecf9382e4f9c`. Its file bytes and required CI
+were checked; exact proposed-control owner review `5567890660` was submitted.
+Initialization dispatch `39212605755` uses both command IDs zero as required;
+no legacy `/approve` or `/merge` was posted for this descriptor. No production
+activation, App, secret, settings or Environment change. Native acceptance remains
+pending until actual caller setup, successor, rejection/migration/recovery runs.
+
+### Canonical caller setup and successor proposal (2026-10-19T07:03:48Z)
+
+Initial caller proposal `39212881045` created test PR #253 at signed head
+`3b098e3ef0b8281de09fa589ee8de6533dbce5dd`. The generated diff renames only the
+three legacy native wrappers to `testing-*`, pins development reusables at pre.1
+source `f0a8090a66b05d3c0e048a75e80d2e5fb6374edd`, forwards the same existing
+Client secret and adds `testing-ci.yml`. Required CI/policy and User review
+`5567976815` passed; owner commands are `6261601217` and `6261637782`.
+
+In parallel, read-only qualification and proposal `39213284245` produced
+descriptor-only test PR #254 for generation two at head
+`981607c9167a942625dd5f3165fee0a0489f00b1`. Its exact diff selects qualified
+pre.2 and links previous control bb0f6bb9…; proposed full identity is
+`317fbf25a73f6db161f76205f154c4c44de79c9009fb1e6669871af94999196f`.
+Caller setup must merge before this successor; no native acceptance result is
+claimed from either proposal or passing setup CI.
+
+### Successor fixture base mismatch (2026-10-19T07:12:33Z)
+
+Run `39213929302` refused PR #254 with `fixture PR ownership, branch, base or
+accepted head changed` before mutation. The API still reported PR base
+`3184f6280f16f6fdf334ff1c188d8b425801e7d1`, while caller setup had advanced main
+to `0a898efe3e745fc7c8bb2c3088504aeeb739078b`. A PR base SHA is not implicitly
+refreshed when main advances. Parallel proposal before that main write was a
+fixture ordering error. Do not relax the exact base check or repeat the same
+merge. PR #254 was closed unmerged and its exact branch head checked before
+deletion; fresh proposal `39214453159` is bound to current main. No acceptance
+case is certified by this setup refusal. Keep main frozen from each proposal
+until its reviewed merge; after intentional control-change tests, create a fresh
+canonical caller proposal for the new main before testing successful migration.
+
+### Successor control activated (2026-10-19)
+
+Correct-base PR #255 merged through reviewed fixture run `39214829376` at
+`588ab2b354642bf0cc3b41c0b2e248a55a7766fa`. Independent descriptor readback and
+Rust identity validation confirmed generation 2, control
+`317fbf25a73f6db161f76205f154c4c44de79c9009fb1e6669871af94999196f`,
+source `10334dcb2b5f2e119f1b8724660df29c6a2f0f2a` and the previously qualified
+pre.2 archive. Review `5568115345` and distinct commands `6261816667` /
+`6261816918` bind this fresh PR. Native acceptance remains pending; next is
+canonical distribution and actual old-pin rejection, then the recorded guards,
+reviewed migration and native Client-label recovery. No production activation.
+
+### Native old-pin rejection confirmed (2026-10-19)
+
+Distribution `39215317164` created canonical test PR #256 at head
+`03312ce768f00707c6f4d99de41e4062ea3c55fb`. Actual client Approve
+`39215616778` and Policy `39215616789` both failed at runtime qualification with
+`testing caller workflow source differs from active test control`. Independent
+trusted snapshots `old-pin-before.json` / `old-pin-after.json` show identical
+default head, PR head/state/merged, reviews, comments and statuses; only Actions
+check completion changed. Branch-and-pull comparison passed. This satisfies the
+old-pin portion only; migration and native recovery remain pending. Evidence is
+in `/private/tmp/securefix-phaseb-native-evidence/`.
+
+### First native migration guards confirmed (2026-10-19)
+
+Non-owner fixture `39216014326` dispatched actual migration run `39216179219`
+as `civitaspo-bot` (User); both host and merge jobs were skipped with no steps.
+Independent `nonowner-before/after.json` all-state comparison passed. After a
+current-head CHANGES_REQUESTED review `5568242180`, owner migration run
+`39216345180` refused with `current-head owner review for the active control is
+missing`; independent `revoked-before/after.json` all-state comparison passed.
+Both cases use canonical PR #256 and active control generation 2.
+
+### Edited commands and failing required CI confirmed (2026-10-19)
+
+Edited-command run `39216705755` refused the restored `/approve` body with
+`owner command is edited, expired, pre-review or bound to another owner/PR`;
+`edited-before/after.json` all-state comparison passed. Required CI fixture
+`39217049218` first bound the exact head successfully and then deliberately
+failed `status-check` (GitHub Actions App 15368, check 117943238727). Actual
+migration `39217085370` recorded authorization, then refused Ready with
+`required CI, control-bound policy check and current-head owner review are not ready`.
+`failing-ci-before/after.json` confirms protected main and PR head/state/merged
+unchanged. Separate owner consumption markers are `6262181003` / `6262181204`;
+replay is being tested with a new first-attempt run, not a merged-PR shortcut.
+
+### Consumed command replay confirmed (2026-10-19)
+
+New first-attempt migration `39217540417` reused only the already consumed
+command IDs on still-open PR #256. It refused with `owner approval or merge
+command was already consumed; issue new commands`. Independent
+`consumed-before/after.json` all-state comparison passed. The earlier failing
+CI run and this replay remain separate evidence. A descriptor-only generation-3
+rollback proposal (#257, run `39217337408`) is reviewed but remains unmerged;
+test main/control stay frozen while file/head guards are exercised.
+
+### Unmanaged fixture post-write readback failure (2026-10-19)
+
+Fixture `39217927273` created signed Server App commit
+`416e52f9cfd76cb255bec9e53a2c8670eb0f509b` (parent canonical `03312ce7…`),
+then failed the immediate post-write PR predicate with `fixture is not the exact
+open Server App migration PR on the fixed test repository`. The failed response
+does not expose which predicate field differed; do not claim a proven API-lag
+cause. Independent later PR readback satisfies every predicate, and the verified
+commit adds only `.securefix-testing/migration-unmanaged.txt`; main/control are
+unchanged. Do not repeat mutation. Use this independently verified invalid head
+for the actual migration guard, keeping fixture failure and guard result distinct.
+
+### Native unmanaged-file guard confirmed (2026-10-19)
+
+Actual migration `39218387811` refused PR #256 head `416e52f9…` with
+`automation branch contains an unmanaged or deleted file: .securefix-testing/migration-unmanaged.txt`.
+Independent `unmanaged-before/after.json` all-state comparison passed. The
+fixture-controller failure `39217927273` remains distinct from this successful
+guard verification. Trusted owner cleanup independently fenced current main,
+control, exact open Server App PR/head and branch, closed PR #256 unmerged,
+verified its closed/unmerged head, then deleted only the matching branch and
+read back unchanged main. This avoids rebuilding the cleanup controller; it
+does not count as acceptance. Next canonical proposal is `39218758709`.
+
+### Routing correction takes priority (2026-10-19)
+
+User correction: the three migrated approve/merge/policy callers are not a complete
+test deployment. Release PR/sync/tag still select production reusable workflows,
+and the current testing reusables execute candidate capture in the consumer repo.
+A reusable file on securefix-server does not make that run a server run.
+
+| Consumer workflow / trigger | Existing call and runtime | Actual execution | Required correction |
+| --- | --- | --- | --- |
+| testing-approve-request / PR, owner command | testing reusable / pre.1 | consumer capture, server continuation | notification only in consumer; candidate entirely on server |
+| testing-merge-request / owner or Renovate command | testing reusable / pre.1 | consumer capture, server continuation | same; preserve User review and Client label |
+| testing-policy-check / PR, main push | testing reusable / pre.1 | consumer capture, server continuation | same; retain exact target/control checks |
+| release-pr / main push, manual version | production reusable / v0.2.33 | consumer prepare, production server | testing caller and server processing |
+| release-pr-sync / manual | production reusable / v0.2.33 | consumer | testing caller and server processing |
+| release-tag / merged release PR, manual retry | production reusable / v0.2.33 | consumer build/tag, production server | testing caller and server processing |
+| client-app-smoke / manual | source 678e10c6 probe | consumer | consolidate into real Client label ingress evidence |
+| runtime-smoke / manual, workflow push | synthetic archive | consumer | remove obsolete substitute; verify selected real runtime on server |
+| verify-server / manual | old 97269f5f testing reusable | consumer | remove obsolete entry; use server native verification |
+| verify-published-runtime / manual | old 7819d4ab stable loader | consumer | consolidate into server qualification/isolated runtime verification |
+| ci, fixture-validation, testing-ci, testing-required-ci-fixture | credential-free CI | consumer | preserve; intentional CI fixture remains |
+
+Reuse existing label processor, isolated runtime qualification, restricted Docker,
+release implementation and caller distributor. Enable Release capability only in
+the single-repository testing policy; production policy/control stay unchanged.
+All new caller files/display names and server entrypoints use testing-. Remove
+old consumer release/smoke/verify files as part of the exact reviewed setup change,
+not by leaving duplicate active routes. Notification data remains untrusted and
+requires exact successful first-attempt run, reusable pin/source, caller source,
+current control and native event/authorization checks on server. Keys/PAT remain
+in approved host code; no extra Environment approvals or authentication system.
+
+Preserve Phase B evidence. No runs are currently in progress. Fixture run
+39219142815 failed after a signed managed-bytes mutation of PR #258 with the
+same undiagnosed immediate PR-predicate failure as 39217927273. Independent
+readback is saved as managed-fixture-independent-pr.json; do not repeat mutation.
+Add field-level diagnostic context without relaxing predicates. PR #258 and the
+reviewed, unmerged control proposal #257 are unfinished fixtures, not acceptance.
+
+Order: correct routing implementation and exact caller generation; review/merge
+server source; qualify its explicit development runtime; install isolated control
+and all testing callers through reviewed changes; prove actual Client label route
+and selected runtime per feature (including release); then resume canonical
+migration, native recovery and remaining negative scenarios with independent
+protected-state snapshots. Existing successful/failed evidence is retained.
+
+### Approved development runtime trust correction (2026-10-19)
+
+The previous implementation incorrectly treated every development binary as
+untrusted even after reviewed-source and publication qualification. That was not
+the user's intended boundary. This entry supersedes the earlier blanket PAT/key
+prohibition and split-review design, while retaining its history. Approved server
+source and a verified runtime bound to that source are trusted in server testing
+workflows. Unreviewed PR code and unqualified artifacts remain untrusted.
+
+Use the same qualified development CLI for normal validate/apply operations.
+In particular, `securefix approve apply` uses the existing civitaspo-bot User PAT
+and posts the actual review. App token actions still issue explicit test-only
+repository and operation permissions. No new key delivery mechanism, issuer,
+App, Environment approval or production fixture is introduced.
+
+Delete split approval modes, review-for-testing/apply-reviewed-for-testing,
+relayed policy apply and prepare/continue testing-request commands. Remove
+consumer candidate execution, its loader, split-only Docker and host/candidate
+manifest transfers. Retain qualification as a prerequisite to executing approved
+development code; it is not a split of the tested business operation. Existing
+qualification and migration scratch containers remain only where they exercise
+unreviewed source or protect disposable fixture operations. Reassess them by
+actual role instead of imposing them on approved normal processing.
+
+Verification starts anew for changed execution paths. Earlier split-path successes
+remain historical evidence and cannot prove corrected native processing.
+
+Implementation checklist and throughput checkpoint:
+
+Historical checkpoint: the server-wide routing and sequential/no-agent statements
+below were superseded by the current direction at the top of this document.
+
+- [x] `how` over affected ingress, approval, policy and release call sites.
+- [x] `architect` skipped: user fixed the design and forbids redesign/delegation.
+- [x] Blocking first steps: record corrected trust and preserve previous evidence.
+- [x] Independent workstreams: sequential source/workflow/caller edits; no agents.
+- [x] Shared mutable state: preserve production control; serialize test main/control changes.
+- [x] Smallest safe decomposition: one owner reuses normal commands and exact existing manifests.
+- [ ] Remove split code and route client notifications to server development commands.
+- [ ] Complete release routes and remove obsolete consumer smoke/verify entries.
+- [ ] Verify changed source, review/merge, qualify runtime and install reviewed test callers/control.
+- [ ] Verify real Actions routes and rerun affected acceptance cases.
+
+Model the Domain keeps the existing RequestManifest and ControlRevision as the
+authority data shapes. Subtract Before You Add removes the split modes before
+extending release routing. The implementation and checks are sequential; no
+independent agent review is claimed.
+
+### Native path implementation checkpoint (2026-10-19)
+
+The six testing reusable workflows now share the production job/command sequence
+and execution locations, with the qualified testing loader and testing release
+branch. The five server testing entrypoints retain normal approve, merge, policy,
+CSM and release processing. Normal `approve apply` owns the complete User review;
+split commands, aggregate notification/release adapters, aggregate processor and
+approved-runtime migration/distribution Docker launchers have been removed.
+The existing unreviewed-source scratch harness remains separate.
+
+Canonical distribution now renders all six testing callers, including release;
+the isolated policy enables release only for testing-securefix-server. Client
+capture/release preparation/build/tag/sync stay on the client. Removal of old
+consumer release/smoke/verify routes still requires a reviewed consumer change.
+
+The existing setup-cli action can reuse a source/build-bound main CI artifact.
+It checks the producer repository, workflow, successful first attempt, exact SHA,
+artifact SHA-256, fixed archive members and matching policy bytes before reuse.
+Missing or mismatched artifacts fall back to the existing locked Cargo build.
+Each business operation keeps its own current control and authorization checks.
+The local functional test covers reuse and source/digest rejection; real multi-run
+reuse and corrected native-path acceptance remain pending.
+
+Local checks for this checkpoint: `cargo test --locked` passed 42 library, 288
+CLI, 22 bootstrap and 3 integration tests (2 CLI tests ignored). Clippy with
+`-D warnings`, formatting, shell syntax and actionlint passed. Evidence:
+`/private/tmp/securefix-phaseb-native-final-tests-2.log`,
+`/private/tmp/securefix-phaseb-native-final-clippy-3.log`, and
+`/private/tmp/securefix-phaseb-native-final-actionlint.log`. The earlier failed
+full run and focused corrections remain separate logs; its stale permission
+assertion was fixed before this successful full run. Production `control/active.json`
+and `policy.json` have no local changes. Hosted acceptance remains pending.

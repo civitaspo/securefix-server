@@ -37,55 +37,39 @@ source revision, control identity, event chronology and workflow run/attempt,
 and require the expected rejection reason. A passing comparison after an API,
 setup, artifact or runner failure is not a passing scenario.
 
-## Trusted User review and candidate continuation
+## Approved development runtime and native processing
 
-The development workflow keeps `civitaspo-bot` as its automatic User reviewer.
-Two testing-only CLI operations separate its PAT mutation from candidate execution:
+The owner trusts reviewed server source and verified pre-release binaries bound to
+it. Testing uses the production execution locations and the normal CLI commands.
+Caller capture, release preparation/build/tag and sync stay on the caller; approval,
+merge, policy results, CSM writes and signing/publication stay on the server.
+Testing reusables differ in names/references, qualified runtime selection,
+test-only operation scopes and the independent testing control/policy.
 
-- `securefix approve review-for-testing` independently validates the source
-  request, current policy, accepted head, control and owner authorization, then
-  authenticates the configured User and invokes the existing exact-head,
-  control-bound review core. Only the trusted host binary runs this command with
-  `SECUREFIX_APPROVE_TOKEN`; it needs no candidate App write token.
-- `securefix approve apply-reviewed-for-testing` repeats request/policy/control
-  validation, requires the current User review for that head and control, and
-  performs the existing owner-marker and policy-result operations with the
-  limited test App token. It does not load or authenticate the bot PAT.
+The same approved development CLI runs `securefix approve validate` and
+`securefix approve apply`, using the existing civitaspo-bot User PAT to post the
+actual control-bound review. There is no separate review revision or candidate
+continuation command. The prior split commands and aggregate processor were
+removed after the owner corrected the trust interpretation on 2026-10-19.
 
-Both require a trusted testing policy with `workflow_prefix: testing-` and
-`control_repository` equal to the configured integration repository. That policy
-cannot grant production-repository operations or settings authority. The ordinary
-`approve apply` flow retains its existing combined behavior and configured User.
+The existing Client App secret still creates server labels. Server App tokens and
+all actual mutations are limited to the test repository. Unreviewed code and
+unqualified artifacts remain outside this trust grant; existing scratch sandbox
+validation remains applicable to those cases. Production active control/settings
+are never fixtures. No new App, issuer or Environment approval is introduced.
 
-The local `testing-process-request.yml` now wires these operations into an
-label-triggered development controller. Its separately built, captured-main
-host validator checks the exact first-attempt Client App label event and run
-before any App token is issued. It retrieves the successful native source artifact independently and
-reuses its complete request/provenance/head/control validation. Only trusted
-host code receives the PAT. The candidate continuation runs in the existing
-restricted container with singleton test-repository tokens and read-only request
-data. A policy continuation re-fetches its exact native source; approval requires
-the trusted User review; merge reuses authorization, readiness and expected-head
-apply. Neither keys nor PAT, host GitHub token, Actions command files, home or a
-privileged socket are mounted or passed into that container.
+The test loader qualifies full source/workflow/runtime/control bindings each run.
+`setup-cli` may reuse a source- and build-condition-bound successful main CI
+artifact after checking its exact producer run and digest; this never skips active
+control, authorization, accepted-head or readiness checks. See
+[the current plan](testing-workflows-plan.md#current-direction--supersedes-historical-routing-and-credential-restrictions-2026-10-19).
 
-This is local wiring, not a deployed or successfully executed native flow.
-The trusted caller dispatch job creates the native testing label on the server;
-that event starts processing automatically. Parent scenario orchestration must
-record both the caller run and the server label run and check the resulting state.
-The owner's trusted-server threat model retains the repository Client key and
-excludes deliberate remote secret retrieval by approved server code; the direct
-host/container credential boundary remains required.
+## Historical development runtime and native capture
 
-The host must use the reviewed trusted binary and independently retrieved source
-manifest in its own directory; a candidate-generated manifest or executable is
-not trusted authority. Preserve the existing container restrictions and never
-mount host credentials, PAT/key files, workflow command files, or a privileged
-socket into candidate execution. Merely running these as separate runner steps
-does not establish that boundary. A passing unit test of the split does not
-establish native automatic approval or recovery.
+The following records the earlier container/relay implementation. It is superseded
+for normal approved-development operations by the section above; previous successful
+runs do not validate the corrected execution path.
 
-## Development runtime and native capture
 
 `testing-load-cli.yml` builds a credential-free validator from captured current
 server main. With the caller's test-repository read token, it reads only that

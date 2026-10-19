@@ -1116,7 +1116,9 @@ fn request_server() -> Result<()> {
         .repository(repo.as_str())?
         .require(Capability::Release)?;
     let run_id: u64 = env("GITHUB_RUN_ID")?.parse()?;
-    let label = format!("release-request-{run_id}");
+    let label = crate::config::trusted()?
+        .deployment
+        .label_prefix(&format!("release-request-{run_id}"));
     let description = format!("{}/{run_id}", repo.as_str());
     ensure!(
         description.len() <= 100,
@@ -1157,7 +1159,11 @@ fn request_parts(event: &Value) -> Result<(Repository, RunId)> {
         .as_str()
         .context("event lacks request description")?;
     let run = label
-        .strip_prefix("release-request-")
+        .strip_prefix(
+            &crate::config::trusted()?
+                .deployment
+                .label_prefix("release-request-"),
+        )
         .context("label is not a release request")?;
     let run_id = RunId(
         run.parse()
@@ -2509,7 +2515,11 @@ fn cleanup() -> Result<()> {
     let Some(label) = event["label"]["name"].as_str() else {
         return Ok(());
     };
-    if !label.starts_with("release-request-") {
+    if !label.starts_with(
+        &crate::config::trusted()?
+            .deployment
+            .label_prefix("release-request-"),
+    ) {
         return Ok(());
     }
     let server_repository = &crate::config::trusted()?.deployment.server.repository;

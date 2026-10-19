@@ -158,7 +158,22 @@ fn validate_pull(
             && [&pull["head"]["repo"], &pull["base"]["repo"]]
                 .iter()
                 .all(|r| r["id"] == fixture.id && r["full_name"] == fixture.repository),
-        "fixture is not the exact open Server App migration PR on the fixed test repository"
+        "fixture is not the exact open Server App migration PR on the fixed test repository: number={} state={} draft={} merged={} head={} expected_head={} branch={} expected_branch={} base={} expected_base={} base_ref={} author_id={} author_type={} head_repo={} base_repo={}",
+        pull["number"],
+        pull["state"],
+        pull["draft"],
+        pull["merged"],
+        pull["head"]["sha"],
+        head,
+        pull["head"]["ref"],
+        branch,
+        pull["base"]["sha"],
+        main,
+        pull["base"]["ref"],
+        pull["user"]["id"],
+        pull["user"]["type"],
+        pull["head"]["repo"]["full_name"],
+        pull["base"]["repo"]["full_name"]
     );
     Ok(())
 }

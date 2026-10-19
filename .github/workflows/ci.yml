@@ -24,7 +24,7 @@ concurrency:
 jobs:
   workflows:
     name: GitHub Actions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 10
@@ -78,6 +78,29 @@ jobs:
           -shellcheck=
           -ignore 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
           -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/(install-cli|load-runtime)" in invalid format because ref is missing'
+
+      - name: Publish reusable CLI build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: cli-artifact
+        with:
+          name: securefix-cli-ubuntu-24.04-x64-rust-1.99.0-${{ github.sha }}
+          path: |
+            target/release/securefix
+            target/release/policy.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record reusable CLI provenance
+        if: steps.cli-artifact.outcome == 'success'
+        env:
+          ARTIFACT_ID: ${{ steps.cli-artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.cli-artifact.outputs.artifact-digest }}
+        run: |
+          echo "source_sha=$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "runner=ubuntu-24.04/x64; rust=1.99.0; cargo=--locked --release --bin securefix" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
   status-check:
     runs-on: ubuntu-latest

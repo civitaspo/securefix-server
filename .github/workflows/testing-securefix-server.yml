@@ -241,6 +241,7 @@ jobs:
     if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)))
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
     timeout-minutes: 20
     outputs:
@@ -302,6 +303,7 @@ jobs:
     if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'prepare' || inputs.phase == 'bootstrap') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
     timeout-minutes: 20
     outputs:
@@ -315,7 +317,9 @@ jobs:
           ref: ${{ inputs.candidate_sha || job.workflow_sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-cli
+        id: setup-cli
       - name: Test candidate without credentials
+        if: steps.setup-cli.outputs.reused != 'true'
         run: cargo +1.99.0 test --locked
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload

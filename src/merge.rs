@@ -74,7 +74,7 @@ fn validate() -> Result<()> {
         .as_str()
         .context("missing label name")?;
     let run_id: u64 = label
-        .strip_prefix("merge-request-")
+        .strip_prefix(&config::trusted()?.deployment.label_prefix("merge-request-"))
         .context("unexpected merge request label")?
         .parse()?;
     ensure!(
@@ -510,7 +510,10 @@ fn notify() -> Result<()> {
             && policy.control.as_ref() == Some(&manifest.control)
             && payload["action"] == "created"
             && payload["repository"]["id"].as_u64() == Some(trusted.deployment.server.id)
-            && payload["label"]["name"] == format!("merge-request-{}", manifest.run_id)
+            && payload["label"]["name"]
+                == config::trusted()?
+                    .deployment
+                    .label_prefix(&format!("merge-request-{}", manifest.run_id))
             && payload["label"]["description"]
                 == format!("{}/{}", manifest.repository.full_name, manifest.run_id)
             && request::matches_principal(
@@ -664,7 +667,9 @@ fn cleanup() -> Result<()> {
     let Some(label) = payload["label"]["name"].as_str() else {
         return Ok(());
     };
-    let Some(suffix) = label.strip_prefix("merge-request-") else {
+    let Some(suffix) =
+        label.strip_prefix(&config::trusted()?.deployment.label_prefix("merge-request-"))
+    else {
         return Ok(());
     };
     ensure!(suffix.parse::<u64>().is_ok(), "invalid merge request label");

@@ -1,0 +1,257 @@
+name: testing-Merge Pull Request
+run-name: testing-Merge Pull Request (${{ github.event.label.description }})
+
+on:
+  label:
+    types:
+      - created
+
+permissions: {}
+
+jobs:
+  build:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.event.sender.id == 288068203 && startsWith(github.event.label.name, 'testing-merge-request-')
+    uses: ./.github/workflows/testing-load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+
+  authorize:
+    needs: build
+    if: needs.build.result == 'success' && startsWith(github.event.label.name, 'testing-merge-request-')
+    runs-on: ubuntu-latest
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    timeout-minutes: 15
+    outputs:
+      repository: ${{ steps.validate.outputs.repository }}
+      repository_name: testing-securefix-server
+      manifest_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Validate source proof and accepted head
+        id: validate
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: securefix merge validate
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: steps.validate.outcome == 'success'
+        id: authorization-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-checks: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Record validated authorization and refresh the policy check
+        id: authorize
+        if: steps.validate.outcome == 'success'
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_AUTHORIZATION_TOKEN: ${{ steps.authorization-token.outputs.token }}
+        run: securefix merge authorize
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        if: steps.authorize.outcome == 'success'
+        with:
+          name: merge-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: merge/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  wait:
+    needs: [build, authorize]
+    if: needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    timeout-minutes: 70
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.manifest_artifact_id }}
+          path: merge
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Wait for current checks and review approval
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: securefix merge wait
+
+  apply:
+    needs: [build, authorize, wait]
+    if: always() && needs.authorize.result == 'success' && needs.wait.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+      attestations: read
+    timeout-minutes: 15
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.manifest_artifact_id }}
+          path: merge
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: needs.wait.result == 'success'
+        id: merge-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Merge the accepted SHA
+        id: apply
+        if: needs.wait.result == 'success'
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: securefix merge apply
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: always() && (needs.wait.result != 'success' || steps.apply.outcome != 'success')
+        id: notify-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Report the terminal result
+        if: always() && steps.notify-token.outcome == 'success'
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_NOTIFY_TOKEN: ${{ steps.notify-token.outputs.token }}
+          SECUREFIX_MERGE_RESULT: ${{ needs.wait.result == 'success' && steps.apply.outcome || 'wait-failed' }}
+          SECUREFIX_MERGE_SHA: ${{ steps.apply.outputs.merge_sha }}
+        run: securefix merge notify
+
+  cleanup:
+    needs: [build, apply]
+    if: always() && needs.build.result == 'success' && startsWith(github.event.label.name, 'testing-merge-request-')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    timeout-minutes: 5
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - name: Delete the one-time request label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: securefix merge cleanup

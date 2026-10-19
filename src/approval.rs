@@ -14,33 +14,24 @@ use securefix::{
 pub enum Command {
     Validate,
     Apply,
-    /// Trusted testing host only: validate the request and create the configured User review.
-    ReviewForTesting,
-    /// Candidate testing container: require the trusted User review without receiving its PAT.
-    ApplyReviewedForTesting,
     Cleanup,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ApplyMode {
-    Full,
-    ReviewOnly,
-    Reviewed,
 }
 
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Validate => validate(),
-        Command::Apply => apply(ApplyMode::Full),
-        Command::ReviewForTesting => apply(ApplyMode::ReviewOnly),
-        Command::ApplyReviewedForTesting => apply(ApplyMode::Reviewed),
+        Command::Apply => apply(),
         Command::Cleanup => cleanup(),
     }
 }
 
 fn approval_source(label: &str) -> Result<(u64, RequestKind)> {
     let suffix = label
-        .strip_prefix("approve-request-")
+        .strip_prefix(
+            &config::trusted()?
+                .deployment
+                .label_prefix("approve-request-"),
+        )
         .context("unexpected approval request label")?;
     let (run, kind) = if let Some(run) = suffix.strip_prefix("renovate-") {
         (run, RequestKind::Merge)
@@ -161,15 +152,6 @@ fn validate() -> Result<()> {
     Ok(())
 }
 
-fn require_testing_review_split(deployment: &config::Deployment) -> Result<()> {
-    ensure!(
-        deployment.workflow_prefix == "testing-"
-            && deployment.control_repository.as_ref() == Some(&deployment.integration),
-        "split review operations require the isolated testing deployment"
-    );
-    Ok(())
-}
-
 fn authenticate_reviewer(api: &GitHub, reviewer: &config::Principal) -> Result<()> {
     let approver: Value = api.get("/user")?;
     ensure!(
@@ -196,11 +178,7 @@ fn create_configured_review(read: &GitHub, manifest: &RequestManifest) -> Result
     )
 }
 
-fn apply(mode: ApplyMode) -> Result<()> {
-    let deployment = &config::trusted()?.deployment;
-    if mode != ApplyMode::Full {
-        require_testing_review_split(deployment)?;
-    }
+fn apply() -> Result<()> {
     let read = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&read)?;
     let manifest: RequestManifest =
@@ -240,21 +218,6 @@ fn apply(mode: ApplyMode) -> Result<()> {
     );
     let owner_requested = matches!(&manifest.authorization, Authorization::OwnerComment { .. });
     validate_approval_policy(&read, &policy, &manifest)?;
-    if mode == ApplyMode::ReviewOnly {
-        return create_configured_review(&read, &manifest);
-    }
-    if mode == ApplyMode::Reviewed {
-        ensure!(
-            request::has_current_head_approval_for_control(
-                &read,
-                repository,
-                manifest.pull_request.number,
-                &manifest.pull_request.head_sha,
-                &manifest.control,
-            )?,
-            "trusted User review is not attached to the accepted head and control"
-        );
-    }
     let write = GitHub::from_env("SECUREFIX_WRITE_TOKEN")?;
     if owner_requested
         && let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization
@@ -268,9 +231,7 @@ fn apply(mode: ApplyMode) -> Result<()> {
             &manifest.control,
         )?;
     }
-    if mode == ApplyMode::Full {
-        create_configured_review(&read, &manifest)?;
-    }
+    create_configured_review(&read, &manifest)?;
     let current_policy = Policy::active(&read)?;
     ensure!(
         current_policy.revision == manifest.workflow_sha,
@@ -443,7 +404,11 @@ fn cleanup() -> Result<()> {
     let Some(label) = payload["label"]["name"].as_str() else {
         return Ok(());
     };
-    if !label.starts_with("approve-request-") {
+    if !label.starts_with(
+        &config::trusted()?
+            .deployment
+            .label_prefix("approve-request-"),
+    ) {
         return Ok(());
     }
     approval_source(label)?;
@@ -462,20 +427,6 @@ fn cleanup() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn split_review_modes_require_isolated_state_without_changing_the_user() {
-        let mut deployment = config::trusted().unwrap().deployment.clone();
-        let reviewer = deployment.approval_reviewer.clone();
-        assert!(require_testing_review_split(&deployment).is_err());
-        deployment.workflow_prefix = "testing-".into();
-        assert!(require_testing_review_split(&deployment).is_err());
-        deployment.control_repository = Some(deployment.integration.clone());
-        require_testing_review_split(&deployment).unwrap();
-        assert_eq!(deployment.approval_reviewer, reviewer);
-        deployment.control_repository = Some(deployment.server.clone());
-        assert!(require_testing_review_split(&deployment).is_err());
-    }
 
     #[test]
     fn trusted_review_authentication_requires_the_exact_configured_user() {

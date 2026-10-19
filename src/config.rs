@@ -47,6 +47,10 @@ pub struct Deployment {
 }
 
 impl Deployment {
+    pub fn label_prefix(&self, prefix: &str) -> String {
+        format!("{}{prefix}", self.workflow_prefix)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             matches!(self.workflow_prefix.as_str(), "" | "testing-"),
@@ -394,8 +398,26 @@ mod tests {
         );
         let canonical = ".github/workflows/merge-caller-migration.yml";
         assert_eq!(deployment.workflow_path(canonical).unwrap(), canonical);
+        for label in [
+            "approve-request-7",
+            "merge-request-7",
+            "policy-request-7",
+            "release-request-7",
+            "securefix-7-abcd",
+        ] {
+            assert_eq!(deployment.label_prefix(label), label);
+        }
         deployment.workflow_prefix = "testing-".into();
         deployment.validate().unwrap();
+        for (label, testing_label) in [
+            ("approve-request-7", "testing-approve-request-7"),
+            ("merge-request-7", "testing-merge-request-7"),
+            ("policy-request-7", "testing-policy-request-7"),
+            ("release-request-7", "testing-release-request-7"),
+            ("securefix-7-abcd", "testing-securefix-7-abcd"),
+        ] {
+            assert_eq!(deployment.label_prefix(label), testing_label);
+        }
         assert_eq!(
             deployment.workflow_path(canonical).unwrap(),
             ".github/workflows/testing-merge-caller-migration.yml"

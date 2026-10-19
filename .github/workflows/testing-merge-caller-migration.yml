@@ -44,6 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: read
     timeout-minutes: 20
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
@@ -117,11 +118,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_TEST_READ_TOKEN: ${{ steps.read.outputs.token }}
         run: securefix integration load-testing-control --kind caller-migration
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ steps.runtime.outputs.directory }}/securefix
       - name: Validate the fixed caller and prepare its canonical reviewed plan
         env:
           GITHUB_TOKEN: ${{ steps.read.outputs.token }}
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
-          SECUREFIX_POLICY_PATH: ${{ runner.temp }}/testing-host/testing-policy.json
           SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source_sha }}
           SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control_id }}
           CALLER: ${{ inputs.repository }}
@@ -132,36 +135,8 @@ jobs:
           MERGE_COMMENT: ${{ inputs.merge_comment_id }}
           PUBLISHER: ${{ inputs.publisher_run_id }}
         run: |
-          mkdir -p "$RUNNER_TEMP/testing-operation"
-          cd "$RUNNER_TEMP/testing-operation"
           securefix caller-migration target "$CALLER"
           securefix caller-migration prepare "$CALLER" "$PR" "$HEAD" "$CONTROL" "$APPROVE_COMMENT" "$MERGE_COMMENT" "$PUBLISHER"
-      - name: Prepare the fixed container launcher without executing the candidate
-        env:
-          CANDIDATE_DIRECTORY: ${{ steps.runtime.outputs.directory }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/testing-exec"
-          install -m 0555 "$CANDIDATE_DIRECTORY/securefix" "$RUNNER_TEMP/testing-exec/securefix"
-          cat > "$RUNNER_TEMP/testing-launcher-input" <<'LAUNCHER'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
-            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /operation \
-            --mount "type=bind,source=$RUNNER_TEMP/testing-exec/securefix,target=/candidate/securefix,readonly" \
-            --mount "type=bind,source=$CANDIDATE_DIRECTORY/policy.json,target=/candidate/policy.json,readonly" \
-            --mount "type=bind,source=$RUNNER_TEMP/testing-operation,target=/operation,readonly" \
-            --mount "type=bind,source=$GITHUB_EVENT_PATH,target=/event.json,readonly" \
-            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
-            -e SECUREFIX_SERVER_TOKEN -e SECUREFIX_AUTHORIZATION_TOKEN -e SECUREFIX_MERGE_TOKEN \
-            -e SECUREFIX_SOURCE_SHA -e SECUREFIX_CONTROL_ID \
-            -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SERVER_URL \
-            -e GITHUB_EVENT_NAME -e GITHUB_ACTOR_ID -e GITHUB_REF -e GITHUB_SHA -e GITHUB_WORKFLOW_REF \
-            -e GITHUB_EVENT_PATH=/event.json \
-            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
-            /candidate/securefix caller-migration "$@"
-          LAUNCHER
-          install -m 0555 "$RUNNER_TEMP/testing-launcher-input" "$RUNNER_TEMP/testing-run-candidate"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: authorization
         with:
@@ -172,21 +147,19 @@ jobs:
           permission-checks: write
           permission-issues: write
           permission-pull-requests: write
-      - name: Candidate records exact-head control-bound authorization
+      - name: Record exact-head control-bound authorization
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
           SECUREFIX_AUTHORIZATION_TOKEN: ${{ steps.authorization.outputs.token }}
           SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source_sha }}
           SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control_id }}
-          CANDIDATE_DIRECTORY: ${{ steps.runtime.outputs.directory }}
-        run: '"$RUNNER_TEMP/testing-run-candidate" authorize'
-      - name: Candidate revalidates normal checks and owner review before merge-token issuance
+        run: securefix caller-migration authorize
+      - name: Revalidate normal checks and owner review before merge-token issuance
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
           SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source_sha }}
           SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control_id }}
-          CANDIDATE_DIRECTORY: ${{ steps.runtime.outputs.directory }}
-        run: '"$RUNNER_TEMP/testing-run-candidate" ready'
+        run: securefix caller-migration ready
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: write
         with:
@@ -196,11 +169,10 @@ jobs:
           repositories: testing-securefix-server
           permission-contents: write
           permission-pull-requests: write
-      - name: Candidate revalidates and merges only the accepted canonical head
+      - name: Revalidate and merge only the accepted canonical head
         env:
           SECUREFIX_SERVER_TOKEN: ${{ steps.read.outputs.token }}
           SECUREFIX_MERGE_TOKEN: ${{ steps.write.outputs.token }}
           SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source_sha }}
           SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control_id }}
-          CANDIDATE_DIRECTORY: ${{ steps.runtime.outputs.directory }}
-        run: '"$RUNNER_TEMP/testing-run-candidate" merge'
+        run: securefix caller-migration merge
