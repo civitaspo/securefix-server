@@ -14,8 +14,8 @@
   "repositories": [
     {
       "repository": "civitaspo/testing-securefix-server",
-      "capabilities": ["approve", "merge", "securefix"],
-      "release": null,
+      "capabilities": ["approve", "merge", "securefix", "release"],
+      "release": "terraform-provider",
       "protect_tags": false
     }
   ],

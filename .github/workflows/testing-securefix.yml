@@ -1,0 +1,84 @@
+name: testing-Securefix
+on:
+  label:
+    types: [created]
+permissions: {}
+jobs:
+  runtime:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.event.sender.id == 288068203 && startsWith(github.event.label.name, 'testing-securefix-')
+    uses: ./.github/workflows/testing-load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+  fix:
+    needs: runtime
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.event.sender.id == 288068203 && startsWith(github.event.label.name, 'testing-securefix-')
+    runs-on: ubuntu-latest
+    environment: main
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      pull-requests: read
+    env:
+      SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
+      SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
+      SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - name: Validate label event and source capability
+        id: event
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: securefix securefix validate-event
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+      - name: Validate artifact and bind the destination head
+        id: prepare
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+        run: securefix securefix prepare
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: write-token
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Apply the authorized signed commit
+        id: apply
+        env:
+          SECUREFIX_SERVER_TOKEN: ${{ steps.read-token.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.write-token.outputs.token }}
+        run: securefix securefix apply
+      - name: Delete the consumed request label
+        if: always() && steps.event.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: securefix securefix cleanup

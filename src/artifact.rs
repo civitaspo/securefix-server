@@ -229,12 +229,14 @@ pub fn safe_path(path: &str) -> bool {
 }
 
 pub(crate) fn valid_artifact_name_for_cli(name: &str) -> bool {
-    name.strip_prefix("securefix-").is_some_and(|suffix| {
-        !suffix.is_empty()
-            && name.len() <= 50
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    ["securefix-", "testing-securefix-"].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty()
+                && name.len() <= 50
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
     })
 }
 
@@ -242,6 +244,20 @@ pub(crate) fn valid_artifact_name_for_cli(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn artifact_name_accepts_only_the_production_or_testing_prefix() {
+        for valid in ["securefix-7-abcd", "testing-securefix-7-abcd"] {
+            assert!(valid_artifact_name_for_cli(valid), "{valid}");
+        }
+        for invalid in [
+            "other-securefix-7-abcd",
+            "testing-securefix-",
+            "securefix-x/y",
+        ] {
+            assert!(!valid_artifact_name_for_cli(invalid), "{invalid}");
+        }
+    }
 
     fn archive(name: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

@@ -11,7 +11,7 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
     let source = "a".repeat(40);
     let main = "b".repeat(40);
     let tag = "v0.2.34-pre.1";
-    let mut legacy = rendered_files(&source, tag, "main", false).unwrap();
+    let mut legacy = rendered_files(&source, tag, "main", true).unwrap();
     let ci = "name: CI\non:\n  pull_request:\n    types: [opened, synchronize, reopened]\n  push:\n    branches: [main]\n  workflow_dispatch:\npermissions: {}\njobs:\n  ok:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: exit 0\n  status-check:\n    needs: [ok]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    if: always()\n    steps:\n      - name: Require successful checks\n        env:\n          JOB_RESULT: ${{ needs.ok.result }}\n        run: test \"$JOB_RESULT\" = success\n";
     legacy.insert(".github/workflows/ci.yml".into(), ci.as_bytes().to_vec());
     let content = |bytes: &[u8]| json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)});
@@ -56,12 +56,20 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
         ));
     }
     routes.push(Route::get(version_path, version));
-    for path in ["approve-request", "ci", "merge-request", "policy-check"] {
+    for path in [
+        "approve-request",
+        "ci",
+        "merge-request",
+        "policy-check",
+        "release-pr-sync",
+        "release-pr",
+        "release-tag",
+    ] {
         routes.push(missing(&format!(".github/workflows/testing-{path}.yml")));
     }
     let fixture = Fixture::new(routes);
     let files = caller::initial_testing_files(&fixture.api, &isolated, &source, &main).unwrap();
-    assert_eq!(files.len(), 4);
+    assert_eq!(files.len(), 7);
     assert!(!files.contains_key(".github/workflows/ci.yml"));
     for (path, bytes) in files {
         assert!(path.starts_with(".github/workflows/testing-"));
@@ -69,7 +77,10 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
         assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
         if !path.ends_with("testing-ci.yml") {
             let text = String::from_utf8(bytes).unwrap();
-            assert!(text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+            assert_eq!(
+                text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"),
+                !path.ends_with("testing-release-pr-sync.yml")
+            );
             assert!(text.contains("testing-reusable-"));
             assert!(text.contains(&source));
         }

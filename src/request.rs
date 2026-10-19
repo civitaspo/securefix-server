@@ -491,8 +491,10 @@ fn dispatch() -> Result<()> {
         RequestKind::Approve => Capability::Approve,
         RequestKind::Merge => Capability::Merge,
     })?;
+    let deployment = &config::trusted()?.deployment;
     let label = format!(
-        "{}{}",
+        "{}{}{}",
+        deployment.workflow_prefix,
         match manifest.kind {
             RequestKind::Approve => "approve-request-",
             RequestKind::Merge => "merge-request-",
@@ -512,15 +514,12 @@ fn dispatch() -> Result<()> {
         // Renew automatic review for this exact head/control through the existing
         // approval job. The merge request grants no owner authorization.
         let _: Value = app.post(
-            &format!("/repos/{}/labels", config::trusted()?.deployment.server.repository),
-            &json!({"name":format!("approve-request-renovate-{}", manifest.run_id),"color":"1f6feb","description":description}),
+            &format!("/repos/{}/labels", deployment.server.repository),
+            &json!({"name":format!("{}approve-request-renovate-{}", deployment.workflow_prefix, manifest.run_id),"color":"1f6feb","description":description}),
         )?;
     }
     let _: Value = app.post(
-        &format!(
-            "/repos/{}/labels",
-            config::trusted()?.deployment.server.repository
-        ),
+        &format!("/repos/{}/labels", deployment.server.repository),
         &json!({"name":label,"color":"1f6feb","description":description}),
     )?;
     output("label", label)?;

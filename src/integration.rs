@@ -83,57 +83,19 @@ pub enum Command {
     },
     /// Trusted host: validate the exact first-attempt testing processor before credentials.
     ValidateTestingProcessor {
-        #[arg(long, value_enum, default_value = "request")]
+        #[arg(long, value_enum)]
         kind: testing_processor::HostKind,
     },
     /// Trusted host: qualify the active isolated control's runtime as data.
     LoadTestingControl {
-        #[arg(long, value_enum, default_value = "request")]
+        #[arg(long, value_enum)]
         kind: testing_processor::HostKind,
     },
-    /// Trusted host: independently retrieve a native request from the fixed client.
-    PrepareTestingRequest {
-        #[arg(long, value_enum)]
-        kind: testing_runtime::CaptureKind,
-        #[arg(long)]
-        source_run_id: u64,
-    },
-    /// Candidate container: continue a host-qualified native request with test-only tokens.
-    ContinueTestingRequest {
-        #[arg(long, value_enum)]
-        kind: testing_runtime::CaptureKind,
-        #[arg(long)]
-        source_run_id: u64,
-    },
-    /// Trusted host: qualify an isolated test control's pre-release without executing it.
+    /// Qualify the isolated development runtime before normal native execution.
     LoadTestingRuntime {
         #[arg(long)]
         workflow_sha: String,
     },
-    /// Trusted host: validate the bounded output of a native capture container.
-    ValidateTestingCapture {
-        #[arg(long, value_enum)]
-        kind: testing_runtime::CaptureKind,
-        #[arg(long)]
-        directory: PathBuf,
-        #[arg(long)]
-        source_sha: String,
-        #[arg(long)]
-        control_id: String,
-    },
-    /// Trusted host: dispatch a bounded native capture using only Client App label authority.
-    DispatchTestingRequest {
-        #[arg(long, value_enum)]
-        kind: testing_runtime::CaptureKind,
-        #[arg(long)]
-        directory: PathBuf,
-        #[arg(long)]
-        source_sha: String,
-        #[arg(long)]
-        control_id: String,
-    },
-    /// Trusted host: delete only this run's validated testing request label.
-    CleanupTestingRequest,
     /// Trusted host: qualify a testing pre-release archive as data before publication.
     ValidateTestingPublication {
         #[arg(long)]
@@ -377,28 +339,9 @@ pub fn run(command: Command) -> Result<()> {
             testing_processor::require_context(kind)?;
             testing_runtime::load_for_host()
         }
-        Command::PrepareTestingRequest {
-            kind,
-            source_run_id,
-        } => testing_processor::prepare(kind, source_run_id),
-        Command::ContinueTestingRequest {
-            kind,
-            source_run_id,
-        } => testing_processor::continue_request(kind, source_run_id),
-        Command::LoadTestingRuntime { workflow_sha } => testing_runtime::load(&workflow_sha),
-        Command::ValidateTestingCapture {
-            kind,
-            directory,
-            source_sha,
-            control_id,
-        } => testing_runtime::validate_capture(kind, &directory, &source_sha, &control_id),
-        Command::DispatchTestingRequest {
-            kind,
-            directory,
-            source_sha,
-            control_id,
-        } => testing_runtime::dispatch(kind, &directory, &source_sha, &control_id),
-        Command::CleanupTestingRequest => testing_processor::cleanup(),
+        Command::LoadTestingRuntime { workflow_sha } => {
+            testing_runtime::load_for_caller(&workflow_sha)
+        }
         Command::ValidateTestingPublication {
             source_sha,
             archive,

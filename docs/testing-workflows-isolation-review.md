@@ -1,3 +1,9 @@
+> Superseded on 2026-10-19: the owner trusts approved server development source
+> and its verified runtime, permits the existing PAT/App authentication in normal
+> operations, and withdrew server-wide execution centralization. The split review
+> and host/candidate relay below are historical, removed implementation. See
+> `testing-workflows-plan.md` → Current direction for the authoritative scope.
+
 # Shared-App testing isolation review
 
 Baseline: `7d94766dccf7231408c3aa7b6137315e5fcd7728`.

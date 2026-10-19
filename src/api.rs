@@ -20,9 +20,6 @@ enum WriteContext {
     ClientLabel {
         server: String,
     },
-    TestingLabelCleanup {
-        path: String,
-    },
     Production {
         revision: Option<String>,
         control_id: Option<String>,
@@ -73,37 +70,6 @@ impl GitHub {
         };
         Ok(api)
     }
-    /// Trusted host only: no general server write authority or production label deletion.
-    pub fn testing_label_cleanup_from_env(name: &str, label: &str) -> Result<Self> {
-        let valid = [
-            "testing-approve-request-renovate-",
-            "testing-approve-request-",
-            "testing-merge-request-",
-            "testing-policy-request-",
-        ]
-        .iter()
-        .any(|prefix| {
-            label
-                .strip_prefix(prefix)
-                .and_then(|run| run.parse::<u64>().ok())
-                .is_some_and(|run| run > 0 && label == format!("{prefix}{run}"))
-        });
-        ensure!(
-            valid,
-            "cleanup target is not a canonical testing request label"
-        );
-        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
-        ensure!(!token.is_empty(), "{name} is empty");
-        let mut api = Self::new("https://api.github.com", token)?;
-        api.writes = WriteContext::TestingLabelCleanup {
-            path: format!(
-                "/repos/{}/labels/{label}",
-                crate::config::trusted()?.deployment.server.repository
-            ),
-        };
-        Ok(api)
-    }
-
     pub fn from_env(name: &str) -> Result<Self> {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
@@ -199,7 +165,7 @@ impl GitHub {
         Ok(api)
     }
 
-    fn require_write_target(&self, path: &str) -> Result<()> {
+    fn require_write_target(&self, method: &Method, path: &str) -> Result<()> {
         if let WriteContext::ClientLabel { server } = &self.writes {
             ensure!(
                 path == format!("/repos/{server}/labels"),
@@ -220,14 +186,47 @@ impl GitHub {
                 "/repos/{}/",
                 crate::config::trusted()?.deployment.integration.repository
             );
+            let scratch_target = path.starts_with(&prefix)
+                && !path.contains(['%', '\\', '?'])
+                && !path.split('/').any(|part| part == "." || part == "..");
+            let testing_label_cleanup = if scratch_target {
+                false
+            } else {
+                self.is_testing_label_cleanup(method, path)?
+            };
             ensure!(
-                path.starts_with(&prefix)
-                    && !path.contains(['%', '\\', '?'])
-                    && !path.split('/').any(|part| part == "." || part == ".."),
+                scratch_target || testing_label_cleanup,
                 "integration write target is outside the scratch repository"
             );
         }
         Ok(())
+    }
+
+    fn is_testing_label_cleanup(&self, method: &Method, path: &str) -> Result<bool> {
+        if *method != Method::DELETE || !matches!(self.writes, WriteContext::Production { .. }) {
+            return Ok(false);
+        }
+        if std::env::var("GITHUB_EVENT_NAME").as_deref() != Ok("label")
+            || std::env::var("GITHUB_RUN_ATTEMPT").as_deref() != Ok("1")
+        {
+            return Ok(false);
+        }
+        let trusted = crate::config::trusted()?;
+        if trusted.deployment.workflow_prefix != "testing-"
+            || trusted.deployment.control_repository.is_none()
+        {
+            return Ok(false);
+        }
+        let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH") else {
+            return Ok(false);
+        };
+        let Ok(bytes) = std::fs::read(event_path) else {
+            return Ok(false);
+        };
+        let Ok(payload) = serde_json::from_slice::<Value>(&bytes) else {
+            return Ok(false);
+        };
+        testing_label_cleanup_matches(trusted, method, path, &payload)
     }
 
     fn url(&self, path: &str) -> Result<String> {
@@ -258,12 +257,6 @@ impl GitHub {
                 "client may only create configured server request labels"
             );
         }
-        if let WriteContext::TestingLabelCleanup { path: target } = &self.writes {
-            ensure!(
-                method == Method::DELETE && path == target,
-                "testing cleanup may only delete its exact validated request label"
-            );
-        }
         let read_only_graphql = path == "/graphql"
             && method == Method::POST
             && body
@@ -273,7 +266,7 @@ impl GitHub {
             ensure!(read_only_graphql, "unsupported GraphQL operation");
         }
         if method != Method::GET && method != Method::HEAD && !read_only_graphql {
-            self.require_write_target(path)?;
+            self.require_write_target(&method, path)?;
             self.require_current_revision()?;
         }
         let mut request = self.builder(method.clone(), path)?;
@@ -302,7 +295,7 @@ impl GitHub {
     fn require_current_revision(&self) -> Result<()> {
         let (expected, expected_control) = match &self.writes {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
-            WriteContext::ClientLabel { .. } | WriteContext::TestingLabelCleanup { .. } => {
+            WriteContext::ClientLabel { .. } => {
                 return Ok(());
             }
             WriteContext::Scratch { .. } => return Ok(()),
@@ -409,7 +402,7 @@ impl GitHub {
         );
 
         let path = format!("/repos/{repository}/issues/comments/{comment_id}");
-        self.require_write_target(&path)?;
+        self.require_write_target(&Method::GET, &path)?;
         let comment: Value = self.get(&path)?;
         let policy = crate::config::trusted()?;
         let expected_issue_path = format!("/repos/{repository}/issues/{number}");
@@ -527,7 +520,7 @@ impl GitHub {
                 && deletions.iter().all(|path| !additions.contains_key(path)),
             "duplicate commit file change"
         );
-        self.require_write_target(&format!("/repos/{repository}/git/commits"))?;
+        self.require_write_target(&Method::POST, &format!("/repos/{repository}/git/commits"))?;
         self.require_current_revision()?;
         let (headline, body) = message.split_once('\n').unwrap_or((message, ""));
         let input = serde_json::json!({
@@ -586,7 +579,7 @@ impl GitHub {
         crate::policy::validate_sha(expected_head)?;
         ensure!(number > 0, "invalid auto-merge PR number");
         let path = format!("/repos/{repository}/pulls/{number}");
-        self.require_write_target(&path)?;
+        self.require_write_target(&Method::GET, &path)?;
         let pull: Value = self.get(&path)?;
         ensure!(
             pull["number"] == number
@@ -726,6 +719,79 @@ impl GitHub {
     }
 }
 
+fn testing_label_cleanup_matches(
+    trusted: &crate::config::TrustedConfig,
+    method: &Method,
+    path: &str,
+    payload: &Value,
+) -> Result<bool> {
+    let deployment = &trusted.deployment;
+    if *method != Method::DELETE
+        || deployment.workflow_prefix != "testing-"
+        || deployment.control_repository.is_none()
+        || payload["action"] != "created"
+        || payload["repository"]["id"].as_u64() != Some(deployment.server.id)
+        || payload["repository"]["full_name"] != deployment.server.repository
+        || payload["sender"]["id"].as_u64() != Some(trusted.client_bot_id)
+        || payload["sender"]["type"] != "Bot"
+    {
+        return Ok(false);
+    }
+    let Some(label) = payload["label"]["name"].as_str() else {
+        return Ok(false);
+    };
+    let Some(description) = payload["label"]["description"].as_str() else {
+        return Ok(false);
+    };
+    if label.len() > 50
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || path != format!("/repos/{}/labels/{label}", deployment.server.repository)
+    {
+        return Ok(false);
+    }
+    let request_prefixes = [
+        deployment.label_prefix("approve-request-"),
+        deployment.label_prefix("merge-request-"),
+        deployment.label_prefix("policy-request-"),
+        deployment.label_prefix("release-request-"),
+    ];
+    let label_run = request_prefixes.iter().find_map(|prefix| {
+        let suffix = label.strip_prefix(prefix)?;
+        let suffix = suffix.strip_prefix("renovate-").unwrap_or(suffix);
+        let run = suffix.parse::<u64>().ok()?;
+        (run > 0 && run.to_string() == suffix).then_some(run)
+    });
+    let label_run = label_run.or_else(|| {
+        let suffix = label.strip_prefix(&deployment.label_prefix("securefix-"))?;
+        let (run, digest) = suffix.split_once('-')?;
+        let parsed_run = run.parse::<u64>().ok()?;
+        (parsed_run > 0
+            && parsed_run.to_string() == run
+            && digest.len() == 12
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then_some(parsed_run)
+    });
+    let Some(label_run) = label_run else {
+        return Ok(false);
+    };
+    let Some((repository, described_run)) = description.rsplit_once('/') else {
+        return Ok(false);
+    };
+    if repository != deployment.integration.repository {
+        return Ok(false);
+    }
+    let Ok(described_run) = described_run.parse::<u64>() else {
+        return Ok(false);
+    };
+    Ok(described_run > 0
+        && described_run == label_run
+        && described_run.to_string() == description.rsplit('/').next().unwrap_or_default())
+}
+
 fn read_only_query(query: &str) -> bool {
     let query = query.trim_start();
     query
@@ -756,6 +822,79 @@ mod tests {
         ] {
             assert!(api.url(path).is_err());
         }
+    }
+
+    #[test]
+    fn isolated_normal_cleanup_only_deletes_the_current_testing_server_label() {
+        let mut trusted = crate::config::trusted().unwrap().clone();
+        trusted.deployment.workflow_prefix = "testing-".into();
+        trusted.deployment.control_repository = Some(trusted.deployment.integration.clone());
+        let server = &trusted.deployment.server;
+        for (label, run) in [
+            ("testing-approve-request-11", "11"),
+            ("testing-approve-request-renovate-12", "12"),
+            ("testing-merge-request-13", "13"),
+            ("testing-policy-request-14", "14"),
+            ("testing-release-request-15", "15"),
+            ("testing-securefix-16-012345abcdef", "16"),
+        ] {
+            let payload = serde_json::json!({
+                "action":"created",
+                "repository":{"id":server.id,"full_name":server.repository},
+                "sender":{"id":trusted.client_bot_id,"type":"Bot"},
+                "label":{"name":label,"description":format!("{}/{run}", trusted.deployment.integration.repository)}
+            });
+            let path = format!("/repos/{}/labels/{label}", server.repository);
+            assert!(
+                testing_label_cleanup_matches(&trusted, &Method::DELETE, &path, &payload).unwrap()
+            );
+            assert!(
+                !testing_label_cleanup_matches(&trusted, &Method::POST, &path, &payload).unwrap()
+            );
+            assert!(
+                !testing_label_cleanup_matches(
+                    &trusted,
+                    &Method::DELETE,
+                    &format!("/repos/other/server/labels/{label}"),
+                    &payload,
+                )
+                .unwrap()
+            );
+        }
+
+        let other_caller = serde_json::json!({
+            "action":"created",
+            "repository":{"id":server.id,"full_name":server.repository},
+            "sender":{"id":trusted.client_bot_id,"type":"Bot"},
+            "label":{"name":"testing-merge-request-13","description":"civitaspo/production/13"}
+        });
+        assert!(
+            !testing_label_cleanup_matches(
+                &trusted,
+                &Method::DELETE,
+                &format!(
+                    "/repos/{}/labels/testing-merge-request-13",
+                    server.repository
+                ),
+                &other_caller,
+            )
+            .unwrap()
+        );
+        let production_label = serde_json::json!({
+            "action":"created",
+            "repository":{"id":server.id,"full_name":server.repository},
+            "sender":{"id":trusted.client_bot_id,"type":"Bot"},
+            "label":{"name":"merge-request-13","description":"civitaspo/example/13"}
+        });
+        assert!(
+            !testing_label_cleanup_matches(
+                &trusted,
+                &Method::DELETE,
+                &format!("/repos/{}/labels/merge-request-13", server.repository),
+                &production_label,
+            )
+            .unwrap()
+        );
     }
     #[test]
     fn release_asset_download_requests_binary_bytes() {
@@ -1061,54 +1200,17 @@ mod tests {
         fixture.finish();
     }
     #[test]
-    fn testing_label_cleanup_cannot_read_write_or_delete_any_other_target() {
-        use crate::fixtures::{Fixture, Route};
-        let server = &crate::config::trusted()
-            .unwrap()
-            .deployment
-            .server
-            .repository;
-        let path = format!("/repos/{server}/labels/testing-approve-request-7");
-        let mut fixture = Fixture::new(vec![Route::request("DELETE", &path, 204, Value::Null)]);
-        fixture.api.writes = WriteContext::TestingLabelCleanup { path: path.clone() };
-        for wrong in [
-            format!("/repos/{server}/labels/approve-request-7"),
-            format!("/repos/{server}/labels/testing-approve-request-8"),
-            "/repos/other/server/labels/testing-approve-request-7".into(),
-        ] {
-            assert!(fixture.api.delete(&wrong).is_err());
-        }
-        assert!(fixture.api.get::<Value>(&path).is_err());
-        assert!(fixture.api.post::<Value>(&path, &Value::Null).is_err());
-        assert!(fixture.api.patch::<Value>(&path, &Value::Null).is_err());
-        fixture.api.delete(&path).unwrap();
-        for label in [
-            "approve-request-7",
-            "testing-approve-request-0",
-            "testing-approve-request-07",
-            "testing-approve-request-7/extra",
-            "testing-policy-request-+7",
-        ] {
-            assert!(
-                GitHub::testing_label_cleanup_from_env("UNUSED_TESTING_TOKEN", label)
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("not a canonical testing request label")
-            );
-        }
-        fixture.finish();
-    }
-
-    #[test]
     fn scratch_writes_cannot_escape_the_fixed_repository() {
         let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
         api.writes = WriteContext::Scratch {
             candidate_sha: "a".repeat(40),
         };
         assert!(
-            api.require_write_target(&format!("/repos/{SCRATCH_REPOSITORY}/issues/1/comments"))
-                .is_ok()
+            api.require_write_target(
+                &Method::POST,
+                &format!("/repos/{SCRATCH_REPOSITORY}/issues/1/comments"),
+            )
+            .is_ok()
         );
         for path in [
             "/repos/civitaspo/securefix-server/issues/1/comments",
@@ -1353,7 +1455,12 @@ mod tests {
             format!("/repos/{}/../securefix-server/labels", state.repository),
             format!("/repos/{}/%2e%2e/labels", state.repository),
         ] {
-            assert!(fixture.api.require_write_target(&path).is_err());
+            assert!(
+                fixture
+                    .api
+                    .require_write_target(&Method::POST, &path)
+                    .is_err()
+            );
         }
         let _: Value = fixture
             .api

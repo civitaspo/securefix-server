@@ -3,43 +3,39 @@ name: testing-Load CLI
 on:
   workflow_call:
     outputs:
-      validator-artifact-id:
-        description: Immutable artifact containing the captured trusted host validator
-        value: ${{ jobs.load.outputs.validator-artifact-id }}
       artifact-id:
-        description: Immutable artifact containing the qualified candidate as data
+        description: Immutable artifact ID of the qualified test runtime
         value: ${{ jobs.load.outputs.artifact-id }}
       source-sha:
-        description: Exact candidate source selected by the isolated test control
+        description: Exact development source selected by the test control
         value: ${{ jobs.load.outputs.source-sha }}
       control-id:
-        description: Full isolated test control identity
+        description: Canonical identity of the isolated test control
         value: ${{ jobs.load.outputs.control-id }}
       workflow-sha:
-        description: Exact revision defining this reusable workflow
+        description: Immutable revision defining this reusable workflow
         value: ${{ jobs.load.outputs.workflow-sha }}
-
 permissions: {}
-
 defaults:
   run:
     shell: bash -euo pipefail {0}
-
 jobs:
   load:
-    if: github.repository == 'civitaspo/testing-securefix-server'
+    if: >-
+      (github.repository == 'civitaspo/testing-securefix-server') ||
+      (github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: read
     timeout-minutes: 20
     outputs:
-      validator-artifact-id: ${{ steps.validator.outputs.artifact-id }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       source-sha: ${{ steps.runtime.outputs.source_sha }}
       control-id: ${{ steps.runtime.outputs.control_id }}
       workflow-sha: ${{ job.workflow_sha }}
     steps:
-      - name: Capture the trusted host validator source
+      - name: Capture the protected server baseline
         id: baseline
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,16 +46,7 @@ jobs:
           ref: ${{ steps.baseline.outputs.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-cli
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        id: validator
-        with:
-          name: testing-host-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            target/release/securefix
-            target/release/policy.json
-          if-no-files-found: error
-          retention-days: 1
-      - name: Qualify the pre-release as data with the trusted host validator
+      - name: Qualify the pinned pre-release against the isolated control
         id: runtime
         env:
           GITHUB_TOKEN: ${{ github.token }}

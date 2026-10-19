@@ -1,0 +1,40 @@
+name: testing-Reusable Release PR Sync
+
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  cli:
+    uses: ./.github/workflows/testing-load-cli.yml
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+
+  sync:
+    needs: cli
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
+          path: ${{ runner.temp }}/securefix-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/securefix-runtime/securefix
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release/testing-next
+          persist-credentials: false
+      - name: Sync release PR title and summary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+        run: securefix release sync-pr

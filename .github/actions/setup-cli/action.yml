@@ -1,18 +1,33 @@
-name: Build trusted Securefix CLI
-description: Compile this checkout with its locked toolchain and dependencies
+name: Set up trusted Securefix CLI
+description: Reuse a qualified main CI build or compile this checkout
 outputs:
   binary:
     description: Absolute path to the compiled CLI
-    value: ${{ steps.build.outputs.binary }}
+    value: ${{ steps.reuse.outputs.binary || steps.build.outputs.binary }}
+  reused:
+    description: Whether setup selected a verified reusable CI artifact
+    value: ${{ steps.reuse.outputs.reused }}
 runs:
   using: composite
   steps:
+    - name: Reuse a verified main CI build when available
+      id: reuse
+      if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT_NAME: ${{ github.event_name }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/reuse-build.sh"
+
     - name: Install Rust toolchain
+      if: steps.reuse.outputs.binary == ''
       shell: bash
       working-directory: ${{ github.action_path }}/../../..
       run: rustup toolchain install 1.99.0 --profile minimal
     - name: Build CLI
       id: build
+      if: steps.reuse.outputs.binary == ''
       shell: bash
       working-directory: ${{ github.action_path }}/../../..
       run: |

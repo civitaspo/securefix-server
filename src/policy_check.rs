@@ -97,27 +97,6 @@ impl Manifest {
     }
 }
 
-pub(crate) fn validate_testing_capture(
-    bytes: &[u8],
-    repository: &str,
-    repository_id: u64,
-    source: &str,
-    control: &str,
-    run_id: u64,
-) -> Result<()> {
-    let manifest: Manifest = serde_json::from_slice(bytes)?;
-    manifest.validate()?;
-    ensure!(
-        manifest.repository == repository
-            && manifest.repository_id == repository_id
-            && manifest.source_sha == source
-            && manifest.control.identity()? == control
-            && manifest.run_id == run_id,
-        "testing policy capture differs from the qualified runtime or client run"
-    );
-    Ok(())
-}
-
 #[derive(Subcommand)]
 pub enum Command {
     Capture,
@@ -125,11 +104,6 @@ pub enum Command {
     Locate,
     Validate,
     Apply,
-    /// Candidate sandbox: process a host-relayed policy run with test-only credentials.
-    ApplyForTesting {
-        #[arg(long)]
-        source_run_id: u64,
-    },
     Cleanup,
 }
 
@@ -139,8 +113,7 @@ pub fn run(command: Command) -> Result<()> {
         Command::Dispatch => dispatch(),
         Command::Locate => locate(),
         Command::Validate => validate(),
-        Command::Apply => apply(None),
-        Command::ApplyForTesting { source_run_id } => apply(Some(source_run_id)),
+        Command::Apply => apply(),
         Command::Cleanup => cleanup(),
     }
 }
@@ -271,7 +244,7 @@ fn dispatch() -> Result<()> {
         .repository(&manifest.repository)?
         .require(Capability::Merge)?;
     let api = GitHub::client_from_env("SECUREFIX_APP_TOKEN")?;
-    let _: Value = api.post(&format!("/repos/{server}/labels"), &json!({"name":format!("policy-request-{}",manifest.run_id),"description":format!("{}/{}",manifest.repository,manifest.run_id),"color":"1f6feb"}))?;
+    let _: Value = api.post(&format!("/repos/{server}/labels"), &json!({"name":format!("{}policy-request-{}",config::trusted()?.deployment.workflow_prefix,manifest.run_id),"description":format!("{}/{}",manifest.repository,manifest.run_id),"color":"1f6feb"}))?;
     Ok(())
 }
 
@@ -299,7 +272,7 @@ fn label(policy: &Policy) -> Result<(String, u64)> {
     let id: u64 = payload["label"]["name"]
         .as_str()
         .context("missing policy label")?
-        .strip_prefix("policy-request-")
+        .strip_prefix(&deployment.label_prefix("policy-request-"))
         .context("invalid policy label")?
         .parse()?;
     let (repository, run) = payload["label"]["description"]
@@ -517,38 +490,11 @@ fn validate() -> Result<()> {
     )
 }
 
-pub(crate) fn prepare_testing_request(
-    api: &GitHub,
-    policy: &Policy,
-    repository: &str,
-    run_id: u64,
-) -> Result<()> {
-    let manifest = source_for(api, policy, repository, run_id)?;
-    securefix::control::ControlRevision::require_current(api, &manifest.control)?;
-    workflow::write_json("policy-check/manifest.json", &manifest)
-}
-
-fn apply(testing_run: Option<u64>) -> Result<()> {
+fn apply() -> Result<()> {
     let read = GitHub::from_env("SECUREFIX_SERVER_TOKEN")?;
     let policy = Policy::active(&read)?;
     workflow::require_current_runtime(&read, WRAPPER)?;
-    let manifest = if let Some(run_id) = testing_run {
-        let deployment = &config::trusted()?.deployment;
-        ensure!(
-            deployment.workflow_prefix == "testing-"
-                && deployment.control_repository.as_ref() == Some(&deployment.integration),
-            "relayed policy apply requires isolated testing configuration"
-        );
-        let requested: Manifest = serde_json::from_slice(&fs::read("policy-check/manifest.json")?)?;
-        let manifest = source_for(&read, &policy, &deployment.integration.repository, run_id)?;
-        ensure!(
-            serde_json::to_value(&requested)? == serde_json::to_value(&manifest)?,
-            "relayed policy source changed after host qualification"
-        );
-        manifest
-    } else {
-        source(&read, &policy)?
-    };
+    let manifest = source(&read, &policy)?;
     securefix::control::ControlRevision::require_current(&read, &manifest.control)?;
     let result: Result<()> = (|| match &manifest.target {
         Target::PullRequest {
@@ -816,7 +762,10 @@ fn cleanup() -> Result<()> {
     let api = GitHub::from_env("GITHUB_TOKEN")?;
     let policy = Policy::active(&api)?;
     let (_, id) = label(&policy)?;
-    if let Err(error) = api.delete(&format!("/repos/{server}/labels/policy-request-{id}")) {
+    if let Err(error) = api.delete(&format!(
+        "/repos/{server}/labels/{}policy-request-{id}",
+        config::trusted()?.deployment.workflow_prefix
+    )) {
         ensure!(
             error
                 .downcast_ref::<securefix::api::ApiError>()
