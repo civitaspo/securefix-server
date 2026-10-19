@@ -1,5 +1,12 @@
 # Agent instructions
 
+## GitHub communication language
+
+Write PR titles, descriptions, and comments in English, regardless of the chat
+language, unless the owner explicitly requests another language for that GitHub
+artifact. Before publishing or editing, check the entire resulting text (including
+appended handoff notes) for language consistency. Chat replies may remain Japanese.
+
 ## Purpose and architecture
 
 This repository is a privileged GitHub automation server. Preserve its security

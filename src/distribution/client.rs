@@ -448,9 +448,14 @@ fn validate_legacy_or_native_action(
     let native = step["with"]
         .as_mapping()
         .context("native Securefix action inputs are missing")?;
-    let prefix = &crate::config::trusted()?.deployment.workflow_prefix;
+    let config = crate::config::trusted()?;
+    let prefix = &config.deployment.workflow_prefix;
+    let expected_control_repository = &config.deployment.control_repository().repository;
+    let explicit_control_repository = native.get("control-repository").and_then(Value::as_str);
     ensure!(
-        native.len() == 6 + usize::from(!prefix.is_empty())
+        native.len()
+            == 6 + usize::from(!prefix.is_empty())
+                + usize::from(explicit_control_repository.is_some())
             && (if prefix.is_empty() {
                 native.get("workflow-prefix").is_none()
             } else {
@@ -458,6 +463,11 @@ fn validate_legacy_or_native_action(
             })
             && native.get("runtime-sha").and_then(Value::as_str) == Some(native_sha)
             && native.get("server-repository").and_then(Value::as_str) == Some(server_repository)
+            && (if expected_control_repository == server_repository {
+                explicit_control_repository.is_none_or(|value| value == server_repository)
+            } else {
+                explicit_control_repository == Some(expected_control_repository.as_str())
+            })
             && native.get("runtime-default-branch").and_then(Value::as_str) == Some(default_branch)
             && native.get("client-token").and_then(Value::as_str)
                 == Some("${{ steps.securefix-client-token.outputs.token }}")
@@ -535,6 +545,7 @@ fn render_native_steps(
         "server repository is invalid"
     );
     let default_branch = &config.deployment.server.default_branch;
+    let control_repository = &config.deployment.control_repository().repository;
     let client_app_id = config.deployment.client_app_id;
     let condition = serde_json::to_string(condition)?;
     let server_repository_yaml = serde_json::to_string(server_repository)?;
@@ -550,6 +561,13 @@ fn render_native_steps(
     let mut rendered = format!(
         "      - name: Create Securefix client token\n        id: securefix-client-token\n        if: {condition}\n        uses: {TOKEN_ACTION} {TOKEN_ACTION_COMMENT}\n        with:\n          app-id: {client_app_id}\n          private-key: ${{{{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}}}\n          owner: {server_owner}\n          repositories: {server_name}\n          permission-issues: write\n\n      - name: {action_name}\n        if: {condition}\n        uses: {action_ref} # {runtime_version}\n        with:\n          runtime-sha: {runtime_sha}\n          server-repository: {server_repository_yaml}\n          runtime-default-branch: {default_branch}\n          client-token: ${{{{ steps.securefix-client-token.outputs.token }}}}\n          files: ${{{{ steps.securefix-files.outputs.files }}}}\n          commit-message: {commit_message}\n\n"
     );
+    if control_repository != server_repository {
+        let control_repository_yaml = serde_json::to_string(control_repository)?;
+        rendered = rendered.replace(
+            "          runtime-default-branch:",
+            &format!("          control-repository: {control_repository_yaml}\n          runtime-default-branch:"),
+        );
+    }
     if !config.deployment.workflow_prefix.is_empty() {
         let prefix = serde_json::to_string(&config.deployment.workflow_prefix)?;
         rendered = rendered.replace(
@@ -924,6 +942,44 @@ mod tests {
         assert!(validate_previous_generation(&files, &"a".repeat(40)).is_err());
         files.insert(AUTOFIX_PATH.to_owned(), second);
         assert!(validate_previous_generation(&files, &"b".repeat(40)).is_ok());
+    }
+
+    #[test]
+    fn native_client_action_uses_the_configured_testing_control_repository() {
+        let mut config = crate::config::trusted().unwrap().clone();
+        let production = render_native_steps(
+            "Request Securefix commit",
+            "steps.workflow-fixes.outputs.changed == 'true'",
+            "ci: apply test",
+            &config,
+            &"a".repeat(40),
+            "v0.2.34-pre.13",
+        )
+        .unwrap();
+        assert!(!production.contains("control-repository:"));
+        config.deployment.workflow_prefix = "testing-".into();
+        config.deployment.control_repository = Some(config.deployment.integration.clone());
+        let rendered = render_native_steps(
+            "Request Securefix commit",
+            "steps.workflow-fixes.outputs.changed == 'true'",
+            "ci: apply test",
+            &config,
+            &"a".repeat(40),
+            "v0.2.34-pre.13",
+        )
+        .unwrap();
+        let parsed: Value = serde_yaml::from_str(&format!("steps:\n{rendered}")).unwrap();
+        let with = &parsed["steps"][1]["with"];
+        assert_eq!(
+            with["server-repository"],
+            config.deployment.server.repository
+        );
+        assert_eq!(
+            with["control-repository"],
+            config.deployment.integration.repository
+        );
+        assert_eq!(with["workflow-prefix"], "testing-");
+        assert_eq!(with["runtime-sha"], "a".repeat(40));
     }
     #[test]
     fn renovate_token_pin_updates_migrate_without_accepting_unknown_actions() {

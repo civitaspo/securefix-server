@@ -53,7 +53,33 @@ fn testing_publication_executes_only_trusted_qualification_and_stable_publisher(
             assert!(guard.contains(condition), "{condition}");
         }
     }
+    let build = &value["jobs"]["build"];
+    assert_eq!(
+        build["outputs"]["validator-artifact-id"],
+        "${{ steps.validator.outputs.artifact-id }}"
+    );
+    assert_eq!(
+        build["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["uses"] == "./.github/actions/setup-cli")
+            .count(),
+        1
+    );
     let publish = &value["jobs"]["publish"];
+    assert_eq!(publish["needs"], serde_json::json!(["build", "controller"]));
+    assert_eq!(
+        publish["env"]["SECUREFIX_TEST_BASELINE_SHA"],
+        "${{ needs.build.outputs.source-sha }}"
+    );
+    assert!(publish["steps"].as_array().unwrap().iter().any(|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            && step["with"]["artifact-ids"] == "${{ needs.build.outputs.validator-artifact-id }}"
+            && step["with"]["path"] == "${{ runner.temp }}/testing-validator"
+    }));
     assert_eq!(publish["environment"], "main");
     assert_eq!(publish["concurrency"]["group"], "securefix-control");
     let steps = publish["steps"].as_array().unwrap();
@@ -155,10 +181,13 @@ fn testing_loader_qualifies_selected_runtime_without_operational_secrets() {
     let text = serde_json::to_string(load).unwrap();
     assert!(text.contains("load-testing-runtime --workflow-sha"));
     assert!(text.contains("job.workflow_sha"));
-    assert!(text.contains("setup-cli"));
+    assert!(text.contains("load-runtime"));
+    assert!(text.contains("install-cli"));
+    assert!(text.contains("control-repository"));
+    assert!(text.contains("testing-"));
     for forbidden in [
+        "setup-cli",
         "secrets.",
-        "install-cli",
         "create-github-app-token",
         "validator-artifact-id",
         "docker run",
@@ -366,6 +395,7 @@ fn runtime_loader_stops_before_extraction_or_export_when_a_gate_fails() {
         "bad-metadata",
         "wrong-workflow-namespace",
         "wrong-policy-namespace",
+        "wrong-control-policy",
         "invalid-workflow-prefix",
     ]
     .into_iter()
@@ -385,8 +415,9 @@ case "$1" in
     [[ "$SCENARIO" != api-error ]] || exit 1
     case "$2" in
       repos/example/runtime) cat "$REPOSITORY_JSON" ;;
-      repos/example/runtime/commits/main) printf '%s\n' "$ACTIVE_SOURCE_SHA" ;;
-      repos/example/runtime/contents/control/active.json\?ref=*)
+      repos/example/control) cat "$CONTROL_REPOSITORY_JSON" ;;
+      repos/example/runtime/commits/main|repos/example/control/commits/control-main) printf '%s\n' "$ACTIVE_SOURCE_SHA" ;;
+      repos/example/runtime/contents/control/active.json\?ref=*|repos/example/control/contents/control/active.json\?ref=*)
         [[ "$SCENARIO" != missing ]] || exit 1
         cat "$CONTENT_RESPONSE" ;;
       repos/example/runtime/actions/runs/9) cat "$PUBLISHER_RUN_JSON" ;;
@@ -423,7 +454,11 @@ printf '%s  %s\n' "$digest" "$1"
 set -euo pipefail
 echo extraction >> "$TRACE"
 cp "$VERIFIER" "$4/securefix"
-printf '{"deployment":{"workflow_prefix":"%s"}}\n' "$MOCK_POLICY_PREFIX" > "$4/policy.json"
+if [[ "$CONTROL_REPOSITORY" != "$REPOSITORY" || -n "${MOCK_CONTROL_REPOSITORY:-}" ]]; then
+  printf '{"deployment":{"workflow_prefix":"%s","server":{"repository":"example/runtime","id":1,"default_branch":"main"},"control_repository":{"repository":"%s","id":%s,"default_branch":"control-main"}}}\n' "$MOCK_POLICY_PREFIX" "${MOCK_CONTROL_REPOSITORY:-$CONTROL_REPOSITORY}" "${MOCK_CONTROL_ID:-2}" > "$4/policy.json"
+else
+  printf '{"deployment":{"workflow_prefix":"%s","server":{"repository":"example/runtime","id":1,"default_branch":"main"}}}\n' "$MOCK_POLICY_PREFIX" > "$4/policy.json"
+fi
 "#,
             ),
             (
@@ -481,7 +516,16 @@ fi
         fs::write(
             &repository_path,
             serde_json::to_vec(&serde_json::json!({
-                "id":1,"default_branch":"main","owner":{"id":2}
+                "id":1,"full_name":"example/runtime","default_branch":"main","owner":{"id":2}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let control_repository_path = temp.path().join("control-repository.json");
+        fs::write(
+            &control_repository_path,
+            serde_json::to_vec(&serde_json::json!({
+                "id":2,"full_name":"example/control","default_branch":"control-main","owner":{"id":2}
             }))
             .unwrap(),
         )
@@ -570,6 +614,14 @@ fi
             )
             .env("CONTROL_ID", &control_id)
             .env("REPOSITORY", "example/runtime")
+            .env(
+                "CONTROL_REPOSITORY",
+                if testing {
+                    "example/control"
+                } else {
+                    "example/runtime"
+                },
+            )
             .env("DEFAULT_BRANCH", "main")
             .env(
                 "WORKFLOW_PREFIX",
@@ -590,6 +642,15 @@ fi
             .env("SCENARIO", scenario)
             .env("CONTENT_RESPONSE", content_path)
             .env("REPOSITORY_JSON", repository_path)
+            .env("CONTROL_REPOSITORY_JSON", control_repository_path)
+            .env(
+                "MOCK_CONTROL_REPOSITORY",
+                if scenario == "wrong-control-policy" {
+                    "example/wrong"
+                } else {
+                    ""
+                },
+            )
             .env("PUBLISHER_RUN_JSON", publisher_run_path_file)
             .env("RELEASE_JSON", release_path)
             .env("TRACE", &trace)
@@ -639,6 +700,7 @@ fi
             }
             "bad-attestation" => "download\nattestation\n",
             "wrong-policy-namespace" => "download\nattestation\nextraction\n",
+            "wrong-control-policy" => "download\nattestation\nextraction\n",
             "wrong-source"
             | "malformed-pin"
             | "wrong-publisher-source"
@@ -968,6 +1030,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     );
     let client = fs::read_to_string(".github/actions/client/action.yml").unwrap();
     let client_action: Value = serde_yaml::from_slice(client.as_bytes()).unwrap();
+    assert_eq!(client_action["inputs"]["control-repository"]["default"], "");
     let client_steps = client_action["runs"]["steps"].as_array().unwrap();
     let published_loader = client_steps
         .iter()
@@ -989,6 +1052,17 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert_eq!(
         published_loader["env"]["GH_TOKEN"],
         "${{ inputs.runtime-token || github.token }}"
+    );
+    assert_eq!(
+        published_loader["env"]["CONTROL_REPOSITORY"],
+        "${{ inputs.control-repository || inputs.runtime-repository || inputs.server-repository }}"
+    );
+    let shared_loader: Value =
+        serde_yaml::from_slice(&fs::read(".github/actions/load-runtime/action.yml").unwrap())
+            .unwrap();
+    assert_eq!(
+        shared_loader["runs"]["steps"][0]["env"]["CONTROL_REPOSITORY"],
+        "${{ inputs.control-repository || inputs.repository }}"
     );
     let install_runtime = client_steps
         .iter()
@@ -1090,6 +1164,14 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         "${{ steps.upload.outputs.artifact-id }}"
     );
     let build_steps = build["steps"].as_array().unwrap();
+    assert_eq!(
+        build_steps
+            .iter()
+            .filter(|step| step["uses"] == "./.github/actions/setup-cli")
+            .count(),
+        1,
+        "the publisher validates and packages one source build"
+    );
     assert!(build_steps.iter().any(|step| {
         step["with"]["repository"] == "civitaspo/securefix-server"
             && step["with"]["ref"] == "${{ job.workflow_sha }}"
@@ -1274,10 +1356,8 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/publish-runtime.yml",
             ".github/workflows/testing-control-fixture.yml",
             ".github/workflows/testing-distribute-runtime.yml",
-            ".github/workflows/testing-load-cli.yml",
             ".github/workflows/testing-merge-caller-migration.yml",
             ".github/workflows/testing-migration-fixture.yml",
-            ".github/workflows/testing-publish-runtime.yml",
             ".github/workflows/testing-publish-runtime.yml",
             ".github/workflows/testing-release-pr.yml",
             ".github/workflows/testing-securefix-server.yml"
@@ -2238,6 +2318,16 @@ fn scratch_uses_one_selected_runtime_and_test_scoped_tokens() {
             .unwrap()
             .contains("inputs.phase == 'verify'")
     );
+    let setup = build["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["uses"] == "./.github/actions/setup-cli")
+        .unwrap();
+    assert_eq!(
+        setup["with"]["candidate-run-id"],
+        "${{ inputs.phase == 'verify' && inputs.fixture_run_id || '' }}"
+    );
     let scratch = &value["jobs"]["scratch"];
     assert_eq!(
         scratch["env"]["SECUREFIX_TEST_BASELINE_SHA"],
@@ -2921,13 +3011,29 @@ case "$2" in
     printf '{"id":1250079425,"full_name":"civitaspo/securefix-server"}\n'
     ;;
   repos/civitaspo/securefix-server/actions/workflows/ci.yml/runs*)
+    if [[ "$MOCK_MODE" == candidate-* ]]; then
+      printf '{"total_count":0,"workflow_runs":[]}'
+      exit 0
+    fi
     printf '{"total_count":1,"workflow_runs":[{"id":39212230237,"path":".github/workflows/ci.yml","event":"push","head_branch":"main","head_sha":"%s","repository":{"id":1250079425,"full_name":"civitaspo/securefix-server"},"head_repository":{"id":1250079425,"full_name":"civitaspo/securefix-server"},"status":"completed","conclusion":"success","run_attempt":1}]}\n' "$MOCK_RUN_SHA"
+    ;;
+  repos/civitaspo/securefix-server/actions/runs/39212230238)
+    run_sha="$MOCK_WORKFLOW_SHA"
+    printf '{"id":39212230238,"path":".github/workflows/testing-securefix-server.yml@refs/heads/main","event":"workflow_dispatch","head_branch":"main","head_sha":"%s","repository":{"id":1250079425,"full_name":"civitaspo/securefix-server"},"head_repository":{"id":1250079425,"full_name":"civitaspo/securefix-server"},"status":"completed","conclusion":"success","run_attempt":1,"actor":{"id":4525500},"triggering_actor":{"id":4525500}}\n' "$run_sha"
+    ;;
+  repos/civitaspo/securefix-server/actions/runs/39212230238/artifacts*)
+    digest="$MOCK_CANDIDATE_DIGEST"
+    [[ "$MOCK_MODE" != candidate-digest-mismatch ]] || digest=0000000000000000000000000000000000000000000000000000000000000000
+    printf '{"artifacts":[{"id":12171131611,"name":"candidate-runtime","expired":false,"size_in_bytes":5000,"digest":"sha256:%s","workflow_run":{"id":39212230238,"repository_id":1250079425,"head_repository_id":1250079425,"head_branch":"main","head_sha":"%s"}}]}\n' "$digest" "$MOCK_WORKFLOW_SHA"
     ;;
   repos/civitaspo/securefix-server/actions/runs/39212230237/artifacts*)
     printf '{"artifacts":[{"id":12171131610,"name":"securefix-cli-ubuntu-24.04-x64-rust-1.99.0-%s","expired":false,"size_in_bytes":5000,"digest":"sha256:%s","workflow_run":{"id":39212230237,"repository_id":1250079425,"head_repository_id":1250079425,"head_branch":"main","head_sha":"%s"}}]}\n' "$MOCK_RUN_SHA" "$MOCK_DIGEST" "$MOCK_RUN_SHA"
     ;;
   repos/civitaspo/securefix-server/actions/artifacts/12171131610/zip)
     cat "$MOCK_ARCHIVE"
+    ;;
+  repos/civitaspo/securefix-server/actions/artifacts/12171131611/zip)
+    cat "$MOCK_CANDIDATE_ARCHIVE"
     ;;
   *) exit 2 ;;
 esac
@@ -3004,25 +3110,96 @@ esac
         crate::hex_encode(Sha256::digest(fs::read(&archive_path).unwrap()))
     };
 
-    for (scenario, run_sha, reported_digest, expected_reuse) in [
-        ("valid", source_sha.as_str(), artifact_digest.as_str(), true),
+    for (scenario, run_sha, reported_digest, expected_reuse, mode) in [
+        (
+            "valid",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            true,
+            "ci",
+        ),
         (
             "source-mismatch",
             "0000000000000000000000000000000000000000",
             artifact_digest.as_str(),
             false,
+            "ci",
         ),
         (
             "digest-mismatch",
             source_sha.as_str(),
             "0000000000000000000000000000000000000000000000000000000000000000",
             false,
+            "ci",
+        ),
+        (
+            "candidate-valid",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            true,
+            "candidate-valid",
+        ),
+        (
+            "candidate-source-mismatch",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            false,
+            "candidate-source-mismatch",
+        ),
+        (
+            "candidate-build-mismatch",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            false,
+            "candidate-build-mismatch",
+        ),
+        (
+            "candidate-digest-mismatch",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            false,
+            "candidate-digest-mismatch",
         ),
     ] {
         let scenario_dir = temp.path().join(scenario);
         fs::create_dir_all(&scenario_dir).unwrap();
         let output = scenario_dir.join("github-output");
         fs::write(&output, "").unwrap();
+        let workflow_sha = "a".repeat(40);
+        let candidate_archive = scenario_dir.join("candidate.zip");
+        let mut candidate_zip = zip::ZipWriter::new(fs::File::create(&candidate_archive).unwrap());
+        candidate_zip
+            .start_file("securefix", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        candidate_zip
+            .write_all(b"verified executable bytes")
+            .unwrap();
+        candidate_zip
+            .start_file("policy.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        candidate_zip.write_all(b"{\"policy\":true}\n").unwrap();
+        candidate_zip
+            .start_file("build.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        let candidate_source = if mode == "candidate-source-mismatch" {
+            "0".repeat(40)
+        } else {
+            source_sha.clone()
+        };
+        let platform = if mode == "candidate-build-mismatch" {
+            "ubuntu-22.04"
+        } else {
+            "ubuntu-24.04-x86_64"
+        };
+        let manifest = serde_json::json!({"source_sha":candidate_source,"workflow_sha":workflow_sha,"platform":platform,"rust":"1.99.0","profile":"release","locked":true});
+        candidate_zip
+            .write_all(serde_json::to_string(&manifest).unwrap().as_bytes())
+            .unwrap();
+        candidate_zip.finish().unwrap();
+        let candidate_digest = {
+            use sha2::{Digest, Sha256};
+            crate::hex_encode(Sha256::digest(fs::read(&candidate_archive).unwrap()))
+        };
         let mut command = Command::new("bash");
         let result = command
             .arg(action.join("reuse-build.sh"))
@@ -3036,9 +3213,21 @@ esac
             .env("RUNNER_TEMP", &scenario_dir)
             .env("GITHUB_OUTPUT", &output)
             .env("GH_TOKEN", "stub")
+            .env(
+                "CANDIDATE_RUN_ID",
+                if mode.starts_with("candidate-") {
+                    "39212230238"
+                } else {
+                    ""
+                },
+            )
+            .env("MOCK_MODE", mode)
             .env("MOCK_RUN_SHA", run_sha)
+            .env("MOCK_WORKFLOW_SHA", &workflow_sha)
             .env("MOCK_DIGEST", reported_digest)
             .env("MOCK_ARCHIVE", &archive_path)
+            .env("MOCK_CANDIDATE_ARCHIVE", &candidate_archive)
+            .env("MOCK_CANDIDATE_DIGEST", candidate_digest)
             .output()
             .unwrap();
         assert!(
@@ -3048,7 +3237,12 @@ esac
         );
         let output = fs::read_to_string(output).unwrap();
         if expected_reuse {
-            assert!(String::from_utf8_lossy(&result.stdout).contains("Reused CLI artifact"));
+            assert!(
+                String::from_utf8_lossy(&result.stdout).contains("Reused "),
+                "{scenario}: stdout={} stderr={}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
             assert!(output.contains("reused=true\n"));
             assert!(output.contains(&format!(
                 "binary={}/target/release/securefix",

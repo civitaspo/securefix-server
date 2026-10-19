@@ -4,7 +4,6 @@ set -euo pipefail
 root="$(cd "$ACTION_PATH/../../.." && pwd)"
 source_sha="$(git -C "$root" rev-parse HEAD)"
 artifact_name="securefix-cli-ubuntu-24.04-x64-rust-1.99.0-$source_sha"
-destination="$RUNNER_TEMP/securefix-cli-extract-$source_sha"
 
 # The artifact is only built on this exact runner image/architecture and with
 # the default locked Cargo build settings used by CI.
@@ -27,7 +26,6 @@ if [[ -n "$(git -C "$root" ls-files --others --exclude-standard)" ]]; then
   exit 0
 fi
 
-# Extract only the two fixed artifact members and cap decompression size.
 extract_member() {
   local archive="$1" member="$2" output="$3" limit=$((50 * 1024 * 1024))
   local -a status
@@ -38,8 +36,44 @@ extract_member() {
   [[ "${status[0]}" == 0 && "${status[1]}" == 0 && "$(stat -c %s "$output")" -gt 0 && "$(stat -c %s "$output")" -le "$limit" ]]
 }
 
-# Pull request code is always built from the checkout. Only completed, first
-# attempt CI runs on the protected main branch can supply a reusable binary.
+reuse_cli_artifact() {
+  local archive="$1" digest="$2" artifact_id="$3" source="$4" producer_run="$5" kind="$6" workflow_sha="${7:-}"
+  local actual_digest extracted members expected_members
+  actual_digest="$(sha256sum "$archive" | cut -d ' ' -f 1)" || return 1
+  [[ "$actual_digest" == "$digest" ]] || { echo "Reusable artifact $artifact_id digest mismatch; building locally."; return 1; }
+  extracted="$RUNNER_TEMP/securefix-cli-extract-$source"
+  rm -rf "$extracted" || return 1
+  mkdir -p "$extracted" || return 1
+  members="$(unzip -Z1 "$archive" 2>/dev/null | LC_ALL=C sort)" || return 1
+  if [[ "$kind" == ci ]]; then
+    expected_members=$'policy.json\nsecurefix'
+  else
+    expected_members=$'build.json\npolicy.json\nsecurefix'
+  fi
+  [[ "$members" == "$expected_members" ]] || { echo "Reusable artifact $artifact_id layout invalid; building locally."; return 1; }
+  extract_member "$archive" securefix "$extracted/securefix" || return 1
+  extract_member "$archive" policy.json "$extracted/policy.json" || return 1
+  cmp -s "$extracted/policy.json" "$root/policy.json" || { echo "Reusable artifact $artifact_id policy differs from checked source; building locally."; return 1; }
+  if [[ "$kind" == candidate ]]; then
+    extract_member "$archive" build.json "$extracted/build.json" || return 1
+    jq -e --arg source "$source" --arg workflow "$workflow_sha" '
+      .source_sha == $source and .workflow_sha == $workflow and
+      .platform == "ubuntu-24.04-x86_64" and .rust == "1.99.0" and
+      .profile == "release" and .locked == true
+    ' "$extracted/build.json" >/dev/null 2>&1 || { echo "Candidate artifact $artifact_id build identity differs; building locally."; return 1; }
+  fi
+  mkdir -p "$root/target/release" || return 1
+  install -m 755 "$extracted/securefix" "$root/target/release/securefix" || return 1
+  install -m 644 "$extracted/policy.json" "$root/target/release/policy.json" || return 1
+  echo "binary=$root/target/release/securefix" >> "$GITHUB_OUTPUT" || return 1
+  echo "reused=true" >> "$GITHUB_OUTPUT" || return 1
+  if [[ "$kind" == ci ]]; then
+    echo "Reused CLI artifact $artifact_id (sha256:$digest) from CI run $producer_run for $source"
+  else
+    echo "Reused candidate CLI artifact $artifact_id (sha256:$digest) from run $producer_run for $source"
+  fi
+}
+
 if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != pull_request_target && -n "${GH_TOKEN:-}" ]]; then
   if server="$(gh api repos/civitaspo/securefix-server 2>/dev/null)"; then
     server_id="$(jq -r '.id // empty' <<<"$server")"
@@ -73,34 +107,9 @@ if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != pull_request_target && -
           artifact_id="$(jq -r '.id' <<<"$artifact")"
           expected_digest="$(jq -r '.digest | sub("^sha256:"; "")' <<<"$artifact")"
           archive="$RUNNER_TEMP/securefix-cli-$source_sha.zip"
-          extracted="$destination"
-          if gh api "repos/civitaspo/securefix-server/actions/artifacts/$artifact_id/zip" >"$archive" 2>/dev/null; then
-            actual_digest="$(sha256sum "$archive" | cut -d ' ' -f 1)"
-            if [[ "$actual_digest" == "$expected_digest" ]]; then
-              rm -rf "$extracted"
-              mkdir -p "$extracted"
-              if members="$(unzip -Z1 "$archive" 2>/dev/null)"; then
-                sorted_members="$(printf '%s\n' "$members" | LC_ALL=C sort)"
-              else
-                sorted_members=
-              fi
-              if [[ "$sorted_members" == $'policy.json\nsecurefix' ]] && extract_member "$archive" securefix "$extracted/securefix" && extract_member "$archive" policy.json "$extracted/policy.json"; then
-                if cmp -s "$extracted/policy.json" "$root/policy.json"; then
-                  mkdir -p "$root/target/release"
-                  install -m 755 "$extracted/securefix" "$root/target/release/securefix"
-                  install -m 644 "$extracted/policy.json" "$root/target/release/policy.json"
-                  echo "binary=$root/target/release/securefix" >> "$GITHUB_OUTPUT"
-                  echo "reused=true" >> "$GITHUB_OUTPUT"
-                  echo "Reused CLI artifact $artifact_id (sha256:$expected_digest) from CI run $run_id for $source_sha"
-                  exit 0
-                fi
-                echo "CI artifact policy does not match the checked out source; building locally."
-              else
-                echo "CI artifact layout was invalid; building locally."
-              fi
-            else
-              echo "CI artifact digest did not match its Actions API metadata; building locally."
-            fi
+          if gh api "repos/civitaspo/securefix-server/actions/artifacts/$artifact_id/zip" >"$archive" 2>/dev/null &&
+             reuse_cli_artifact "$archive" "$expected_digest" "$artifact_id" "$source_sha" "$run_id" ci; then
+            exit 0
           fi
         fi
       fi
@@ -108,4 +117,50 @@ if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != pull_request_target && -
   fi
 fi
 
-echo "No unique qualified CI artifact for $source_sha; building this checkout."
+if [[ "$EVENT_NAME" == workflow_dispatch && "${CANDIDATE_RUN_ID:-}" =~ ^[1-9][0-9]*$ && -n "${GH_TOKEN:-}" ]]; then
+  candidate_run_id="$CANDIDATE_RUN_ID"
+  if candidate_run="$(gh api "repos/civitaspo/securefix-server/actions/runs/$candidate_run_id" 2>/dev/null)"; then
+    candidate_branch="$(jq -r '.head_branch // empty' <<<"$candidate_run")"
+    candidate_path="$(jq -r '.path // empty' <<<"$candidate_run")"
+    candidate_workflow_sha="$(jq -r '.head_sha // empty' <<<"$candidate_run")"
+    candidate_workflow=".github/workflows/testing-securefix-server.yml"
+    if [[ "$(jq -r '.id' <<<"$candidate_run")" == "$candidate_run_id" &&
+          "$(jq -r '.repository.id' <<<"$candidate_run")" == 1250079425 &&
+          "$(jq -r '.repository.full_name' <<<"$candidate_run")" == civitaspo/securefix-server &&
+          "$(jq -r '.head_repository.id' <<<"$candidate_run")" == 1250079425 &&
+          "$(jq -r '.head_repository.full_name' <<<"$candidate_run")" == civitaspo/securefix-server &&
+          "$(jq -r '.event' <<<"$candidate_run")" == workflow_dispatch &&
+          "$(jq -r '.status' <<<"$candidate_run")" == completed &&
+          "$(jq -r '.conclusion' <<<"$candidate_run")" == success &&
+          "$(jq -r '.run_attempt' <<<"$candidate_run")" == 1 &&
+          "$(jq -r '.actor.id' <<<"$candidate_run")" == 4525500 &&
+          "$(jq -r '.triggering_actor.id' <<<"$candidate_run")" == 4525500 &&
+          ( "$candidate_branch" == main || "$candidate_branch" == integration/native-* ) &&
+          ( "$candidate_path" == "$candidate_workflow" || "$candidate_path" == "$candidate_workflow@refs/heads/$candidate_branch" ) ]]; then
+      if candidate_artifacts="$(gh api "repos/civitaspo/securefix-server/actions/runs/$candidate_run_id/artifacts?per_page=100" 2>/dev/null)"; then
+        candidate_artifact="$(jq -cer --argjson run_id "$candidate_run_id" --arg workflow "$candidate_workflow_sha" '
+          [.artifacts[] | select(
+            .name == "candidate-runtime" and .expired == false and
+            .id > 0 and .workflow_run.id == $run_id and
+            .workflow_run.repository_id == 1250079425 and
+            .workflow_run.head_repository_id == 1250079425 and
+            .workflow_run.head_sha == $workflow and
+            .size_in_bytes > 0 and .size_in_bytes <= 52428800 and
+            (.digest | test("^sha256:[0-9a-f]{64}$"))
+          )] | if length == 1 then .[0] else empty end
+        ' <<<"$candidate_artifacts" 2>/dev/null || true)"
+        if [[ -n "$candidate_artifact" ]]; then
+          candidate_artifact_id="$(jq -r '.id' <<<"$candidate_artifact")"
+          candidate_digest="$(jq -r '.digest | sub("^sha256:"; "")' <<<"$candidate_artifact")"
+          candidate_archive="$RUNNER_TEMP/securefix-candidate-$source_sha.zip"
+          if gh api "repos/civitaspo/securefix-server/actions/artifacts/$candidate_artifact_id/zip" >"$candidate_archive" 2>/dev/null &&
+             reuse_cli_artifact "$candidate_archive" "$candidate_digest" "$candidate_artifact_id" "$source_sha" "$candidate_run_id" candidate "$candidate_workflow_sha"; then
+            exit 0
+          fi
+        fi
+      fi
+    fi
+  fi
+fi
+
+echo "No qualified reusable artifact for $source_sha; building this checkout."

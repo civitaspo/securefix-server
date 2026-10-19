@@ -1,11 +1,15 @@
 name: Set up trusted Securefix CLI
-description: Reuse a qualified main CI build or compile this checkout
+description: Reuse a qualified source artifact or compile this checkout
+inputs:
+  candidate-run-id:
+    description: Successful source-bound candidate run whose CLI artifact may be reused
+    required: false
 outputs:
   binary:
     description: Absolute path to the compiled CLI
     value: ${{ steps.reuse.outputs.binary || steps.build.outputs.binary }}
   reused:
-    description: Whether setup selected a verified reusable CI artifact
+    description: Whether setup selected a verified artifact for the exact source and build conditions
     value: ${{ steps.reuse.outputs.reused }}
 runs:
   using: composite
@@ -18,6 +22,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         EVENT_NAME: ${{ github.event_name }}
         ACTION_PATH: ${{ github.action_path }}
+        CANDIDATE_RUN_ID: ${{ inputs.candidate-run-id }}
       run: bash "$ACTION_PATH/reuse-build.sh"
 
     - name: Install Rust toolchain

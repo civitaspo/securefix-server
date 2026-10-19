@@ -244,16 +244,26 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-cli
         id: setup-cli
+        with:
+          candidate-run-id: ${{ inputs.phase == 'verify' && inputs.fixture_run_id || '' }}
       - name: Test candidate without credentials
         if: steps.setup-cli.outputs.reused != 'true'
         run: cargo +1.99.0 test --locked
+      - name: Assemble source-bound candidate runtime
+        env:
+          SOURCE_SHA: ${{ steps.checkout.outputs.commit }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          mkdir -p candidate-runtime
+          install -m 755 target/release/securefix candidate-runtime/securefix
+          install -m 644 target/release/policy.json candidate-runtime/policy.json
+          printf '{"source_sha":"%s","workflow_sha":"%s","platform":"ubuntu-24.04-x86_64","rust":"1.99.0","profile":"release","locked":true}\n' \
+            "$SOURCE_SHA" "$WORKFLOW_SHA" > candidate-runtime/build.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
           name: candidate-runtime
-          path: |
-            target/release/securefix
-            target/release/policy.json
+          path: candidate-runtime/
           if-no-files-found: error
           retention-days: 7
 

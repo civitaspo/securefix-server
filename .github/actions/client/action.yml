@@ -8,6 +8,10 @@ inputs:
     description: Repository publishing the verified runtime; defaults to server-repository
     required: false
     default: ''
+  control-repository:
+    description: Repository whose protected default branch selects the active runtime
+    required: false
+    default: ''
   runtime-token:
     description: Optional read-only token for runtime contents, action runs, and attestations
     required: false
@@ -102,6 +106,7 @@ runs:
         GH_TOKEN: ${{ inputs.runtime-token || github.token }}
         SOURCE_SHA: ${{ inputs.runtime-sha }}
         REPOSITORY: ${{ inputs.runtime-repository || inputs.server-repository }}
+        CONTROL_REPOSITORY: ${{ inputs.control-repository || inputs.runtime-repository || inputs.server-repository }}
         DEFAULT_BRANCH: ${{ inputs.runtime-default-branch }}
         WORKFLOW_PREFIX: ${{ inputs.workflow-prefix }}
       run: bash "$ACTION_PATH/../load-runtime/load.sh"

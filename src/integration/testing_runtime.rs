@@ -24,7 +24,9 @@ pub(super) fn load_for_caller(workflow_sha: &str) -> Result<()> {
             baseline == workflow_sha,
             "server testing workflow is not pinned to the captured protected-main revision"
         );
-        GitHub::anonymous()?
+        let token = std::env::var("GITHUB_TOKEN").context("missing server GITHUB_TOKEN")?;
+        ensure!(!token.is_empty(), "server GITHUB_TOKEN is empty");
+        GitHub::new("https://api.github.com", token)?
     };
     let policy = Policy::parse(POLICY)?;
     let control =
@@ -52,9 +54,12 @@ fn qualify(workflow_sha: &str, client: &GitHub) -> Result<()> {
     securefix::policy::validate_sha(workflow_sha)?;
     let trusted = config::trusted()?;
     ensure!(
-        trusted.deployment.workflow_prefix.is_empty()
-            && trusted.deployment.control_repository.is_none(),
-        "testing runtime qualification requires the production-configured host validator"
+        (trusted.deployment.workflow_prefix.is_empty()
+            && trusted.deployment.control_repository.is_none())
+            || (trusted.deployment.workflow_prefix == "testing-"
+                && trusted.deployment.control_repository.as_ref()
+                    == Some(&trusted.deployment.integration)),
+        "testing runtime qualification requires the production or isolated testing deployment"
     );
     validate_policy(trusted)?;
     let policy = Policy::parse(POLICY)?;
@@ -77,6 +82,10 @@ fn qualify(workflow_sha: &str, client: &GitHub) -> Result<()> {
         ))
     };
     super::validate_test_baseline(&baseline, &main()?)?;
+    ensure!(
+        public.content(&server.repository, POLICY_PATH, &baseline)? == POLICY,
+        "testing runtime policy differs from the captured protected-main policy"
+    );
     let repository: Value = public.get(&format!("/repos/{}", server.repository))?;
     ensure!(
         repository["id"].as_u64() == Some(server.id)
