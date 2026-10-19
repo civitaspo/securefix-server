@@ -214,23 +214,16 @@ opens the canonical migration PR and never merges it. Use the separate reviewed
 testing migration lane. Owner/main/first-attempt guards and `securefix-control`
 serialization apply before credential issuance or mutation.
 
-## Isolated legacy client smoke
+## Retired legacy client smoke
 
-The direct scratch harness now runs the selected candidate or verified stable
-client CLI in the existing restricted container with networking disabled and no
-credentials. It mounts only the executable, scratch policy, fixed input, event
-and output directory. Candidate Action code no longer executes on the host or
-replaces the trusted host CLI. This smoke verifies the client CLI/artifact
-protocol; it does not claim execution of the candidate composite Action itself.
-The separate native testing callers remain the workflow recovery acceptance path.
-
-`validate-client-stage` admits only the fixed bounded three-file smoke artifact,
-rejecting extra files and symlinks, and parses it with the existing artifact
-validator before immutable upload. `dispatch-client-smoke` independently retrieves
-and validates that uploaded artifact/run before the trusted host uses a Client
-App token restricted to test-client `issues:write`. The ordinary smoke readback
-then verifies both artifact and label. Candidate output never supplies a host
-command-file path or the label destination.
+The old `client-smoke`/`client-baseline` jobs and `client_runtime` selector were
+removed. They split candidate CLI preparation in Docker from trusted-host label
+dispatch, duplicating the approved-development native path under an obsolete
+credential restriction. Their dedicated prepare/stage/dispatch/verify CLI commands
+were removed as well. Normal client artifact preparation and Client App server
+label creation remain in the production-shared testing callers; actual native
+acceptance is recorded in [the workflow inventory](testing-workflows-client-inventory.md).
+Unreviewed candidate scratch/bootstrap/provider probes retain their isolation.
 
 ## Existing direct scratch probes
 
@@ -251,10 +244,9 @@ The trusted workflow builds the candidate without credentials, then runs the
 artifact in an isolated job. On main or an integration branch, it separately captures
 the exact signed protected server default-branch SHA, builds that read-only test validator with locked
 dependencies, and uploads a distinct immutable artifact. Baseline commands
-validate the producer and retrieve fixture state; candidate commands prepare
-client input, exercise the isolated mutations, and verify the client result.
+validate the producer and retrieve fixture state; candidate commands exercise and verify the isolated scratch mutations.
 The validator's baseline SHA must remain current throughout the test. Read-only
-producer, fixture-state and client-verification commands require
+producer and fixture-state commands require
 `SECUREFIX_TEST_BASELINE_SHA` to match signed current main at entry. This test-only
 build receives no production credentials and does not select an operational runtime.
 The published test runtime is selected independently from `control/active.json`:
@@ -432,20 +424,11 @@ default-branch revision write checks remain unchanged.
 
 The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
 
-The separate `client-smoke` job exercises CLI preparation in the restricted
-credential-free container described above. Its candidate binary is bound to the
-successful credential-free build's source SHA and immutable artifact ID. A trusted
-controller generates a scratch deployment policy and one fixed input file.
-Client-only policies omit approval exemptions and the optional Renovate merge
-principal, so the published baseline can parse the fixture before a schema update
-is activated. These fixtures grant only the scratch `securefix` capability.
-After bounded validation and upload, only the trusted host receives a Client App
-token restricted to scratch `issues:write` and creates the request label in
-scratch. The trusted verifier independently reads
-the source artifact and scratch label, checks exact metadata and file bytes, and
-uploads `client-verification.json`.
-
-Candidate testing uses `client_runtime: candidate-artifact`; that path skips published descriptor and release loading. The live `published-release` loader path cannot be verified until the initial active descriptor exists. After bootstrap, run a published-release prepare and verify to cover descriptor selection, publisher-run validation, Release download, attestation verification, preparation, upload, and dispatch. Record that run separately; candidate-artifact smoke results do not stand in for it. The bootstrap and published-loader end-to-end gate remain unverified.
+The former standalone client smoke and published-baseline selector are retired;
+they are not part of runtime qualification. Native testing callers exercise the
+qualified development runtime and original Client App/server-label transport.
+The distribution fixture below still reuses the scratch client policy and the
+normal client Action; those shared helpers remain in use.
 
 The distribution fixture also migrates the three-file autofix workflow call chain.
 Its scratch-only job deliberately changes a tracked workflow, requires the native

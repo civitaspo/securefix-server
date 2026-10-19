@@ -103,7 +103,7 @@ fn testing_publication_executes_only_trusted_qualification_and_stable_publisher(
 }
 
 #[test]
-fn testing_fixture_controller_and_client_smoke_keep_candidate_out_of_credentialed_host_execution() {
+fn testing_fixture_controller_scopes_credentials_and_retires_legacy_client_smoke() {
     let value = workflow("testing-control-fixture.yml");
     let host = &value["jobs"]["host"];
     assert!(!serde_json::to_string(host).unwrap().contains("secrets."));
@@ -130,47 +130,14 @@ fn testing_fixture_controller_and_client_smoke_keep_candidate_out_of_credentiale
         steps[mint]["with"]["repositories"],
         "testing-securefix-server"
     );
-    let smoke = workflow("testing-securefix-server.yml");
-    let steps = smoke["jobs"]["client-smoke"]["steps"].as_array().unwrap();
+    let candidate = workflow("testing-securefix-server.yml");
+    assert!(candidate["jobs"].get("client-smoke").is_none());
+    assert!(candidate["jobs"].get("client-baseline").is_none());
     assert!(
-        !steps
-            .iter()
-            .any(|s| s["uses"] == "./candidate/.github/actions/client")
+        candidate["on"]["workflow_dispatch"]["inputs"]
+            .get("client_runtime")
+            .is_none()
     );
-    assert!(
-        !steps
-            .iter()
-            .any(|s| s["with"]["binary"] == "candidate-runtime/securefix")
-    );
-    let capture = steps
-        .iter()
-        .position(|s| {
-            s["name"] == "Prepare client artifact inside the candidate sandbox without credentials"
-        })
-        .unwrap();
-    let validate = steps.iter().position(|s| s["id"] == "request").unwrap();
-    let mint = steps.iter().position(|s| s["id"] == "client").unwrap();
-    assert!(capture < validate && validate < mint);
-    let sandbox = steps[capture]["run"].as_str().unwrap();
-    for required in [
-        "docker run",
-        "--network none",
-        "--read-only",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
-    ] {
-        assert!(sandbox.contains(required));
-    }
-    for forbidden in [
-        "-e GITHUB_TOKEN",
-        "-e SECUREFIX_CLIENT_APP_TOKEN",
-        "GITHUB_OUTPUT",
-        "docker.sock",
-        "PRIVATE_KEY",
-        "APPROVE_TOKEN",
-    ] {
-        assert!(!sandbox.contains(forbidden));
-    }
 }
 
 #[test]
@@ -877,8 +844,6 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                     "${{ steps.resolve.outputs.sha }}"
                                 } else if job_id == "build" {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
-                                } else if job_id == "client-smoke" {
-                                    "${{ needs.build.outputs.source-sha }}"
                                 } else if job_id == "bootstrap-scratch" {
                                     "${{ github.workflow_sha }}"
                                 } else {
@@ -2340,7 +2305,7 @@ fn candidate_execution_is_separate_from_secret_free_build_and_scoped_to_scratch(
             .unwrap()
             .contains("refs/heads/main")
     );
-    for job in ["reuse", "client-smoke", "scratch"] {
+    for job in ["reuse", "scratch"] {
         assert_eq!(
             candidate["jobs"][job]["env"]["SECUREFIX_TEST_BASELINE_SHA"],
             "${{ needs.baseline-build.outputs.source-sha }}"
