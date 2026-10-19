@@ -9,6 +9,7 @@ pub enum HostKind {
     Request,
     CallerMigration,
     CallerDistribution,
+    MigrationFixture,
 }
 
 impl HostKind {
@@ -17,6 +18,7 @@ impl HostKind {
             Self::Request => ".github/workflows/testing-process-request.yml",
             Self::CallerMigration => ".github/workflows/testing-merge-caller-migration.yml",
             Self::CallerDistribution => ".github/workflows/testing-distribute-runtime.yml",
+            Self::MigrationFixture => ".github/workflows/testing-migration-fixture.yml",
         }
     }
 
@@ -94,7 +96,7 @@ pub(super) fn require_context(kind: HostKind) -> Result<()> {
     let source = std::env::var("SECUREFIX_TEST_BASELINE_SHA")?;
     let (event, actor) = match kind {
         HostKind::Request => ("label", trusted.client_bot_id),
-        HostKind::CallerMigration | HostKind::CallerDistribution => {
+        HostKind::CallerMigration | HostKind::CallerDistribution | HostKind::MigrationFixture => {
             ("workflow_dispatch", trusted.owner_id)
         }
     };
@@ -145,7 +147,7 @@ fn validate_run(
     let server = &trusted.deployment.server;
     let (event, actor) = match kind {
         HostKind::Request => ("label", trusted.client_bot_id),
-        HostKind::CallerMigration | HostKind::CallerDistribution => {
+        HostKind::CallerMigration | HostKind::CallerDistribution | HostKind::MigrationFixture => {
             ("workflow_dispatch", trusted.owner_id)
         }
     };
@@ -384,6 +386,11 @@ mod tests {
             HostKind::CallerDistribution,
         )
         .unwrap();
+        let mut fixture = migration.clone();
+        fixture["path"] = json!(HostKind::MigrationFixture.path());
+        validate_run(&fixture, 7, &source, trusted, HostKind::MigrationFixture).unwrap();
+        assert!(validate_run(&migration, 7, &source, trusted, HostKind::MigrationFixture).is_err());
+        assert!(validate_run(&fixture, 7, &source, trusted, HostKind::CallerMigration).is_err());
         assert!(
             validate_run(
                 &distribution,

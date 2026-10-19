@@ -62,6 +62,24 @@ fn sandboxed_smoke_stage_is_validated_before_upload_and_rejects_extra_files() {
         "{}",
         String::from_utf8_lossy(&valid.stderr)
     );
+    #[cfg(unix)]
+    {
+        fs::rename(
+            dir.path().join("artifacts"),
+            dir.path().join("real-artifacts"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("real-artifacts", dir.path().join("artifacts")).unwrap();
+        let rejected = validate();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("not a regular directory"));
+        fs::remove_file(dir.path().join("artifacts")).unwrap();
+        fs::rename(
+            dir.path().join("real-artifacts"),
+            dir.path().join("artifacts"),
+        )
+        .unwrap();
+    }
     let artifact = fs::read_dir(dir.path().join("artifacts"))
         .unwrap()
         .next()
