@@ -1555,6 +1555,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/testing-distribute-runtime.yml",
             ".github/workflows/testing-load-cli.yml",
             ".github/workflows/testing-merge-caller-migration.yml",
+            ".github/workflows/testing-migration-fixture.yml",
             ".github/workflows/testing-process-request.yml",
             ".github/workflows/testing-publish-runtime.yml",
             ".github/workflows/testing-publish-runtime.yml",
@@ -1605,6 +1606,48 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert!(install.contains("install -D -m 755"));
     assert!(install.contains("$GITHUB_PATH"));
     assert!(installer["inputs"].get("binary").is_some());
+}
+
+#[test]
+fn testing_fixture_is_owner_guarded_and_never_executes_candidate_code_with_credentials() {
+    let value = workflow("testing-migration-fixture.yml");
+    for id in ["host", "fixture"] {
+        let guard = value["jobs"][id]["if"].as_str().unwrap();
+        assert!(guard.contains("refs/heads/main"));
+        assert!(guard.contains("github.actor_id == '4525500'"));
+        assert!(guard.contains("github.run_attempt == 1"));
+    }
+    assert!(
+        !serde_json::to_string(&value["jobs"]["host"])
+            .unwrap()
+            .contains("secrets.")
+    );
+    let job = &value["jobs"]["fixture"];
+    assert_eq!(job["environment"], "main");
+    assert_eq!(job["concurrency"]["group"], "securefix-control");
+    let steps = job["steps"].as_array().unwrap();
+    let validate = steps
+        .iter()
+        .position(|s| {
+            s["run"] == "securefix integration validate-testing-processor --kind migration-fixture"
+        })
+        .unwrap();
+    for (index, step) in steps.iter().enumerate() {
+        if step["uses"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("actions/create-github-app-token@"))
+        {
+            assert!(validate < index);
+            assert_eq!(step["with"]["repositories"], "testing-securefix-server");
+        }
+        if let Some(run) = step["run"].as_str() {
+            assert!(!run.contains("/candidate/") && !run.contains("docker run"));
+        }
+        if step["env"].get("SECUREFIX_TEST_NONOWNER_TOKEN").is_some() {
+            assert_eq!(step["if"], "inputs.case == 'nonowner-dispatch'");
+            assert!(step["run"].as_str().unwrap().contains("testing-merge-caller-migration.yml/dispatches --input migration-nonowner-dispatch.json"));
+        }
+    }
 }
 
 #[test]

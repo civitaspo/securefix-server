@@ -499,3 +499,37 @@ Terraform Registry ingestion still requires a published release.
 The candidate verify phase exercises receipt reactions on both owner commands and the configured scratch bot's `/merge`. After the scratch merge, it checks the completion comment's squash SHA and Server run URL. The policy feedback probe publishes two failure results, verifies only the latest failure comment is visible, then publishes success and verifies both failure comments are hidden. The comment bodies identify the server CI and target commit. These probes use scratch-scoped Server App credentials.
 
 Prepare also exercises the shared policy feedback probe: wrapping multiline failure comments, superseding an older failure, and hiding failures after success. It preserves the server run and commit references and leaves no visible probe failure comment.
+
+## Migration rejection fixtures
+
+`testing-migration-fixture.yml` is a narrow trusted-host fixture writer on the
+server. It builds the captured protected-main source without credentials and
+validates its exact owner/main/first-attempt provenance before issuing credentials.
+It accepts only an open Server App PR on the isolated policy's fixed automation
+branch in the existing test client, with explicit expected head, protected main
+and control identity. The host rechecks those fences before writes and independently
+reads back the resulting head. It never merges or changes a descriptor.
+
+The supported mutations add one unmanaged file or append a comment to the managed
+merge wrapper. The latter supplies either non-canonical bytes or a head advance
+*after* owner acceptance. These commits need the Server App identity so that the
+real migration lane reaches the intended validation instead of an unrelated
+commit-author rejection. Tokens remain singleton test-client tokens: ordinary
+file changes and cleanup omit workflow permission; managed workflow mutations
+request it explicitly. Cleanup closes only the accepted PR and deletes only its
+still-matching automation ref. Candidate code is not executed by this host.
+
+The non-owner case is different: it makes no test-client mutation. Trusted host
+code verifies the existing reviewer User PAT's identity, prepares only the fixed
+migration dispatch with the active publisher/control, and the trusted `gh` CLI
+sends it as that User. The PAT is never passed to a candidate. The resulting run
+must independently show both migration jobs skipped before token issuance and
+unchanged protected test state. A dispatch permission failure is a failed setup,
+not evidence that the migration guard rejected the request.
+
+These fixture operations do not certify a rejection. Capture the independent
+before state after fixture preparation; trigger the real migration workflow; then
+verify its exact failure reason and a fresh after state. Revoked owner reviews
+and edited commands are made by the owner controller outside candidate execution.
+The consumed-command case must retain an open PR after accepted authorization
+and failing required CI, then reject the same IDs in a new first-attempt run.

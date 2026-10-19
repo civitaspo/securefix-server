@@ -24,6 +24,7 @@ use securefix::{
 
 const WORKFLOW_PATH: &str = ".github/workflows/testing-securefix-server.yml";
 mod testing_control;
+mod testing_fixture;
 mod testing_processor;
 mod testing_publication;
 mod testing_runtime;
@@ -62,6 +63,19 @@ fn owner_id() -> Result<u64> {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Trusted host: mutate or clean up only the exact test migration fixture.
+    MigrationFixture {
+        #[arg(long, value_enum)]
+        case: testing_fixture::Case,
+        #[arg(long)]
+        pull_request: u64,
+        #[arg(long)]
+        expected_head_sha: String,
+        #[arg(long)]
+        expected_main_sha: String,
+        #[arg(long)]
+        expected_control_id: String,
+    },
     /// Trusted host: propose or merge an independently stored test control fixture.
     TestingControl {
         #[command(subcommand)]
@@ -344,6 +358,19 @@ struct ControlProbeVerification {
 pub fn run(command: Command) -> Result<()> {
     crate::config::trusted()?;
     match command {
+        Command::MigrationFixture {
+            case,
+            pull_request,
+            expected_head_sha,
+            expected_main_sha,
+            expected_control_id,
+        } => testing_fixture::run(
+            case,
+            pull_request,
+            &expected_head_sha,
+            &expected_main_sha,
+            &expected_control_id,
+        ),
         Command::TestingControl { command } => testing_control::run(command),
         Command::ValidateTestingProcessor { kind } => testing_processor::require_context(kind),
         Command::LoadTestingControl { kind } => {
@@ -1289,7 +1316,13 @@ fn validate_client_stage(directory: &Path) -> Result<()> {
     let run_id: u64 = std::env::var("GITHUB_RUN_ID")?.parse()?;
     let source = std::env::var("GITHUB_SHA")?;
     validate_sha(&source)?;
-    let entries = fs::read_dir(directory)?.collect::<std::io::Result<Vec<_>>>()?;
+    ensure!(
+        fs::symlink_metadata(directory)?.file_type().is_dir(),
+        "client stage is not a regular directory"
+    );
+    let entries = fs::read_dir(directory)?
+        .take(2)
+        .collect::<std::io::Result<Vec<_>>>()?;
     ensure!(entries.len() == 1, "client stage must contain one artifact");
     let stage = &entries[0];
     ensure!(

@@ -1,0 +1,160 @@
+name: testing-Migration Fixture
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: Deliberately invalid fixed migration fixture or exact cleanup
+        type: choice
+        options: [unmanaged-file, managed-bytes, advance-head, nonowner-dispatch, cleanup]
+        required: true
+      pull_request:
+        description: Exact Server App migration PR in the test client
+        type: string
+        required: true
+      expected_head_sha:
+        description: Accepted fixture head before this operation
+        type: string
+        required: true
+      expected_main_sha:
+        description: Current protected test-client main
+        type: string
+        required: true
+      expected_control_id:
+        description: Current isolated test control identity
+        type: string
+        required: true
+      approve_comment_id:
+        description: Non-owner dispatch only; existing owner approve command
+        type: string
+        default: '0'
+      merge_comment_id:
+        description: Non-owner dispatch only; existing separate owner merge command
+        type: string
+        default: '0'
+      publisher_run_id:
+        description: Non-owner dispatch only; active testing publisher
+        type: string
+        default: '0'
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  host:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: testing-migration-fixture-host
+          path: |
+            target/release/securefix
+            target/release/policy.json
+          if-no-files-found: error
+          retention-days: 1
+  fixture:
+    needs: host
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 5
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    env:
+      SECUREFIX_TEST_BASELINE_SHA: ${{ needs.host.outputs.source-sha }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.host.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/testing-host
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/testing-host/securefix
+      - name: Validate exact trusted fixture controller before credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: securefix integration validate-testing-processor --kind migration-fixture
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read
+        if: inputs.case == 'nonowner-dispatch'
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: read
+          permission-pull-requests: read
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: write
+        if: inputs.case == 'managed-bytes' || inputs.case == 'advance-head'
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: read
+          permission-workflows: write
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: basic
+        if: inputs.case == 'unmanaged-file' || inputs.case == 'cleanup'
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: ${{ inputs.case == 'cleanup' && 'write' || 'read' }}
+      - name: Mutate only the accepted test migration fixture
+        if: inputs.case != 'nonowner-dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_TEST_FIXTURE_TOKEN: ${{ steps.write.outputs.token || steps.basic.outputs.token }}
+          CASE: ${{ inputs.case }}
+          PR: ${{ inputs.pull_request }}
+          HEAD: ${{ inputs.expected_head_sha }}
+          MAIN: ${{ inputs.expected_main_sha }}
+          CONTROL: ${{ inputs.expected_control_id }}
+        run: securefix integration migration-fixture --case "$CASE" --pull-request "$PR" --expected-head-sha "$HEAD" --expected-main-sha "$MAIN" --expected-control-id "$CONTROL"
+      - name: Dispatch the guarded migration lane as the existing non-owner User
+        if: inputs.case == 'nonowner-dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
+          SECUREFIX_TEST_NONOWNER_TOKEN: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
+          SECUREFIX_TEST_FIXTURE_TOKEN: ${{ steps.read.outputs.token }}
+          PR: ${{ inputs.pull_request }}
+          HEAD: ${{ inputs.expected_head_sha }}
+          MAIN: ${{ inputs.expected_main_sha }}
+          CONTROL: ${{ inputs.expected_control_id }}
+        run: |
+          securefix integration migration-fixture --case nonowner-dispatch --pull-request "$PR" --expected-head-sha "$HEAD" --expected-main-sha "$MAIN" --expected-control-id "$CONTROL"
+          gh api --method POST repos/civitaspo/securefix-server/actions/workflows/testing-merge-caller-migration.yml/dispatches --input migration-nonowner-dispatch.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.case != 'cleanup'
+        with:
+          name: testing-migration-fixture
+          path: migration-*.json
+          if-no-files-found: error
+          retention-days: 1

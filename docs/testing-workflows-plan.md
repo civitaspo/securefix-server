@@ -110,6 +110,47 @@ in [Client key protection proposal](testing-client-secret-protection-proposal.md
 It is retained as proposal history. The owner rejected its Environment move and
 per-job approvals; no secret or setting change is required for that proposal.
 
+## Hosted direct-harness qualification: caller interference (2026-10-19)
+
+Prepare [39206238831](https://github.com/civitaspo/securefix-server/actions/runs/39206238831)
+succeeded at source `f0a8090a66b05d3c0e048a75e80d2e5fb6374edd`. It proved the
+restricted candidate execution, credential-free client capture, trusted Client App
+label dispatch and immutable artifact readback. The virtual control probe recorded
+three distinct generations, expected-head conflict rejection and stale identity
+rejection after ABA. These are direct-harness results, not the ten native workflow
+acceptance cases.
+
+Verify [39206649129](https://github.com/civitaspo/securefix-server/actions/runs/39206649129)
+reused that exact immutable candidate/state after owner review `5567425033` and
+separate commands `6260633467`, `6260634047`, `6260634245`. It failed with
+`positive policy check was published before the native auto-merge probe`.
+Existing production-pinned caller workflows had also processed these direct core
+fixtures and created production-control reviews/checks and owner markers. The
+assertion is retained. Fixture PRs #241–243 were closed by cleanup; independent
+readback confirmed test main stayed `0851bea96e07756a8ee52c5721dba99b8527d13f`.
+The two outstanding competing fixture merge runs `39206677319` and `39206684422`
+were cancelled; approval run `39206678642` had already completed. This failed
+qualification is not publication or migration evidence.
+
+[Test PR #244](https://github.com/civitaspo/testing-securefix-server/pull/244)
+merged temporary job guards on the three existing legacy callers as
+`bb15209a8844e29abb7f45ba9ee0628649e14e02`, through the normal server merge
+lane `39207118408` after the exact-head `civitaspo-bot` APPROVED review,
+owner approve `6260676111` and separate merge `6260693810`. Only direct
+`securefix-integration-*` PR branches and `test: Securefix ` issue titles are
+excluded before entering the reusable workflow/minting credentials. Ordinary PRs
+and native migration scenarios on the canonical automation branch retain the
+Client App path. The exact original files are saved in
+`/private/tmp/securefix-phaseb-direct-fence/`; restore them by reviewed PR after
+all direct candidate qualification and before initial canonical testing-caller
+setup. No secret, Environment, App, production control or setting is changed.
+This is a test fixture configuration repair, not a relaxed verification gate.
+Fresh prepare `39207258822` passed using the same candidate source. Legacy
+approve/policy jobs were skipped and the positive head had no premature review
+or policy check. Owner review `5567499478` and separate commands
+`6260775361`, `6260777158`, `6260777386` precede verify `39207675252`, which
+is in progress.
+
 ## Execution checklist
 
 - [x] Read the Principles section of poteto-mode.
@@ -289,6 +330,31 @@ successful prepare artifact and immutable candidate artifact, and reject missing
 additional cases. Cleanup uses only recorded fixture identities and expected heads.
 
 ## Current status
+
+The foundation is deployed through the ordinary source-code PR lane:
+[PR #120](https://github.com/civitaspo/securefix-server/pull/120), reviewed head
+`f6cba8dcef4d16bf1eaa176110203ded153eee4b`, `civitaspo-bot` APPROVED review
+`5567379748`, owner approve comment `6260523221`, separate merge comment
+`6260555280`, and successful
+[CI](https://github.com/civitaspo/securefix-server/actions/runs/39205833004).
+The server merge lane is
+[run 39206111198](https://github.com/civitaspo/securefix-server/actions/runs/39206111198);
+main is `f0a8090a66b05d3c0e048a75e80d2e5fb6374edd`.
+Production active control remains generation five selecting v0.2.33/source
+`1e2866cbab65c5ef4e218fa6853300c2731e73c0`; no activation/settings/secret change.
+The automatic PR-target approval attempt rejected reusable provenance; a fresh
+ordinary owner `/approve` comment succeeded with the exact-head User review and
+policy result. No provenance condition was relaxed.
+
+[Scratch prepare 39206238831](https://github.com/civitaspo/securefix-server/actions/runs/39206238831)
+passed the deployed candidate artifact at that exact main source. Follow-up verify
+`39206649129` failed because the old native callers also processed the direct
+fixtures; see the hosted qualification section above and repair PR #244. No testing
+pre-release, descriptor or canonical testing-caller deployment has been created,
+and the ten hosted workflow cases remain unverified.
+
+The following paragraphs record implementation progress before that deployment;
+their earlier local-only/undeployed statements are historical.
 
 The latest local increment adds `testing-control-fixture.yml` and trusted Rust
 propose/merge operations for initial and successor test descriptors, reusing
@@ -505,3 +571,27 @@ Work starts from protected main `7d94766dccf7231408c3aa7b6137315e5fcd7728` in
 an isolated clone. The shared worktree is untouched.
 The proposed `civitaspo/testing-securefix-control` repository was not found during
 the initial read-only GitHub lookup. No external test setup has been changed.
+
+### Next reviewed increment: rejection fixture operations
+
+Local `testing-migration-fixture.yml` and the narrow Rust fixture command provide
+only the missing signed test inputs and exact cleanup. Existing canonical
+migration, provenance, owner review/commands and snapshot comparison remain the
+validators. A separate trusted-host branch can dispatch the actual migration
+workflow using the existing configured non-owner User PAT after identity checking;
+it does not pass that PAT to a candidate. No new authentication service, App,
+review identity, Environment approval or production fixture is introduced.
+See [the fixture contract](integration-testing.md#migration-rejection-fixtures).
+This increment advances the next candidate to `0.2.34-pre.2`; it is local and
+unpublished. Source one remains frozen while its direct qualification runs.
+The client stage validator also rejects a symlinked output directory before
+reading it and bounds enumeration to two entries. The focused regression passed.
+Hosted scenario results are still required.
+
+Local assembled verification of this increment passed 356 tests (42 library,
+289 CLI, 22 bootstrap, 3 client; 2 existing ignored), fmt, actionlint and Clippy.
+The first assembled run found a sort-order mismatch in the exact secret-free
+build-job inventory; the expected list was ordered correctly and all assertions
+were retained. Logs: `/private/tmp/securefix-phaseb-fixture-verified.log` and
+`/private/tmp/securefix-phaseb-fixture-clippy.log`. No native hosted acceptance
+case is certified by these local results.

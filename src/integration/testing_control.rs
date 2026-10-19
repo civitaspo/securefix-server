@@ -156,7 +156,7 @@ fn current(api: &GitHub, main: &str, expected: &str) -> Result<Option<ControlRev
     Ok(Some(descriptor))
 }
 
-fn fence(api: &GitHub, main: &str, expected: &str) -> Result<Option<ControlRevision>> {
+pub(super) fn fence(api: &GitHub, main: &str, expected: &str) -> Result<Option<ControlRevision>> {
     super::integration_read_api()?;
     current(api, main, expected)
 }
