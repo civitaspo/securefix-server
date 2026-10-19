@@ -439,7 +439,7 @@ fn verify_public_attestation(
         "/repos/{repository}/attestations/sha256:{digest}?per_page=100"
     ))?;
     let bytes = public_bundles(&response, config::trusted()?.deployment.server.id)?;
-    let mut bundles = tempfile::NamedTempFile::new()?;
+    let mut bundles = tempfile::Builder::new().suffix(".jsonl").tempfile()?;
     std::io::Write::write_all(&mut bundles, &bytes)?;
     let empty_config = tempfile::tempdir()?;
     let branch = &config::trusted()?.deployment.server.default_branch;
