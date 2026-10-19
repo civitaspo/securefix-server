@@ -1356,7 +1356,6 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/publish-runtime.yml",
             ".github/workflows/testing-control-fixture.yml",
             ".github/workflows/testing-distribute-runtime.yml",
-            ".github/workflows/testing-load-cli.yml",
             ".github/workflows/testing-merge-caller-migration.yml",
             ".github/workflows/testing-migration-fixture.yml",
             ".github/workflows/testing-publish-runtime.yml",

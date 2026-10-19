@@ -64,6 +64,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_TEST_BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
           DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: ${{ steps.selected.outputs.source-sha }}
+          SECUREFIX_CONTROL_ID: ${{ steps.selected.outputs.control-id }}
         run: securefix integration load-testing-runtime --workflow-sha "$DEFINING_WORKFLOW_SHA"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
