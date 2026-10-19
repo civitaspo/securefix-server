@@ -181,10 +181,13 @@ fn testing_loader_qualifies_selected_runtime_without_operational_secrets() {
     let text = serde_json::to_string(load).unwrap();
     assert!(text.contains("load-testing-runtime --workflow-sha"));
     assert!(text.contains("job.workflow_sha"));
-    assert!(text.contains("setup-cli"));
+    assert!(text.contains("load-runtime"));
+    assert!(text.contains("install-cli"));
+    assert!(text.contains("control-repository"));
+    assert!(text.contains("testing-"));
     for forbidden in [
+        "setup-cli",
         "secrets.",
-        "install-cli",
         "create-github-app-token",
         "validator-artifact-id",
         "docker run",

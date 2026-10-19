@@ -28,6 +28,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      attestations: read
     timeout-minutes: 20
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
@@ -45,14 +46,25 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ steps.baseline.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-cli
+      - name: Load the source-bound attested development runtime
+        id: selected
+        uses: ./.github/actions/load-runtime
+        with:
+          repository: civitaspo/securefix-server
+          control-repository: civitaspo/testing-securefix-server
+          default-branch: main
+          workflow-prefix: testing-
+          token: ${{ github.token }}
+      - uses: ./.github/actions/install-cli
+        with:
+          binary: ${{ steps.selected.outputs.directory }}/securefix
       - name: Qualify the pinned pre-release against the isolated control
         id: runtime
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_TEST_BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
           DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: target/release/securefix integration load-testing-runtime --workflow-sha "$DEFINING_WORKFLOW_SHA"
+        run: securefix integration load-testing-runtime --workflow-sha "$DEFINING_WORKFLOW_SHA"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
