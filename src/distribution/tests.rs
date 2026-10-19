@@ -32,60 +32,92 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
             json!({"message":"Not Found"}),
         )
     };
-    let mut routes = vec![
-        Route::get(
-            format!("/repos/{repository}"),
-            json!({"full_name":repository,"owner":{"id":trusted.deployment.repository_owner.id},"default_branch":"main"}),
-        ),
-        Route::get(
-            format!("/repos/{repository}/commits/main"),
-            json!({"sha":main}),
-        ),
-        Route::get(&version_path, version.clone()),
-        missing(".github/workflows/push.yml"),
-        Route::get(
-            format!("/repos/{repository}/contents/.github/workflows/ci.yml?ref={main}"),
-            content(ci.as_bytes()),
-        ),
-        missing(".github/workflows/wc-autofix.yml"),
-    ];
-    for (path, bytes) in &legacy {
-        routes.push(Route::get(
-            format!("/repos/{repository}/contents/{path}?ref={main}"),
-            content(bytes),
-        ));
-    }
-    routes.push(Route::get(version_path, version));
-    for path in [
-        "approve-request",
-        "ci",
-        "merge-request",
-        "policy-check",
-        "release-pr-sync",
-        "release-pr",
-        "release-tag",
-    ] {
-        routes.push(missing(&format!(".github/workflows/testing-{path}.yml")));
-    }
-    let fixture = Fixture::new(routes);
-    let files = caller::initial_testing_files(&fixture.api, &isolated, &source, &main).unwrap();
-    assert_eq!(files.len(), 7);
-    assert!(!files.contains_key(".github/workflows/ci.yml"));
-    for (path, bytes) in files {
-        assert!(path.starts_with(".github/workflows/testing-"));
-        let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
-        assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
-        if !path.ends_with("testing-ci.yml") {
-            let text = String::from_utf8(bytes).unwrap();
-            assert_eq!(
-                text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"),
-                !path.ends_with("testing-release-pr-sync.yml")
-            );
-            assert!(text.contains("testing-reusable-"));
-            assert!(text.contains(&source));
+    for include_releases in [true, false] {
+        let mut routes = vec![
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"full_name":repository,"owner":{"id":trusted.deployment.repository_owner.id},"default_branch":"main"}),
+            ),
+            Route::get(
+                format!("/repos/{repository}/commits/main"),
+                json!({"sha":main}),
+            ),
+            Route::get(&version_path, version.clone()),
+            missing(".github/workflows/push.yml"),
+            Route::get(
+                format!("/repos/{repository}/contents/.github/workflows/ci.yml?ref={main}"),
+                content(ci.as_bytes()),
+            ),
+            missing(".github/workflows/wc-autofix.yml"),
+        ];
+        for (path, bytes) in &legacy {
+            if !include_releases && path.contains("release-") {
+                routes.push(missing(path));
+                continue;
+            }
+            routes.push(Route::get(
+                format!("/repos/{repository}/contents/{path}?ref={main}"),
+                content(bytes),
+            ));
         }
+        routes.push(Route::get(version_path.clone(), version.clone()));
+        for path in [
+            "approve-request",
+            "ci",
+            "merge-request",
+            "policy-check",
+            "release-pr-sync",
+            "release-pr",
+            "release-tag",
+        ] {
+            routes.push(missing(&format!(".github/workflows/testing-{path}.yml")));
+        }
+        let fixture = Fixture::new(routes);
+        let callers =
+            caller::initial_testing_files(&fixture.api, &isolated, &source, &main).unwrap();
+        let files = callers.files;
+        let deletions = callers.deletions;
+        assert_eq!(files.len(), 7);
+        assert!(!files.contains_key(".github/workflows/ci.yml"));
+        assert_eq!(deletions.len(), if include_releases { 6 } else { 3 });
+        for path in [
+            ".github/workflows/approve-request.yml",
+            ".github/workflows/merge-request.yml",
+            ".github/workflows/policy-check.yml",
+        ] {
+            assert!(deletions.iter().any(|deleted| deleted == path));
+        }
+        for path in [
+            ".github/workflows/release-pr.yml",
+            ".github/workflows/release-pr-sync.yml",
+            ".github/workflows/release-tag.yml",
+        ] {
+            assert_eq!(
+                deletions.iter().any(|deleted| deleted == path),
+                include_releases
+            );
+        }
+        assert!(
+            !deletions
+                .iter()
+                .any(|path| path == ".github/workflows/ci.yml")
+        );
+        for (path, bytes) in files {
+            assert!(path.starts_with(".github/workflows/testing-"));
+            let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+            assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
+            if !path.ends_with("testing-ci.yml") {
+                let text = String::from_utf8(bytes).unwrap();
+                assert_eq!(
+                    text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"),
+                    !path.ends_with("testing-release-pr-sync.yml")
+                );
+                assert!(text.contains("testing-reusable-"));
+                assert!(text.contains(&source));
+            }
+        }
+        fixture.finish();
     }
-    fixture.finish();
 }
 
 #[test]

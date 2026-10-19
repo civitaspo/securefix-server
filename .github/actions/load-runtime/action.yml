@@ -4,6 +4,10 @@ inputs:
   repository:
     description: Repository that publishes the runtime
     required: true
+  control-repository:
+    description: Repository whose protected default branch selects the active runtime
+    required: false
+    default: ''
   default-branch:
     description: Publisher branch required by the attestation
     required: true
@@ -36,6 +40,7 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         GH_TOKEN: ${{ inputs.token }}
         REPOSITORY: ${{ inputs.repository }}
+        CONTROL_REPOSITORY: ${{ inputs.control-repository || inputs.repository }}
         DEFAULT_BRANCH: ${{ inputs.default-branch }}
         WORKFLOW_PREFIX: ${{ inputs.workflow-prefix }}
       run: bash "$ACTION_PATH/load.sh"

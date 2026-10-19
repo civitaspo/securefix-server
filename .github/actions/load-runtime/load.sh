@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'repository must be owner/name' >&2; exit 1; }
+CONTROL_REPOSITORY="${CONTROL_REPOSITORY:-$REPOSITORY}"
+[[ "$CONTROL_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'control-repository must be owner/name' >&2; exit 1; }
 [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || { echo 'default-branch is invalid' >&2; exit 1; }
 WORKFLOW_PREFIX="${WORKFLOW_PREFIX:-}"
 [[ "$WORKFLOW_PREFIX" == '' || "$WORKFLOW_PREFIX" == testing- ]] || { echo 'workflow-prefix is invalid' >&2; exit 1; }
@@ -10,10 +12,14 @@ archive="$(mktemp "$RUNNER_TEMP/runtime-archive.XXXXXX")"
 trap 'rm -f "$descriptor" "$archive"' EXIT
 
 repo="$(gh api "repos/$REPOSITORY")"
-[[ "$(jq -r '.default_branch' <<<"$repo")" == "$DEFAULT_BRANCH" ]] || { echo 'server default branch differs from configured branch' >&2; exit 1; }
-main_sha="$(gh api "repos/$REPOSITORY/commits/$DEFAULT_BRANCH" --jq '.sha')"
+[[ "$(jq -r '.default_branch' <<<"$repo")" == "$DEFAULT_BRANCH" ]] || { echo 'runtime repository default branch differs from configured branch' >&2; exit 1; }
+control_repo="$(gh api "repos/$CONTROL_REPOSITORY")"
+[[ "$(jq -er '.full_name' <<<"$control_repo")" == "$CONTROL_REPOSITORY" ]] || { echo 'resolved control repository identity differs from configuration' >&2; exit 1; }
+control_default_branch="$(jq -er '.default_branch' <<<"$control_repo")"
+[[ "$control_default_branch" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || { echo 'control repository default branch is invalid' >&2; exit 1; }
+main_sha="$(gh api "repos/$CONTROL_REPOSITORY/commits/$control_default_branch" --jq '.sha')"
 [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'resolved main revision is invalid' >&2; exit 1; }
-descriptor_response="$(gh api "repos/$REPOSITORY/contents/control/active.json?ref=$main_sha")"
+descriptor_response="$(gh api "repos/$CONTROL_REPOSITORY/contents/control/active.json?ref=$main_sha")"
 [[ "$(jq -r '.encoding' <<<"$descriptor_response")" == 'base64' ]] || { echo 'control descriptor encoding is invalid' >&2; exit 1; }
 jq -r '.content' <<<"$descriptor_response" | base64 --decode > "$descriptor"
 [[ -s "$descriptor" && "$(stat -c %s "$descriptor")" -le 16384 ]] || { echo 'control descriptor is missing or exceeds size limit' >&2; exit 1; }
@@ -76,6 +82,12 @@ cp "$descriptor" "$runtime_dir/control.json"
 policy_sha="$(sha256sum "$runtime_dir/policy.json" | cut -d ' ' -f 1)"
 [[ "$policy_sha" == "$(jq -r '.policy_sha256' "$descriptor")" ]] || { echo 'runtime policy digest differs from active descriptor' >&2; exit 1; }
 [[ "$(jq -r '.deployment.workflow_prefix // ""' "$runtime_dir/policy.json")" == "$WORKFLOW_PREFIX" ]] || { echo 'runtime workflow namespace differs from the trusted loader configuration' >&2; exit 1; }
+expected_control_repository="$(jq -er '.deployment.control_repository.repository // .deployment.server.repository' "$runtime_dir/policy.json")"
+[[ "$expected_control_repository" == "$CONTROL_REPOSITORY" ]] || { echo 'control repository differs from the runtime deployment policy' >&2; exit 1; }
+expected_control_branch="$(jq -er '.deployment.control_repository.default_branch // .deployment.server.default_branch' "$runtime_dir/policy.json")"
+[[ "$expected_control_branch" == "$control_default_branch" ]] || { echo 'control repository default branch differs from the runtime deployment policy' >&2; exit 1; }
+expected_control_id="$(jq -er '.deployment.control_repository.id // .deployment.server.id' "$runtime_dir/policy.json")"
+[[ "$expected_control_id" == "$(jq -er '.id' <<<"$control_repo")" ]] || { echo 'control repository ID differs from the runtime deployment policy' >&2; exit 1; }
 "$runtime_dir/securefix" runtime verify --source-sha "$source_sha" --repository "$REPOSITORY" --archive "$archive"
 control_outputs="$("$runtime_dir/securefix" control identify --descriptor "$runtime_dir/control.json")"
 control_id="$(sed -n 's/^control-id=//p' <<<"$control_outputs")"

@@ -60,20 +60,27 @@ const RELEASE_SYNC: &str = include_str!("../distribution_templates/release-pr-sy
 const RELEASE_PR: &str = include_str!("../distribution_templates/release-pr.yml");
 const RELEASE_TAG: &str = include_str!("../distribution_templates/release-tag.yml");
 
+pub(crate) struct InitialTestingCallers {
+    pub(crate) files: BTreeMap<String, Vec<u8>>,
+    pub(crate) deletions: Vec<String>,
+}
+
 /// Initial test deployment only; later migrations use the ordinary exact-file lane.
 pub(crate) fn initial_testing_files(
     api: &GitHub,
     isolated: &Policy,
     source: &str,
     main: &str,
-) -> Result<BTreeMap<String, Vec<u8>>> {
+) -> Result<InitialTestingCallers> {
     let fixture = &crate::config::trusted()?.deployment.integration;
-    let legacy = prepare_caller(api, isolated, &fixture.repository, source)?;
+    let (legacy, existing) =
+        prepare_caller_with_existing(api, isolated, &fixture.repository, source)?;
     let ci = ".github/workflows/ci.yml";
     ensure!(
         matches!(legacy.files.len(), 4 | 7) && legacy.files.contains_key(ci),
         "initial testing caller setup requires the supported minimal CI layout"
     );
+    let deletions = existing.into_iter().filter(|path| path != ci).collect();
     let mut trusted = crate::config::trusted()?.clone();
     trusted.deployment = isolated.deployment.clone();
     let tag = crate::runtime::version_at_source(api, source)?.tag();
@@ -91,7 +98,7 @@ pub(crate) fn initial_testing_files(
             "initial testing caller already exists: {path}"
         );
     }
-    Ok(files)
+    Ok(InitialTestingCallers { files, deletions })
 }
 
 pub(super) fn prepare_caller(
@@ -100,6 +107,16 @@ pub(super) fn prepare_caller(
     repository: &str,
     source_sha: &str,
 ) -> Result<CallerMigration> {
+    prepare_caller_with_existing(api, policy, repository, source_sha)
+        .map(|(migration, _)| migration)
+}
+
+fn prepare_caller_with_existing(
+    api: &GitHub,
+    policy: &Policy,
+    repository: &str,
+    source_sha: &str,
+) -> Result<(CallerMigration, Vec<String>)> {
     let config = crate::config::trusted()?;
     let update_branch = config.deployment.runtime_update_branch.as_str();
     let allowed = caller_names(policy)?;
@@ -196,9 +213,11 @@ pub(super) fn prepare_caller(
     .map(workflow_path)
     .collect::<Result<Vec<_>>>()?;
     let mut default_current = true;
+    let mut existing = Vec::new();
     for (path, expected) in &files {
         match optional_content(api, repository, path, base_sha)? {
             Some(current) => {
+                existing.push(path.clone());
                 validate_existing(path, &current, default_branch)?;
                 default_current &= current == *expected;
             }
@@ -211,14 +230,17 @@ pub(super) fn prepare_caller(
             }
         }
     }
-    Ok(CallerMigration {
-        repository: repository.to_owned(),
-        default_branch: default_branch.to_owned(),
-        source_sha: source_sha.to_owned(),
-        runtime_tag,
-        files,
-        default_current,
-    })
+    Ok((
+        CallerMigration {
+            repository: repository.to_owned(),
+            default_branch: default_branch.to_owned(),
+            source_sha: source_sha.to_owned(),
+            runtime_tag,
+            files,
+            default_current,
+        },
+        existing,
+    ))
 }
 
 pub(super) fn validate_runtime_annotation(tag: &str, source_sha: &str) -> Result<()> {

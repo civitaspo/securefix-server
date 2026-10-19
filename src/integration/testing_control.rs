@@ -269,7 +269,7 @@ pub(super) fn run(command: Command) -> Result<()> {
                 "testing caller control evidence changed"
             );
             let isolated = Policy::parse(POLICY)?;
-            let files = crate::distribution::caller::initial_testing_files(
+            let callers = crate::distribution::caller::initial_testing_files(
                 &write,
                 &isolated,
                 &active.source_sha,
@@ -287,21 +287,14 @@ pub(super) fn run(command: Command) -> Result<()> {
                 &branch,
                 &expected_main_sha,
                 "test: install native testing callers",
-                files,
-                [
-                    ".github/workflows/approve-request.yml",
-                    ".github/workflows/merge-request.yml",
-                    ".github/workflows/policy-check.yml",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+                callers.files,
+                callers.deletions,
             )?;
             fence(&write, &expected_main_sha, &expected_control_id)?;
             let pull: Value = write.post(&format!("{root}/pulls"), &json!({
                 "head":branch,"base":fixture.default_branch,
                 "title":"testing-setup: native development callers",
-                "body":format!("Initial test deployment, not a caller-migration acceptance result.\n\nSource: {}\nTest control: {}\nReplaces the three production caller wrappers; retains the existing Client repository secret and direct-harness workflows. Review and merge through the existing production caller lane before exercising test-only successors.",active.source_sha,active.identity()?)
+                "body":format!("Initial test deployment, not a caller-migration acceptance result.\n\nSource: {}\nTest control: {}\nReplaces the existing production caller wrappers with testing callers; retains the existing Client repository secret and direct-harness workflows. Review and merge through the existing production caller lane before exercising test-only successors.",active.source_sha,active.identity()?)
             }))?;
             ensure!(
                 pull["head"]["sha"] == head

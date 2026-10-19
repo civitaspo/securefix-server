@@ -24,7 +24,9 @@ pub(super) fn load_for_caller(workflow_sha: &str) -> Result<()> {
             baseline == workflow_sha,
             "server testing workflow is not pinned to the captured protected-main revision"
         );
-        GitHub::anonymous()?
+        let token = std::env::var("GITHUB_TOKEN").context("missing server GITHUB_TOKEN")?;
+        ensure!(!token.is_empty(), "server GITHUB_TOKEN is empty");
+        GitHub::new("https://api.github.com", token)?
     };
     let policy = Policy::parse(POLICY)?;
     let control =
