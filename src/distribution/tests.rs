@@ -2,6 +2,82 @@ use super::caller::validate_existing;
 use super::*;
 
 #[test]
+fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_ci() {
+    use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
+    let trusted = crate::config::trusted().unwrap();
+    let isolated = Policy::parse(include_bytes!("../../.github/testing-policy.json")).unwrap();
+    let repository = &trusted.deployment.integration.repository;
+    let source = "a".repeat(40);
+    let main = "b".repeat(40);
+    let tag = "v0.2.34-pre.1";
+    let mut legacy = rendered_files(&source, tag, "main", false).unwrap();
+    let ci = "name: CI\non:\n  pull_request:\n    types: [opened, synchronize, reopened]\n  push:\n    branches: [main]\n  workflow_dispatch:\npermissions: {}\njobs:\n  ok:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: exit 0\n  status-check:\n    needs: [ok]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    if: always()\n    steps:\n      - name: Require successful checks\n        env:\n          JOB_RESULT: ${{ needs.ok.result }}\n        run: test \"$JOB_RESULT\" = success\n";
+    legacy.insert(".github/workflows/ci.yml".into(), ci.as_bytes().to_vec());
+    let content = |bytes: &[u8]| json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)});
+    let version_path = format!(
+        "/repos/{}/contents/Cargo.toml?ref={source}",
+        trusted.deployment.server.repository
+    );
+    let manifest = b"[package]\nname = \"securefix\"\nversion = \"0.2.34-pre.1\"\n";
+    let mut version = content(manifest);
+    version["path"] = json!("Cargo.toml");
+    version["type"] = json!("file");
+    version["size"] = json!(manifest.len());
+    let missing = |path: &str| {
+        Route::request(
+            "GET",
+            format!("/repos/{repository}/contents/{path}?ref={main}"),
+            404,
+            json!({"message":"Not Found"}),
+        )
+    };
+    let mut routes = vec![
+        Route::get(
+            format!("/repos/{repository}"),
+            json!({"full_name":repository,"owner":{"id":trusted.deployment.repository_owner.id},"default_branch":"main"}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/commits/main"),
+            json!({"sha":main}),
+        ),
+        Route::get(&version_path, version.clone()),
+        missing(".github/workflows/push.yml"),
+        Route::get(
+            format!("/repos/{repository}/contents/.github/workflows/ci.yml?ref={main}"),
+            content(ci.as_bytes()),
+        ),
+        missing(".github/workflows/wc-autofix.yml"),
+    ];
+    for (path, bytes) in &legacy {
+        routes.push(Route::get(
+            format!("/repos/{repository}/contents/{path}?ref={main}"),
+            content(bytes),
+        ));
+    }
+    routes.push(Route::get(version_path, version));
+    for path in ["approve-request", "ci", "merge-request", "policy-check"] {
+        routes.push(missing(&format!(".github/workflows/testing-{path}.yml")));
+    }
+    let fixture = Fixture::new(routes);
+    let files = caller::initial_testing_files(&fixture.api, &isolated, &source, &main).unwrap();
+    assert_eq!(files.len(), 4);
+    assert!(!files.contains_key(".github/workflows/ci.yml"));
+    for (path, bytes) in files {
+        assert!(path.starts_with(".github/workflows/testing-"));
+        let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+        assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
+        if !path.ends_with("testing-ci.yml") {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+            assert!(text.contains("testing-reusable-"));
+            assert!(text.contains(&source));
+        }
+    }
+    fixture.finish();
+}
+
+#[test]
 fn testing_deployment_canonical_callers_round_trip() {
     const CHILD: &str = "SECUREFIX_TEST_NAMESPACE_CHILD";
     if std::env::var_os(CHILD).is_none() {

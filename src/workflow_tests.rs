@@ -1552,6 +1552,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/control-bootstrap.yml",
             ".github/workflows/publish-runtime.yml",
             ".github/workflows/testing-control-fixture.yml",
+            ".github/workflows/testing-distribute-runtime.yml",
             ".github/workflows/testing-load-cli.yml",
             ".github/workflows/testing-merge-caller-migration.yml",
             ".github/workflows/testing-process-request.yml",
@@ -1604,6 +1605,79 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert!(install.contains("install -D -m 755"));
     assert!(install.contains("$GITHUB_PATH"));
     assert!(installer["inputs"].get("binary").is_some());
+}
+
+#[test]
+fn testing_distributor_proposes_only_through_test_scoped_candidate_containers() {
+    let value = workflow("testing-distribute-runtime.yml");
+    assert!(
+        !serde_json::to_string(&value["jobs"]["host"])
+            .unwrap()
+            .contains("secrets.")
+    );
+    for id in ["host", "distribute"] {
+        let guard = value["jobs"][id]["if"].as_str().unwrap();
+        for clause in [
+            "refs/heads/main",
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+        ] {
+            assert!(guard.contains(clause));
+        }
+    }
+    let job = &value["jobs"]["distribute"];
+    assert_eq!(job["concurrency"]["group"], "securefix-control");
+    let steps = job["steps"].as_array().unwrap();
+    let preflight = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                == "securefix integration validate-testing-processor --kind caller-distribution"
+        })
+        .unwrap();
+    let first_mint = steps.iter().position(|s| s["id"] == "read").unwrap();
+    let prepare = steps
+        .iter()
+        .position(|s| {
+            s["name"]
+                == "Validate publisher and prepare canonical test caller files in the container"
+        })
+        .unwrap();
+    let writer = steps.iter().position(|s| s["id"] == "write").unwrap();
+    assert!(preflight < first_mint && first_mint < prepare && prepare < writer);
+    for step in steps {
+        if step["uses"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("actions/create-github-app-token@"))
+        {
+            assert_eq!(step["with"]["repositories"], "testing-securefix-server");
+        }
+        if let Some(run) = step["run"].as_str() {
+            assert!(!run.contains("securefix-bin/securefix distribute"));
+            if run.contains("docker run") {
+                for forbidden in [
+                    "docker.sock",
+                    "GITHUB_OUTPUT",
+                    "GITHUB_PATH",
+                    "PRIVATE_KEY",
+                    "APPROVE_TOKEN",
+                    "HOME",
+                    "--privileged",
+                ] {
+                    assert!(!run.contains(forbidden), "{forbidden}");
+                }
+                for required in [
+                    "--read-only",
+                    "--cap-drop=ALL",
+                    "no-new-privileges",
+                    "--user",
+                    "/candidate/securefix distribute",
+                ] {
+                    assert!(run.contains(required));
+                }
+            }
+        }
+    }
 }
 
 #[test]

@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Propose or merge a reviewed descriptor on the test client only
+        description: Propose/merge a reviewed test descriptor or propose initial testing callers
         type: choice
-        options: [propose, merge]
+        options: [propose, merge, propose-callers]
         required: true
       expected_main_sha:
         description: Exact current main of testing-securefix-server
@@ -101,6 +101,7 @@ jobs:
         run: securefix integration testing-control validate
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: test-token
+        if: inputs.phase != 'propose-callers'
         with:
           app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
@@ -111,6 +112,24 @@ jobs:
           permission-issues: write
           permission-checks: write
           permission-statuses: read
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: caller-token
+        if: inputs.phase == 'propose-callers'
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Propose the initial native testing caller deployment
+        if: inputs.phase == 'propose-callers'
+        env:
+          SECUREFIX_TEST_WRITE_TOKEN: ${{ steps.caller-token.outputs.token }}
+        run: >-
+          securefix integration testing-control propose-callers
+          --expected-main-sha "$EXPECTED_MAIN" --expected-control-id "$EXPECTED_CONTROL"
       - name: Qualify evidence and propose the signed test descriptor PR
         if: inputs.phase == 'propose'
         env:

@@ -60,6 +60,40 @@ const RELEASE_SYNC: &str = include_str!("../distribution_templates/release-pr-sy
 const RELEASE_PR: &str = include_str!("../distribution_templates/release-pr.yml");
 const RELEASE_TAG: &str = include_str!("../distribution_templates/release-tag.yml");
 
+/// Initial test deployment only; later migrations use the ordinary exact-file lane.
+pub(crate) fn initial_testing_files(
+    api: &GitHub,
+    isolated: &Policy,
+    source: &str,
+    main: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let fixture = &crate::config::trusted()?.deployment.integration;
+    let legacy = prepare_caller(api, isolated, &fixture.repository, source)?;
+    let ci = ".github/workflows/ci.yml";
+    ensure!(
+        legacy.files.len() == 4 && legacy.files.contains_key(ci),
+        "initial testing caller setup requires the supported minimal CI layout"
+    );
+    let mut trusted = crate::config::trusted()?.clone();
+    trusted.deployment = isolated.deployment.clone();
+    let tag = crate::runtime::version_at_source(api, source)?.tag();
+    let mut files = rendered_files_for(&trusted, source, &tag, &fixture.default_branch, false)?;
+    files.insert(
+        trusted.deployment.workflow_path(ci)?,
+        trusted
+            .deployment
+            .render_workflow(std::str::from_utf8(&legacy.files[ci])?)?
+            .into_bytes(),
+    );
+    for path in files.keys() {
+        ensure!(
+            optional_content(api, &fixture.repository, path, main)?.is_none(),
+            "initial testing caller already exists: {path}"
+        );
+    }
+    Ok(files)
+}
+
 pub(super) fn prepare_caller(
     api: &GitHub,
     policy: &Policy,

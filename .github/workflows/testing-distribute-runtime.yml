@@ -1,0 +1,142 @@
+name: testing-Distribute Runtime
+on:
+  workflow_dispatch:
+    inputs:
+      publisher_run_id:
+        description: Exact testing publisher selected by the active isolated descriptor
+        type: string
+        required: true
+permissions: {}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+jobs:
+  host:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      source-sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cli
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: testing-distribution-host
+          path: |
+            target/release/securefix
+            target/release/policy.json
+          if-no-files-found: error
+          retention-days: 1
+  distribute:
+    needs: host
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 15
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    env:
+      SECUREFIX_TEST_BASELINE_SHA: ${{ needs.host.outputs.source-sha }}
+      SECUREFIX_SOURCE_SHA: ${{ needs.host.outputs.source-sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/testing-host
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ runner.temp }}/testing-host/securefix
+      - name: Validate exact trusted distributor before issuing test credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: securefix integration validate-testing-processor --kind caller-distribution
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: read
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - name: Qualify isolated source, runtime and control as data
+        id: runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_TEST_READ_TOKEN: ${{ steps.read.outputs.token }}
+        run: securefix integration load-testing-control --kind caller-distribution
+      - name: Prepare fixed restricted candidate launcher
+        run: |
+          mkdir -p "$RUNNER_TEMP/testing-operation" "$RUNNER_TEMP/testing-exec"
+          install -m 0555 "${{ steps.runtime.outputs.directory }}/securefix" "$RUNNER_TEMP/testing-exec/securefix"
+          cat > "$RUNNER_TEMP/testing-launcher-input" <<'LAUNCHER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 64 --memory 256m --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --workdir /operation \
+            --mount "type=bind,source=$RUNNER_TEMP/testing-exec/securefix,target=/candidate/securefix,readonly" \
+            --mount "type=bind,source=$CANDIDATE_DIRECTORY/policy.json,target=/candidate/policy.json,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/testing-operation,target=/operation" \
+            --mount "type=bind,source=/etc/ssl/certs,target=/etc/ssl/certs,readonly" \
+            -e GITHUB_TOKEN -e SECUREFIX_SERVER_TOKEN \
+            -e SECUREFIX_SOURCE_SHA -e SECUREFIX_CONTROL_ID -e SECUREFIX_WORKFLOW_SHA \
+            -e GITHUB_REPOSITORY -e GITHUB_REF -e GITHUB_EVENT_NAME -e GITHUB_ACTOR_ID \
+            ubuntu@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b \
+            /candidate/securefix distribute "$@"
+          LAUNCHER
+          install -m 0555 "$RUNNER_TEMP/testing-launcher-input" "$RUNNER_TEMP/testing-run-candidate"
+      - name: Validate publisher and prepare canonical test caller files in the container
+        env:
+          CANDIDATE_DIRECTORY: ${{ steps.runtime.outputs.directory }}
+          GITHUB_TOKEN: ${{ steps.read.outputs.token }}
+          SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source_sha }}
+          SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control_id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PUBLISHER: ${{ inputs.publisher_run_id }}
+        run: |
+          "$RUNNER_TEMP/testing-run-candidate" validate-promotion "$PUBLISHER"
+          "$RUNNER_TEMP/testing-run-candidate" prepare-caller civitaspo/testing-securefix-server caller-migration
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: write
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Propose signed canonical migration without merging
+        env:
+          CANDIDATE_DIRECTORY: ${{ steps.runtime.outputs.directory }}
+          GITHUB_TOKEN: ${{ steps.read.outputs.token }}
+          SECUREFIX_SERVER_TOKEN: ${{ steps.write.outputs.token }}
+          SECUREFIX_SOURCE_SHA: ${{ steps.runtime.outputs.source_sha }}
+          SECUREFIX_CONTROL_ID: ${{ steps.runtime.outputs.control_id }}
+          SECUREFIX_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PUBLISHER: ${{ inputs.publisher_run_id }}
+        run: >-
+          "$RUNNER_TEMP/testing-run-candidate" apply-caller
+          --repository civitaspo/testing-securefix-server
+          --directory caller-migration --publisher-run-id "$PUBLISHER"

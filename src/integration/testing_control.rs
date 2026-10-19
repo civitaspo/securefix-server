@@ -17,6 +17,13 @@ const ACTIVE: &str = "control/active.json";
 #[derive(clap::Subcommand)]
 pub enum Command {
     Validate,
+    /// Propose initial native testing callers after the isolated descriptor exists.
+    ProposeCallers {
+        #[arg(long)]
+        expected_main_sha: String,
+        #[arg(long)]
+        expected_control_id: String,
+    },
     Propose {
         #[arg(long)]
         source_sha: String,
@@ -243,6 +250,73 @@ pub(super) fn run(command: Command) -> Result<()> {
     let root = format!("/repos/{}", fixture.repository);
     match command {
         Command::Validate => unreachable!(),
+        Command::ProposeCallers {
+            expected_main_sha,
+            expected_control_id,
+        } => {
+            let active = fence(&write, &expected_main_sha, &expected_control_id)?
+                .context("initialize the reviewed isolated control before testing callers")?;
+            let mut qualified = qualify(
+                &public,
+                &active.source_sha,
+                active.publisher_run_id,
+                active.verification_run_id,
+            )?;
+            qualified.generation = active.generation;
+            qualified.previous.clone_from(&active.previous);
+            ensure!(
+                qualified == active,
+                "testing caller control evidence changed"
+            );
+            let isolated = Policy::parse(POLICY)?;
+            let files = crate::distribution::caller::initial_testing_files(
+                &write,
+                &isolated,
+                &active.source_sha,
+                &expected_main_sha,
+            )?;
+            let branch = format!("testing-setup/callers/{}", &expected_control_id[..12]);
+            fence(&write, &expected_main_sha, &expected_control_id)?;
+            let _: Value = write.post(
+                &format!("{root}/git/refs"),
+                &json!({"ref":format!("refs/heads/{branch}"),"sha":expected_main_sha}),
+            )?;
+            fence(&write, &expected_main_sha, &expected_control_id)?;
+            let head = write.create_commit(
+                &fixture.repository,
+                &branch,
+                &expected_main_sha,
+                "test: install native testing callers",
+                files,
+                [
+                    ".github/workflows/approve-request.yml",
+                    ".github/workflows/merge-request.yml",
+                    ".github/workflows/policy-check.yml",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            )?;
+            fence(&write, &expected_main_sha, &expected_control_id)?;
+            let pull: Value = write.post(&format!("{root}/pulls"), &json!({
+                "head":branch,"base":fixture.default_branch,
+                "title":"testing-setup: native development callers",
+                "body":format!("Initial test deployment, not a caller-migration acceptance result.\n\nSource: {}\nTest control: {}\nReplaces the three production caller wrappers; retains the existing Client repository secret and direct-harness workflows. Review and merge through the existing production caller lane before exercising test-only successors.",active.source_sha,active.identity()?)
+            }))?;
+            ensure!(
+                pull["head"]["sha"] == head
+                    && pull["user"]["id"] == config::trusted()?.server_bot_id,
+                "testing caller proposal response mismatch"
+            );
+            securefix::output("head_sha", head)?;
+            securefix::output(
+                "pull_request",
+                pull["number"]
+                    .as_u64()
+                    .context("missing caller PR number")?
+                    .to_string(),
+            )
+        }
         Command::Propose {
             source_sha,
             publisher_run_id,

@@ -8,6 +8,7 @@ use serde_json::Value;
 pub enum HostKind {
     Request,
     CallerMigration,
+    CallerDistribution,
 }
 
 impl HostKind {
@@ -15,6 +16,7 @@ impl HostKind {
         match self {
             Self::Request => ".github/workflows/testing-process-request.yml",
             Self::CallerMigration => ".github/workflows/testing-merge-caller-migration.yml",
+            Self::CallerDistribution => ".github/workflows/testing-distribute-runtime.yml",
         }
     }
 
@@ -92,7 +94,9 @@ pub(super) fn require_context(kind: HostKind) -> Result<()> {
     let source = std::env::var("SECUREFIX_TEST_BASELINE_SHA")?;
     let (event, actor) = match kind {
         HostKind::Request => ("label", trusted.client_bot_id),
-        HostKind::CallerMigration => ("workflow_dispatch", trusted.owner_id),
+        HostKind::CallerMigration | HostKind::CallerDistribution => {
+            ("workflow_dispatch", trusted.owner_id)
+        }
     };
     ensure!(
         std::env::var("GITHUB_EVENT_NAME").is_ok_and(|v| v == event)
@@ -141,7 +145,9 @@ fn validate_run(
     let server = &trusted.deployment.server;
     let (event, actor) = match kind {
         HostKind::Request => ("label", trusted.client_bot_id),
-        HostKind::CallerMigration => ("workflow_dispatch", trusted.owner_id),
+        HostKind::CallerMigration | HostKind::CallerDistribution => {
+            ("workflow_dispatch", trusted.owner_id)
+        }
     };
     ensure!(
         id > 0
@@ -358,6 +364,36 @@ mod tests {
         migration["triggering_actor"] = json!({"id":trusted.owner_id});
         validate_run(&migration, 7, &source, trusted, HostKind::CallerMigration).unwrap();
         assert!(validate_run(&migration, 7, &source, trusted, HostKind::Request).is_err());
+        assert!(
+            validate_run(
+                &migration,
+                7,
+                &source,
+                trusted,
+                HostKind::CallerDistribution
+            )
+            .is_err()
+        );
+        let mut distribution = migration.clone();
+        distribution["path"] = json!(HostKind::CallerDistribution.path());
+        validate_run(
+            &distribution,
+            7,
+            &source,
+            trusted,
+            HostKind::CallerDistribution,
+        )
+        .unwrap();
+        assert!(
+            validate_run(
+                &distribution,
+                7,
+                &source,
+                trusted,
+                HostKind::CallerMigration
+            )
+            .is_err()
+        );
         let mut wrong_migration = migration.clone();
         wrong_migration["actor"] = json!({"id":trusted.client_bot_id});
         assert!(

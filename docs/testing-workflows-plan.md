@@ -301,12 +301,31 @@ CLI artifact preparation, bounded host validation and trusted label dispatch.
 These additions have not yet been deployed or verified by hosted scenarios.
 See [the integration contract](integration-testing.md#reviewed-isolated-control-fixture).
 
+The next local increment adds `propose-callers` to that trusted controller:
+requalify the test descriptor, validate existing native wrappers/minimal CI,
+propose the canonical testing wrappers and testing CI, and remove only the old
+three production wrappers. Keep the existing direct-harness CI/workflows and
+repository secret. Initial setup merges through the existing production caller
+lane and does not count as the unavailable-old-caller migration scenario.
+`testing-distribute-runtime.yml` reuses existing distribution in the candidate
+container with test-only tokens and never merges its PR. Its trusted source and
+runtime qualification, first-attempt owner guard and shared mutation queue reuse
+the existing test processor boundary. Hosted acceptance remains pending.
+
+Draft implementation PR: https://github.com/civitaspo/securefix-server/pull/120.
+Its first source `6f994a4b213261e08153d0e3112ef54d23561806` is GitHub-signed.
+The [initial CI run](https://github.com/civitaspo/securefix-server/actions/runs/39205242258)
+passed format/tests/Clippy/version/actionlint and `status-check`. This certifies
+CI for that source only. The ordinary request capture rejected the draft PR as
+not ready; the production policy check correctly requires exact-head owner
+authorization for sensitive code. Neither is a testing migration scenario result.
+
 
 After the fixture controller and smoke isolation increment, local assembled
-checks pass: 352 tests (42 library, 285 CLI, 22 bootstrap, 3 client), 2 existing
+checks pass: 354 tests (42 library, 287 CLI, 22 bootstrap, 3 client), 2 existing
 ignored, documentation tests, fmt, clippy and actionlint. The full test log is
-`/private/tmp/securefix-phaseb-verified-tests.log`; Clippy output is in
-`/private/tmp/securefix-phaseb-clippy.log`. Earlier assembled failures exposed
+`/private/tmp/securefix-phaseb-distribution-verified.log`; Clippy output is in
+`/private/tmp/securefix-phaseb-distribution-verified-clippy.log`. Earlier assembled failures exposed
 obsolete workflow expectations; the implementation and exact assertions were
 corrected before the successful rerun. No hosted scenario,
 publication, deployment or control activation has occurred. The owner has resolved

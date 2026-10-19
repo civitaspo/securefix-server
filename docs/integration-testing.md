@@ -210,6 +210,26 @@ prepare/verify evidence and all ten scenarios still need actual Actions runs.
 The existing Client repository secret stays in place under the owner's explicit
 trusted-server threat model; no Environment move or per-job approval is required.
 
+After initialization, `testing-control-fixture.yml` phase `propose-callers`
+requalifies the active test descriptor and proposes the initial caller setup.
+It reuses the existing strict production wrapper/minimal-CI validator and canonical
+testing renderer. The signed Server App PR adds the three `testing-*` native
+callers and `testing-ci.yml`, and deletes only the three old production caller
+wrappers so owner commands cannot enter both deployments. The existing `ci.yml`
+and other direct-harness workflows remain. This phase receives a separate
+singleton test token with contents/PR/workflow write, without check or issue write.
+Review and merge this initial setup through the existing production caller lane;
+it is setup, not proof of migration from an unavailable caller.
+
+`testing-distribute-runtime.yml` subsequently qualifies the isolated active
+runtime with the trusted protected-main host. The candidate runs the existing
+`distribute validate-promotion`, `prepare-caller` and `apply-caller` only in the
+restricted container. Preparation gets a test read token; signed PR creation gets
+only test contents/PR/workflow write after successful preparation. The workflow
+opens the canonical migration PR and never merges it. Use the separate reviewed
+testing migration lane. Owner/main/first-attempt guards and `securefix-control`
+serialization apply before credential issuance or mutation.
+
 ## Isolated legacy client smoke
 
 The direct scratch harness now runs the selected candidate or verified stable
@@ -428,16 +448,16 @@ default-branch revision write checks remain unchanged.
 
 The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
 
-The separate `client-smoke` job exercises the actual composite client Action. Its
-action checkout and candidate binary are bound to the successful credential-free
-build's source SHA and immutable artifact ID. A trusted controller generates a
-scratch deployment policy and one fixed input file.
+The separate `client-smoke` job exercises CLI preparation in the restricted
+credential-free container described above. Its candidate binary is bound to the
+successful credential-free build's source SHA and immutable artifact ID. A trusted
+controller generates a scratch deployment policy and one fixed input file.
 Client-only policies omit approval exemptions and the optional Renovate merge
 principal, so the published baseline can parse the fixture before a schema update
 is activated. These fixtures grant only the scratch `securefix` capability.
-The Action receives only a
-Client App token restricted to scratch `issues:write`, uploads the real envelope,
-and creates its request label in scratch. The trusted verifier independently reads
+After bounded validation and upload, only the trusted host receives a Client App
+token restricted to scratch `issues:write` and creates the request label in
+scratch. The trusted verifier independently reads
 the source artifact and scratch label, checks exact metadata and file bytes, and
 uploads `client-verification.json`.
 
