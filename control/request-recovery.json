@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "authority_branch": "emergency/recover-intake-040-20261020",
+  "workflow": ".github/workflows/control-activation.yml",
+  "expected_main_sha": "041268a86feec5eed7c9514cf2c7c56089ca79dd",
+  "pull_request": 143,
+  "target_branch": "emergency/restore-legacy-workflow-contract",
+  "expected_head_sha": "17de6fdb1fe4846acdc34d469662e1bab635de94",
+  "expected_tree_sha": "35c2a86ec23cb52f3b8fdb3779f3cbcdb116f532",
+  "commits": [
+    "17de6fdb1fe4846acdc34d469662e1bab635de94"
+  ],
+  "active": {
+    "version": 1,
+    "generation": 6,
+    "source_sha": "f80196051161fe4161c42cd9cb7530cc7db79882",
+    "policy_sha256": "91292daf7e6229ec64d66618926b10c4785e67bb3b1cd31d1a9bc1646464cc1c",
+    "archive_sha256": "87cbd300024e9f653820e64d9fcbaa15bb23261c345c10c1b18711e531bf0f57",
+    "release_id": 417941094,
+    "asset_id": 658052746,
+    "publisher_run_id": 39359327054,
+    "verification_run_id": 39359041267,
+    "previous": "3006b3f1706a226100c567b3aca38377efaeb0dfdf0b93c3a7bdd55c6ff995d1"
+  },
+  "files": [
+    {
+      "path": ".github/workflows/approve-request.yml",
+      "status": "modified",
+      "sha256": "99e00634bfb4d78afc11ef8a02c6b526778e4bc54a71cb1aec43269ce38c2111"
+    },
+    {
+      "path": ".github/workflows/merge-request.yml",
+      "status": "modified",
+      "sha256": "8c31d4e40986696eca9da1b1d61bf4edf470d1d0de834997efeda2ff86daa6c4"
+    },
+    {
+      "path": "Cargo.lock",
+      "status": "modified",
+      "sha256": "137d71996328fad88f3782573d6ef164cd64078d8f77f473bf1a896bb98f579d"
+    },
+    {
+      "path": "Cargo.toml",
+      "status": "modified",
+      "sha256": "c42797a7df01e99447705318a2db0e8119dcee51d083baa422ad6c6bdc000d0d"
+    },
+    {
+      "path": "docs/merging.md",
+      "status": "modified",
+      "sha256": "3c5de9d440aad9d5e4af304d04259798ec7431247235007acf71807cb4e0129e"
+    },
+    {
+      "path": "docs/request-intake-recovery-2026-10-20.md",
+      "status": "modified",
+      "sha256": "7ae896edfda0448e98b5c18eba5784a04797272b133c5e02ee0c8f4df5238767"
+    },
+    {
+      "path": "src/workflow_tests.rs",
+      "status": "modified",
+      "sha256": "0816915298395573acf7abcdda98520c97637acc0a0cbe28525aea1dfa870561"
+    }
+  ],
+  "probe": {
+    "run_id": 39432135670,
+    "source_sha": "611fde1dd08df445e351f63348638e39d31d2fbe",
+    "workflow": ".github/workflows/testing-ci.yml",
+    "branch": "testing/reaction-permission-20261020"
+  },
+  "workflow_probe": {
+    "run_id": 39441257574,
+    "source_sha": "72bcb9cea307ca6e89b23fd6389559bf49f39c01",
+    "workflow": ".github/workflows/testing-ci.yml",
+    "branch": "testing/legacy-workflow-scope-positive-20261020"
+  }
+}

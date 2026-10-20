@@ -1,0 +1,171 @@
+# One-use request-intake executor, 2026-10-20
+
+Status: prepared for exact-source owner review. This branch must never merge to
+main, publish a runtime, or be distributed to callers. Production write
+qualification, scratch rehearsal and repair merge remain pending.
+
+## Fixed repair and authority
+
+[PR #143](https://github.com/civitaspo/securefix-server/pull/143) repairs only the
+server-local legacy request compatibility bridge, its structural tests, package
+version and recovery documentation. The [compiled authorization record](../control/request-recovery.json)
+fixes head `17de6fdb1fe4846acdc34d469662e1bab635de94`, expected main
+`041268a86feec5eed7c9514cf2c7c56089ca79dd`, complete generation-six descriptor,
+reviewed tree, one signed owner commit and SHA-256 hashes for all seven changed
+files. Dispatch inputs cannot substitute another repair. The source-pinned Rust
+host extends neither the retired bootstrap nor its bounded repair contract; its
+three new commands are explicitly separate authority on this unmerged branch.
+
+The owner reviews this exact executor source, the fixed target and this procedure
+together. Authorization of the general recovery procedure does not replace this
+exact-source review. The read-only plan prints the exact unedited owner comment
+required on the target PR. That comment binds source, target, expected main, full
+control and the compiled authorization record. It expires after 24 hours; changed
+or edited comments and later source/head/control changes are rejected. PR head,
+base and lifecycle transitions at or after authorization also invalidate it.
+
+## Independent gates
+
+The fixed host builds from `job.workflow_sha` without credentials and is passed
+by immutable artifact ID. The qualifier runs without a production environment or
+App token. It validates owner/run/workflow/source and branch identity, successful
+source-bound code CI for executor and repair, signed owner ancestry, unchanged
+main/policy/control, exact same-repository PR identity and state, complete signed
+owner commit chain, full changed-file set and bytes, fixed tree and scope probe.
+
+All unrelated PR checks must be completed and successful, neutral or skipped.
+The only substituted ordinary policy failure is the exact-control Server App
+check whose reported reason is missing owner authorization. The executor never
+publishes a substitute green `securefix-policy-check`. It repeats these independent
+gates before privileged writes. Administrative configuration is not read by this
+host, and no administrator credential enters any of its jobs.
+
+The production review and merge additionally require a successful rehearsal run
+from this same signed executor source and first-attempt owner dispatch. The host
+verifies its bounded, digest-checked artifact and independently reads scratch PRs,
+merge signature/tree/sole parent, unchanged protected scratch main and deleted
+fixture refs. A successful fixture setup or read-only plan is insufficient.
+
+## Scratch rehearsal scope
+
+The [compiled fixture record](../control/request-recovery-rehearsal.json) identifies
+owner-signed scratch PRs #334 and #335 against the disposable non-default base
+`testing/recovery2-base-20261020`. It does not change either repository's main.
+The source-bound test harness is compiled in the secret-free build job and receives
+only a singleton scratch installation token, never the production installation
+or configured reviewer PAT. The shared token-scope guard rejects other installations.
+
+The test exercises the actual fixed merge core after target/fence validation,
+rejects the advanced stale head before writing, verifies the successful signed
+merge's exact tree and parent, rechecks scratch main and cleans recorded fixtures.
+It does not exercise production owner intake or the configured User reviewer
+credential. Their exact-target validation and mutation/readback are separate
+production recovery gates. Unit fixtures cover changed owner/source/head/control,
+signatures and effective committers, altered files, main fences and the exact
+expected-head Merge API payload. No test is represented as proof of ordinary
+production recovery.
+
+## Exact-source approval and execution
+
+After reviewing the immutable executor source and fixed repair together:
+
+1. Confirm successful executor and repair CI and the read-only `request-recovery-plan`
+   run; retain its artifact and the exact source SHA. Inspect all remaining gates.
+2. Through the separate administrator context, lock only the executor branch with
+   administrator enforcement, no force pushes or deletion, and confirm its SHA.
+   Preserve main protection, rulesets, sole Server App PR bypass, native merge
+   settings and all existing environment admissions.
+3. Temporarily admit only this branch to the existing `main` environment. Record
+   the new admission ID for cleanup. Set the repository-level Actions variable
+   `SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA` to the approved source SHA. Confirm no
+   same-named environment variable shadows it. No App permissions change.
+4. Post the plan's exact owner authorization comment on PR #143 after source review.
+   Dispatch `request-recovery-rehearsal` with exact `authority_sha` and that
+   `authorization_comment_id`. Inspect the actual result and independent scratch
+   state. Any failure stops production work and requires cleanup and investigation.
+5. Dispatch `request-recovery-review` with the same source and comment plus the
+   successful `rehearsal_run_id`. Only this job receives the existing configured
+   User reviewer PAT. Rust verifies its identity and non-author status, repeats
+   qualification and posts APPROVED for the exact `commit_id`. It checks the
+   resulting review and GitHub review decision.
+6. In a separate dispatch, run `request-recovery-merge` with those same bindings.
+   Its read-only qualifier also checks the latest exact-source/head/control Bot
+   review. The writer alone mints a server-repository Contents/Pull requests token,
+   verifies singleton installation scope and repeats qualification, authorization,
+   review and check validation. It rechecks head, main and full active descriptor
+   immediately before the fixed PR squash Merge API call with expected-head CAS.
+   The main fence is an application check, not an atomic base-SHA CAS.
+7. Verify the resulting signed main's sole parent and exact reviewed tree, unchanged
+   active descriptor and completed target PR. Restore and prove ordinary intake
+   with fresh exact-head commands, then complete candidate qualification and the
+   ordinary publication/activation sequence before caller distribution.
+
+The protected writer jobs share `securefix-control` with `queue: max`. Temporary
+branch admission cannot enable this branch's settings or distribution workflows:
+their entry and privileged jobs explicitly require main. Other manual privileged
+entrypoints are guarded by main or the separate integration branch prefix, or
+depend on such guarded jobs without `always()`. The fixed recovery jobs alone
+admit the exact recovery branch, owner, source and first attempt.
+
+## Cleanup and failures
+
+After completion or any failed attempt, remove the repository approval variable
+and only the newly created environment admission using the separate administrator
+context. Confirm earlier admissions remain unchanged, no environment variable
+shadows the removed repository variable, and the unmerged executor remains locked
+at its reviewed SHA. Do not relax rulesets, enable auto-merge, push main directly,
+reuse bootstrap, fabricate policy checks or broaden this authority.
+
+Inspect an ambiguous result read-only before taking another action. A successful
+merge changes the fixed expected main and prevents another successful use. A
+failed or abandoned operation requires fresh explicit review before re-enabling
+source approval. Preserve source, exact-head reviews/checks, run and artifact
+identities, resulting commit and cleanup evidence. The general recovery contract
+and later reusable mechanism must be reviewed separately; this one-use executor
+is not a permanent alternative merge service.
+
+## Corrected authority and preparation evidence
+
+This is a new reviewed authority, not a rerun of the consumed executor.
+The prior source `e6214109711dfc504c7202012f15d8bdff92404a` remains locked
+and disarmed. Its fixed main and PR #142 have already been consumed. That recovery
+merged and cleaned up successfully, but ordinary intake failed at workflow startup
+because the caller narrowed the legacy reusable's declared Issues write permission.
+The correction and exact failed run are recorded in the
+[intake recovery report](request-intake-recovery-2026-10-20.md#first-bounded-recovery-and-corrected-compatibility-requirement).
+
+The new authorization record fixes PR #143, its seven exact changed-file hashes,
+main `041268a86feec5eed7c9514cf2c7c56089ca79dd` and the unchanged generation-six
+active descriptor. The target grants both writes only to the two server-local
+legacy callers. Current reusables and generated callers stay read-only.
+
+Independent qualification now requires both the earlier reaction API scope probe
+and the signed source-bound GitHub workflow expansion probe `39441257574`.
+That workflow is valid and both deliberately disabled caller jobs are skipped;
+the host requires exactly those two results. It does not count a skipped caller
+as evidence that command capture or Server processing succeeded. The matching
+negative probe `39441404600` reproduces the startup failure with Issues read.
+The new signed scratch fixtures are PRs #334 and #335 on a separate disposable
+base. Their creation is preparation only; the exact-source rehearsal remains
+pending. A fixture preparation command initially published its new base under
+the previous disposable ref name; read-only inspection identified the mismatch,
+the correct new base was published and the accidental old ref was deleted with
+an exact-SHA lease. Neither protected main changed.
+
+The owner's prior approval covers only the consumed source. This new source,
+record, successful CI and read-only plan must be reviewed together before any
+new branch admission, source-approval variable or owner authorization comment.
+After exact-source approval, run a fresh rehearsal, a separate configured Bot
+review, then a separate bounded Server App PR merge and cleanup as specified above.
+No previous rehearsal artifact may substitute for this source.
+
+The fixed repair head passed
+[code CI 39441851644](https://github.com/civitaspo/securefix-server/actions/runs/39441851644),
+including its required status-check. Before freezing the new executor, its focused
+recovery suite passed eleven tests with one live rehearsal ignored. The assembled
+source passed pinned Rust fmt, the full locked suite (42 library, 303 CLI, 33 host,
+two native-client and one testing-runtime tests), Clippy with warnings denied,
+CI-pinned actionlint v1.7.12 and the official workflow lock verifier for all 42
+workflows. The two existing CLI live tests and one new-source live rehearsal were
+ignored locally. Exact-source remote CI, read-only plan and owner approval remain
+separate pending gates; local tests do not certify a production recovery.

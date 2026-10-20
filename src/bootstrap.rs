@@ -21,6 +21,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "bootstrap_request_recovery.rs"]
+mod request_recovery;
+
 const ACTIVE: &str = "control/active.json";
 const ASSET: &str = "securefix-runtime-linux-x86_64.tar.gz";
 const BOOTSTRAP_WORKFLOW: &str = ".github/workflows/control-bootstrap.yml";
@@ -30,6 +33,9 @@ const MAX_ARTIFACT: usize = 64 * 1024;
 
 #[derive(Subcommand)]
 pub enum Command {
+    RequestRecoveryPlan,
+    RequestRecoveryReview,
+    RequestRecoveryMerge,
     Prepare {
         #[arg(long)]
         source_sha: String,
@@ -101,6 +107,9 @@ pub enum Command {
 pub fn run(command: Command) -> Result<()> {
     let host = Host::from_env()?;
     match command {
+        Command::RequestRecoveryPlan => request_recovery::plan(&host),
+        Command::RequestRecoveryReview => request_recovery::review(&host),
+        Command::RequestRecoveryMerge => request_recovery::merge(&host),
         Command::Prepare {
             source_sha,
             verification_run_id,
