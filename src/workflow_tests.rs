@@ -3381,6 +3381,29 @@ fn one_use_request_recovery_keeps_qualification_and_credentials_separate() {
     let qualify = &jobs["recovery-qualify"];
     assert!(qualify.get("environment").is_none());
     let text = serde_json::to_string(qualify).unwrap();
+    let steps = qualify["steps"].as_array().unwrap();
+    let qualification = steps
+        .iter()
+        .find(|step| step["id"] == "qualification")
+        .unwrap();
+    assert_eq!(
+        qualification["run"],
+        "\"$RUNNER_TEMP/securefix-request-recovery\" request-recovery-plan"
+    );
+    let record = steps
+        .iter()
+        .find(|step| step["name"] == "Record the read-only plan and pending authorization gates")
+        .unwrap();
+    assert_eq!(
+        record["env"]["PLAN"],
+        "${{ steps.qualification.outputs.plan }}"
+    );
+    assert!(
+        record["run"]
+            .as_str()
+            .unwrap()
+            .contains("test -n \"$PLAN\"")
+    );
     assert!(!text.contains("secrets.") && !text.contains("create-github-app-token"));
     for job in [
         "recovery-host",

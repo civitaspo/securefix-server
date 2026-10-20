@@ -153,12 +153,18 @@ jobs:
       - name: Install the immutable source-bound recovery host
         run: install -D -m 755 recovery-host/securefix-bootstrap "$RUNNER_TEMP/securefix-request-recovery"
       - name: Qualify the fixed repair without production credentials
+        id: qualification
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA }}
-        run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-plan > "$RUNNER_TEMP/request-recovery-plan.json"'
+        run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-plan'
       - name: Record the read-only plan and pending authorization gates
-        run: cat "$RUNNER_TEMP/request-recovery-plan.json" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          PLAN: ${{ steps.qualification.outputs.plan }}
+        run: |
+          test -n "$PLAN"
+          printf '%s\n' "$PLAN" > "$RUNNER_TEMP/request-recovery-plan.json"
+          cat "$RUNNER_TEMP/request-recovery-plan.json" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: request-recovery-plan

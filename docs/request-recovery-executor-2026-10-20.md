@@ -149,3 +149,14 @@ association. The official gh-actions-lock v0.2.0 regenerated that single entry;
 its frozen check then validated all 42 workflows and the relevant Rust lockfile
 contract test passed. No production operation ran during the failed CI. The
 corrected source needs its own successful code CI and read-only plan.
+
+Source `262c0e26b5ffa7cb956c6d59e596d6bcd16e7708` passed
+[CI 39436400094](https://github.com/civitaspo/securefix-server/actions/runs/39436400094).
+Its [read-only run 39436923834](https://github.com/civitaspo/securefix-server/actions/runs/39436923834)
+completed qualification, but inspection found an empty plan artifact: the workflow
+captured stdout while the existing Rust emitter writes an Actions `plan` output.
+The workflow now names that step, transfers its exact output through an environment
+variable, rejects an empty value and saves it for the artifact and summary. A
+structural check covers that handoff. This was an evidence-recording defect;
+review, rehearsal and merge jobs were all skipped. A new source-bound code CI and
+non-empty read-only plan are required before exact-source owner approval.
