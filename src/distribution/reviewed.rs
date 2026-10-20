@@ -540,6 +540,7 @@ fn read_plan() -> Result<Plan> {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+    use base64::Engine;
 
     const TEST_CALLER: &str = "civitaspo/dotfiles";
     const TEST_PR: u64 = 41;
@@ -547,6 +548,36 @@ mod tests {
     const TEST_PUBLISHER: u64 = 5;
     fn sha(ch: char) -> String {
         ch.to_string().repeat(40)
+    }
+
+    fn lock_snapshot_routes(
+        files: &std::collections::BTreeMap<String, Vec<u8>>,
+        base: &str,
+        tree: &str,
+    ) -> Vec<Route> {
+        let entries = files
+            .iter()
+            .map(|(path, bytes)| {
+                json!({"path":path,"type":"blob","mode":"100644","size":bytes.len()})
+            })
+            .collect::<Vec<_>>();
+        let mut routes = vec![
+            Route::get(
+                format!("/repos/{TEST_CALLER}/commits/{base}"),
+                json!({"sha":base,"commit":{"tree":{"sha":tree}}}),
+            ),
+            Route::get(
+                format!("/repos/{TEST_CALLER}/git/trees/{tree}?recursive=1"),
+                json!({"sha":tree,"truncated":false,"tree":entries}),
+            ),
+        ];
+        routes.extend(files.iter().map(|(path, bytes)| {
+            Route::get(
+                format!("/repos/{TEST_CALLER}/contents/{path}?ref={base}"),
+                json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+            )
+        }));
+        routes
     }
 
     fn migration_plan(control: &securefix::control::ControlRevision) -> Plan {
@@ -612,6 +643,22 @@ mod tests {
             ".github/workflows/push.yml".into(),
             super::super::caller::rendered_push_fixture("main").unwrap(),
         );
+        let mut base_snapshot = files.clone();
+        base_snapshot.remove(".github/workflows/policy-check.yml");
+        base_snapshot.extend([
+            (
+                ".github/workflows/unmanaged.yml".into(),
+                b"name: Unmanaged\nsteps: []\n".to_vec(),
+            ),
+            (
+                ".github/workflows/actions.lock".into(),
+                b"previous lock entries\n".to_vec(),
+            ),
+            (
+                "actions/local/action.yml".into(),
+                b"runs:\n  using: composite\n  steps: []\n".to_vec(),
+            ),
+        ]);
         let content = |bytes: &[u8]| json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(bytes)});
         let content_route = |repository: &str, path: &str, revision: &str, bytes: &[u8]| {
             let mut value = content(bytes);
@@ -738,6 +785,14 @@ mod tests {
                 routes.push(content_route(TEST_CALLER, path, &base, bytes));
             }
         }
+        let base_tree = sha('8');
+        routes.extend(lock_snapshot_routes(&base_snapshot, &base, &base_tree));
+        routes.push(content_route(
+            TEST_CALLER,
+            ".github/workflows/actions.lock",
+            &base,
+            &base_snapshot[".github/workflows/actions.lock"],
+        ));
         let pr = json!({"number":TEST_PR,"state":"open","draft":false,
             "user":{"id":policy.server_bot_id,"type":"Bot"},
             "head":{"repo":{"id":repository_id,"full_name":TEST_CALLER},"ref":update_branch,"sha":head},
@@ -746,6 +801,29 @@ mod tests {
             format!("/repos/{TEST_CALLER}/pulls/{TEST_PR}"),
             pr.clone(),
         ));
+        let mut branch_files = files.clone();
+        let mut lock_paths = branch_files.keys().cloned().collect::<Vec<_>>();
+        lock_paths.extend([
+            ".github/workflows/unmanaged.yml".to_owned(),
+            "actions/local/action.yml".to_owned(),
+        ]);
+        let mut lock_paths = lock_paths
+            .into_iter()
+            .map(|path| {
+                if path.starts_with(".github/workflows/") {
+                    path
+                } else {
+                    format!("./{path}")
+                }
+            })
+            .collect::<Vec<_>>();
+        lock_paths.sort();
+        lock_paths.dedup();
+        let lock = lock_paths
+            .iter()
+            .map(|path| format!("{path}\n"))
+            .collect::<String>();
+        branch_files.insert(".github/workflows/actions.lock".into(), lock.into_bytes());
         routes.extend([
             Route::get(format!("/repos/{TEST_CALLER}/git/ref/heads/{update_branch}"), json!({"object":{"sha":head}})),
             Route::get(format!("/repos/{TEST_CALLER}/commits/main"), json!({"sha":base})),
@@ -756,13 +834,15 @@ mod tests {
                 "commit":{"verification":{"verified":true}},"author":{"id":policy.server_bot_id,"login":trusted.deployment.server_bot_login}})),
             Route::get(format!("/repos/{TEST_CALLER}/git/commits/{head}"), json!({"tree":{"sha":sha('g')}})),
             Route::get(format!("/repos/{TEST_CALLER}/git/trees/{}?recursive=1", sha('g')), json!({"truncated":false,
-                "tree":files.keys().map(|path| json!({"path":path,"type":"blob","mode":"100644"})).collect::<Vec<_>>()})),
+                "tree":branch_files.keys().map(|path| json!({"path":path,"type":"blob","mode":"100644","size":branch_files[path].len()})).collect::<Vec<_>>()})),
         ]);
-        for (path, bytes) in &files {
+        for (path, bytes) in &branch_files {
             routes.push(content_route(TEST_CALLER, path, &head, bytes));
         }
-        let changed_files =
-            json!([{"filename":".github/workflows/policy-check.yml","status":"added"}]);
+        let changed_files = json!([
+            {"filename":".github/workflows/policy-check.yml","status":"added"},
+            {"filename":".github/workflows/actions.lock","status":"added"}
+        ]);
         routes.extend([
             Route::get(format!("/repos/{TEST_CALLER}/pulls?state=open&head=civitaspo:{update_branch}&per_page=100&page=1"), json!([pr.clone()])),
             Route::get(format!("/repos/{TEST_CALLER}/pulls/{TEST_PR}/files?per_page=100&per_page=100&page=1"), changed_files.clone()),
@@ -884,6 +964,12 @@ mod tests {
                 "expected_head_sha":sha('d'),"control_id":control.identity().unwrap(),
                 "approve_comment_id":"301","merge_comment_id":"302","publisher_run_id":TEST_PUBLISHER.to_string()}});
             let directory = tempfile::tempdir().unwrap();
+            let bin = super::super::lockfile::install_fake_runner(directory.path());
+            let path = format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
             let event_path = directory.path().join("event.json");
             std::fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
             let status = ProcessCommand::new(std::env::current_exe().unwrap())
@@ -891,6 +977,7 @@ mod tests {
                 .arg("distribution::reviewed::tests::verify_binds_the_canonical_migration_to_owner_review_commands_and_control")
                 .arg("--nocapture")
                 .env("SECUREFIX_REVIEWED_VERIFY_CHILD","1")
+                .env("PATH",path)
                 .env("GITHUB_EVENT_PATH",event_path)
                 .env("GITHUB_REPOSITORY",&trusted.deployment.server.repository)
                 .env("GITHUB_REF",format!("refs/heads/{}",trusted.deployment.server.default_branch))

@@ -25,8 +25,9 @@ concurrency:
 jobs:
   trusted-runtime:
     if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && inputs.candidate_sha == github.sha
-    uses: civitaspo/securefix-server/.github/workflows/load-cli.yml@9ec4043ce71f454811ef676b82dcba1314a5f0bb # v0.2.7
+    uses: ./.github/workflows/load-cli.yml
     permissions:
+      actions: read
       contents: read
       attestations: read
 
@@ -43,7 +44,7 @@ jobs:
         with:
           ref: ${{ inputs.candidate_sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-cli
+      - uses: $/.github/actions/setup-cli
       - name: Stage candidate CLI and policy
         run: |
           mkdir -p candidate-runtime
@@ -84,7 +85,7 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: candidate-source
           persist-credentials: false
-      - uses: ./candidate-source/.github/actions/install-cli
+      - uses: $/.github/actions/install-cli
         with:
           binary: ${{ github.workspace }}/trusted-runtime/securefix
       - name: Validate frozen producer before minting scratch credentials
@@ -168,7 +169,7 @@ jobs:
           working_directory: scratch
           install_args: "aqua:orhun/git-cliff"
           cache: false
-      - uses: ./candidate-source/.github/actions/install-cli
+      - uses: $/.github/actions/install-cli
         with:
           binary: ${{ github.workspace }}/candidate/securefix
       - name: Verify scratch checkout identity and default head

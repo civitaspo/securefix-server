@@ -1,0 +1,1169 @@
+[
+  {
+    "repo": "civitaspo/dotfiles",
+    "default_branch": "main",
+    "head": "cff4d812b44cd69e6904e1b45ba2f45c21093135",
+    "workflow_count": 4,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/securefix-server",
+    "default_branch": "main",
+    "head": "2f56c5f75b74c588715995a58eff86017388b286",
+    "workflow_count": 42,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/approve.yml",
+      ".github/workflows/build-bootstrap-host.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/control-activation.yml",
+      ".github/workflows/control-bootstrap.yml",
+      ".github/workflows/distribute-runtime.yml",
+      ".github/workflows/load-cli.yml",
+      ".github/workflows/merge-caller-migration.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/merge.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/publish-runtime.yml",
+      ".github/workflows/release.yml",
+      ".github/workflows/repo-settings.yml",
+      ".github/workflows/reusable-approve-request.yml",
+      ".github/workflows/reusable-merge-request.yml",
+      ".github/workflows/reusable-policy-check.yml",
+      ".github/workflows/reusable-release-pr-sync.yml",
+      ".github/workflows/reusable-release-pr.yml",
+      ".github/workflows/reusable-release-tag.yml",
+      ".github/workflows/securefix.yml",
+      ".github/workflows/testing-approve.yml",
+      ".github/workflows/testing-control-fixture.yml",
+      ".github/workflows/testing-distribute-runtime.yml",
+      ".github/workflows/testing-load-cli.yml",
+      ".github/workflows/testing-merge-caller-migration.yml",
+      ".github/workflows/testing-merge.yml",
+      ".github/workflows/testing-migration-fixture.yml",
+      ".github/workflows/testing-policy-check.yml",
+      ".github/workflows/testing-provider-release.yml",
+      ".github/workflows/testing-publish-runtime.yml",
+      ".github/workflows/testing-release-pr.yml",
+      ".github/workflows/testing-release.yml",
+      ".github/workflows/testing-reusable-approve-request.yml",
+      ".github/workflows/testing-reusable-merge-request.yml",
+      ".github/workflows/testing-reusable-policy-check.yml",
+      ".github/workflows/testing-reusable-release-pr-sync.yml",
+      ".github/workflows/testing-reusable-release-pr.yml",
+      ".github/workflows/testing-reusable-release-tag.yml",
+      ".github/workflows/testing-securefix-server.yml",
+      ".github/workflows/testing-securefix.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "./.github/workflows/reusable-approve-request.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/approve.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/build-bootstrap-host.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/control-activation.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/control-bootstrap.yml",
+        "uses": [
+          "./.github/workflows/build-bootstrap-host.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/distribute-runtime.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/load-cli.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/merge-caller-migration.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "./.github/workflows/reusable-merge-request.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/publish-runtime.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/repo-settings.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/reusable-approve-request.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/reusable-merge-request.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/reusable-policy-check.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/reusable-release-pr-sync.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/reusable-release-pr.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/reusable-release-tag.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/securefix.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-approve.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-control-fixture.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-distribute-runtime.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-load-cli.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-merge-caller-migration.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-merge.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-migration-fixture.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-policy-check.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-provider-release.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-publish-runtime.yml",
+        "uses": [
+          "./.github/workflows/load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/load-cli.yml@9ec4043ce71f454811ef676b82dcba1314a5f0bb"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-release.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-reusable-approve-request.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-reusable-merge-request.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-reusable-policy-check.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-reusable-release-pr-sync.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-reusable-release-pr.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-reusable-release-tag.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-securefix-server.yml",
+        "uses": [
+          "./.github/workflows/build-bootstrap-host.yml",
+          "./.github/workflows/testing-provider-release.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-securefix.yml",
+        "uses": [
+          "./.github/workflows/testing-load-cli.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/dbt-authorized-models",
+    "default_branch": "main",
+    "head": "9ee99e05e125870f9704dbf339f18ec9c6e4c0df",
+    "workflow_count": 15,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-fusion-compatibility.yml",
+      ".github/workflows/wc-integration-tests.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-fusion-compatibility.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-integration-tests.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-integration-tests.yml",
+          "./.github/workflows/wc-fusion-compatibility.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-integration-tests.yml",
+          "./.github/workflows/wc-fusion-compatibility.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/dbt-snowflake-iceberg-sync",
+    "default_branch": "main",
+    "head": "38f79189a10936ee6d5e9ddcd9638f931f134b08",
+    "workflow_count": 15,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-fusion-parse.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/wc-tests.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-fusion-parse.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-tests.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-tests.yml",
+          "./.github/workflows/wc-fusion-parse.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-tests.yml",
+          "./.github/workflows/wc-fusion-parse.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/dbt-snowflake-rap-enforcement",
+    "default_branch": "main",
+    "head": "71b0bbc42e2ab22faa9d8518c032e0171127ad68",
+    "workflow_count": 15,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-fusion-compatibility.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/wc-test.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-fusion-compatibility.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-test.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-test.yml",
+          "./.github/workflows/wc-fusion-compatibility.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-test.yml",
+          "./.github/workflows/wc-fusion-compatibility.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/terraform-provider-sigma",
+    "default_branch": "main",
+    "head": "8e8e1013a7a45c27280281b6dc1b7befef691273",
+    "workflow_count": 15,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-goreleaser-check.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/wc-test.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-goreleaser-check.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-test.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-test.yml",
+          "./.github/workflows/wc-goreleaser-check.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-test.yml",
+          "./.github/workflows/wc-goreleaser-check.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/herdr-linear-agent",
+    "default_branch": "main",
+    "head": "8ab60297001e8dec9cf4c5e24cd0f6ca783da3de",
+    "workflow_count": 15,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-assets.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/wc-rust.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [
+      ".github/workflows/actions.lock"
+    ],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-assets.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-rust.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-rust.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-rust.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/hook-relay-client-rs",
+    "default_branch": "main",
+    "head": "2b3289bb2e9026745e54b83055ff9305b6b7da74",
+    "workflow_count": 15,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-assets.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/wc-rust.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-assets.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-rust.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-rust.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-rust.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/herdr-infobox",
+    "default_branch": "main",
+    "head": "2316f8f3e213d68bc5dff456b550532f87b26c71",
+    "workflow_count": 14,
+    "workflow_paths": [
+      ".github/workflows/approve-request.yml",
+      ".github/workflows/merge-request.yml",
+      ".github/workflows/policy-check.yml",
+      ".github/workflows/pull_request.yml",
+      ".github/workflows/push.yml",
+      ".github/workflows/release-pr-sync.yml",
+      ".github/workflows/release-pr.yml",
+      ".github/workflows/release-tag.yml",
+      ".github/workflows/wc-autofix.yml",
+      ".github/workflows/wc-lint.yml",
+      ".github/workflows/wc-pr-title.yml",
+      ".github/workflows/wc-rust.yml",
+      ".github/workflows/workflow_call_pr.yml",
+      ".github/workflows/workflow_call_push.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/pull_request.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_pr.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/push.yml",
+        "uses": [
+          "./.github/workflows/workflow_call_push.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@1e2866cbab65c5ef4e218fa6853300c2731e73c0"
+        ]
+      },
+      {
+        "path": ".github/workflows/wc-autofix.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-lint.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-pr-title.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/wc-rust.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/workflow_call_pr.yml",
+        "uses": [
+          "./.github/workflows/wc-lint.yml",
+          "./.github/workflows/wc-rust.yml",
+          "./.github/workflows/wc-autofix.yml",
+          "./.github/workflows/wc-pr-title.yml"
+        ]
+      },
+      {
+        "path": ".github/workflows/workflow_call_push.yml",
+        "uses": [
+          "./.github/workflows/wc-rust.yml",
+          "./.github/workflows/wc-lint.yml"
+        ]
+      }
+    ]
+  },
+  {
+    "repo": "civitaspo/testing-securefix-server",
+    "default_branch": "main",
+    "head": "c47ddd187a9e016f634e921910e05d920118ddb5",
+    "workflow_count": 10,
+    "workflow_paths": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/fixture-validation.yml",
+      ".github/workflows/testing-approve-request.yml",
+      ".github/workflows/testing-ci.yml",
+      ".github/workflows/testing-merge-request.yml",
+      ".github/workflows/testing-policy-check.yml",
+      ".github/workflows/testing-release-pr-sync.yml",
+      ".github/workflows/testing-release-pr.yml",
+      ".github/workflows/testing-release-tag.yml",
+      ".github/workflows/testing-required-ci-fixture.yml"
+    ],
+    "lock_paths": [],
+    "workflows": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/fixture-validation.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-approve-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/testing-reusable-approve-request.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-ci.yml",
+        "uses": []
+      },
+      {
+        "path": ".github/workflows/testing-merge-request.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/testing-reusable-merge-request.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-policy-check.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/testing-reusable-policy-check.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-release-pr-sync.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/testing-reusable-release-pr-sync.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-release-pr.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/testing-reusable-release-pr.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-release-tag.yml",
+        "uses": [
+          "civitaspo/securefix-server/.github/workflows/testing-reusable-release-tag.yml@c1195a11ddf07e324f3fc81aadbb55a6935f0d94"
+        ]
+      },
+      {
+        "path": ".github/workflows/testing-required-ci-fixture.yml",
+        "uses": []
+      }
+    ]
+  }
+]

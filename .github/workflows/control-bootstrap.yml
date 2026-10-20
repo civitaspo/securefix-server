@@ -82,7 +82,7 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-cli
+      - uses: $/.github/actions/setup-cli
       - name: Assemble candidate runtime archive as data
         run: |
           mkdir -p runtime distribution

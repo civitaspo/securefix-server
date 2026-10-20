@@ -41,5 +41,8 @@
       ]
     }
   ],
-  "automergeComment": "/merge"
+  "automergeComment": "/merge",
+  "constraints": {
+    "ghActionsLock": "v0.2.0"
+  }
 }

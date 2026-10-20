@@ -48,14 +48,14 @@ jobs:
           persist-credentials: false
       - name: Load the source-bound attested development runtime
         id: selected
-        uses: ./.github/actions/load-runtime
+        uses: $/.github/actions/load-runtime
         with:
           repository: civitaspo/securefix-server
           control-repository: civitaspo/testing-securefix-server
           default-branch: main
           workflow-prefix: testing-
           token: ${{ github.token }}
-      - uses: ./.github/actions/install-cli
+      - uses: $/.github/actions/install-cli
         with:
           binary: ${{ steps.selected.outputs.directory }}/securefix
       - name: Qualify the pinned pre-release against the isolated control

@@ -1,0 +1,16 @@
+name: Install official workflow lockfile tool
+description: Install the digest-verified GitHub Actions lockfile generator
+runs:
+  using: composite
+  steps:
+    - name: Install gh-actions-lock v0.2.0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        binary="$RUNNER_TEMP/gh-actions-lock-v0.2.0"
+        gh api repos/github/gh-actions-lock/releases/assets/634768078 -H 'Accept: application/octet-stream' > "$binary"
+        echo "79ec84c191667fd935a277e6fd3662cf5d3669cccc9e99998731d8f306f373b6  $binary" | sha256sum --check
+        install -D -m 755 "$binary" "$RUNNER_TEMP/actions-lock/bin/gh-actions-lock"
+        echo "$RUNNER_TEMP/actions-lock/bin" >> "$GITHUB_PATH"

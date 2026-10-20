@@ -98,7 +98,7 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: candidate-runtime
           merge-multiple: true
-      - uses: ./.github/actions/install-cli
+      - uses: $/.github/actions/install-cli
         with:
           binary: candidate-runtime/securefix
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -242,7 +242,7 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ inputs.candidate_sha || job.workflow_sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-cli
+      - uses: $/.github/actions/setup-cli
         id: setup-cli
         with:
           candidate-run-id: ${{ inputs.phase == 'verify' && inputs.fixture_run_id || '' }}
@@ -289,7 +289,7 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: candidate-runtime
           merge-multiple: true
-      - uses: ./.github/actions/install-cli
+      - uses: $/.github/actions/install-cli
         with:
           binary: candidate-runtime/securefix
       - name: Validate the defining workflow before minting credentials

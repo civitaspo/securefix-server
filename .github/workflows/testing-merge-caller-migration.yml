@@ -56,7 +56,7 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-cli
+      - uses: $/.github/actions/setup-cli
       - name: Bundle the reviewed isolated host policy
         run: install -m 644 .github/testing-policy.json target/release/testing-policy.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -84,9 +84,11 @@ jobs:
       cancel-in-progress: false
       queue: max
     env:
+      GITHUB_TOKEN: ${{ github.token }}
       SECUREFIX_TEST_BASELINE_SHA: ${{ needs.host.outputs.source-sha }}
       SECUREFIX_SOURCE_SHA: ${{ needs.host.outputs.source-sha }}
     steps:
+      - uses: $/.github/actions/install-actions-lock
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.host.outputs.artifact-id }}

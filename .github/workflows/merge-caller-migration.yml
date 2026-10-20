@@ -55,10 +55,12 @@ jobs:
       actions: read
       contents: read
     env:
+      GITHUB_TOKEN: ${{ github.token }}
       SECUREFIX_SOURCE_SHA: ${{ needs.runtime.outputs.source-sha }}
       SECUREFIX_CONTROL_ID: ${{ needs.runtime.outputs.control-id }}
       SECUREFIX_WORKFLOW_SHA: ${{ needs.runtime.outputs.workflow-sha }}
     steps:
+      - uses: $/.github/actions/install-actions-lock
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.runtime.outputs.artifact-id }}
