@@ -303,11 +303,11 @@ that no request label or corresponding server request run was created. Then mark
 both PRs ready, let their ready-event caller and server label-consumer runs finish,
 and confirm the transient request labels are gone before dispatching verify.
 The verifier re-reads the fresh, unedited owner comments after the PRs are ready
-and records acceptance at that point, after checking current PR state. Changes to
-the review, head, or PR state after acceptance invalidate the direct probe. These
-comments exercise the production request and merge core; because their original
-caller events failed closed while the PRs were drafts, this does not claim to test
-end-to-end caller event delivery.
+and records acceptance at that point. Later merge-state validation requires the
+PRs to be ready and rejects changes to the review, head, or PR state after
+acceptance. The comments exercise the production request and merge core. Their
+original caller events failed closed while the PRs were drafts, so this does not
+claim to test end-to-end caller event delivery.
 
 The workflow validates producer metadata before minting scratch tokens and uses
 one source-bound candidate CLI to retrieve state from the exact successful
