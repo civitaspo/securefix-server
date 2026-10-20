@@ -57,7 +57,7 @@ The successful workflow also uploaded control artifact `12282168245` with the
 same candidate identity and successful control/CAS/ABA checks.
 This direct probe does not certify native caller token scopes or production rollout.
 
-## Testing prerelease and remaining gates
+## Testing prerelease preparation
 
 The isolated testing publication and control loaders require `pre.N` versions.
 Version `0.2.43-pre.1` prepares the read-only capture implementation for that
@@ -65,11 +65,11 @@ existing lane without changing business logic. The production generation-six
 compatibility declarations remain until a stable successor can accept read-only
 capture. Production caller templates must not be distributed from this bridge.
 
-The prerelease still requires exact-source scratch prepare and verify, testing
-publication, reviewed testing-control succession, testing caller migration and
-live read-only caller approval/merge/reaction evidence. Stable publication,
+At this preparation stage, exact-source scratch qualification, testing
+publication, control succession, caller migration and native request evidence
+were pending. The later sections record their actual results. Stable publication,
 production activation, removal and requalification of temporary declarations,
-and migration of all eight external production callers remain unverified.
+and migration of all eight external production callers remain pending.
 The server's local callers and the isolated testing caller also belong to the
 final permission audit of all ten registered repositories.
 
@@ -98,3 +98,81 @@ explicit control repository. Production continues to exclude it.
 This correction requires fresh exact-source qualification, testing publication,
 reviewed control succession, caller migration and native request evidence.
 The failed first distribution is not evidence of a successful caller migration.
+
+
+## Corrected testing distribution and native read-only requests
+
+PR #146 merged as signed source `865a26535fb9a1756bf255df9ecbc58199c66c3f`.
+[Prepare 39468365541](https://github.com/civitaspo/securefix-server/actions/runs/39468365541)
+and [verify 39469261260](https://github.com/civitaspo/securefix-server/actions/runs/39469261260)
+passed with the exact candidate and fixture artifacts. Independent reads verified
+signed positive merge `ccc44bab96803a5a68ee3fe955b3bb35b17d6d49`, its exact
+prepared parent and reviewed tree, stale rejection, singleton Server App receipts,
+fixture cleanup and source-advance/CAS/ABA checks.
+
+[Testing publication 39469762248](https://github.com/civitaspo/securefix-server/actions/runs/39469762248)
+created immutable `v0.2.43-pre.2`, release `418697086`, asset `660047122`, archive
+digest `27acbcba9183fa1ea75c92550d52175e0a38126c8bb44a81e46a225efee5108b`.
+The locally verified attestation bound the archive to exact source and publisher.
+[Reviewed testing control merge 39470412885](https://github.com/civitaspo/securefix-server/actions/runs/39470412885)
+merged descriptor PR #350 as signed main `d6867b27a1db610aea1ef67077f82a10e2d5ce9b`.
+Generation ten has identity
+`824f3066c5d35178102dad38ccd00f375d5cdcd6e31343b445b653c493fb853c`.
+The previous callers rejected requests before dispatch because their source
+no longer matched the selected test control. These failures were inspected;
+they do not certify native caller behavior.
+
+[Testing distribution 39470603305](https://github.com/civitaspo/securefix-server/actions/runs/39470603305)
+created canonical six-file caller PR #351. Exact-head owner review `5589370556`
+and separate commands `6297596147` and `6297596419` bound it to generation ten.
+[Dedicated caller migration 39471073952](https://github.com/civitaspo/securefix-server/actions/runs/39471073952)
+passed and merged signed main `58b22ef3f11b2c870c866d60777b8f30b952ca9d`.
+Independent reads verified the sole expected parent, exact reviewed tree, all six
+default-branch file bytes and unchanged control. Approval and merge callers pin
+the qualified source and grant no Issues or PullRequests write permission.
+
+Native PR #352 used owner-authored signed head
+`2f2b2d10dbc13b0946df9aff14eb98df3e0e6cf4` with one non-sensitive fixture file.
+A command edited after caller capture was rejected by
+[server run 39471712996](https://github.com/civitaspo/securefix-server/actions/runs/39471712996)
+with `source authorization does not match its triggering event`; cleanup passed
+and its comment has no reaction. This tests a change after capture, not a blanket
+rejection of every owner comment edited before capture.
+
+Fresh owner `/approve` comment `6297792754` passed
+[read-only caller 39472328132](https://github.com/civitaspo/testing-securefix-server/actions/runs/39472328132)
+and [server approval 39472435555](https://github.com/civitaspo/securefix-server/actions/runs/39472435555).
+Bot approval binds the exact head and generation-ten identity.
+Separate fresh `/merge` comment `6297841040` passed
+[read-only caller 39472688693](https://github.com/civitaspo/testing-securefix-server/actions/runs/39472688693)
+and [server authorization, readiness and merge 39472807254](https://github.com/civitaspo/securefix-server/actions/runs/39472807254).
+Both actual caller logs show Issues and PullRequests as `read`; their Client App
+token targets only `securefix-server` with Issues write for label transport.
+Both uploaded manifests bind PR #352, its exact head, the accepted command,
+caller revision, runtime source and full control descriptor.
+Each valid command has exactly one rocket reaction from Server App bot
+`288069019`. Independent reads verified signed merge
+`576c80cca5d7b3245bb8c0ed32a5914ca7c59090`, sole parent `58b22ef3f11b2c870c866d60777b8f30b952ca9d`,
+exact fixture tree, unchanged control, no transient request labels and automatic
+fixture-branch deletion. The edited command still has no reaction.
+
+No native Renovate-authored scratch PR was exercised. Renovate command identity,
+changed-command rejection and duplicate acknowledgement remain covered by the
+Rust tests and isolated direct probe; the native results above certify the actual
+owner-command caller path. No production merge was used as a probe.
+
+## Stable bridge and final rollout
+
+Version `0.2.43` retains the qualified implementation and advances the package
+from its testing prerelease to a stable candidate. Its exact merged source still
+requires fresh scratch qualification, normal publication and reviewed production
+control activation. The temporary production permission declarations are retained
+for the current generation-six controller. After that activation, a separate
+reviewed version removes those declarations and is independently qualified,
+published and activated before distribution. Do not distribute the stable bridge
+caller declarations to production clients.
+
+Final completion requires all eight external production caller migrations, the
+server's local callers and the testing caller to be read back and audited. The
+production runtime, production caller rollout and this final audit are not yet
+verified by the testing evidence above.
