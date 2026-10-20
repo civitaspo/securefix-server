@@ -294,19 +294,33 @@ with `.generation_one` from the control-probe artifact:
 ```
 
 The PR review's `commit_id` binds that approval to the current head; the marker binds it
-to the control generation. A plain UI approval without the marker is rejected. Then post
-exact owner `/approve` and `/merge` comments on the positive PR, plus exact owner `/merge` on the stale-head
-PR. Run the workflow's verify phase with the successful prepare run ID. A validator
-built from the captured current default-branch source fetches state
-only from that exact successful owner-run `workflow_dispatch`, validates the
-server repository ID, owner actor, workflow path, producer SHA, the configured default branch or
-SHA-named frozen integration branch, and single bounded artifact. Prepare also
-checks that the named producer branch currently resolves to the recorded
-producer SHA; keep a frozen integration branch protected against updates while
-it is used. The validator selects the candidate binary by its immutable artifact ID.
-Only the validator receives the server repository read token; the candidate receives
-only installation tokens scoped to the scratch repository. The candidate
-SHA remains an independent state binding. It then checks commit signatures, current-head
+to the control generation. A plain UI approval without the marker is rejected.
+While the positive and stale PRs are drafts, post the exact owner `/approve` and
+`/merge` comments on the positive PR, then the exact owner `/merge` on the
+stale-head PR, one comment at a time. Wait for each matching caller workflow to
+fail closed on the draft and for the opposite command workflow to skip. Confirm
+that no request label or corresponding server request run was created. Then mark
+both PRs ready, let their ready-event caller and server label-consumer runs finish,
+and confirm the transient request labels are gone before dispatching verify.
+The verifier re-reads the fresh, unedited owner comments after the PRs are ready
+and records acceptance at that point, after checking current PR state. Changes to
+the review, head, or PR state after acceptance invalidate the direct probe. These
+comments exercise the production request and merge core; because their original
+caller events failed closed while the PRs were drafts, this does not claim to test
+end-to-end caller event delivery.
+
+The workflow validates producer metadata before minting scratch tokens and uses
+one source-bound candidate CLI to retrieve state from the exact successful
+owner-run `workflow_dispatch`, validate the server repository ID, owner actor,
+workflow path, producer SHA, configured default branch or SHA-named frozen
+integration branch, and bounded artifact, then run the probe and validate its
+outputs. Prepare also checks that the named producer branch currently resolves
+to the recorded producer SHA; keep a frozen integration branch protected against
+updates while it is used. The candidate SHA remains an independent state binding.
+The CLI uses the server-repository read token to fetch fixture artifacts; the
+Server and Client App tokens are scoped to the scratch repository. Direct
+owner-selected scratch probes use no separate trusted or candidate executable
+or container. The probe then checks commit signatures, current-head
 authorization, merge readiness, rejection of native GitHub auto-merge, stale-head rejection, replay
 rejection, and exact distribution workflow bytes. The distribution PR runs actual
 `pinact run --verify-comment` and must have a successful Actions `status-check`.

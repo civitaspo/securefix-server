@@ -3742,6 +3742,16 @@ fn wait_for_owner_comment(
             kind.command()
         );
         if let Some(comment) = matches.into_iter().next() {
+            let comment_id = comment["id"].as_u64().context("owner comment has no ID")?;
+            let created_at = parse_time(&comment["created_at"])?;
+            crate::distribution::reviewed::validate_comment(
+                &comment,
+                integration_repository()?,
+                fixture.number,
+                comment_id,
+                kind,
+                created_at,
+            )?;
             return Ok(comment);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -3981,7 +3991,7 @@ fn manifest(
             comment_id: id,
             updated_at,
         },
-        accepted_at: created,
+        accepted_at: Utc::now(),
         run_id,
         run_attempt: 1,
         workflow_sha: candidate_sha.to_owned(),
