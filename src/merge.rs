@@ -145,6 +145,20 @@ fn authorize() -> Result<()> {
     request::validate_merge_policy(&read, &policy, &manifest, true)?;
     {
         let write = GitHub::from_env("SECUREFIX_AUTHORIZATION_TOKEN")?;
+        if matches!(
+            &manifest.authorization,
+            Authorization::OwnerComment { .. } | Authorization::RenovateComment { .. }
+        ) {
+            request::acknowledge_request(
+                &read,
+                &write,
+                &policy,
+                &manifest.repository.full_name,
+                manifest.pull_request.number,
+                &manifest.authorization,
+                RequestKind::Merge,
+            )?;
+        }
         if let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization {
             request::post_owner_marker(
                 &write,

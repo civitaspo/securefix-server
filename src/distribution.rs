@@ -456,9 +456,24 @@ fn legacy_request_generations(path: &str, expected: serde_yaml::Value) -> Vec<se
             );
         }
         generations.push(legacy.clone());
+        let mut write_pair = None;
+        if issues == "write" {
+            let mut both_write = legacy.clone();
+            both_write["jobs"][job]["permissions"]["pull-requests"] =
+                serde_yaml::Value::String("write".to_owned());
+            generations.push(both_write.clone());
+            write_pair = Some(both_write);
+        }
         if is_approval {
             legacy["jobs"][job].as_mapping_mut().unwrap().remove("if");
             generations.push(legacy);
+            if let Some(mut both_write) = write_pair {
+                both_write["jobs"][job]
+                    .as_mapping_mut()
+                    .unwrap()
+                    .remove("if");
+                generations.push(both_write);
+            }
         }
     }
     generations

@@ -219,6 +219,17 @@ fn apply() -> Result<()> {
     let owner_requested = matches!(&manifest.authorization, Authorization::OwnerComment { .. });
     validate_approval_policy(&read, &policy, &manifest)?;
     let write = GitHub::from_env("SECUREFIX_WRITE_TOKEN")?;
+    if owner_requested {
+        request::acknowledge_request(
+            &read,
+            &write,
+            &policy,
+            repository,
+            manifest.pull_request.number,
+            &manifest.authorization,
+            manifest.kind,
+        )?;
+    }
     if owner_requested
         && let Authorization::OwnerComment { comment_id, .. } = &manifest.authorization
     {

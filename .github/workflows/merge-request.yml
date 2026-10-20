@@ -26,7 +26,7 @@ jobs:
       actions: read
       contents: read
       attestations: read
-      issues: write
-      pull-requests: write
+      issues: read
+      pull-requests: read
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

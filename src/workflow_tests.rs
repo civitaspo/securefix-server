@@ -2599,6 +2599,14 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
     for operation in ["approve", "merge"] {
         let caller = workflow(&format!("{operation}-request.yml"));
         assert_eq!(
+            caller["jobs"]["request"]["permissions"]["issues"], "read",
+            "{operation}: caller token can read the request but cannot add reactions"
+        );
+        assert_eq!(
+            caller["jobs"]["request"]["permissions"]["pull-requests"], "read",
+            "{operation}: caller token is read-only"
+        );
+        assert_eq!(
             caller["jobs"]["request"]["secrets"],
             serde_json::json!({
                 "SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
@@ -2613,6 +2621,8 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         let build = &reusable["jobs"]["build"];
         assert!(build.get("secrets").is_none());
         let capture = &reusable["jobs"]["capture"];
+        assert_eq!(capture["permissions"]["issues"], "read");
+        assert_eq!(capture["permissions"]["pull-requests"], "read");
         assert_eq!(
             capture["environment"],
             "${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}"

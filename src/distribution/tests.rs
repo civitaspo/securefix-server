@@ -1631,10 +1631,6 @@ fn caller_validator_accepts_only_the_exact_legacy_approve_concurrency_group() {
     workflow["concurrency"]["group"] = serde_yaml::Value::String(
         "approve-request-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}".into(),
     );
-    workflow["jobs"]["approve"]["permissions"]["issues"] =
-        serde_yaml::Value::String("write".into());
-    workflow["jobs"]["approve"]["permissions"]["pull-requests"] =
-        serde_yaml::Value::String("read".into());
     let legacy = serde_yaml::to_string(&workflow).unwrap();
     assert!(caller::validate_existing(path, legacy.as_bytes(), "main").is_ok());
 
@@ -2170,4 +2166,73 @@ fn migration_renderer_accepts_only_the_previous_exact_merge_body_prefilter() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn request_callers_keep_write_scopes_only_while_pinned_to_an_older_runtime() {
+    let current_sha = "a".repeat(40);
+    let previous_sha = "b".repeat(40);
+    let canonical = rendered_files(&current_sha, "v0.2.0-pre.1", "main", false).unwrap();
+    for path in [
+        ".github/workflows/approve-request.yml",
+        ".github/workflows/merge-request.yml",
+    ] {
+        let expected: serde_yaml::Value = serde_yaml::from_slice(&canonical[path]).unwrap();
+        let job = if path.ends_with("approve-request.yml") {
+            "approve"
+        } else {
+            "request"
+        };
+        let legacy = super::legacy_request_generations(path, expected);
+        for previous_pull_requests in ["read", "write"] {
+            assert!(
+                legacy.iter().any(|legacy| {
+                    legacy["jobs"][job]["permissions"]["issues"] == "write"
+                        && legacy["jobs"][job]["permissions"]["pull-requests"]
+                            == previous_pull_requests
+                }),
+                "{path}: legacy request runtime shape missing with pull-requests: {previous_pull_requests}"
+            );
+
+            let mut old_caller: serde_yaml::Value =
+                serde_yaml::from_slice(&canonical[path]).unwrap();
+            assert_eq!(old_caller["jobs"][job]["permissions"]["issues"], "read");
+            assert_eq!(
+                old_caller["jobs"][job]["permissions"]["pull-requests"],
+                "read"
+            );
+            old_caller["jobs"][job]["permissions"]["issues"] =
+                serde_yaml::Value::String("write".into());
+            old_caller["jobs"][job]["permissions"]["pull-requests"] =
+                serde_yaml::Value::String(previous_pull_requests.into());
+            let previous_uses = old_caller["jobs"][job]["uses"]
+                .as_str()
+                .unwrap()
+                .replace(&current_sha, &previous_sha);
+            old_caller["jobs"][job]["uses"] = serde_yaml::Value::String(previous_uses.clone());
+            assert!(
+                caller::validate_existing_for_source(
+                    path,
+                    serde_yaml::to_string(&old_caller).unwrap().as_bytes(),
+                    "main",
+                    &current_sha,
+                )
+                .is_ok(),
+                "{path}: previous runtime still needs caller write scopes"
+            );
+
+            old_caller["jobs"][job]["uses"] =
+                serde_yaml::Value::String(previous_uses.replace(&previous_sha, &current_sha));
+            assert!(
+                caller::validate_existing_for_source(
+                    path,
+                    serde_yaml::to_string(&old_caller).unwrap().as_bytes(),
+                    "main",
+                    &current_sha,
+                )
+                .is_err(),
+                "{path}: current runtime must not retain caller write scopes"
+            );
+        }
+    }
 }
