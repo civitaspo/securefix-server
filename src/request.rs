@@ -410,16 +410,6 @@ fn capture(kind: RequestKind) -> Result<()> {
             .context("active control revision is missing")?,
     };
     manifest.validate()?;
-    if !matches!(manifest.authorization, Authorization::Automatic { .. }) {
-        acknowledge_request(
-            &token,
-            &policy,
-            &repo,
-            number,
-            &manifest.authorization,
-            kind,
-        )?;
-    }
     write_json("request/manifest.json", &manifest)?;
     output(
         "request_name",
@@ -449,7 +439,8 @@ fn validate_pull_request_target_source(payload: &Value, caller_workflow_sha: &st
 }
 
 pub(crate) fn acknowledge_request(
-    api: &GitHub,
+    read: &GitHub,
+    write: &GitHub,
     policy: &Policy,
     repository: &str,
     number: u64,
@@ -459,7 +450,7 @@ pub(crate) fn acknowledge_request(
     validate_repository(repository)?;
     let (comment_id, _) = command_identity(authorization)?;
     ensure!(number > 0 && comment_id > 0, "invalid request identity");
-    let comment: Value = api.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
+    let comment: Value = read.get(&format!("/repos/{repository}/issues/comments/{comment_id}"))?;
     ensure!(
         comment["id"].as_u64() == Some(comment_id)
             && command_matches(policy, authorization, kind, &comment, number)
@@ -468,10 +459,15 @@ pub(crate) fn acknowledge_request(
             }),
         "request comment changed or no longer matches this pull request"
     );
-    let _: Value = api.post(
-        &format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
-        &json!({"content":"rocket"}),
-    )?;
+    if write
+        .post::<Value>(
+            &format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
+            &json!({"content":"rocket"}),
+        )
+        .is_err()
+    {
+        eprintln!("request acknowledgement reaction failed");
+    }
     Ok(())
 }
 
@@ -1562,6 +1558,7 @@ mod tests {
 
             acknowledge_request(
                 &fixture.api,
+                &fixture.api,
                 &policy,
                 repository,
                 number,
@@ -1571,6 +1568,51 @@ mod tests {
             .unwrap();
             fixture.finish();
         }
+    }
+
+    #[test]
+    fn acknowledgement_reaction_failure_does_not_fail_the_request() {
+        let policy = Policy::load("tests/fixtures/policy.json").unwrap();
+        let repository = "civitaspo/dbt-authorized-models";
+        let number = 7;
+        let comment_id = 19;
+        let updated_at = Utc::now();
+        let fixture = Fixture::new(vec![
+            Route::get(
+                format!("/repos/{repository}/issues/comments/{comment_id}"),
+                json!({
+                    "id":comment_id,
+                    "body":"/approve",
+                    "user":{"id":4525500,"login":"civitaspo","type":"User"},
+                    "created_at":updated_at,
+                    "updated_at":updated_at,
+                    "issue_url":format!("https://api.github.com/repos/{repository}/issues/{number}")
+                }),
+            ),
+            Route::active_control(&Fixture::control_revision()),
+            Route::request(
+                "POST",
+                format!("/repos/{repository}/issues/comments/{comment_id}/reactions"),
+                500,
+                json!({"message":"temporary failure"}),
+            )
+            .with_request_body(json!({"content":"rocket"})),
+        ]);
+
+        acknowledge_request(
+            &fixture.api,
+            &fixture.api,
+            &policy,
+            repository,
+            number,
+            &Authorization::OwnerComment {
+                comment_id,
+                updated_at: Some(updated_at),
+            },
+            RequestKind::Approve,
+        )
+        .unwrap();
+        fixture.finish();
     }
 
     #[test]
@@ -1601,6 +1643,7 @@ mod tests {
             )]);
             assert!(
                 acknowledge_request(
+                    &fixture.api,
                     &fixture.api,
                     &policy,
                     repository,
@@ -1659,6 +1702,7 @@ mod tests {
             assert!(
                 acknowledge_request(
                     &fixture.api,
+                    &fixture.api,
                     &policy,
                     repository,
                     7,
@@ -1683,6 +1727,7 @@ mod tests {
         ] {
             assert!(
                 acknowledge_request(
+                    &api,
                     &api,
                     &policy,
                     repository,

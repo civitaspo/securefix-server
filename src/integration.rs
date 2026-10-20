@@ -2607,6 +2607,7 @@ fn verify_inner(
             .context("fixture command has no ID")?;
         request::acknowledge_request(
             api,
+            api,
             policy,
             integration_repository()?,
             scenario.positive.number,
@@ -2723,6 +2724,7 @@ fn verify_inner(
     bot_manifest.validate()?;
     merge::validate_state(api, &bot_policy, &bot_manifest)?;
     request::acknowledge_request(
+        api,
         api,
         &bot_policy,
         integration_repository()?,

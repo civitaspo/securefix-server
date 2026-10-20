@@ -20,10 +20,10 @@ Every change in the server repository is sensitive.
 
 Client wrappers are `.github/workflows/approve-request.yml` and `.github/workflows/merge-request.yml`.
 They call the corresponding reusable at the source SHA selected by the active control revision.
-The caller grants `actions: read`, `contents: read`, `attestations: read`, `issues: write`, and `pull-requests: write`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
+The caller grants `actions: read`, `contents: read`, `attestations: read`, `issues: read`, and `pull-requests: read`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
 The Client App creates a server label whose description is only `civitaspo/<repository>/<run ID>`.
 The versioned manifest travels as an immutable source-run artifact.
-After validating an explicit owner or Renovate command and its PR, intake adds a 🚀 reaction to acknowledge receipt. Automatic PR-event approval has no command to acknowledge. The generated approval caller ignores unrelated issue comments; Rust still validates the exact owner command.
+The server revalidates an explicit owner or Renovate command and its PR before adding a 🚀 reaction. The caller's `GITHUB_TOKEN` remains read-only; the Server App uses its existing operation-scoped token for the reaction. Automatic PR-event approval has no command to acknowledge. The generated approval caller ignores unrelated issue comments; Rust still validates the exact owner command.
 
 The Rust processor verifies the Client App sender ID/type, repository capability and ID, successful first attempt, event/path, default-branch ancestry, wrapper pin and Actions `referenced_workflows`, artifact identity, and manifest fields.
 The request captures the full active control identity. A changed identity invalidates the request even when the runtime source remains an ancestor of `main`.
@@ -94,7 +94,7 @@ No verification-repository environment variable bypasses the exact policy.
 The scratch repository and its capabilities must be explicitly configured in the reviewed policy. Candidate integration uses its separate, repository-scoped scratch context; it does not require widening the production allowlist.
 The [historical GitHub tests](archive/merge-verification-2026-10-08.md) cover the former implementation and do not certify the Rust path.
 
-Owner `/approve` and `/merge` commands receive a rocket reaction after the trusted request runtime validates the comment identity and exact command. The reaction acknowledges receipt for processing; it does not mean approval or merge succeeded. It appears when the Actions runner starts the capture step after loading the CLI.
+Owner `/approve` and `/merge` commands receive a rocket reaction during server approval application or merge authorization, after the server reloads and revalidates the comment identity and exact command. The reaction acknowledges acceptance for processing; it does not mean approval or merge succeeded. A reaction-posting failure does not fail the operation.
 
 A failed `securefix-policy-check` posts one English Server App comment with the rejection reason and a small Server CI/commit reference. Subsequent results hide this App's older marked failure comments as outdated. Success hides the failure history without posting a success comment. Other comments and owner authorization records remain visible. The check itself links directly to the server run that made the decision.
 

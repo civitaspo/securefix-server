@@ -228,7 +228,7 @@ fn prepare_caller_with_existing(
         match optional_content(api, repository, path, base_sha)? {
             Some(current) => {
                 existing.push(path.clone());
-                validate_existing(path, &current, default_branch)?;
+                validate_existing_for_source(path, &current, default_branch, source_sha)?;
                 default_current &= current == *expected;
             }
             None => {
@@ -419,7 +419,26 @@ pub(super) fn validate_migration_files(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &str) -> Result<()> {
+    validate_existing_inner(path, contents, default_branch, None)
+}
+
+pub(super) fn validate_existing_for_source(
+    path: &str,
+    contents: &[u8],
+    default_branch: &str,
+    source_sha: &str,
+) -> Result<()> {
+    validate_existing_inner(path, contents, default_branch, Some(source_sha))
+}
+
+fn validate_existing_inner(
+    path: &str,
+    contents: &[u8],
+    default_branch: &str,
+    source_sha: Option<&str>,
+) -> Result<()> {
     let actual_path = path;
     let deployment = &crate::config::trusted()?.deployment;
     // Select only this deployment's managed namespace before using canonical
@@ -552,6 +571,23 @@ pub(super) fn validate_existing(path: &str, contents: &[u8], default_branch: &st
         .context("managed workflow missing from canonical template set")?;
     let mut expected_yaml: serde_yaml::Value = serde_yaml::from_slice(expected_bytes)?;
     legacy_workflow_shape(path, &value, &mut expected_yaml);
+    let old_request_capture_write = matches!(
+        path,
+        ".github/workflows/approve-request.yml" | ".github/workflows/merge-request.yml"
+    ) && source_sha.is_some_and(|source| sha != source)
+        && job["permissions"]["issues"] == "write"
+        && matches!(
+            job["permissions"]["pull-requests"].as_str(),
+            Some("read" | "write")
+        );
+    if old_request_capture_write {
+        // Older pinned request runtimes acknowledged commands in the caller.
+        // Keep their historical scopes until the caller moves to this source.
+        expected_yaml["jobs"][job_name]["permissions"]["issues"] =
+            serde_yaml::Value::String("write".into());
+        expected_yaml["jobs"][job_name]["permissions"]["pull-requests"] =
+            serde_yaml::Value::String("write".into());
+    }
     validate_permission_subset(
         &job["permissions"],
         &expected_yaml["jobs"][job_name]["permissions"],

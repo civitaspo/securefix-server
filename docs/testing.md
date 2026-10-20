@@ -4,8 +4,10 @@ The workflow-level migration environment is being implemented in
 [the Phase B plan](testing-workflows-plan.md). The owner-defined trusted-server threat model and credential boundary are recorded
 in [the isolation review](testing-workflows-isolation-review.md). The Environment
 move and per-job approvals were rejected; keep the existing client repository key.
-Candidates still run only in the restricted container with test-only tokens.
-The following commands describe the existing direct scratch harness.
+The owner-selected development CLI runs as one source-bound process on the runner
+under the securefix-server change-management boundary. Scratch credentials remain
+repository-scoped and test-only. The following commands describe the direct scratch
+harness.
 
 Use `testing-Candidate Runtime` on the server's trusted main workflow with a full reviewed candidate SHA. The candidate does not need a merged production revision or a Runtime Release.
 
@@ -27,7 +29,7 @@ The scratch main branch requires a non-author approving review, signed commits, 
 
 See [the harness contract](integration-testing.md) for the boundary between live functional tests and source-provenance fixtures. Stable runtime publication is a separate protected-main operation after candidate verification and review.
 
-The candidate executes in a digest-pinned Ubuntu container with an unprivileged user, read-only root filesystem, dropped capabilities and private process namespace. Only its executable, read-only deployment policy, CA certificates and fixture directory are mounted; the runner filesystem, Docker socket and workflow command files are unavailable. Only scratch tokens and explicit non-secret workflow metadata enter the container. App keys and the server read token stay in the trusted host steps. The trusted CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
+The same source-bound CLI prepares fixtures, runs the scratch operations and validates output bindings on the runner. It does not receive production credentials or signing keys. The CLI rejects symlinks, unexpected files, oversized data and invalid output bindings before fixture artifacts are uploaded.
 
 The former PAT-based live merge test has been replaced by the candidate integration workflow. Live writes use only repository-scoped installation tokens and clean up their fixtures. The optional known signed-commit regression remains read-only.
 

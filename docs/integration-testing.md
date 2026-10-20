@@ -15,11 +15,11 @@ securefix integration workflow-snapshot --pull-request <number> --state-file evi
 securefix integration compare-workflow-snapshots --before evidence/before.json --after evidence/after.json --protect all
 ```
 
-Run these commands with the trusted host validator and a test-repository read
-token in `GITHUB_TOKEN`. Keep the evidence directory outside candidate-writable
-mounts; never accept candidate-produced snapshots as independent readback.
-The repository identity comes from the validator's trusted deployment policy,
-not a command-line repository argument. Paths must be relative without traversal.
+Run these commands with the owner-selected source-bound CLI and a test-repository
+read token in `GITHUB_TOKEN`. Keep the evidence directory separate from scratch
+fixtures so the before/after API snapshots remain available for comparison. The
+repository identity comes from the CLI's deployment policy, not a command-line
+repository argument. Paths must be relative without traversal.
 
 Each bounded snapshot records the default head, PR head/state/merged flag, and
 fingerprints of every review, issue comment, commit status and check run on that
@@ -104,10 +104,10 @@ creates the native request label. The candidate never gets that key or token.
 The caller's repository secret remains required; reusable placement does not
 supply the server repository's secrets to caller jobs.
 
-The candidate receives the native event file and the test caller's token inside
-the existing restricted Docker sandbox. Approval/merge capture needs test issues
-write only for the validated command acknowledgement; policy capture needs read
-access. The host's `integration validate-testing-capture` checks a single regular
+The source-bound CLI receives the native event file and the test caller's
+read-only token on the runner. Approval/merge capture needs only issues and pull
+request reads; the server adds the validated command reaction using its existing
+operation-scoped token. `integration validate-testing-capture` checks a single regular
 manifest of at most 16 KiB, rejects symlinks and extra files, and binds repository,
 run/attempt, request kind, source and full control identity before uploading it.
 
