@@ -1,6 +1,6 @@
 # Request intake recovery, 2026-10-20
 
-Status: the first bounded recovery merged and was cleaned up; normal intake remains blocked by a reusable workflow permission mismatch. A corrected bounded recovery and normal-path verification are pending.
+Status: the second bounded recovery merged and was cleaned up; normal intake is still blocked by server-local reusable provenance. The local-source correction and normal-path verification are pending.
 
 ## Failure and bounded repair
 
@@ -147,3 +147,42 @@ capture or Server processing. The corrected bridge must pass an independently
 reviewed new exact-source recovery before ordinary owner commands can be proved.
 The earlier executor cannot be reused: its fixed expected main and target are
 already consumed. Bootstrap and repair remain retired.
+
+## Server-local provenance failure after the permission correction
+
+PR #143 merged through signed executor
+`0e33d30d70c14aa8dcfdc0d44134583b66aa75cd` after
+[successful exact-source CI](https://github.com/civitaspo/securefix-server/actions/runs/39450313335),
+[read-only qualification](https://github.com/civitaspo/securefix-server/actions/runs/39450791204),
+[fresh scratch rehearsal](https://github.com/civitaspo/securefix-server/actions/runs/39451205606),
+[exact-head Bot review](https://github.com/civitaspo/securefix-server/actions/runs/39451616538)
+and the separate [Server App merge](https://github.com/civitaspo/securefix-server/actions/runs/39451952259).
+Independent reads verified signed main
+`84fa5d889c1b7f204a6e7bc5ce08d5bdd0606f99`, sole parent
+`041268a86feec5eed7c9514cf2c7c56089ca79dd`, exact tree
+`35c2a86ec23cb52f3b8fdb3779f3cbcdb116f532` and the unchanged descriptor.
+Temporary admission `63728725` and the approval variable were removed; only
+original main admission `50334840` remains and the executor is locked and unmerged.
+
+Fresh PR #141 command
+[6295132041](https://github.com/civitaspo/securefix-server/pull/141#issuecomment-6295132041)
+passed [caller capture 39452965186](https://github.com/civitaspo/securefix-server/actions/runs/39452965186),
+including the reaction and request dispatch. However,
+[server approval 39453000527](https://github.com/civitaspo/securefix-server/actions/runs/39453000527)
+failed closed with `source reusable workflow is not the single current revision`.
+The run's `referenced_workflows` records the old `f801960...` reusable while its
+caller main is `84fa5d8...`. Server-local provenance requires the reusable's exact
+caller revision and a local `./.github/workflows/...` wrapper reference.
+The SHA-pinned compatibility bridge was an implementation error; permission
+expansion alone did not test the server's provenance validation.
+
+Restore both wrappers to local references and temporarily grant the active old
+runtime's reaction permissions in the current reusable capture jobs as well as
+the wrappers. Keep both provenance guards unchanged. Regression tests must feed
+the actual wrapper files through the existing exact-pin validator and verify that
+the old runtime revision is rejected as a server-local reusable revision. Keep
+read-only distributed templates unchanged; restore the temporary declarations
+after activating the successor and publish that restored source before rollout.
+A new bounded executor must fix this new PR and main, use fresh scratch fixtures,
+obtain an exact-head Bot review and merge separately. The owner's authorization
+covers the remaining corrective work without another conversational approval wait.

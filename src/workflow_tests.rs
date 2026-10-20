@@ -212,8 +212,23 @@ fn testing_reusables_share_production_jobs_and_commands() {
         "release-pr-sync",
         "release-tag",
     ] {
-        let production = workflow(&format!("reusable-{feature}.yml"));
+        let mut production = workflow(&format!("reusable-{feature}.yml"));
         let testing = workflow(&format!("testing-reusable-{feature}.yml"));
+        if matches!(feature, "approve-request" | "merge-request") {
+            // The production bridge is temporary; approved development capture stays read-only.
+            for permission in ["issues", "pull-requests"] {
+                assert_eq!(
+                    production["jobs"]["capture"]["permissions"][permission],
+                    "write"
+                );
+                assert_eq!(
+                    testing["jobs"]["capture"]["permissions"][permission],
+                    "read"
+                );
+                production["jobs"]["capture"]["permissions"][permission] =
+                    serde_json::json!("read");
+            }
+        }
         let expected = serde_json::to_string(&production["jobs"])
             .unwrap()
             .replace(
@@ -2611,30 +2626,12 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
     for operation in ["approve", "merge"] {
         let caller = workflow(&format!("{operation}-request.yml"));
         let local_reusable = format!("./.github/workflows/reusable-{operation}-request.yml");
-        let legacy_reusable = format!(
-            "civitaspo/securefix-server/.github/workflows/reusable-{operation}-request.yml@f80196051161fe4161c42cd9cb7530cc7db79882"
-        );
-        let uses = caller["jobs"]["request"]["uses"].as_str().unwrap();
-        assert!(
-            uses == local_reusable || uses == legacy_reusable,
-            "{operation}: only the exact generation-6 compatibility workflow is allowed"
-        );
-        let legacy_bridge = uses == legacy_reusable;
-        assert_eq!(
-            caller["jobs"]["request"]["permissions"]["issues"],
-            if legacy_bridge { "write" } else { "read" },
-            "{operation}: the pinned legacy reusable declares Issues write and cannot be narrowed by its caller"
-        );
+        assert_eq!(caller["jobs"]["request"]["uses"], local_reusable);
+        assert_eq!(caller["jobs"]["request"]["permissions"]["issues"], "write");
         assert_eq!(
             caller["jobs"]["request"]["permissions"]["pull-requests"],
-            if legacy_bridge { "write" } else { "read" },
-            "{operation}: only the temporary legacy bridge may write PR reactions"
+            "write"
         );
-        if legacy_bridge {
-            let source =
-                fs::read_to_string(format!(".github/workflows/{operation}-request.yml")).unwrap();
-            assert!(source.contains(&format!("{legacy_reusable} # v0.2.36")));
-        }
         assert_eq!(
             caller["jobs"]["request"]["secrets"],
             serde_json::json!({
@@ -2650,8 +2647,8 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         let build = &reusable["jobs"]["build"];
         assert!(build.get("secrets").is_none());
         let capture = &reusable["jobs"]["capture"];
-        assert_eq!(capture["permissions"]["issues"], "read");
-        assert_eq!(capture["permissions"]["pull-requests"], "read");
+        assert_eq!(capture["permissions"]["issues"], "write");
+        assert_eq!(capture["permissions"]["pull-requests"], "write");
         assert_eq!(
             capture["environment"],
             "${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}"
@@ -2993,7 +2990,7 @@ fn operational_workflows_do_not_request_administration_or_settings_credentials()
 }
 
 #[test]
-fn reusable_callers_grant_the_permissions_requested_by_their_jobs() {
+fn reusable_callers_check_current_permissions_and_keep_future_templates_read_only() {
     let mut callers = workflows();
     let server = &crate::config::trusted()
         .unwrap()
@@ -3026,6 +3023,22 @@ fn reusable_callers_grant_the_permissions_requested_by_their_jobs() {
                 continue;
             };
             let called = workflow(callee);
+            if path.starts_with("generated:")
+                && matches!(
+                    callee,
+                    "reusable-approve-request.yml" | "reusable-merge-request.yml"
+                )
+            {
+                // These future read-only callers must not be distributed with this bridge source.
+                for permission in ["issues", "pull-requests"] {
+                    assert_eq!(job["permissions"][permission], "read");
+                    assert_eq!(
+                        called["jobs"]["capture"]["permissions"][permission],
+                        "write"
+                    );
+                }
+                continue;
+            }
             for (nested_id, nested) in called["jobs"].as_object().unwrap() {
                 for (permission, required) in nested["permissions"].as_object().unwrap() {
                     let granted = job["permissions"][permission].as_str().unwrap_or("none");
