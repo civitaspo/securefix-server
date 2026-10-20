@@ -141,3 +141,11 @@ and read-only live review found no remaining blocker after the permission,
 policy-check completeness, stale-rejection, timeline-restoration and harness
 selection fixes. These checks do not establish a successful live rehearsal or
 production recovery.
+
+The initial executor [CI 39436152460](https://github.com/civitaspo/securefix-server/actions/runs/39436152460)
+at source `868cc8d68acb07954b60361a38cb1dd4b2e90368` stopped before Rust checks:
+the new control-activation artifact upload was missing its workflow lockfile
+association. The official gh-actions-lock v0.2.0 regenerated that single entry;
+its frozen check then validated all 42 workflows and the relevant Rust lockfile
+contract test passed. No production operation ran during the failed CI. The
+corrected source needs its own successful code CI and read-only plan.
