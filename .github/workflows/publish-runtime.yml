@@ -27,7 +27,7 @@ jobs:
           repository: civitaspo/securefix-server
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-cli
+      - uses: $/.github/actions/setup-cli
       - name: Assemble candidate runtime archive
         run: |
           install -Dm755 target/release/securefix runtime/securefix

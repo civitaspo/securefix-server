@@ -73,14 +73,14 @@ pub(crate) fn initial_testing_files(
     main: &str,
 ) -> Result<InitialTestingCallers> {
     let fixture = &crate::config::trusted()?.deployment.integration;
-    let (legacy, existing) =
+    let (legacy, existing, _) =
         prepare_caller_with_existing(api, isolated, &fixture.repository, source)?;
     let ci = ".github/workflows/ci.yml";
     ensure!(
         matches!(legacy.files.len(), 4 | 7) && legacy.files.contains_key(ci),
         "initial testing caller setup requires the supported minimal CI layout"
     );
-    let deletions = existing.into_iter().filter(|path| path != ci).collect();
+    let deletions: Vec<String> = existing.into_iter().filter(|path| path != ci).collect();
     let mut trusted = crate::config::trusted()?.clone();
     trusted.deployment = isolated.deployment.clone();
     let tag = crate::runtime::version_at_source(api, source)?.tag();
@@ -98,6 +98,8 @@ pub(crate) fn initial_testing_files(
             "initial testing caller already exists: {path}"
         );
     }
+    let lock = super::lockfile::generate(api, &fixture.repository, main, &files, &deletions)?;
+    files.insert(".github/workflows/actions.lock".into(), lock);
     Ok(InitialTestingCallers { files, deletions })
 }
 
@@ -107,8 +109,16 @@ pub(super) fn prepare_caller(
     repository: &str,
     source_sha: &str,
 ) -> Result<CallerMigration> {
-    prepare_caller_with_existing(api, policy, repository, source_sha)
-        .map(|(migration, _)| migration)
+    let (mut migration, _, base_sha) =
+        prepare_caller_with_existing(api, policy, repository, source_sha)?;
+    let lock = super::lockfile::generate(api, repository, &base_sha, &migration.files, &[])?;
+    migration.default_current &=
+        optional_content(api, repository, ".github/workflows/actions.lock", &base_sha)?
+            == Some(lock.clone());
+    migration
+        .files
+        .insert(".github/workflows/actions.lock".into(), lock);
+    Ok(migration)
 }
 
 fn prepare_caller_with_existing(
@@ -116,7 +126,7 @@ fn prepare_caller_with_existing(
     policy: &Policy,
     repository: &str,
     source_sha: &str,
-) -> Result<(CallerMigration, Vec<String>)> {
+) -> Result<(CallerMigration, Vec<String>, String)> {
     let config = crate::config::trusted()?;
     let update_branch = config.deployment.runtime_update_branch.as_str();
     let allowed = caller_names(policy)?;
@@ -240,6 +250,7 @@ fn prepare_caller_with_existing(
             default_current,
         },
         existing,
+        base_sha.to_owned(),
     ))
 }
 
@@ -360,9 +371,10 @@ pub(super) fn write_migration(directory: &Path, migration: &CallerMigration) -> 
         ensure!(
             path.components().count() == 3
                 && path.starts_with(".github/workflows")
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().ends_with(".yml")),
+                && (relative == ".github/workflows/actions.lock"
+                    || path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".yml"))),
             "invalid migration path"
         );
         let output_path = directory.join(path);
@@ -381,9 +393,10 @@ pub(super) fn validate_migration_files(
         ensure!(
             path.components().count() == 3
                 && path.starts_with(".github/workflows")
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().ends_with(".yml")),
+                && (relative == ".github/workflows/actions.lock"
+                    || path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".yml"))),
             "invalid migration path"
         );
         let mut current = directory.to_path_buf();

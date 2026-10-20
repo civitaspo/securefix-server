@@ -159,3 +159,5 @@ The referenced source run must be named `Release Tag`, run in the exact allowlis
 The `release/next` PR must contain `.release-version` and the release changelog. For Terraform provider clients, the checked-in `terraform-registry-manifest.json` is used as data only; it is copied into the release assets after the fixed build.
 
 Immutable releases must be enabled for every release-capable repository through settings reconciliation or organization policy before publication. The publisher relies on that setup and does not read administrative repository settings. After publishing, it re-fetches the release and requires the expected tag, published state, and `immutable: true`. The publishing App does not need Administration permission. GitHub does not enable immutable releases by default.
+
+Caller migrations include the official workflow dependency lockfile in the exact generated file set. See [workflow lockfile maintenance](workflow-lockfiles.md).

@@ -4,8 +4,14 @@ use std::fs;
 fn workflows() -> Vec<(String, Value)> {
     fs::read_dir(".github/workflows")
         .unwrap()
-        .map(|entry| {
-            let path = entry.unwrap().path();
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|s| s.to_str()),
+                Some("yml" | "yaml")
+            )
+        })
+        .map(|path| {
             let value: Value = serde_yaml::from_slice(&fs::read(&path).unwrap()).unwrap();
             (path.display().to_string(), value)
         })
@@ -63,7 +69,7 @@ fn testing_publication_executes_only_trusted_qualification_and_stable_publisher(
             .as_array()
             .unwrap()
             .iter()
-            .filter(|step| step["uses"] == "./.github/actions/setup-cli")
+            .filter(|step| step["uses"] == "$/.github/actions/setup-cli")
             .count(),
         1
     );
@@ -759,18 +765,10 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
         );
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             if let Some(uses) = job["uses"].as_str() {
-                let published_probe_loader = path == ".github/workflows/testing-release-pr.yml"
-                    && job_id == "trusted-runtime"
-                    && uses
-                        == "civitaspo/securefix-server/.github/workflows/load-cli.yml@9ec4043ce71f454811ef676b82dcba1314a5f0bb";
                 assert!(
-                    uses.starts_with("./.github/workflows/") || published_probe_loader,
+                    uses.starts_with("./.github/workflows/"),
                     "{path}/{job_id}: local reusable must use the running revision"
                 );
-                if published_probe_loader {
-                    assert_eq!(job["permissions"]["contents"], "read");
-                    assert_eq!(job["permissions"]["attestations"], "read");
-                }
                 assert!(
                     job.get("secrets").is_none() || uses != "./.github/workflows/load-cli.yml",
                     "runtime loader cannot inherit secrets"
@@ -1158,7 +1156,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     );
     let build_text = serde_json::to_string(build).unwrap();
     assert!(!build_text.contains("secrets."));
-    assert!(build_text.contains("./.github/actions/setup-cli"));
+    assert!(build_text.contains("$/.github/actions/setup-cli"));
     assert_eq!(
         build["outputs"]["artifact-id"],
         "${{ steps.upload.outputs.artifact-id }}"
@@ -1167,7 +1165,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     assert_eq!(
         build_steps
             .iter()
-            .filter(|step| step["uses"] == "./.github/actions/setup-cli")
+            .filter(|step| step["uses"] == "$/.github/actions/setup-cli")
             .count(),
         1,
         "the publisher validates and packages one source build"
@@ -1292,7 +1290,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     );
     assert!(
         !publish_text.contains("candidate-runtime/securefix")
-            && !publish_text.contains("./.github/actions/setup-cli")
+            && !publish_text.contains("$/.github/actions/setup-cli")
     );
     let verification = publish_steps[verified]["run"].as_str().unwrap();
     for required in [
@@ -1765,7 +1763,7 @@ fn bootstrap_workflow_uses_fixed_host_code_and_serialized_main_authority() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|step| { step["uses"] == "./.github/actions/setup-cli" })
+            .any(|step| { step["uses"] == "$/.github/actions/setup-cli" })
     );
     assert!(!serde_json::to_string(build).unwrap().contains("secrets."));
     let build_download = "${{ needs.build-candidate.outputs.artifact-id }}";
@@ -2322,7 +2320,7 @@ fn scratch_uses_one_selected_runtime_and_test_scoped_tokens() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|step| step["uses"] == "./.github/actions/setup-cli")
+        .find(|step| step["uses"] == "$/.github/actions/setup-cli")
         .unwrap();
     assert_eq!(
         setup["with"]["candidate-run-id"],
@@ -2378,7 +2376,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 let trusted_installer = steps
                     .iter()
                     .position(|step| {
-                        step["uses"] == "./candidate-source/.github/actions/install-cli"
+                        step["uses"] == "$/.github/actions/install-cli"
                             && step["with"]["binary"]
                                 == "${{ github.workspace }}/trusted-runtime/securefix"
                     })
@@ -2386,7 +2384,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 let candidate_installer = steps
                     .iter()
                     .position(|step| {
-                        step["uses"] == "./candidate-source/.github/actions/install-cli"
+                        step["uses"] == "$/.github/actions/install-cli"
                             && step["with"]["binary"]
                                 == "${{ github.workspace }}/candidate/securefix"
                     })
@@ -3260,4 +3258,30 @@ esac
             );
         }
     }
+}
+
+#[test]
+fn lockfile_covers_every_workflow_and_ci_verifies_the_official_format() {
+    let lock: Value =
+        serde_yaml::from_slice(include_bytes!("../.github/workflows/actions.lock")).unwrap();
+    let entries = lock["workflows"].as_object().unwrap();
+    let workflow_files = workflows();
+    assert_eq!(entries.len(), workflow_files.len());
+    for (path, _) in workflow_files {
+        assert!(
+            entries.contains_key(&path),
+            "missing lockfile workflow {path}"
+        );
+    }
+    let ci = workflow("ci.yml");
+    let steps = ci["jobs"]["workflows"]["steps"].as_array().unwrap();
+    let install = steps
+        .iter()
+        .position(|s| s["uses"] == "$/.github/actions/install-actions-lock")
+        .unwrap();
+    let verify = steps
+        .iter()
+        .position(|s| s["run"] == "gh-actions-lock --verify")
+        .unwrap();
+    assert!(install < verify);
 }

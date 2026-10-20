@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, thread, time::Duration};
 
 pub(crate) mod caller;
+mod lockfile;
 pub(crate) mod reviewed;
 use caller::{prepare_caller, rendered_files, validate_migration_files, write_migration};
 

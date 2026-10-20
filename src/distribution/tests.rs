@@ -1,8 +1,87 @@
 use super::caller::validate_existing;
 use super::*;
 
+fn lock_snapshot_routes(
+    repository: &str,
+    base_sha: &str,
+    tree_sha: &str,
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Vec<crate::fixtures::Route> {
+    use crate::fixtures::Route;
+    use base64::Engine;
+
+    let entries = files
+        .iter()
+        .map(|(path, bytes)| json!({"path":path,"type":"blob","mode":"100644","size":bytes.len()}))
+        .collect::<Vec<_>>();
+    let mut routes = vec![
+        Route::get(
+            format!("/repos/{repository}/commits/{base_sha}"),
+            json!({"sha":base_sha,"commit":{"tree":{"sha":tree_sha}}}),
+        ),
+        Route::get(
+            format!("/repos/{repository}/git/trees/{tree_sha}?recursive=1"),
+            json!({"sha":tree_sha,"truncated":false,"tree":entries}),
+        ),
+    ];
+    routes.extend(files.iter().map(|(path, bytes)| {
+        Route::get(
+            format!("/repos/{repository}/contents/{path}?ref={base_sha}"),
+            json!({
+                "encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(bytes)
+            }),
+        )
+    }));
+    routes
+}
+
+fn workflow_snapshot() -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::collections::BTreeMap::from([
+        (
+            ".github/workflows/unmanaged.yml".into(),
+            b"name: Unmanaged\nsteps: []\n".to_vec(),
+        ),
+        (
+            ".github/workflows/actions.lock".into(),
+            b"previous lock entries\n".to_vec(),
+        ),
+        (
+            "actions/local/action.yml".into(),
+            b"runs:\n  using: composite\n  steps: []\n".to_vec(),
+        ),
+    ])
+}
+
 #[test]
 fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_ci() {
+    const CHILD: &str = "SECUREFIX_INITIAL_TEST_CALLER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = super::lockfile::install_fake_runner(directory.path());
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "distribution::tests::initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_ci",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
     use crate::fixtures::{Fixture, Route};
     use base64::Engine;
     let trusted = crate::config::trusted().unwrap();
@@ -10,6 +89,7 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
     let repository = &trusted.deployment.integration.repository;
     let source = "a".repeat(40);
     let main = "b".repeat(40);
+    let tree_sha = "c".repeat(40);
     let tag = "v0.2.34-pre.1";
     let mut legacy = rendered_files(&source, tag, "main", true).unwrap();
     let ci = "name: CI\non:\n  pull_request:\n    types: [opened, synchronize, reopened]\n  push:\n    branches: [main]\n  workflow_dispatch:\npermissions: {}\njobs:\n  ok:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: exit 0\n  status-check:\n    needs: [ok]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    if: always()\n    steps:\n      - name: Require successful checks\n        env:\n          JOB_RESULT: ${{ needs.ok.result }}\n        run: test \"$JOB_RESULT\" = success\n";
@@ -72,12 +152,20 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
         ] {
             routes.push(missing(&format!(".github/workflows/testing-{path}.yml")));
         }
+        let mut snapshot = legacy.clone();
+        if !include_releases {
+            snapshot.retain(|path, _| !path.contains("release-"));
+        }
+        snapshot.extend(workflow_snapshot());
+        routes.extend(lock_snapshot_routes(
+            repository, &main, &tree_sha, &snapshot,
+        ));
         let fixture = Fixture::new(routes);
         let callers =
             caller::initial_testing_files(&fixture.api, &isolated, &source, &main).unwrap();
         let files = callers.files;
         let deletions = callers.deletions;
-        assert_eq!(files.len(), 7);
+        assert_eq!(files.len(), 8);
         assert!(!files.contains_key(".github/workflows/ci.yml"));
         assert_eq!(deletions.len(), if include_releases { 6 } else { 3 });
         for path in [
@@ -102,7 +190,16 @@ fn initial_testing_callers_reuse_canonical_native_templates_and_preserve_legacy_
                 .iter()
                 .any(|path| path == ".github/workflows/ci.yml")
         );
+        let lock = String::from_utf8(files[".github/workflows/actions.lock"].clone()).unwrap();
+        assert!(lock.contains("unmanaged.yml"));
+        assert!(lock.contains("action.yml"));
+        assert!(lock.contains("testing-approve-request.yml"));
+        assert!(!lock.contains("/.github/workflows/approve-request.yml"));
+        assert!(!lock.contains("/.github/workflows/release-pr.yml"));
         for (path, bytes) in files {
+            if path == ".github/workflows/actions.lock" {
+                continue;
+            }
             assert!(path.starts_with(".github/workflows/testing-"));
             let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
             assert!(yaml["name"].as_str().unwrap().starts_with("testing-"));
@@ -127,6 +224,12 @@ fn releases_enabled_migration_adds_release_callers_but_requires_approve_merge_an
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("policy.json");
         std::fs::write(&path, include_bytes!("../../.github/testing-policy.json")).unwrap();
+        let bin = super::lockfile::install_fake_runner(directory.path());
+        let search_path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -135,6 +238,7 @@ fn releases_enabled_migration_adds_release_callers_but_requires_approve_merge_an
             ])
             .env(CHILD, "1")
             .env("SECUREFIX_POLICY_PATH", path)
+            .env("PATH", search_path)
             .output()
             .unwrap();
         assert!(
@@ -155,6 +259,7 @@ fn releases_enabled_migration_adds_release_callers_but_requires_approve_merge_an
     let source = "a".repeat(40);
     let prior_source = "b".repeat(40);
     let main = "c".repeat(40);
+    let tree_sha = "d".repeat(40);
     let manifest = b"[package]\nname = \"securefix\"\nversion = \"0.2.34-pre.5\"\n";
     let manifest_content = json!({
         "encoding":"base64",
@@ -223,13 +328,28 @@ fn releases_enabled_migration_adds_release_callers_but_requires_approve_merge_an
                 routes.push(missing(path));
             }
         }
+        let mut snapshot = previous.clone();
+        snapshot.extend(workflow_snapshot());
+        if !omit_approve {
+            routes.extend(lock_snapshot_routes(
+                repository, &main, &tree_sha, &snapshot,
+            ));
+            routes.push(Route::get(
+                format!("/repos/{repository}/contents/.github/workflows/actions.lock?ref={main}"),
+                content(&snapshot[".github/workflows/actions.lock"]),
+            ));
+        }
         routes
     };
 
     let fixture = Fixture::new(make_routes(&previous, false));
     let migration = caller::prepare_caller(&fixture.api, &policy, repository, &source).unwrap();
-    assert_eq!(migration.files.len(), 7);
+    assert_eq!(migration.files.len(), 8);
     assert!(!migration.default_current);
+    let lock =
+        String::from_utf8(migration.files[".github/workflows/actions.lock"].clone()).unwrap();
+    assert!(lock.contains("unmanaged.yml"));
+    assert!(lock.contains("action.yml"));
     for name in ["release-pr.yml", "release-pr-sync.yml", "release-tag.yml"] {
         assert!(
             migration
@@ -483,10 +603,16 @@ fn legacy_approval_rejects_changed_conditions_permissions_and_inputs() {
 
 #[test]
 fn prepared_caller_migration_requires_exact_regular_managed_files() {
-    let files = BTreeMap::from([(
-        ".github/workflows/approve-request.yml".to_owned(),
-        b"reviewed workflow".to_vec(),
-    )]);
+    let files = BTreeMap::from([
+        (
+            ".github/workflows/approve-request.yml".to_owned(),
+            b"reviewed workflow".to_vec(),
+        ),
+        (
+            ".github/workflows/actions.lock".to_owned(),
+            b"reviewed lock".to_vec(),
+        ),
+    ]);
     let migration = CallerMigration {
         repository: "civitaspo/herdr-linear-agent".into(),
         default_branch: "main".into(),
@@ -498,6 +624,30 @@ fn prepared_caller_migration_requires_exact_regular_managed_files() {
     let directory = tempfile::tempdir().unwrap();
     caller::write_migration(directory.path(), &migration).unwrap();
     assert!(caller::validate_migration_files(directory.path(), &migration).is_ok());
+
+    std::fs::write(
+        directory.path().join(".github/workflows/actions.lock"),
+        b"changed lock",
+    )
+    .unwrap();
+    assert!(caller::validate_migration_files(directory.path(), &migration).is_err());
+    std::fs::write(
+        directory.path().join(".github/workflows/actions.lock"),
+        b"reviewed lock",
+    )
+    .unwrap();
+    std::fs::remove_file(directory.path().join(".github/workflows/actions.lock")).unwrap();
+    assert!(caller::validate_migration_files(directory.path(), &migration).is_err());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            directory.path().join("expected.yml"),
+            directory.path().join(".github/workflows/actions.lock"),
+        )
+        .unwrap();
+        assert!(caller::validate_migration_files(directory.path(), &migration).is_err());
+        std::fs::remove_file(directory.path().join(".github/workflows/actions.lock")).unwrap();
+    }
 
     std::fs::write(
         directory
