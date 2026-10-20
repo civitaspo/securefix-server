@@ -2621,8 +2621,9 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         );
         let legacy_bridge = uses == legacy_reusable;
         assert_eq!(
-            caller["jobs"]["request"]["permissions"]["issues"], "read",
-            "{operation}: PR reactions require no Issues write permission"
+            caller["jobs"]["request"]["permissions"]["issues"],
+            if legacy_bridge { "write" } else { "read" },
+            "{operation}: the pinned legacy reusable declares Issues write and cannot be narrowed by its caller"
         );
         assert_eq!(
             caller["jobs"]["request"]["permissions"]["pull-requests"],

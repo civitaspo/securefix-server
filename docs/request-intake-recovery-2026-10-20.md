@@ -1,6 +1,6 @@
 # Request intake recovery, 2026-10-20
 
-Status: permission diagnosis complete; recovery merge and normal-path verification pending.
+Status: the first bounded recovery merged and was cleaned up; normal intake remains blocked by a reusable workflow permission mismatch. A corrected bounded recovery and normal-path verification are pending.
 
 ## Failure and bounded repair
 
@@ -15,9 +15,9 @@ posting its reaction returned 403. A green code CI does not establish successful
 owner authorization or satisfy the failed policy check.
 
 The repair temporarily pins only the server's two request wrappers to the active
-v0.2.36 reusable workflows and grants Pull requests write while keeping Issues read-only.
-The caller narrows the legacy reusable workflow declaration to the observed API
-requirement. Current reusable workflows and generated client templates
+v0.2.36 reusable workflows and grants both Issues and Pull requests write to match
+their declarations. The reaction API itself requires only Pull requests write,
+but GitHub validates the entire nested permission declaration before starting jobs. Current reusable workflows and generated client templates
 remain read-only. It does not change active control, repository policy, App
 permissions or rulesets. The bridge must remain until a compatible successor is
 verified and activated; remove it in a subsequent reviewed change.
@@ -104,3 +104,46 @@ For future changes, preserve predecessor-compatible intake permissions until the
 successor runtime is active. Rehearse recovery from intake, runtime-validation and
 loader failures separately before claiming a reusable recovery capability exists.
 This document does not establish that such a permanent executor is deployed.
+
+## First bounded recovery and corrected compatibility requirement
+
+The first independently reviewed executor source was
+`e6214109711dfc504c7202012f15d8bdff92404a`, with
+[successful code CI](https://github.com/civitaspo/securefix-server/actions/runs/39437467080)
+and [read-only qualification](https://github.com/civitaspo/securefix-server/actions/runs/39437991365).
+The [scratch fixed-core rehearsal](https://github.com/civitaspo/securefix-server/actions/runs/39438859972)
+verified a signed exact-tree merge, stale-head rejection, unchanged scratch main
+and complete fixture cleanup. The separate
+[Bot review](https://github.com/civitaspo/securefix-server/actions/runs/39439292730)
+approved PR #142 head `cdaebbcf51306dea3a2acc6dd8b1a010d381d989`.
+The [Server App merge](https://github.com/civitaspo/securefix-server/actions/runs/39439800062)
+produced signed main `041268a86feec5eed7c9514cf2c7c56089ca79dd`, sole parent
+`dd1f4ec650587e7d491f38df77708f0a1d9b65af`, exact reviewed tree
+`3566877425c63fccf92c454aa48e23f8047791cb` and unchanged active descriptor.
+Readback confirmed the temporary source-approval variable and environment admission
+`63718732` were removed, the original main admission `50334840` remained, and the
+unmerged executor stayed locked at the approved source.
+
+That successful bounded merge did not restore ordinary intake.
+[Normal PR #141 intake 39440786077](https://github.com/civitaspo/securefix-server/actions/runs/39440786077)
+failed before any job started. GitHub's annotation states that nested `capture`
+requests Issues write while its caller allows only Issues read. The API permission
+probe did not test workflow expansion; using its narrower permission for the
+legacy reusable caller was an implementation error.
+
+Two disposable scratch dispatches bind this diagnosis to the exact v0.2.36 approve
+and merge reusables. Their jobs deliberately use `if: false`, so validation expands
+the references without running a capture or exposing a secret to a job:
+
+- [Both declared writes, 39441257574](https://github.com/civitaspo/testing-securefix-server/actions/runs/39441257574),
+  signed source `72bcb9cea307ca6e89b23fd6389559bf49f39c01` on `testing/legacy-workflow-scope-positive-20261020`:
+  valid workflow, both jobs skipped as intended.
+- [Issues read, 39441404600](https://github.com/civitaspo/testing-securefix-server/actions/runs/39441404600),
+  signed source `bee95d379a23add514928c0b2e73681b1689642b` on `testing/legacy-workflow-scope-negative-20261020`:
+  startup failure with no jobs, reproducing the declaration mismatch.
+
+These probes establish workflow validation behavior, not successful command
+capture or Server processing. The corrected bridge must pass an independently
+reviewed new exact-source recovery before ordinary owner commands can be proved.
+The earlier executor cannot be reused: its fixed expected main and target are
+already consumed. Bootstrap and repair remain retired.
