@@ -273,3 +273,14 @@ caught the previous record's seven-file assertion; it was updated to this exact
 ten-file target and the focused and complete suites then passed. All ten hashes
 were independently derived from immutable target commit bytes. Exact-source remote
 CI, plan, rehearsal and production review/merge are still separate required gates.
+
+
+The first read-only dispatch from source
+`0569bbf2d472e03ce950d3b792d3e9583b30761c`,
+[39455054975](https://github.com/civitaspo/securefix-server/actions/runs/39455054975),
+skipped every job because the nested builder still selected the preceding source
+branch. This is not a qualified plan. No temporary approval or environment
+admission had been enabled and no fixture or production write occurred. The
+successor corrects all three nested builder guards and tests the builder, harness
+steps and top-level job guards against the same compiled authorization branch.
+Fresh exact-source CI and a non-empty successful plan remain required.

@@ -14,7 +14,7 @@ defaults:
     shell: bash -euo pipefail {0}
 jobs:
   build:
-    if: github.repository == 'civitaspo/securefix-server' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020') && github.actor_id == '4525500' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/securefix-server' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/emergency/recover-local-intake-041-20261021') && github.actor_id == '4525500' && github.run_attempt == 1
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -42,7 +42,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Compile the source-bound rehearsal harness without credentials
-        if: github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020'
+        if: github.ref == 'refs/heads/emergency/recover-local-intake-041-20261021'
         env:
           SECUREFIX_BOOTSTRAP_SOURCE_SHA: ${{ job.workflow_sha }}
         run: |
@@ -52,7 +52,7 @@ jobs:
           install -m 755 "$test_executable" "$RUNNER_TEMP/request-recovery-tests/recovery-tests"
           cp policy.json "$RUNNER_TEMP/request-recovery-tests/policy.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020'
+        if: github.ref == 'refs/heads/emergency/recover-local-intake-041-20261021'
         id: upload-tests
         with:
           name: request-recovery-tests

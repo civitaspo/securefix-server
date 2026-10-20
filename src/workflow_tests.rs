@@ -3390,6 +3390,33 @@ fn lockfile_covers_every_workflow_and_ci_verifies_the_official_format() {
 
 #[test]
 fn one_use_request_recovery_keeps_qualification_and_credentials_separate() {
+    let record: Value =
+        serde_json::from_slice(include_bytes!("../control/request-recovery.json")).unwrap();
+    let authority_ref = format!(
+        "refs/heads/{}",
+        record["authority_branch"].as_str().unwrap()
+    );
+    let builder = workflow("build-bootstrap-host.yml");
+    let build = &builder["jobs"]["build"];
+    assert_eq!(
+        build["if"],
+        format!(
+            "github.repository == 'civitaspo/securefix-server' && (github.ref == 'refs/heads/main' || github.ref == '{authority_ref}') && github.actor_id == '4525500' && github.run_attempt == 1"
+        )
+    );
+    let rehearsal_steps: Vec<_> = build["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| {
+            step["name"] == "Compile the source-bound rehearsal harness without credentials"
+                || step["id"] == "upload-tests"
+        })
+        .collect();
+    assert_eq!(rehearsal_steps.len(), 2);
+    for step in rehearsal_steps {
+        assert_eq!(step["if"], format!("github.ref == '{authority_ref}'"));
+    }
     let workflow = workflow("control-activation.yml");
     let jobs = &workflow["jobs"];
     let qualify = &jobs["recovery-qualify"];
@@ -3427,8 +3454,11 @@ fn one_use_request_recovery_keeps_qualification_and_credentials_separate() {
         "recovery-rehearsal",
     ] {
         let guard = jobs[job]["if"].as_str().unwrap();
+        assert!(
+            guard.contains(&authority_ref),
+            "{job}: compiled authority branch mismatch"
+        );
         for condition in [
-            "refs/heads/emergency/recover-local-intake-041-20261021",
             "github.actor_id == '4525500'",
             "github.run_attempt == 1",
             "inputs.authority_sha == github.sha",
