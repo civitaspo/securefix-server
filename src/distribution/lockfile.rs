@@ -182,7 +182,8 @@ fn run_binary(binary: &OsStr, args: &[&str], root: &Path, repository: &str) -> R
             command.env(key, value);
         }
     }
-    if let Some(token) = std::env::var_os("GITHUB_TOKEN") {
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    if let Some(token) = &token {
         command.env("GH_TOKEN", token);
     }
     let output = command
@@ -191,8 +192,25 @@ fn run_binary(binary: &OsStr, args: &[&str], root: &Path, repository: &str) -> R
         .env("GH_ACTIONS_LOCK_REPO_ROOT", root)
         .output()
         .context("run the pinned gh-actions-lock extension")?;
-    ensure!(output.status.success(), "gh-actions-lock failed");
+    ensure!(
+        output.status.success(),
+        "gh-actions-lock failed ({}); stdout: {}; stderr: {}",
+        output.status,
+        diagnostic(&output.stdout, token.as_deref()),
+        diagnostic(&output.stderr, token.as_deref()),
+    );
     String::from_utf8(output.stdout).context("gh-actions-lock output is not UTF-8")
+}
+
+fn diagnostic(bytes: &[u8], token: Option<&str>) -> String {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if let Some(token) = token.filter(|value| !value.is_empty()) {
+        text = text.replace(token, "[REDACTED]");
+    }
+    text.chars()
+        .flat_map(char::escape_debug)
+        .take(2048)
+        .collect()
 }
 
 fn read_generated_lock(root: &Path) -> Result<Vec<u8>> {
@@ -266,6 +284,46 @@ mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
     use serde_json::json;
+
+    #[test]
+    fn failure_diagnostics_redact_bound_and_escape_tool_output() {
+        assert_eq!(
+            diagnostic(
+                b"request failed: secret-token\n\x1b[31m",
+                Some("secret-token")
+            ),
+            "request failed: [REDACTED]\\n\\u{1b}[31m"
+        );
+        assert_eq!(diagnostic(&[0xff], None), "�");
+        assert_eq!(diagnostic(b"error", Some("")), "error");
+        assert_eq!(
+            diagnostic("é".repeat(4096).as_bytes(), None)
+                .chars()
+                .count(),
+            2048
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_runner_reports_exit_status_and_both_output_streams() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("failed-locker");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'generation stopped'\nprintf 'API request failed' >&2\nexit 7\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = run_binary(script.as_os_str(), &[], root.path(), "owner/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exit status: 7"));
+        assert!(error.contains("stdout: generation stopped"));
+        assert!(error.contains("stderr: API request failed"));
+    }
 
     #[test]
     fn selects_workflows_and_action_definitions_without_other_files() {
