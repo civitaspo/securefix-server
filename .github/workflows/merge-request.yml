@@ -21,12 +21,13 @@ jobs:
         github.event.comment.user.type == 'Bot' &&
         github.event.issue.user.id == 29139614)) &&
       github.run_attempt == 1
-    uses: ./.github/workflows/reusable-merge-request.yml
+    # Temporary generation-6 bridge: the active v0.2.36 runtime reacts with GITHUB_TOKEN.
+    uses: civitaspo/securefix-server/.github/workflows/reusable-merge-request.yml@f80196051161fe4161c42cd9cb7530cc7db79882 # v0.2.36
     permissions:
       actions: read
       contents: read
       attestations: read
-      issues: read
+      issues: write
       pull-requests: read
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
