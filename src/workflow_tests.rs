@@ -1396,6 +1396,18 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     let setup = fs::read_to_string(".github/actions/setup-cli/action.yml").unwrap();
     assert!(setup.contains("build --locked --release"));
     assert!(!setup.contains("secrets."));
+    let setup: Value = serde_yaml::from_str(&setup).unwrap();
+    for step in setup["runs"]["steps"].as_array().unwrap() {
+        if step["name"] == "Install Rust toolchain" || step["name"] == "Build CLI" {
+            assert_eq!(step["working-directory"], "${{ github.workspace }}");
+        }
+    }
+    assert_eq!(
+        setup["runs"]["steps"][0]["run"],
+        "bash \"$ACTION_PATH/reuse-build.sh\""
+    );
+    let reuse = fs::read_to_string(".github/actions/setup-cli/reuse-build.sh").unwrap();
+    assert!(reuse.contains("root=\"$GITHUB_WORKSPACE\""));
     let installer: Value =
         serde_yaml::from_slice(&fs::read(".github/actions/install-cli/action.yml").unwrap())
             .unwrap();
@@ -3060,7 +3072,8 @@ esac
     }
 
     let repository = temp.path().join("repo");
-    let action = repository.join(".github/actions/setup-cli");
+    let action = temp.path().join("_actions/setup-cli");
+    fs::create_dir_all(&repository).unwrap();
     fs::create_dir_all(&action).unwrap();
     fs::write(action.join("reuse-build.sh"), action_source).unwrap();
     fs::write(repository.join("policy.json"), b"{\"policy\":true}\n").unwrap();
@@ -3206,6 +3219,7 @@ esac
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             )
             .env("ACTION_PATH", &action)
+            .env("GITHUB_WORKSPACE", &repository)
             .env("EVENT_NAME", "workflow_dispatch")
             .env("ImageOS", "ubuntu24")
             .env("RUNNER_TEMP", &scenario_dir)

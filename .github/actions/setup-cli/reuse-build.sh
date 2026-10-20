@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(cd "$ACTION_PATH/../../.." && pwd)"
+root="$GITHUB_WORKSPACE"
 source_sha="$(git -C "$root" rev-parse HEAD)"
 artifact_name="securefix-cli-ubuntu-24.04-x64-rust-1.99.0-$source_sha"
 
