@@ -19,12 +19,14 @@ on:
 permissions: {}
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/load-cli.yml
     permissions:
       actions: read
       contents: read
       attestations: read
   prepare:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment: main
@@ -85,6 +87,7 @@ jobs:
         working-directory: ${{ runner.temp }}/securefix-runtime
         run: securefix settings activation-preflight
   reconcile:
+    if: github.ref == 'refs/heads/main'
     needs: [build, prepare]
     runs-on: ubuntu-latest
     environment: main
@@ -121,7 +124,7 @@ jobs:
         run: securefix settings reconcile --repository "$REPOSITORY"
   controlled-merges:
     needs: [build, prepare, reconcile]
-    if: needs.prepare.outputs.activate == 'true' || github.event_name == 'schedule'
+    if: github.ref == 'refs/heads/main' && (needs.prepare.outputs.activate == 'true' || github.event_name == 'schedule')
     runs-on: ubuntu-latest
     environment: main
     concurrency:

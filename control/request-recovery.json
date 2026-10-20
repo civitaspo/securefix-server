@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "authority_branch": "emergency/recover-intake-039-20261020",
+  "workflow": ".github/workflows/control-activation.yml",
+  "expected_main_sha": "dd1f4ec650587e7d491f38df77708f0a1d9b65af",
+  "pull_request": 142,
+  "target_branch": "emergency/restore-legacy-reaction-scope",
+  "expected_head_sha": "cdaebbcf51306dea3a2acc6dd8b1a010d381d989",
+  "expected_tree_sha": "3566877425c63fccf92c454aa48e23f8047791cb",
+  "commits": [
+    "bf731d57289687340932af3f59b2b169da20873a",
+    "2a97e1866e48aefa409a932ba553ef9de7f38ff8",
+    "cdaebbcf51306dea3a2acc6dd8b1a010d381d989"
+  ],
+  "active": {
+    "version": 1,
+    "generation": 6,
+    "source_sha": "f80196051161fe4161c42cd9cb7530cc7db79882",
+    "policy_sha256": "91292daf7e6229ec64d66618926b10c4785e67bb3b1cd31d1a9bc1646464cc1c",
+    "archive_sha256": "87cbd300024e9f653820e64d9fcbaa15bb23261c345c10c1b18711e531bf0f57",
+    "release_id": 417941094,
+    "asset_id": 658052746,
+    "publisher_run_id": 39359327054,
+    "verification_run_id": 39359041267,
+    "previous": "3006b3f1706a226100c567b3aca38377efaeb0dfdf0b93c3a7bdd55c6ff995d1"
+  },
+  "files": [
+    {
+      "path": ".github/workflows/approve-request.yml",
+      "status": "modified",
+      "sha256": "91f9fb9824df856b193391dd96a3b1441e72b5bba8cf48234366b0dca31e2387"
+    },
+    {
+      "path": ".github/workflows/merge-request.yml",
+      "status": "modified",
+      "sha256": "036fdc9ed2de9504d3d8bb4cd04b5b0497bcda2aa5d7af15e55d347dddf6c99c"
+    },
+    {
+      "path": "Cargo.lock",
+      "status": "modified",
+      "sha256": "b1e57822e3d0a2cad2f5154e7ead01c5b392764619282cde31e1c7cb0843116f"
+    },
+    {
+      "path": "Cargo.toml",
+      "status": "modified",
+      "sha256": "8ef7ab83ceda89170c8a96ebfc51b5ffd74afeb05c4191f00a4f970dfac59cd1"
+    },
+    {
+      "path": "docs/merging.md",
+      "status": "modified",
+      "sha256": "a767ff0d1d847579a8faec93c4aa10f8015a2d6f24780d1f3e3873ce02c5d524"
+    },
+    {
+      "path": "docs/migration.md",
+      "status": "modified",
+      "sha256": "b9d5158ed76992008cef45a1531984587e33ca94e488ebfb4a059767674d956b"
+    },
+    {
+      "path": "docs/request-intake-recovery-2026-10-20.md",
+      "status": "added",
+      "sha256": "bfd16bbde36c35e4bef9eeaae5cac10179faf6e0d792e8cf6d9fcec8819e449b"
+    },
+    {
+      "path": "src/workflow_tests.rs",
+      "status": "modified",
+      "sha256": "d08508ff31ae5307f90a8f6e25c1d801e0aa1184f8d0aa507f3f14c455478e2c"
+    }
+  ],
+  "probe": {
+    "run_id": 39432135670,
+    "source_sha": "611fde1dd08df445e351f63348638e39d31d2fbe",
+    "workflow": ".github/workflows/testing-ci.yml",
+    "branch": "testing/reaction-permission-20261020"
+  }
+}

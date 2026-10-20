@@ -3,21 +3,39 @@ run-name: Prepare Control Activation (${{ inputs.source_sha }})
 on:
   workflow_dispatch:
     inputs:
+      phase:
+        description: Normal proposal or separately reviewed fixed request-intake recovery
+        required: false
+        default: propose
+        type: choice
+        options: [propose, request-recovery-plan, request-recovery-rehearsal, request-recovery-review, request-recovery-merge]
+      authority_sha:
+        description: Exact signed recovery executor source; target is compiled into that source
+        required: false
+        type: string
+      authorization_comment_id:
+        description: Unedited exact-source owner authorization on the fixed target PR
+        required: false
+        type: string
+      rehearsal_run_id:
+        description: Successful exact-source scratch recovery rehearsal run for review and merge
+        required: false
+        type: string
       source_sha:
         description: Published and scratch-verified candidate source SHA
-        required: true
+        required: false
         type: string
       publisher_run_id:
         description: Successful Publish Runtime run ID for the candidate
-        required: true
+        required: false
         type: string
       verification_run_id:
         description: Successful scratch verification run ID for the candidate
-        required: true
+        required: false
         type: string
       expected_control_id:
         description: Full identity of the currently active control descriptor
-        required: true
+        required: false
         type: string
 permissions: {}
 defaults:
@@ -108,3 +126,152 @@ jobs:
           --publisher-run-id "$PUBLISHER_RUN_ID"
           --verification-run-id "$VERIFICATION_RUN_ID"
           --expected-control-id "$EXPECTED_CONTROL_ID"
+
+  recovery-host:
+    if: startsWith(inputs.phase, 'request-recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-039-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    uses: ./.github/workflows/build-bootstrap-host.yml
+    permissions:
+      contents: read
+
+  recovery-qualify:
+    if: startsWith(inputs.phase, 'request-recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-039-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    needs: recovery-host
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recovery-host.outputs.artifact-id }}
+          path: recovery-host
+          merge-multiple: true
+      - name: Install the immutable source-bound recovery host
+        run: install -D -m 755 recovery-host/securefix-bootstrap "$RUNNER_TEMP/securefix-request-recovery"
+      - name: Qualify the fixed repair without production credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-plan > "$RUNNER_TEMP/request-recovery-plan.json"'
+      - name: Record the read-only plan and pending authorization gates
+        run: cat "$RUNNER_TEMP/request-recovery-plan.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: request-recovery-plan
+          path: ${{ runner.temp }}/request-recovery-plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  recovery-review:
+    if: inputs.phase == 'request-recovery-review' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-039-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
+    needs: [recovery-host, recovery-qualify]
+    runs-on: ubuntu-24.04
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recovery-host.outputs.artifact-id }}
+          path: recovery-host
+          merge-multiple: true
+      - name: Install the immutable source-bound recovery host
+        run: install -D -m 755 recovery-host/securefix-bootstrap "$RUNNER_TEMP/securefix-request-recovery"
+      - name: Repeat independent qualification before the configured non-author review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA }}
+          SECUREFIX_RECOVERY_REVIEW_TOKEN: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
+        run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-review'
+
+  recovery-merge:
+    if: inputs.phase == 'request-recovery-merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-039-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
+    needs: [recovery-host, recovery-qualify]
+    runs-on: ubuntu-24.04
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recovery-host.outputs.artifact-id }}
+          path: recovery-host
+          merge-multiple: true
+      - name: Install the immutable source-bound recovery host
+        run: install -D -m 755 recovery-host/securefix-bootstrap "$RUNNER_TEMP/securefix-request-recovery"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Repeat qualification and merge only the fixed PR with expected-head CAS
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-merge'
+
+  recovery-rehearsal:
+    if: inputs.phase == 'request-recovery-rehearsal' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-039-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
+    needs: [recovery-host, recovery-qualify]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.recovery-host.outputs.test-artifact-id }}
+          path: ${{ runner.temp }}/recovery-tests
+          merge-multiple: true
+      - name: Install the immutable scratch-only test harness
+        run: chmod 755 "$RUNNER_TEMP/recovery-tests/recovery-tests"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Exercise the fixed merge core and stale-head rejection only in scratch
+        env:
+          GH_TOKEN: ${{ steps.scratch.outputs.token }}
+          SECUREFIX_POLICY_PATH: ${{ runner.temp }}/recovery-tests/policy.json
+          SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA: ${{ vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA }}
+        run: '"$RUNNER_TEMP/recovery-tests/recovery-tests" --ignored --exact bootstrap::request_recovery::tests::live_request_recovery_core_rehearsal --nocapture'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: request-recovery-rehearsal
+          path: ${{ runner.temp }}/request-recovery-rehearsal.json
+          if-no-files-found: error
+          retention-days: 7

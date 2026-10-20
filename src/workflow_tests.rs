@@ -2469,6 +2469,34 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 );
                 continue;
             }
+            if path == ".github/workflows/control-activation.yml"
+                && matches!(
+                    job_id.as_str(),
+                    "recovery-qualify"
+                        | "recovery-review"
+                        | "recovery-merge"
+                        | "recovery-rehearsal"
+                )
+            {
+                let expected = if job_id == "recovery-rehearsal" {
+                    "${{ needs.recovery-host.outputs.test-artifact-id }}"
+                } else {
+                    "${{ needs.recovery-host.outputs.artifact-id }}"
+                };
+                assert_eq!(steps[0]["with"]["artifact-ids"], expected);
+                assert!(
+                    steps[1]["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("securefix-request-recovery")
+                            || run.contains("recovery-tests"))
+                );
+                assert!(steps.iter().all(|step| {
+                    !step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+                }));
+                continue;
+            }
             if downloads_cli {
                 assert!(
                     installer.is_some(),
@@ -2555,6 +2583,13 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             && run.contains("conclusion == \"success\"")))
                     && !run.contains("gh api -X")
                     && !run.contains("--method");
+                let bounded_test_harness_lookup = path == ".github/workflows/build-bootstrap-host.yml"
+                    && job_id == "build"
+                    && step["name"] == "Compile the source-bound rehearsal harness without credentials"
+                    && run.contains("cargo +1.99.0 test --locked --release --no-run --bin securefix-bootstrap --message-format=json")
+                    && run.contains(".target.name == \"securefix-bootstrap\" and .profile.test == true")
+                    && run.contains("if length == 1 then .[0]")
+                    && !run.contains("gh ") && !run.contains("http");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
@@ -2562,7 +2597,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && (!run.contains("jq ")
                             || bounded_baseline_reads
                             || bounded_legacy_runtime_reads
-                            || bounded_release_artifact_lookup)
+                            || bounded_release_artifact_lookup
+                            || bounded_test_harness_lookup)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
@@ -3336,4 +3372,87 @@ fn lockfile_covers_every_workflow_and_ci_verifies_the_official_format() {
         .position(|s| s["run"] == "gh-actions-lock --verify")
         .unwrap();
     assert!(install < verify);
+}
+
+#[test]
+fn one_use_request_recovery_keeps_qualification_and_credentials_separate() {
+    let workflow = workflow("control-activation.yml");
+    let jobs = &workflow["jobs"];
+    let qualify = &jobs["recovery-qualify"];
+    assert!(qualify.get("environment").is_none());
+    let text = serde_json::to_string(qualify).unwrap();
+    assert!(!text.contains("secrets.") && !text.contains("create-github-app-token"));
+    for job in [
+        "recovery-host",
+        "recovery-qualify",
+        "recovery-review",
+        "recovery-merge",
+        "recovery-rehearsal",
+    ] {
+        let guard = jobs[job]["if"].as_str().unwrap();
+        for condition in [
+            "refs/heads/emergency/recover-intake-039-20261020",
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+            "inputs.authority_sha == github.sha",
+        ] {
+            assert!(guard.contains(condition), "{job}: missing {condition}");
+        }
+    }
+    for job in ["recovery-review", "recovery-merge", "recovery-rehearsal"] {
+        assert_eq!(jobs[job]["environment"], "main");
+        assert!(
+            jobs[job]["if"]
+                .as_str()
+                .unwrap()
+                .contains("vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha")
+        );
+        assert_eq!(
+            jobs[job]["needs"],
+            serde_json::json!(["recovery-host", "recovery-qualify"])
+        );
+    }
+    for job in ["recovery-review", "recovery-merge"] {
+        assert_eq!(jobs[job]["concurrency"]["group"], "securefix-control");
+        assert_eq!(jobs[job]["concurrency"]["queue"], "max");
+        assert_eq!(jobs[job]["concurrency"]["cancel-in-progress"], false);
+    }
+    let review = serde_json::to_string(&jobs["recovery-review"]).unwrap();
+    assert!(review.contains("CIVITASPO_BOT_PR_APPROVE_TOKEN"));
+    assert!(!review.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
+    let merge = serde_json::to_string(&jobs["recovery-merge"]).unwrap();
+    assert!(!merge.contains("CIVITASPO_BOT_PR_APPROVE_TOKEN"));
+    let rehearsal = &jobs["recovery-rehearsal"];
+    let rehearsal_text = serde_json::to_string(rehearsal).unwrap();
+    assert!(!rehearsal_text.contains("CIVITASPO_BOT_PR_APPROVE_TOKEN"));
+    let steps = rehearsal["steps"].as_array().unwrap();
+    let token = steps.iter().find(|s| s["id"] == "scratch").unwrap();
+    assert_eq!(token["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(token["with"]["permission-contents"], "write");
+    assert_eq!(token["with"]["permission-pull-requests"], "write");
+    assert!(steps.iter().all(|step| step["uses"] != "actions/checkout"));
+}
+
+#[test]
+fn temporary_recovery_admission_cannot_enable_settings_or_distribution() {
+    let settings = workflow("repo-settings.yml");
+    for job in ["build", "prepare", "reconcile", "controlled-merges"] {
+        assert!(
+            settings["jobs"][job]["if"]
+                .as_str()
+                .unwrap()
+                .contains("github.ref == 'refs/heads/main'")
+        );
+    }
+    let distribution = workflow("distribute-runtime.yml");
+    for job in ["runtime", "caller"] {
+        let guard = distribution["jobs"][job]["if"].as_str().unwrap();
+        assert!(
+            guard.contains("github.ref == 'refs/heads/main'")
+                && guard.contains("github.actor_id == '4525500'")
+        );
+    }
+    let build = workflow("build-bootstrap-host.yml");
+    let text = serde_json::to_string(&build["jobs"]["build"]).unwrap();
+    assert!(!text.contains("secrets.") && !text.contains("environment"));
 }
