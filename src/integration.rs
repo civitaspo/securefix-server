@@ -1643,7 +1643,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         )]),
     )?;
 
-    let rendered = distribution_fixture_files(
+    let mut rendered = distribution_fixture_files(
         &published_runtime_sha,
         &published_runtime_tag,
         &default_branch,
@@ -1653,6 +1653,16 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         "distribution renderer returned no workflows"
     );
     let obsolete_workflows = existing_scratch_workflows(&server, &base_sha)?;
+    rendered.insert(
+        ".github/workflows/actions.lock".to_owned(),
+        crate::distribution::lockfile::generate(
+            &server,
+            integration_repository()?,
+            &base_sha,
+            &rendered,
+            &obsolete_workflows,
+        )?,
+    );
     let distribution = create_pr_with_changes(
         &server,
         &base_sha,
@@ -1663,7 +1673,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             &candidate_sha[..12]
         ),
         rendered.clone(),
-        obsolete_workflows,
+        obsolete_workflows.clone(),
     )?;
     validate_rendered_files(&rendered)?;
 
@@ -2659,12 +2669,13 @@ fn verify_inner(
         &scenario.positive.head_sha,
     )?;
     validate_signed_pr(api, policy, &scenario.distribution)?;
-    verify_rendered_files(
+    let files = verify_rendered_files(
         api,
         &scenario.distribution,
         &scenario.default_branch,
         &scenario.published_runtime_sha,
         published_runtime_tag,
+        &scenario.base_sha,
     )?;
     wait_for_actions_status_check(
         api,
@@ -2680,13 +2691,6 @@ fn verify_inner(
         "scratch-push-status-check",
         deadline,
     )?;
-    let files = distribution_fixture_files(
-        &scenario.published_runtime_sha,
-        published_runtime_tag,
-        &scenario.default_branch,
-    )?;
-    validate_rendered_files(&files)?;
-
     let positive_manifest = manifest(
         scenario,
         &scenario.positive,
@@ -2834,10 +2838,10 @@ fn verify_inner(
     };
     merge::validate_state(api, policy, &positive_manifest)?;
     ensure!(
-        !policy_check_exists(api, &scenario.positive.head_sha)?,
+        !policy_check_exists(api, &scenario.positive.head_sha, control)?,
         "positive policy check was published before the native auto-merge probe"
     );
-    wait_for_merge_gates_except_policy(api, &scenario.positive, deadline)?;
+    wait_for_merge_gates_except_policy(api, &scenario.positive, control, deadline)?;
     let (owner_review_id, owner_review_at) = crate::distribution::reviewed::owner_review(
         api,
         integration_repository()?,
@@ -2875,7 +2879,7 @@ fn verify_inner(
         "scratch positive PR became merge-ready without the Securefix policy check"
     );
     ensure!(
-        !policy_check_exists(api, &scenario.positive.head_sha)?,
+        !policy_check_exists(api, &scenario.positive.head_sha, control)?,
         "positive policy check appeared before it was published by the integration harness"
     );
     policy_check::publish(
@@ -2886,7 +2890,7 @@ fn verify_inner(
         "Integration fixture passed production PR authorization checks.",
         control,
     )?;
-    wait_for_policy_check_success(api, &scenario.positive, deadline)?;
+    wait_for_policy_check_success(api, &scenario.positive, control, deadline)?;
     ensure!(
         merge::ready_with_reviewer(api, &positive_manifest, (&scratch_reviewer, "User"))?,
         "scratch positive PR lacks required checks or approved review after policy check"
@@ -3051,7 +3055,7 @@ fn verify_inner(
             integration_repository()?,
             scenario.stale.number,
             &scenario.stale.head_sha,
-        )? && !policy_check_exists(api, &scenario.stale.head_sha)?,
+        )? && !policy_check_exists(api, &scenario.stale.head_sha, control)?,
         "stale-head fixture unexpectedly has current review or policy check before its probe"
     );
     let stale_head_sha = api.create_commit(
@@ -3099,7 +3103,7 @@ fn verify_inner(
             integration_repository()?,
             scenario.stale.number,
             &stale_head_sha,
-        )? && !policy_check_exists(api, &stale_head_sha)?,
+        )? && !policy_check_exists(api, &stale_head_sha, control)?,
         "advanced stale-head fixture unexpectedly has current review or policy check"
     );
     let stale_merge = api.put::<Value>(
@@ -3358,16 +3362,52 @@ fn verify_rendered_files(
     default_branch: &str,
     published_runtime_sha: &str,
     published_runtime_tag: &str,
-) -> Result<()> {
-    let expected =
+    base_sha: &str,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let obsolete_workflows = existing_scratch_workflows(api, base_sha)?;
+    let mut expected =
         distribution_fixture_files(published_runtime_sha, published_runtime_tag, default_branch)?;
+    expected.insert(
+        ".github/workflows/actions.lock".to_owned(),
+        crate::distribution::lockfile::generate(
+            api,
+            integration_repository()?,
+            base_sha,
+            &expected,
+            &obsolete_workflows,
+        )?,
+    );
     validate_rendered_files(&expected)?;
-    for (path, expected_bytes) in expected {
-        let actual = api.content(integration_repository()?, &path, &fixture.head_sha)?;
+    let mut expected_changes = BTreeMap::new();
+    for (path, bytes) in &expected {
+        match optional_file(api, path, base_sha)? {
+            Some(_) if api.content(integration_repository()?, path, base_sha)? != *bytes => {
+                expected_changes.insert(path.clone(), "modified".to_owned());
+            }
+            Some(_) => {}
+            None => {
+                expected_changes.insert(path.clone(), "added".to_owned());
+            }
+        }
+    }
+    for path in &obsolete_workflows {
+        expected_changes.insert(path.clone(), "removed".to_owned());
+    }
+    let changed = api.paginate(&format!(
+        "/repos/{}/pulls/{}/files?per_page=100",
+        integration_repository()?,
+        fixture.number
+    ))?;
+    validate_distribution_file_changes(&changed, &expected_changes)?;
+    for (path, expected_bytes) in &expected {
+        let actual = api.content(integration_repository()?, path, &fixture.head_sha)?;
         ensure!(
-            actual == expected_bytes,
-            "scratch distribution PR changed managed workflow bytes at {path}"
+            actual == *expected_bytes,
+            "scratch distribution PR changed managed files at {path}"
         );
+        if path == ".github/workflows/actions.lock" {
+            continue;
+        }
         let parsed: serde_yaml::Value = serde_yaml::from_slice(&actual)
             .with_context(|| format!("rendered workflow is invalid at {path}"))?;
         ensure!(
@@ -3381,6 +3421,30 @@ fn verify_rendered_files(
             "scratch distribution PR retained obsolete test workflow {path}"
         );
     }
+    Ok(expected)
+}
+
+fn validate_distribution_file_changes(
+    changed: &[Value],
+    expected: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut actual = BTreeMap::new();
+    for file in changed {
+        let path = file["filename"]
+            .as_str()
+            .context("scratch distribution changed file has no filename")?;
+        let status = file["status"]
+            .as_str()
+            .context("scratch distribution changed file has no status")?;
+        ensure!(
+            actual.insert(path.to_owned(), status.to_owned()).is_none(),
+            "scratch distribution PR contains a duplicate changed path"
+        );
+    }
+    ensure!(
+        actual == *expected,
+        "scratch distribution PR changed unexpected files or statuses"
+    );
     Ok(())
 }
 
@@ -3608,16 +3672,21 @@ fn validate_rendered_files(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
     for (path, bytes) in files {
         ensure!(
             path.starts_with(".github/workflows/")
-                && path.ends_with(".yml")
+                && (path.ends_with(".yml") || path == ".github/workflows/actions.lock")
                 && crate::securefix_gate::artifact::safe_path(path),
             "distribution renderer returned an unsafe path"
         );
-        let workflow: serde_yaml::Value = serde_yaml::from_slice(bytes)
-            .with_context(|| format!("rendered workflow is invalid at {path}"))?;
-        ensure!(
-            workflow["name"].as_str().is_some(),
-            "rendered workflow has no name at {path}"
-        );
+        if path.ends_with(".yml") {
+            let workflow: serde_yaml::Value = serde_yaml::from_slice(bytes)
+                .with_context(|| format!("rendered workflow is invalid at {path}"))?;
+            ensure!(
+                workflow["name"].as_str().is_some(),
+                "rendered workflow has no name at {path}"
+            );
+        } else {
+            ensure!(!bytes.is_empty(), "rendered actions lock is empty");
+            continue;
+        }
         let text = std::str::from_utf8(bytes)?;
         ensure!(
             !text.contains("@SECUREFIX_RUNTIME_SHA@")
@@ -3675,12 +3744,18 @@ fn wait_for_owner_comment(
 fn wait_for_merge_gates_except_policy(
     api: &GitHub,
     fixture: &PullRequestFixture,
+    control: &securefix::control::ControlRevision,
     deadline: Instant,
 ) -> Result<()> {
     loop {
         let checks = check_runs(api, &fixture.head_sha)?;
         ensure!(
-            !policy_check_exists_in(&checks, trusted_config()?.deployment.checks.policy_app_id,),
+            !policy_check_exists_in(
+                &checks,
+                trusted_config()?.deployment.checks.policy_app_id,
+                &fixture.head_sha,
+                control
+            )?,
             "policy check exists before native auto-merge is enabled"
         );
         let status_ready = latest_check_success(
@@ -3720,11 +3795,17 @@ fn wait_for_merge_gates_except_policy(
 fn wait_for_policy_check_success(
     api: &GitHub,
     fixture: &PullRequestFixture,
+    control: &securefix::control::ControlRevision,
     deadline: Instant,
 ) -> Result<()> {
     loop {
         let checks = check_runs(api, &fixture.head_sha)?;
-        let matches = policy_check_runs(&checks, trusted_config()?.deployment.checks.policy_app_id);
+        let matches = policy_check_runs(
+            &checks,
+            trusted_config()?.deployment.checks.policy_app_id,
+            &fixture.head_sha,
+            control,
+        )?;
         ensure!(
             matches.len() <= 1,
             "duplicate Securefix policy checks on fixture head"
@@ -3791,24 +3872,49 @@ fn check_runs(api: &GitHub, sha: &str) -> Result<Vec<Value>> {
     anyhow::bail!("check run pagination exceeded limit")
 }
 
-fn policy_check_runs(checks: &[Value], app_id: u64) -> Vec<&Value> {
-    checks
+fn policy_check_runs<'a>(
+    checks: &'a [Value],
+    app_id: u64,
+    head_sha: &str,
+    control: &securefix::control::ControlRevision,
+) -> Result<Vec<&'a Value>> {
+    let control_id = control.identity()?;
+    let external_id = format!("{head_sha}:{control_id}");
+    Ok(checks
         .iter()
         .filter(|check| {
-            check["name"] == "securefix-policy-check" && check["app"]["id"].as_u64() == Some(app_id)
+            check["name"] == "securefix-policy-check"
+                && check["app"]["id"].as_u64() == Some(app_id)
+                && check["external_id"] == external_id
         })
-        .collect()
+        .collect())
 }
 
-fn policy_check_exists_in(checks: &[Value], app_id: u64) -> bool {
-    !policy_check_runs(checks, app_id).is_empty()
+fn policy_check_exists_in(
+    checks: &[Value],
+    app_id: u64,
+    head_sha: &str,
+    control: &securefix::control::ControlRevision,
+) -> Result<bool> {
+    let matches = policy_check_runs(checks, app_id, head_sha, control)?;
+    ensure!(
+        matches.len() <= 1,
+        "duplicate Securefix policy checks for head and control"
+    );
+    Ok(!matches.is_empty())
 }
 
-fn policy_check_exists(api: &GitHub, sha: &str) -> Result<bool> {
-    Ok(policy_check_exists_in(
+fn policy_check_exists(
+    api: &GitHub,
+    sha: &str,
+    control: &securefix::control::ControlRevision,
+) -> Result<bool> {
+    policy_check_exists_in(
         &check_runs(api, sha)?,
         trusted_config()?.deployment.checks.policy_app_id,
-    ))
+        sha,
+        control,
+    )
 }
 
 fn latest_check_success(checks: &[Value], name: &str, app_id: u64, allow_skipped: bool) -> bool {
@@ -4979,14 +5085,49 @@ mod tests {
     #[test]
     fn policy_check_probe_requires_the_configured_app_identity() {
         let app_id = trusted_config().unwrap().deployment.checks.policy_app_id;
+        let head = "a".repeat(40);
+        let control = scratch_manifest_control(&head).unwrap();
         let check = json!({
             "id":1,
             "name":"securefix-policy-check",
             "app":{"id":app_id + 1},
+            "external_id":format!("{head}:{}", control.identity().unwrap()),
             "status":"completed",
             "conclusion":"success"
         });
-        assert!(!policy_check_exists_in(&[check], app_id));
+        assert!(!policy_check_exists_in(&[check], app_id, &head, &control).unwrap());
+    }
+
+    #[test]
+    fn policy_check_probe_is_scoped_to_the_exact_head_and_control() {
+        let app_id = trusted_config().unwrap().deployment.checks.policy_app_id;
+        let head = "a".repeat(40);
+        let control = scratch_manifest_control(&head).unwrap();
+        let external_id = format!("{head}:{}", control.identity().unwrap());
+        let check = |id, external_id: String| {
+            json!({
+                "id":id,
+                "name":"securefix-policy-check",
+                "app":{"id":app_id},
+                "external_id":external_id,
+                "status":"completed",
+                "conclusion":"success"
+            })
+        };
+        let foreign_control = check(1, format!("{head}:{}", "b".repeat(64)));
+        assert!(!policy_check_exists_in(&[foreign_control], app_id, &head, &control).unwrap());
+        let wrong_head = check(
+            2,
+            format!("{}:{}", "b".repeat(40), control.identity().unwrap()),
+        );
+        assert!(!policy_check_exists_in(&[wrong_head], app_id, &head, &control).unwrap());
+
+        let exact = check(3, external_id.clone());
+        assert!(
+            policy_check_exists_in(std::slice::from_ref(&exact), app_id, &head, &control).unwrap()
+        );
+        let duplicate = check(4, external_id);
+        assert!(policy_check_exists_in(&[exact, duplicate], app_id, &head, &control).is_err());
     }
 
     #[test]
@@ -5048,7 +5189,42 @@ mod tests {
                 .unwrap();
             assert_eq!(caller["permissions"]["actions"], "read");
         }
+        let mut files_with_lock = files.clone();
+        files_with_lock.insert(
+            ".github/workflows/actions.lock".to_owned(),
+            b"workflow-lock fixture\n".to_vec(),
+        );
+        validate_rendered_files(&files_with_lock).unwrap();
         validate_rendered_files(&files).unwrap();
+    }
+
+    #[test]
+    fn distribution_file_validation_rejects_extra_paths_and_wrong_statuses() {
+        let expected = BTreeMap::from([(
+            ".github/workflows/approve-request.yml".to_owned(),
+            "modified".to_owned(),
+        )]);
+        let exact = vec![json!({
+            "filename":".github/workflows/approve-request.yml",
+            "status":"modified"
+        })];
+        assert!(validate_distribution_file_changes(&exact, &expected).is_ok());
+
+        let extra = vec![
+            exact[0].clone(),
+            json!({
+                "filename":".github/workflows/unmanaged.yml",
+                "status":"added"
+            }),
+        ];
+        assert!(validate_distribution_file_changes(&extra, &expected).is_err());
+
+        let wrong_status = vec![json!({
+            "filename":".github/workflows/approve-request.yml",
+            "status":"removed"
+        })];
+        assert!(validate_distribution_file_changes(&wrong_status, &expected).is_err());
+        assert!(validate_distribution_file_changes(&[], &expected).is_err());
     }
 
     #[test]

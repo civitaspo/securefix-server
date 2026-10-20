@@ -249,10 +249,24 @@ need to contain the workflow that produced its fixture artifact. The workflow
 sets `SECUREFIX_TEST_WORKFLOW_SHA` to its own source SHA. The command creates three signed,
 disposable PRs in the scratch repository: one for the approval/merge path, one
 for stale-head rejection, and one containing the managed workflow files rendered
-from the current published stable runtime SHA. Before minting App tokens, the host validates the published baseline source
+from the current published stable runtime SHA, together with a generated
+`.github/workflows/actions.lock`. The lock generator reads the exact recorded
+scratch base SHA, overlays the rendered caller workflows, and removes only the
+obsolete workflow paths recorded as present at that base. Verify regenerates the
+lock from that same immutable base and requires the obsolete set and lock bytes
+to match the prepared PR exactly. This keeps the disposable fixture aligned with
+the normal caller lock maintenance path even when the published baseline predates
+lockfile enforcement. Before minting App tokens, the host validates the published baseline source
 and Release metadata and resolves its source-bound version tag. It passes
 `SECUREFIX_PUBLISHED_RUNTIME_SHA` and `SECUREFIX_PUBLISHED_RUNTIME_TAG` to the
 candidate, then independently rechecks both after candidate execution.
+
+The direct readiness probe binds its policy check to the exact fixture head and
+full structural control identity. A check emitted concurrently by the native
+testing controller for another control does not satisfy that probe. The verifier
+still rejects readiness before its own control publishes a policy result, then
+requires that exact result and the current-head review.
+
 The test-only tag resolver permits the legacy exact-SHA annotation during the
 first SemVer cutover; production consumers require canonical `v<version>` tags.
 The baseline build does not download or attest the published Release asset.

@@ -55,8 +55,9 @@ New workflows still need onboarding with the official generator.
 Actions policy changes belong only in `repo-settings.yml` with its dedicated administrator credential.
 Keep approval, merge, publication, activation, and distribution free of administrator reads and credentials.
 Enable Require lockfile only after all targeted workflows and pinned reusable workflow revisions have valid lockfiles.
-The proposed repository-settings API integration is held until its creation and update requests are accepted by GitHub.
-The active herdr-linear-agent policy is preserved during caller migration.
+On 2026-10-20 the owner deferred new native enforcement until GitHub supports the rule in its write API.
+This rollout adds neither unsupported policy writes nor a mandatory settings audit.
+The existing active herdr-linear-agent policy is preserved during caller migration.
 
 As of the 2026-10-18 official REST OpenAPI revision, repository Actions policy rules document actor and event restrictions but no Require lockfile payload.
 The Actions permissions API exposes `sha_pinning_required`, which is a separate setting.
