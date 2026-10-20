@@ -765,9 +765,21 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
         );
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             if let Some(uses) = job["uses"].as_str() {
+                let operation = match path.as_str() {
+                    ".github/workflows/approve-request.yml" => Some("approve"),
+                    ".github/workflows/merge-request.yml" => Some("merge"),
+                    _ => None,
+                };
+                let generation_six_bridge = operation.is_some_and(|operation| {
+                    job_id == "request"
+                        && uses
+                            == format!(
+                                "civitaspo/securefix-server/.github/workflows/reusable-{operation}-request.yml@f80196051161fe4161c42cd9cb7530cc7db79882"
+                            )
+                });
                 assert!(
-                    uses.starts_with("./.github/workflows/"),
-                    "{path}/{job_id}: local reusable must use the running revision"
+                    uses.starts_with("./.github/workflows/") || generation_six_bridge,
+                    "{path}/{job_id}: reusable must use the running revision except for the exact generation-6 bridge"
                 );
                 assert!(
                     job.get("secrets").is_none() || uses != "./.github/workflows/load-cli.yml",
@@ -2598,14 +2610,30 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
 fn server_request_callers_pass_the_required_environment_secret_by_name() {
     for operation in ["approve", "merge"] {
         let caller = workflow(&format!("{operation}-request.yml"));
+        let local_reusable = format!("./.github/workflows/reusable-{operation}-request.yml");
+        let legacy_reusable = format!(
+            "civitaspo/securefix-server/.github/workflows/reusable-{operation}-request.yml@f80196051161fe4161c42cd9cb7530cc7db79882"
+        );
+        let uses = caller["jobs"]["request"]["uses"].as_str().unwrap();
+        assert!(
+            uses == local_reusable || uses == legacy_reusable,
+            "{operation}: only the exact generation-6 compatibility workflow is allowed"
+        );
+        let legacy_bridge = uses == legacy_reusable;
         assert_eq!(
             caller["jobs"]["request"]["permissions"]["issues"], "read",
-            "{operation}: caller token can read the request but cannot add reactions"
+            "{operation}: PR reactions require no Issues write permission"
         );
         assert_eq!(
-            caller["jobs"]["request"]["permissions"]["pull-requests"], "read",
-            "{operation}: caller token is read-only"
+            caller["jobs"]["request"]["permissions"]["pull-requests"],
+            if legacy_bridge { "write" } else { "read" },
+            "{operation}: only the temporary legacy bridge may write PR reactions"
         );
+        if legacy_bridge {
+            let source =
+                fs::read_to_string(format!(".github/workflows/{operation}-request.yml")).unwrap();
+            assert!(source.contains(&format!("{legacy_reusable} # v0.2.36")));
+        }
         assert_eq!(
             caller["jobs"]["request"]["secrets"],
             serde_json::json!({

@@ -18,12 +18,14 @@ Every change in the server repository is sensitive.
 
 ## Request proof
 
-Client wrappers are `.github/workflows/approve-request.yml` and `.github/workflows/merge-request.yml`.
+Generated client wrappers are `.github/workflows/approve-request.yml` and `.github/workflows/merge-request.yml`.
 They call the corresponding reusable at the source SHA selected by the active control revision.
-The caller grants `actions: read`, `contents: read`, `attestations: read`, `issues: read`, and `pull-requests: read`, and passes `SECUREFIX_CLIENT_PRIVATE_KEY`.
+Client callers grant `actions: read`, `contents: read`, `attestations: read`, `issues: read`, and `pull-requests: read`, and pass `SECUREFIX_CLIENT_PRIVATE_KEY`.
 The Client App creates a server label whose description is only `civitaspo/<repository>/<run ID>`.
 The versioned manifest travels as an immutable source-run artifact.
-The server revalidates an explicit owner or Renovate command and its PR before adding a 🚀 reaction. The caller's `GITHUB_TOKEN` remains read-only; the Server App uses its existing operation-scoped token for the reaction. Automatic PR-event approval has no command to acknowledge. The generated approval caller ignores unrelated issue comments; Rust still validates the exact owner command.
+The server revalidates an explicit owner or Renovate command and its PR before adding a 🚀 reaction. For client calls, the caller's `GITHUB_TOKEN` remains read-only; the Server App uses its existing operation-scoped token for the reaction. Automatic PR-event approval has no command to acknowledge. The generated approval caller ignores unrelated issue comments; Rust still validates the exact owner command.
+
+While generation 6 at v0.2.36 remains active, the server's own approve and merge wrappers temporarily pin the v0.2.36 reusable workflows and grant `issues: read` and `pull-requests: write` so that runtime can react to owner commands. This bridge applies only to those server-local wrappers; current reusable workflows and distributed client templates stay read-only. Remove the bridge after the successor runtime activates.
 
 The Rust processor verifies the Client App sender ID/type, repository capability and ID, successful first attempt, event/path, default-branch ancestry, wrapper pin and Actions `referenced_workflows`, artifact identity, and manifest fields.
 The request captures the full active control identity. A changed identity invalidates the request even when the runtime source remains an ancestor of `main`.

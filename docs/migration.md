@@ -128,7 +128,7 @@ Disable the relevant processing workflows for immediate containment while retain
 controlled-merges restrictions. Recover through the verified active runtime.
 Bootstrap and bounded repair are retired after generation one; a defect that prevents
 normal activation needs a separately reviewed recovery authority. Any change to enforcement authority or rulesets
-requires separate explicit administrator review. An already-successful check on an
+requires separate explicit administrator review. The [request-intake recovery procedure](request-intake-recovery-2026-10-20.md) records the bounded workflow-repair case and its independent gates. An already-successful check on an
 unchanged head is not automatically revoked when policy changes.
 Scheduled reconciliation preserves a disabled restriction and retains tag protection when a policy entry stops requesting it.
 Retry pending work from the latest runtime and current client pins; incompatible or stale manifests fail closed.
