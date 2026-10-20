@@ -176,3 +176,47 @@ Final completion requires all eight external production caller migrations, the
 server's local callers and the testing caller to be read back and audited. The
 production runtime, production caller rollout and this final audit are not yet
 verified by the testing evidence above.
+
+
+## Stable source qualification and compatibility removal
+
+PR #147 merged the stable candidate as signed source
+`d0746a70dcdf1cf436137299317fa5cfeeeb2a44` with the exact reviewed tree.
+[Prepare 39474454414](https://github.com/civitaspo/securefix-server/actions/runs/39474454414)
+and [verify 39476076217](https://github.com/civitaspo/securefix-server/actions/runs/39476076217)
+passed for that exact source and the same immutable candidate and fixture artifacts.
+The working native testing callers rejected all three Draft fixture commands
+before dispatch with the readiness error; their heads and comments remained unchanged.
+After readiness, all four native caller/server pairs completed before direct verify.
+Independent readback confirmed signed positive merge
+`364218d57222e4fa94776fce97029aab839738f7`, its expected sole parent and exact
+fixture tree, stale rejection, singleton Server App receipts and fixture cleanup.
+The source-advance, expected-head CAS and ABA probes also passed.
+
+[Normal publication 39476601995](https://github.com/civitaspo/securefix-server/actions/runs/39476601995)
+created immutable stable `v0.2.43`, release `418739646`, asset `660154917`, archive
+digest `29b3b777883cec0871437ac09b6257781af59406e500b2864f46daab6483c5f7`.
+The archive attestation independently verified the exact source, main ref,
+normal publisher workflow, signer digest and publisher run. No candidate binary
+was executed locally. The bridge caller declarations were not distributed.
+
+[Activation PR #148](https://github.com/civitaspo/securefix-server/pull/148)
+passed exact-head owner review, separate `/approve` and `/merge` commands,
+Bot approval and required CI through the ordinary server lane.
+[Merge 39477709588](https://github.com/civitaspo/securefix-server/actions/runs/39477709588)
+installed generation seven as signed main
+`75b33450b38672ec056a658b5a7b6d5a610f72d3` with the exact reviewed descriptor tree
+and expected sole parent. Independent readback verified full active identity
+`73b4a38b56bdbb3c1b26dff0320654d80c09c7a1b1367aab7dde760ddb4adca2`.
+The old runtime's automatic PR-event approval failed its source-revision guard;
+explicit owner commands succeeded. This is not evidence of automatic approval
+under that predecessor. No production callers were distributed from this bridge.
+
+Version `0.2.44` removes the temporary Issues and PullRequests write declarations
+from the two local request callers and their two reusable capture jobs.
+The corresponding workflow tests now require read permissions and compare
+production/testing jobs and generated caller permissions without migration exceptions.
+The Client App token remains limited to Issues write on the server repository for
+label transport; server-side request validation owns the command receipts.
+This final candidate still requires its own exact-source scratch qualification,
+publication and reviewed activation before production caller distribution.
