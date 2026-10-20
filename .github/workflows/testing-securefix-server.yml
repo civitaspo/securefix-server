@@ -101,6 +101,7 @@ jobs:
       - uses: $/.github/actions/install-cli
         with:
           binary: candidate-runtime/securefix
+      - uses: $/.github/actions/install-actions-lock
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.bootstrap-host.outputs.artifact-id }}
@@ -137,6 +138,7 @@ jobs:
           permission-issues: write
       - name: Prepare scratch fixtures with the candidate runtime
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
           SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
           SECUREFIX_TEST_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -292,6 +294,7 @@ jobs:
       - uses: $/.github/actions/install-cli
         with:
           binary: candidate-runtime/securefix
+      - uses: $/.github/actions/install-actions-lock
       - name: Validate the defining workflow before minting credentials
         id: producer
         env:
@@ -355,6 +358,7 @@ jobs:
       - name: Execute selected runtime against the scratch repository
         id: execute
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SERVER_APP_TOKEN: ${{ steps.server.outputs.token }}
           SECUREFIX_CLIENT_APP_TOKEN: ${{ steps.client.outputs.token }}
           SECUREFIX_TEST_WORKFLOW_SHA: ${{ job.workflow_sha }}
