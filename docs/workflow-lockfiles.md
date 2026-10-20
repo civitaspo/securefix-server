@@ -26,6 +26,7 @@ Caller distribution generates the desired managed workflows over an immutable sn
 The official generator updates the complete lockfile, including dependencies of workflows outside the managed caller set.
 Only the managed caller files and generated lockfile enter the signed migration PR.
 Generation fails if the tool changes a workflow or action definition.
+Tool failures report their exit status and up to 2,048 escaped characters from each output stream, with the supplied GitHub token redacted.
 Convert any unsupported local action reference in a separately reviewed source change before distribution.
 
 The reviewed migration lane regenerates the expected file set against the current default branch.
