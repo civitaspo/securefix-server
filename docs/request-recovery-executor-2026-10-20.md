@@ -169,3 +169,35 @@ CI-pinned actionlint v1.7.12 and the official workflow lock verifier for all 42
 workflows. The two existing CLI live tests and one new-source live rehearsal were
 ignored locally. Exact-source remote CI, read-only plan and owner approval remain
 separate pending gates; local tests do not certify a production recovery.
+
+## Failed rehearsal and successor source
+
+The owner approved source `74d010cd9a6a9debdbff405c71f8e1aff7e9d7bd`.
+[Rehearsal 39445902029](https://github.com/civitaspo/securefix-server/actions/runs/39445902029)
+passed read-only qualification but failed with `invalid fixture branch` before
+any fixture mutation. The compiled fixtures use `testing/recovery2-`; the test
+harness still checked the preceding `testing/recovery-` prefix. This is a harness
+defect, not a tested rejection scenario. Production review and merge were skipped.
+Independent reads confirmed both scratch PRs remain open at their recorded heads
+and production main remains `041268a86feec5eed7c9514cf2c7c56089ca79dd`.
+
+The approval variable and new environment admission `63724315` were removed.
+Only original main admission `50334840` remains, and the failed source stays
+locked with administrator enforcement and force pushes/deletion disabled.
+
+This successor uses a new dedicated branch and corrects only the test fixture
+prefix, extracting the existing fixture authorization construction so an offline
+regression test exercises the same branch guard with both compiled fixtures and
+rejects main and the obsolete prefix. The fixed production target, head, main,
+control, file hashes and scope probes remain identical. No fixture was recreated.
+The successor source needs its own successful CI, read-only plan and exact-source
+owner approval before a fresh first-attempt rehearsal, review and merge. The
+failed attempt's authorization must not be reused.
+
+Before freezing this successor, the focused recovery tests passed twelve tests
+with the live rehearsal ignored. Full locked Rust tests, fmt, Clippy with warnings
+denied, CI-pinned actionlint and the official lock verifier for all 42 workflows
+passed. The initial local actionlint invocation encountered a read-only Go cache;
+a retry found incomplete cached modules, so the successful invocation used a fresh
+temporary Go cache. Neither setup failure changed source. Remote CI, read-only
+qualification, fresh owner source approval and the live rehearsal remain required.

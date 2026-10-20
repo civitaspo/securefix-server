@@ -281,6 +281,60 @@ fn recovery_merge_core_writes_only_the_fixed_pr_and_expected_head() {
     fixture.finish();
 }
 
+fn rehearsal_authorization(state: &Value, case: &str) -> Result<Authorization> {
+    let entry = &state[case];
+    let mut auth = Authorization::load()?;
+    auth.expected_main_sha = state["base_sha"]
+        .as_str()
+        .context("missing base sha")?
+        .into();
+    auth.pull_request = entry["number"].as_u64().context("missing fixture PR")?;
+    auth.target_branch = entry["branch"]
+        .as_str()
+        .context("missing fixture branch")?
+        .into();
+    ensure!(
+        auth.target_branch.starts_with("testing/recovery2-"),
+        "invalid fixture branch"
+    );
+    auth.expected_head_sha = entry["head"]
+        .as_str()
+        .context("missing fixture head")?
+        .into();
+    auth.expected_tree_sha = entry["tree"]
+        .as_str()
+        .context("missing fixture tree")?
+        .into();
+    auth.commits = vec![auth.expected_head_sha.clone()];
+    auth.files = vec![FixedFile {
+        path: entry["path"]
+            .as_str()
+            .context("missing fixture path")?
+            .into(),
+        status: "added".into(),
+        sha256: entry["sha256"]
+            .as_str()
+            .context("missing fixture digest")?
+            .into(),
+    }];
+    Ok(auth)
+}
+
+#[test]
+fn compiled_rehearsal_fixtures_pass_the_live_branch_guard() {
+    let state: Value =
+        serde_json::from_slice(include_bytes!("../control/request-recovery-rehearsal.json"))
+            .unwrap();
+    for case in ["positive", "stale"] {
+        rehearsal_authorization(&state, case).unwrap();
+        let mut invalid = state.clone();
+        invalid[case]["branch"] = json!("main");
+        assert!(rehearsal_authorization(&invalid, case).is_err());
+        invalid[case]["branch"] = json!("testing/recovery-positive-20261020");
+        assert!(rehearsal_authorization(&invalid, case).is_err());
+    }
+}
+
 #[test]
 #[ignore = "owner-dispatched scratch-only recovery rehearsal"]
 fn live_request_recovery_core_rehearsal() -> Result<()> {
@@ -352,45 +406,7 @@ fn live_request_recovery_core_rehearsal() -> Result<()> {
         policy_bytes: include_bytes!("../policy.json").to_vec(),
         context,
     };
-    let prepare_auth = |case: &str| -> Result<Authorization> {
-        let entry = &state[case];
-        let mut auth = Authorization::load()?;
-        auth.expected_main_sha = state["base_sha"]
-            .as_str()
-            .context("missing base sha")?
-            .into();
-        auth.pull_request = entry["number"].as_u64().context("missing fixture PR")?;
-        auth.target_branch = entry["branch"]
-            .as_str()
-            .context("missing fixture branch")?
-            .into();
-        ensure!(
-            auth.target_branch.starts_with("testing/recovery-"),
-            "invalid fixture branch"
-        );
-        auth.expected_head_sha = entry["head"]
-            .as_str()
-            .context("missing fixture head")?
-            .into();
-        auth.expected_tree_sha = entry["tree"]
-            .as_str()
-            .context("missing fixture tree")?
-            .into();
-        auth.commits = vec![auth.expected_head_sha.clone()];
-        auth.files = vec![FixedFile {
-            path: entry["path"]
-                .as_str()
-                .context("missing fixture path")?
-                .into(),
-            status: "added".into(),
-            sha256: entry["sha256"]
-                .as_str()
-                .context("missing fixture digest")?
-                .into(),
-        }];
-        Ok(auth)
-    };
-    let stale = prepare_auth("stale")?;
+    let stale = rehearsal_authorization(&state, "stale")?;
     let writer = Writer {
         host: &host,
         main: stale.expected_main_sha.clone(),
@@ -425,7 +441,7 @@ fn live_request_recovery_core_rehearsal() -> Result<()> {
             && stale_pull["head"]["sha"] == state["stale"]["advanced_head"],
         "stale fixture mutated"
     );
-    let positive = prepare_auth("positive")?;
+    let positive = rehearsal_authorization(&state, "positive")?;
     positive.fence(&host)?;
     positive.target(&host)?;
     let result = positive.merge_fixed(&host, &writer)?;

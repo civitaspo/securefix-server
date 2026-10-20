@@ -3415,7 +3415,7 @@ fn one_use_request_recovery_keeps_qualification_and_credentials_separate() {
     ] {
         let guard = jobs[job]["if"].as_str().unwrap();
         for condition in [
-            "refs/heads/emergency/recover-intake-040-20261020",
+            "refs/heads/emergency/recover-intake-040-v2-20261020",
             "github.actor_id == '4525500'",
             "github.run_attempt == 1",
             "inputs.authority_sha == github.sha",

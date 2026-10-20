@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "authority_branch": "emergency/recover-intake-040-20261020",
+  "authority_branch": "emergency/recover-intake-040-v2-20261020",
   "workflow": ".github/workflows/control-activation.yml",
   "expected_main_sha": "041268a86feec5eed7c9514cf2c7c56089ca79dd",
   "pull_request": 143,
