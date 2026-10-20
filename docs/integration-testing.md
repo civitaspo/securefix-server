@@ -206,10 +206,13 @@ Review and merge this initial setup through the existing production caller lane;
 it is setup, not proof of migration from an unavailable caller.
 
 `testing-distribute-runtime.yml` subsequently qualifies the isolated active
-runtime with the trusted protected-main host. The candidate runs the existing
-`distribute validate-promotion`, `prepare-caller` and `apply-caller` only in the
-restricted container. Preparation gets a test read token; signed PR creation gets
-only test contents/PR/workflow write after successful preparation. The workflow
+runtime with the trusted protected-main host. Distribution target selection
+includes the configured integration repository only when it is also this
+deployment's control repository. Production distribution continues to exclude it.
+The selected testing runtime runs the existing `distribute validate-promotion`,
+`prepare-caller` and `apply-caller` commands. Preparation gets a test read token;
+signed PR creation gets only test contents/PR/workflow write after successful
+preparation. The workflow
 opens the canonical migration PR and never merges it. Use the separate reviewed
 testing migration lane. Owner/main/first-attempt guards and `securefix-control`
 serialization apply before credential issuance or mutation.

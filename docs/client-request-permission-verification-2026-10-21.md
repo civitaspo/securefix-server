@@ -69,4 +69,32 @@ The prerelease still requires exact-source scratch prepare and verify, testing
 publication, reviewed testing-control succession, testing caller migration and
 live read-only caller approval/merge/reaction evidence. Stable publication,
 production activation, removal and requalification of temporary declarations,
-and migration of all nine production callers remain unverified.
+and migration of all eight external production callers remain unverified.
+The server's local callers and the isolated testing caller also belong to the
+final permission audit of all ten registered repositories.
+
+## First prerelease distribution rejection
+
+Exact prerelease source `cd025eb94f9bc47106288661f5f10ff086c20a07` passed
+[prepare](https://github.com/civitaspo/securefix-server/actions/runs/39462463067)
+and [verify](https://github.com/civitaspo/securefix-server/actions/runs/39464739082).
+Independent reads confirmed signed positive merge
+`f2ea59b75a847ccc86e6a34e9f72f404dc82ef72`, stale rejection, fixture cleanup,
+singleton Server App receipts and source-advance/CAS/ABA checks.
+[Testing publication](https://github.com/civitaspo/securefix-server/actions/runs/39465303902)
+created immutable release `418669830`, asset `659979034`, archive digest
+`5e66ef3d3c495b22c504c3b1c9c142f904821c4a50f0ebdcd1fced4d8e4e6eaa`.
+Its attestation bound the archive to that exact source and publisher workflow.
+[Reviewed testing control succession](https://github.com/civitaspo/securefix-server/actions/runs/39466594811)
+merged PR #346 as signed main `3ccbace1a888b7df77931caf273b1eb0e03d576b`.
+Generation nine selects that prerelease with control identity
+`ed46c418e8be966ef1731697cd86bb295f494f433c96eda415f02b0ef8ab8e01`.
+
+[Testing distribution](https://github.com/civitaspo/securefix-server/actions/runs/39466904020)
+then rejected the target matrix before creating a PR: the production filter
+excluded the sole integration repository from the isolated testing policy.
+Version `0.2.43-pre.2` includes that repository only when it is the deployment's
+explicit control repository. Production continues to exclude it.
+This correction requires fresh exact-source qualification, testing publication,
+reviewed control succession, caller migration and native request evidence.
+The failed first distribution is not evidence of a successful caller migration.
