@@ -212,23 +212,8 @@ fn testing_reusables_share_production_jobs_and_commands() {
         "release-pr-sync",
         "release-tag",
     ] {
-        let mut production = workflow(&format!("reusable-{feature}.yml"));
+        let production = workflow(&format!("reusable-{feature}.yml"));
         let testing = workflow(&format!("testing-reusable-{feature}.yml"));
-        if matches!(feature, "approve-request" | "merge-request") {
-            // The production bridge is temporary; approved development capture stays read-only.
-            for permission in ["issues", "pull-requests"] {
-                assert_eq!(
-                    production["jobs"]["capture"]["permissions"][permission],
-                    "write"
-                );
-                assert_eq!(
-                    testing["jobs"]["capture"]["permissions"][permission],
-                    "read"
-                );
-                production["jobs"]["capture"]["permissions"][permission] =
-                    serde_json::json!("read");
-            }
-        }
         let expected = serde_json::to_string(&production["jobs"])
             .unwrap()
             .replace(
@@ -780,21 +765,9 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
         );
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             if let Some(uses) = job["uses"].as_str() {
-                let operation = match path.as_str() {
-                    ".github/workflows/approve-request.yml" => Some("approve"),
-                    ".github/workflows/merge-request.yml" => Some("merge"),
-                    _ => None,
-                };
-                let generation_six_bridge = operation.is_some_and(|operation| {
-                    job_id == "request"
-                        && uses
-                            == format!(
-                                "civitaspo/securefix-server/.github/workflows/reusable-{operation}-request.yml@f80196051161fe4161c42cd9cb7530cc7db79882"
-                            )
-                });
                 assert!(
-                    uses.starts_with("./.github/workflows/") || generation_six_bridge,
-                    "{path}/{job_id}: reusable must use the running revision except for the exact generation-6 bridge"
+                    uses.starts_with("./.github/workflows/"),
+                    "{path}/{job_id}: reusable must use the running revision"
                 );
                 assert!(
                     job.get("secrets").is_none() || uses != "./.github/workflows/load-cli.yml",
@@ -2627,10 +2600,10 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         let caller = workflow(&format!("{operation}-request.yml"));
         let local_reusable = format!("./.github/workflows/reusable-{operation}-request.yml");
         assert_eq!(caller["jobs"]["request"]["uses"], local_reusable);
-        assert_eq!(caller["jobs"]["request"]["permissions"]["issues"], "write");
+        assert_eq!(caller["jobs"]["request"]["permissions"]["issues"], "read");
         assert_eq!(
             caller["jobs"]["request"]["permissions"]["pull-requests"],
-            "write"
+            "read"
         );
         assert_eq!(
             caller["jobs"]["request"]["secrets"],
@@ -2647,8 +2620,8 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         let build = &reusable["jobs"]["build"];
         assert!(build.get("secrets").is_none());
         let capture = &reusable["jobs"]["capture"];
-        assert_eq!(capture["permissions"]["issues"], "write");
-        assert_eq!(capture["permissions"]["pull-requests"], "write");
+        assert_eq!(capture["permissions"]["issues"], "read");
+        assert_eq!(capture["permissions"]["pull-requests"], "read");
         assert_eq!(
             capture["environment"],
             "${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}"
@@ -2990,7 +2963,7 @@ fn operational_workflows_do_not_request_administration_or_settings_credentials()
 }
 
 #[test]
-fn reusable_callers_check_current_permissions_and_keep_future_templates_read_only() {
+fn reusable_callers_grant_required_permissions() {
     let mut callers = workflows();
     let server = &crate::config::trusted()
         .unwrap()
@@ -3023,22 +2996,6 @@ fn reusable_callers_check_current_permissions_and_keep_future_templates_read_onl
                 continue;
             };
             let called = workflow(callee);
-            if path.starts_with("generated:")
-                && matches!(
-                    callee,
-                    "reusable-approve-request.yml" | "reusable-merge-request.yml"
-                )
-            {
-                // These future read-only callers must not be distributed with this bridge source.
-                for permission in ["issues", "pull-requests"] {
-                    assert_eq!(job["permissions"][permission], "read");
-                    assert_eq!(
-                        called["jobs"]["capture"]["permissions"][permission],
-                        "write"
-                    );
-                }
-                continue;
-            }
             for (nested_id, nested) in called["jobs"].as_object().unwrap() {
                 for (permission, required) in nested["permissions"].as_object().unwrap() {
                     let granted = job["permissions"][permission].as_str().unwrap_or("none");

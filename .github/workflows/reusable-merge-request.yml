@@ -22,9 +22,8 @@ jobs:
     environment: ${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}
     permissions:
       contents: read
-      # Temporary generation-6 compatibility until the read-only capture runtime is active.
-      issues: write
-      pull-requests: write
+      issues: read
+      pull-requests: read
     timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ github.token }}

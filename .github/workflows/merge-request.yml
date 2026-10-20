@@ -21,13 +21,12 @@ jobs:
         github.event.comment.user.type == 'Bot' &&
         github.event.issue.user.id == 29139614)) &&
       github.run_attempt == 1
-    # Temporary generation-6 bridge: local source provenance with legacy reaction permissions.
     uses: ./.github/workflows/reusable-merge-request.yml
     permissions:
       actions: read
       contents: read
       attestations: read
-      issues: write
-      pull-requests: write
+      issues: read
+      pull-requests: read
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
