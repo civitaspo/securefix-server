@@ -281,6 +281,101 @@ fn recovery_merge_core_writes_only_the_fixed_pr_and_expected_head() {
     fixture.finish();
 }
 
+fn cleanup_rehearsal_branch(api: &GitHub, root: &str, branch: &str, sha: &str) -> Result<()> {
+    let path = format!("{root}/git/ref/heads/{branch}");
+    let reference: Value = match api.get(&path) {
+        Ok(value) => value,
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|e| e.status == StatusCode::NOT_FOUND) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    ensure!(
+        reference["object"]["sha"] == sha,
+        "fixture branch changed before cleanup"
+    );
+    if let Err(error) = api.delete(&format!("{root}/git/refs/heads/{branch}"))
+        && !error.downcast_ref::<ApiError>().is_some_and(|e| {
+            matches!(
+                e.status,
+                StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY
+            )
+        })
+    {
+        return Err(error);
+    }
+    match api.get::<Value>(&path) {
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|e| e.status == StatusCode::NOT_FOUND) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+        Ok(_) => bail!("fixture branch remains after cleanup"),
+    }
+}
+
+#[test]
+fn rehearsal_cleanup_accepts_absence_but_rejects_changed_heads_and_api_failures() {
+    let root = "/repos/civitaspo/testing-securefix-server";
+    let branch = "testing/recovery2-fixture";
+    let path = format!("{root}/git/ref/heads/{branch}");
+    let delete = format!("{root}/git/refs/heads/{branch}");
+    let head = json!({"object":{"sha":"a".repeat(40)}});
+    let absent = || Route::request("GET", &path, 404, json!({}));
+    for status in [204, 404, 422] {
+        let fixture = Fixture::new(vec![
+            Route::get(&path, head.clone()),
+            Route::active_control(&Fixture::control_revision()),
+            Route::request("DELETE", &delete, status, json!({})),
+            absent(),
+        ]);
+        cleanup_rehearsal_branch(&fixture.api, root, branch, &"a".repeat(40)).unwrap();
+        fixture.finish();
+    }
+    let fixture = Fixture::new(vec![absent()]);
+    cleanup_rehearsal_branch(&fixture.api, root, branch, &"a".repeat(40)).unwrap();
+    fixture.finish();
+    for routes in [
+        vec![Route::get(&path, head.clone())],
+        vec![Route::request("GET", &path, 403, json!({}))],
+        vec![
+            Route::get(&path, head.clone()),
+            Route::active_control(&Fixture::control_revision()),
+            Route::request("DELETE", &delete, 403, json!({})),
+        ],
+        vec![
+            Route::get(&path, head.clone()),
+            Route::active_control(&Fixture::control_revision()),
+            Route::request("DELETE", &delete, 422, json!({})),
+            Route::get(&path, head.clone()),
+        ],
+    ] {
+        let changed = routes.len() == 1;
+        let fixture = Fixture::new(routes);
+        assert!(
+            cleanup_rehearsal_branch(
+                &fixture.api,
+                root,
+                branch,
+                &if changed {
+                    "b".repeat(40)
+                } else {
+                    "a".repeat(40)
+                }
+            )
+            .is_err()
+        );
+        fixture.finish();
+    }
+}
+
 fn rehearsal_authorization(state: &Value, case: &str) -> Result<Authorization> {
     let entry = &state[case];
     let mut auth = Authorization::load()?;
@@ -477,13 +572,7 @@ fn live_request_recovery_core_rehearsal() -> Result<()> {
             merged,
         ),
     ] {
-        let reference: Value = host.api.get(&format!("{root}/git/ref/heads/{branch}"))?;
-        ensure!(
-            reference["object"]["sha"] == sha,
-            "fixture branch changed before cleanup"
-        );
-        host.api
-            .delete(&format!("{root}/git/refs/heads/{branch}"))?;
+        cleanup_rehearsal_branch(&host.api, &root, branch, sha)?;
     }
     let evidence = json!({"recovery_source":compiled,"repository":host.policy.deployment.server.repository,"positive_pr":positive.pull_request,"merge_sha":merged,"stale_pr":stale.pull_request,"scratch_main_sha":state["scratch_main_sha"],"stale_head_rejected":true,"scratch_main_unchanged":true,"fixtures_cleaned":true,"production_merge_verified":false});
     std::fs::write(

@@ -128,13 +128,13 @@ jobs:
           --expected-control-id "$EXPECTED_CONTROL_ID"
 
   recovery-host:
-    if: startsWith(inputs.phase, 'request-recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v2-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    if: startsWith(inputs.phase, 'request-recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
     uses: ./.github/workflows/build-bootstrap-host.yml
     permissions:
       contents: read
 
   recovery-qualify:
-    if: startsWith(inputs.phase, 'request-recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v2-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
+    if: startsWith(inputs.phase, 'request-recovery-') && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha
     needs: recovery-host
     runs-on: ubuntu-24.04
     permissions:
@@ -173,7 +173,7 @@ jobs:
           retention-days: 7
 
   recovery-review:
-    if: inputs.phase == 'request-recovery-review' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v2-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
+    if: inputs.phase == 'request-recovery-review' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
     needs: [recovery-host, recovery-qualify]
     runs-on: ubuntu-24.04
     environment: main
@@ -204,7 +204,7 @@ jobs:
         run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-review'
 
   recovery-merge:
-    if: inputs.phase == 'request-recovery-merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v2-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
+    if: inputs.phase == 'request-recovery-merge' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
     needs: [recovery-host, recovery-qualify]
     runs-on: ubuntu-24.04
     environment: main
@@ -244,7 +244,7 @@ jobs:
         run: '"$RUNNER_TEMP/securefix-request-recovery" request-recovery-merge'
 
   recovery-rehearsal:
-    if: inputs.phase == 'request-recovery-rehearsal' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v2-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
+    if: inputs.phase == 'request-recovery-rehearsal' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020' && github.actor_id == '4525500' && github.run_attempt == 1 && inputs.authority_sha == github.sha && vars.SECUREFIX_REQUEST_RECOVERY_SOURCE_SHA == github.sha
     needs: [recovery-host, recovery-qualify]
     runs-on: ubuntu-24.04
     environment: main

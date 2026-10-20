@@ -49,8 +49,8 @@ fixture refs. A successful fixture setup or read-only plan is insufficient.
 ## Scratch rehearsal scope
 
 The [compiled fixture record](../control/request-recovery-rehearsal.json) identifies
-owner-signed scratch PRs #334 and #335 against the disposable non-default base
-`testing/recovery2-base-20261020`. It does not change either repository's main.
+owner-signed scratch PRs #336 and #337 against the disposable non-default base
+`testing/recovery2-base-v3-20261020`. It does not change either repository's main.
 The source-bound test harness is compiled in the secret-free build job and receives
 only a singleton scratch installation token, never the production installation
 or configured reviewer PAT. The shared token-scope guard rejects other installations.
@@ -201,3 +201,37 @@ passed. The initial local actionlint invocation encountered a read-only Go cache
 a retry found incomplete cached modules, so the successful invocation used a fresh
 temporary Go cache. Neither setup failure changed source. Remote CI, read-only
 qualification, fresh owner source approval and the live rehearsal remain required.
+
+## Cleanup race and fresh rehearsal
+
+[Rehearsal 39449157853](https://github.com/civitaspo/securefix-server/actions/runs/39449157853)
+from signed source `3b43848a34cee7d441257dc5a7e0e6055aabf5f8` passed
+qualification, rejected the stale head and merged scratch PR #334 as signed
+`48077b6fc5d249e3bb02e3cc0c8e0331c4bd234e`. Independent reads confirmed its
+sole parent `fe75d490cecc5c26c2daeff371297d3d043ce656` and exact tree
+`4f0471c8deee35130e844a74bb0e0610209320e7`. Scratch PR #335 closed unmerged.
+The run failed during cleanup because the merged positive branch was already
+absent when the harness read its ref. This is a failed rehearsal, not complete
+qualification. The remaining exact-SHA fixture refs were subsequently deleted
+with leases. Protected scratch main and production main stayed unchanged.
+
+Production review and merge were skipped. The temporary source-approval variable
+and environment admission `63727092` were removed; only original main admission
+`50334840` remains. The failed source stays locked and disarmed.
+
+The successor's test-only cleanup accepts an already absent ref. When present,
+it still requires the exact recorded head, deletes only that branch and confirms
+absence afterward. Only DELETE 404/422 races may proceed to the independent
+absence check; read/write authorization errors and changed or surviving heads
+fail. Regression fixtures cover initial absence, successful deletion, concurrent
+404/422 deletion, changed heads, authorization failures and a surviving ref.
+Fresh signed scratch PRs #336/#337 reuse the same fenced base commit under new
+disposable branch names. Old merged fixtures cannot certify this new source.
+
+On 2026-10-21 JST the owner explicitly authorized all remaining corrective work,
+rehearsals, recovery, publication, activation and rollout through deployment
+completion, without further approval waits. That instruction supersedes the
+per-revision conversational approval steps above for this task. Exact signed
+source, fixed target, source-approval variable, owner comment, independent CI and
+plan qualification, fresh rehearsal, separate review/merge and cleanup remain
+required and recorded; this authorization does not relax their validation.
