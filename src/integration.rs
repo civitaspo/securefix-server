@@ -1570,19 +1570,45 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
     validate_workflow_ref(&workflow_sha, &workflow_ref)?;
     if candidate_sha != workflow_sha {
-        let api = GitHub::new(
-            "https://api.github.com",
-            std::env::var("SECUREFIX_SERVER_APP_TOKEN")?,
-        )?;
-        let limits: Value = api.get("/rate_limit")?;
-        println!(
-            "Read-only Server App core rate limit: {}",
-            json!({
-                "limit": limits["resources"]["core"]["limit"],
-                "remaining": limits["resources"]["core"]["remaining"],
-                "reset": limits["resources"]["core"]["reset"]
-            })
-        );
+        let token = std::env::var("SECUREFIX_SERVER_APP_TOKEN")?;
+        let response = reqwest::blocking::Client::builder()
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()?
+            .get(format!(
+                "https://api.github.com/repos/{}/commits?path=control%2Factive.json&per_page=1",
+                integration_repository()?
+            ))
+            .bearer_auth(&token)
+            .header("User-Agent", "securefix")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("Accept", "application/vnd.github+json")
+            .send()?;
+        println!("Read-only scratch history status: {}", response.status());
+        for name in [
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-reset",
+            "retry-after",
+            "x-github-request-id",
+            "x-accepted-github-permissions",
+        ] {
+            if let Some(value) = response.headers().get(name) {
+                println!("{name}: {:?}", value);
+            }
+        }
+        if !response.status().is_success() {
+            let body: Value = serde_json::from_reader(std::io::Read::take(response, 8 * 1024))?;
+            let message = body["message"]
+                .as_str()
+                .unwrap_or("missing GitHub error message")
+                .replace(&token, "[REDACTED]")
+                .chars()
+                .take(512)
+                .collect::<String>();
+            println!("GitHub error message: {}", message.escape_debug());
+        }
         anyhow::bail!("Read-only diagnostic stopped before scratch mutations");
     }
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
