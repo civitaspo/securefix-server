@@ -152,3 +152,16 @@ This verify rejected `positive policy check was published before the native auto
 The working native testing flow had already published a check for the active testing control, whereas the direct probe expected no policy check of any control. This exposed a direct-harness assumption rather than a production authorization failure.
 No further unchanged-source verification was dispatched. The proposed correction scopes readiness probes to the exact head and full control identity under test, preserving rejection before that control publishes its policy result.
 The published v0.2.34 remains immutable and unactivated; the corrected candidate advances to v0.2.35.
+
+## Revised direct verification contract
+
+[PR #136](https://github.com/civitaspo/securefix-server/pull/136) passed exact-head [CI 39356796270](https://github.com/civitaspo/securefix-server/actions/runs/39356796270) and Bot review `5579944778` at `8063f1aaf797e94d4e01eb278c70e8687a1e0dd7`, under production control `3006b3f1706a226100c567b3aca38377efaeb0dfdf0b93c3a7bdd55c6ff995d1`.
+It merged through normal [server merge 39357076865](https://github.com/civitaspo/securefix-server/actions/runs/39357076865) at signed source `ad5be9abffef306c0e80e551b7dca659b389c55c` (`v0.2.35`).
+Local full tests passed (42 library, 297 CLI passed with 2 ignored, 22 bootstrap, 2 native-client, 1 testing-runtime), along with fmt, Clippy, pinned actionlint, official generation and frozen verification.
+The corrected harness requires the policy result for the exact head and structural control under test, rejects duplicate matches and proves that another control does not grant readiness. Fixture lock generation and exact path/status checks use the immutable recorded base. Production authorization logic is unchanged.
+
+Exact v0.2.35 source passed [CI 39357216476](https://github.com/civitaspo/securefix-server/actions/runs/39357216476) and [prepare 39357249535](https://github.com/civitaspo/securefix-server/actions/runs/39357249535), including official fixture lock generation.
+[Verify 39357599476](https://github.com/civitaspo/securefix-server/actions/runs/39357599476) validated fixture files and completed the positive merge before rejecting `stale-head fixture unexpectedly has current review or policy check before its probe`.
+The stale fixture had a native approval for active scratch control `7ad14a108d8a811de1579dcfc8c3fc82b75cca3a98c1b1efa88d012cb2f9b65d`, which the generic review probe counted toward the candidate structural control.
+Only duplicate native testing merge runs 39357661993 and 39357671106, mapped to the two direct-test fixtures and owner commands, were canceled to keep the direct merge probe isolated. Native approval remained enabled and exposed the review-scope defect.
+The correction uses the existing exact reviewer, head and control approval validator for all three direct readiness probes. Production authorization is unchanged. No unchanged-source retry was made, v0.2.35 was not published, and the corrected source advances to v0.2.36.
