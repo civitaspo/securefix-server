@@ -51,7 +51,10 @@ pub fn run(command: Command) -> Result<()> {
             validate_distributor_context(publisher_run_id)?;
             let promotion = validate_promotion(&api, &policy, publisher_run_id)?;
             output("source_sha", &promotion.source_sha)?;
-            output("callers", &serde_json::to_string(&caller_names(&policy)?)?)
+            output(
+                "callers",
+                &serde_json::to_string(&production_distribution_callers(&policy)?)?,
+            )
         }
         Command::PrepareCaller {
             repository,
@@ -199,6 +202,19 @@ fn caller_names(policy: &Policy) -> Result<Vec<String>> {
     ensure!(
         !callers.is_empty(),
         "no Securefix caller repositories are enabled"
+    );
+    Ok(callers)
+}
+
+fn production_distribution_callers(policy: &Policy) -> Result<Vec<String>> {
+    let integration_repository = &crate::config::trusted()?.deployment.integration.repository;
+    let callers = caller_names(policy)?
+        .into_iter()
+        .filter(|repository| repository != integration_repository)
+        .collect::<Vec<_>>();
+    ensure!(
+        !callers.is_empty(),
+        "no production Securefix caller repositories are enabled"
     );
     Ok(callers)
 }

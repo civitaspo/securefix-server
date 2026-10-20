@@ -2027,6 +2027,36 @@ fn registry_is_exactly_the_eight_non_server_securefix_callers() {
 }
 
 #[test]
+fn production_distribution_matrix_excludes_the_testing_repository() {
+    let policy = Policy::parse(include_bytes!("../../policy.json")).unwrap();
+    assert!(
+        caller_names(&policy).unwrap().contains(
+            &crate::config::trusted()
+                .unwrap()
+                .deployment
+                .integration
+                .repository
+        )
+    );
+    assert_eq!(
+        production_distribution_callers(&policy).unwrap(),
+        vec![
+            "civitaspo/dbt-authorized-models",
+            "civitaspo/dbt-snowflake-iceberg-sync",
+            "civitaspo/dbt-snowflake-rap-enforcement",
+            "civitaspo/dotfiles",
+            "civitaspo/herdr-infobox",
+            "civitaspo/herdr-linear-agent",
+            "civitaspo/hook-relay-client-rs",
+            "civitaspo/terraform-provider-sigma",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn actual_eight_caller_inventory_contains_only_supported_managed_workflow_shapes() {
     let callers: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/distribution-callers.json"
