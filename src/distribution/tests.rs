@@ -2035,7 +2035,7 @@ fn production_distribution_matrix_excludes_the_testing_repository() {
         )
     );
     assert_eq!(
-        production_distribution_callers(&policy).unwrap(),
+        distribution_callers(&policy).unwrap(),
         vec![
             "civitaspo/dbt-authorized-models",
             "civitaspo/dbt-snowflake-iceberg-sync",
@@ -2050,6 +2050,17 @@ fn production_distribution_matrix_excludes_the_testing_repository() {
         .map(str::to_owned)
         .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn isolated_distribution_includes_only_its_configured_control_repository() {
+    let mut policy = Policy::parse(include_bytes!("../../.github/testing-policy.json")).unwrap();
+    assert_eq!(
+        distribution_callers(&policy).unwrap(),
+        vec![policy.deployment.integration.repository.clone()]
+    );
+    policy.deployment.control_repository = None;
+    assert!(distribution_callers(&policy).is_err());
 }
 
 #[test]

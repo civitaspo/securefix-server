@@ -53,7 +53,7 @@ pub fn run(command: Command) -> Result<()> {
             output("source_sha", &promotion.source_sha)?;
             output(
                 "callers",
-                &serde_json::to_string(&production_distribution_callers(&policy)?)?,
+                &serde_json::to_string(&distribution_callers(&policy)?)?,
             )
         }
         Command::PrepareCaller {
@@ -206,15 +206,22 @@ fn caller_names(policy: &Policy) -> Result<Vec<String>> {
     Ok(callers)
 }
 
-fn production_distribution_callers(policy: &Policy) -> Result<Vec<String>> {
+fn distribution_callers(policy: &Policy) -> Result<Vec<String>> {
     let integration_repository = &crate::config::trusted()?.deployment.integration.repository;
     let callers = caller_names(policy)?
         .into_iter()
-        .filter(|repository| repository != integration_repository)
+        .filter(|repository| {
+            repository != integration_repository
+                || policy
+                    .deployment
+                    .control_repository
+                    .as_ref()
+                    .is_some_and(|control| control.repository == *repository)
+        })
         .collect::<Vec<_>>();
     ensure!(
         !callers.is_empty(),
-        "no production Securefix caller repositories are enabled"
+        "no Securefix distribution caller repositories are enabled"
     );
     Ok(callers)
 }
