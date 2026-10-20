@@ -2841,7 +2841,13 @@ fn verify_inner(
         !policy_check_exists(api, &scenario.positive.head_sha, control)?,
         "positive policy check was published before the native auto-merge probe"
     );
-    wait_for_merge_gates_except_policy(api, &scenario.positive, control, deadline)?;
+    wait_for_merge_gates_except_policy(
+        api,
+        &scenario.positive,
+        control,
+        &scratch_reviewer,
+        deadline,
+    )?;
     let (owner_review_id, owner_review_at) = crate::distribution::reviewed::owner_review(
         api,
         integration_repository()?,
@@ -3050,11 +3056,14 @@ fn verify_inner(
     )?;
     merge::validate_state(api, policy, &stale_manifest)?;
     ensure!(
-        !request::has_current_head_approval(
+        !request::has_current_head_approval_for_reviewer(
             api,
             integration_repository()?,
             scenario.stale.number,
             &scenario.stale.head_sha,
+            control,
+            &scratch_reviewer,
+            "User",
         )? && !policy_check_exists(api, &scenario.stale.head_sha, control)?,
         "stale-head fixture unexpectedly has current review or policy check before its probe"
     );
@@ -3098,11 +3107,14 @@ fn verify_inner(
         "stale merge manifest unexpectedly remained valid"
     );
     ensure!(
-        !request::has_current_head_approval(
+        !request::has_current_head_approval_for_reviewer(
             api,
             integration_repository()?,
             scenario.stale.number,
             &stale_head_sha,
+            control,
+            &scratch_reviewer,
+            "User",
         )? && !policy_check_exists(api, &stale_head_sha, control)?,
         "advanced stale-head fixture unexpectedly has current review or policy check"
     );
@@ -3745,6 +3757,7 @@ fn wait_for_merge_gates_except_policy(
     api: &GitHub,
     fixture: &PullRequestFixture,
     control: &securefix::control::ControlRevision,
+    reviewer: &crate::config::Principal,
     deadline: Instant,
 ) -> Result<()> {
     loop {
@@ -3773,11 +3786,14 @@ fn wait_for_merge_gates_except_policy(
             }),
         )?;
         let approved = review["repository"]["pullRequest"]["reviewDecision"] == "APPROVED"
-            && request::has_current_head_approval(
+            && request::has_current_head_approval_for_reviewer(
                 api,
                 integration_repository()?,
                 fixture.number,
                 &fixture.head_sha,
+                control,
+                reviewer,
+                "User",
             )?;
         if status_ready && approved {
             return Ok(());

@@ -845,28 +845,6 @@ pub fn validate_pr_policy(
     Ok(())
 }
 
-/// Returns true only when a non-author reviewer has an effective approval for this exact head.
-/// The caller should still use branch protection's aggregate review decision as an additional gate.
-pub fn has_current_head_approval(
-    api: &GitHub,
-    repository: &str,
-    number: u64,
-    sha: &str,
-) -> Result<bool> {
-    validate_repository(repository)?;
-    validate_sha(sha)?;
-    let pr: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
-    ensure!(
-        pr["state"] == "open" && pr["head"]["sha"] == sha,
-        "pull request changed while checking its review"
-    );
-    let author_id = pr["user"]["id"]
-        .as_u64()
-        .context("pull request author has no ID")?;
-    let reviews = api.paginate(&format!("/repos/{repository}/pulls/{number}/reviews"))?;
-    Ok(current_review_approval(&reviews, sha, author_id))
-}
-
 pub fn has_current_head_approval_for_control(
     api: &GitHub,
     repository: &str,
@@ -1002,6 +980,7 @@ pub(crate) fn review_order(review: &Value) -> Option<(chrono::DateTime<chrono::F
     Some((submitted_at, id))
 }
 
+#[cfg(test)]
 fn current_review_approval(reviews: &[Value], head_sha: &str, author_id: u64) -> bool {
     let mut latest = std::collections::HashMap::<u64, &Value>::new();
     for review in reviews.iter().filter(|review| {
