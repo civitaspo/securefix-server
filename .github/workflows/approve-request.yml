@@ -30,7 +30,7 @@ jobs:
       actions: read
       contents: read
       attestations: read
-      issues: write
+      issues: read
       pull-requests: write
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

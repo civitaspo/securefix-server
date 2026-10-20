@@ -15,8 +15,9 @@ posting its reaction returned 403. A green code CI does not establish successful
 owner authorization or satisfy the failed policy check.
 
 The repair temporarily pins only the server's two request wrappers to the active
-v0.2.36 reusable workflows and grants their declared Issues and Pull requests
-write permissions. Current reusable workflows and generated client templates
+v0.2.36 reusable workflows and grants Pull requests write while keeping Issues read-only.
+The caller narrows the legacy reusable workflow declaration to the observed API
+requirement. Current reusable workflows and generated client templates
 remain read-only. It does not change active control, repository policy, App
 permissions or rulesets. The bridge must remain until a compatible successor is
 verified and activated; remove it in a subsequent reviewed change.
