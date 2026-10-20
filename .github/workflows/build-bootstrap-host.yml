@@ -5,19 +5,23 @@ on:
       artifact-id:
         description: Immutable artifact ID of the source-pinned bootstrap host
         value: ${{ jobs.build.outputs.artifact-id }}
+      test-artifact-id:
+        description: Immutable source-bound scratch rehearsal test harness
+        value: ${{ jobs.build.outputs.test-artifact-id }}
 permissions: {}
 defaults:
   run:
     shell: bash -euo pipefail {0}
 jobs:
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/securefix-server' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020') && github.actor_id == '4525500' && github.run_attempt == 1
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 15
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      test-artifact-id: ${{ steps.upload-tests.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,3 +41,21 @@ jobs:
           path: target/release/securefix-bootstrap
           if-no-files-found: error
           retention-days: 1
+      - name: Compile the source-bound rehearsal harness without credentials
+        if: github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020'
+        env:
+          SECUREFIX_BOOTSTRAP_SOURCE_SHA: ${{ job.workflow_sha }}
+        run: |
+          cargo +1.99.0 test --locked --release --no-run --bin securefix-bootstrap --message-format=json > "$RUNNER_TEMP/request-test-build.jsonl"
+          test_executable="$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "securefix-bootstrap" and .profile.test == true and .executable != null) | .executable] | if length == 1 then .[0] else error("expected exactly one recovery test executable") end' "$RUNNER_TEMP/request-test-build.jsonl")"
+          mkdir -p "$RUNNER_TEMP/request-recovery-tests"
+          install -m 755 "$test_executable" "$RUNNER_TEMP/request-recovery-tests/recovery-tests"
+          cp policy.json "$RUNNER_TEMP/request-recovery-tests/policy.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.ref == 'refs/heads/emergency/recover-intake-040-v3-20261020'
+        id: upload-tests
+        with:
+          name: request-recovery-tests
+          path: ${{ runner.temp }}/request-recovery-tests/
+          if-no-files-found: error
+          retention-days: 7

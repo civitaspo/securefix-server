@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "authority_branch": "emergency/recover-local-intake-041-20261021",
+  "workflow": ".github/workflows/control-activation.yml",
+  "expected_main_sha": "84fa5d889c1b7f204a6e7bc5ce08d5bdd0606f99",
+  "pull_request": 144,
+  "target_branch": "emergency/restore-local-reusable-provenance",
+  "expected_head_sha": "d4b6823a9a6a223ab79dd4d115193e2be4325b25",
+  "expected_tree_sha": "6b849824edcbcdb6d7e16fdd0c4a8079265d0612",
+  "commits": [
+    "d4b6823a9a6a223ab79dd4d115193e2be4325b25"
+  ],
+  "active": {
+    "version": 1,
+    "generation": 6,
+    "source_sha": "f80196051161fe4161c42cd9cb7530cc7db79882",
+    "policy_sha256": "91292daf7e6229ec64d66618926b10c4785e67bb3b1cd31d1a9bc1646464cc1c",
+    "archive_sha256": "87cbd300024e9f653820e64d9fcbaa15bb23261c345c10c1b18711e531bf0f57",
+    "release_id": 417941094,
+    "asset_id": 658052746,
+    "publisher_run_id": 39359327054,
+    "verification_run_id": 39359041267,
+    "previous": "3006b3f1706a226100c567b3aca38377efaeb0dfdf0b93c3a7bdd55c6ff995d1"
+  },
+  "files": [
+    {
+      "path": ".github/workflows/approve-request.yml",
+      "status": "modified",
+      "sha256": "9c2cab2e48a535ca3de905ab40453221bc2f7871e143e30e918b476895d44825"
+    },
+    {
+      "path": ".github/workflows/merge-request.yml",
+      "status": "modified",
+      "sha256": "5ce116180cd27a8936e12923ff4067b8006a4bf229244bdb78f56532be3a99dc"
+    },
+    {
+      "path": ".github/workflows/reusable-approve-request.yml",
+      "status": "modified",
+      "sha256": "ade57b58deac02b5227e027505b325e466b0af1a0c2d3d5f2f49477f451602a2"
+    },
+    {
+      "path": ".github/workflows/reusable-merge-request.yml",
+      "status": "modified",
+      "sha256": "d6fc95bb1062e42847cc2859b907f7d4825d308a7b3dac4a1cff10f68cdbb68c"
+    },
+    {
+      "path": "Cargo.lock",
+      "status": "modified",
+      "sha256": "371944584487ada594c03f0102b669d2b52800a1e72a15dac1a6fe99fa1105db"
+    },
+    {
+      "path": "Cargo.toml",
+      "status": "modified",
+      "sha256": "c73909faa85cc064b38b250163e1908464d8beafc748d980edd6f4f4e66d2700"
+    },
+    {
+      "path": "docs/merging.md",
+      "status": "modified",
+      "sha256": "f74cdd0cebe6a3c5702b0ad91160b622d8d1cba65680c6200505d4a54ff21af1"
+    },
+    {
+      "path": "docs/request-intake-recovery-2026-10-20.md",
+      "status": "modified",
+      "sha256": "e72460ccd2b2e5a3b5da1df04023d77e0573e3d6d1f840606f63312801e07e0f"
+    },
+    {
+      "path": "src/request.rs",
+      "status": "modified",
+      "sha256": "2c18f018674577b56413a9b55d465229d5c292a644c21e8e97146d79ec750103"
+    },
+    {
+      "path": "src/workflow_tests.rs",
+      "status": "modified",
+      "sha256": "5ea7b696cb95f6eb5ed592c9528c6ce6bd335b55c77aa7ecc53608521dc7acc4"
+    }
+  ],
+  "probe": {
+    "run_id": 39432135670,
+    "source_sha": "611fde1dd08df445e351f63348638e39d31d2fbe",
+    "workflow": ".github/workflows/testing-ci.yml",
+    "branch": "testing/reaction-permission-20261020"
+  },
+  "workflow_probe": {
+    "run_id": 39454284283,
+    "source_sha": "b82bc3d66e98744646dfda530cb7c1eb25afa915",
+    "workflow": ".github/workflows/testing-ci.yml",
+    "branch": "testing/local-reusable-scope-20261021"
+  }
+}

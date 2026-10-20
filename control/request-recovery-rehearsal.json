@@ -1,0 +1,22 @@
+{
+  "positive": {
+    "number": 338,
+    "head": "2b63072f89eef0463bd08217463dd01b7bacb2ef",
+    "tree": "4f0471c8deee35130e844a74bb0e0610209320e7",
+    "branch": "testing/recovery2-positive-v4-20261020",
+    "path": ".securefix-testing/recovery-positive.txt",
+    "sha256": "e5aa664b858d39cd35cd2ea652bc15ec089b27faf8b9ef4a2c8c4288b54846ea"
+  },
+  "stale": {
+    "number": 339,
+    "head": "1214795954c13542f56062cb35876f0e6d051c44",
+    "tree": "4e4bf107453f5141f0b3214958ae8138a82933ee",
+    "branch": "testing/recovery2-stale-v4-20261020",
+    "path": ".securefix-testing/recovery-stale.txt",
+    "sha256": "e5aa664b858d39cd35cd2ea652bc15ec089b27faf8b9ef4a2c8c4288b54846ea",
+    "advanced_head": "a0451679a6d9943bb116d3d3ad1c835a8e0a292a"
+  },
+  "base_branch": "testing/recovery2-base-v4-20261020",
+  "base_sha": "fe75d490cecc5c26c2daeff371297d3d043ce656",
+  "scratch_main_sha": "7594ee5f7586d4f126639c5458faeb095c6994fa"
+}
