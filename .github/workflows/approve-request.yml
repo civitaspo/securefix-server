@@ -24,8 +24,8 @@ jobs:
       (github.event.issue.pull_request &&
        github.event.comment.user.id == 4525500 &&
        contains(github.event.comment.body, '/approve'))
-    # Temporary generation-6 bridge: match the pinned v0.2.36 reusable permissions.
-    uses: civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@f80196051161fe4161c42cd9cb7530cc7db79882 # v0.2.36
+    # Temporary generation-6 bridge: local source provenance with legacy reaction permissions.
+    uses: ./.github/workflows/reusable-approve-request.yml
     permissions:
       actions: read
       contents: read
