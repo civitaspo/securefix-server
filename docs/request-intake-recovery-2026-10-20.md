@@ -1,6 +1,6 @@
 # Request intake recovery, 2026-10-20
 
-Status: corrected bounded recovery merged and temporary authorization removed; normal-path verification and deployment remain pending.
+Status: the second bounded recovery merged and was cleaned up; normal intake is still blocked by server-local reusable provenance. The local-source correction and normal-path verification are pending.
 
 ## Failure and bounded repair
 
@@ -148,51 +148,65 @@ reviewed new exact-source recovery before ordinary owner commands can be proved.
 The earlier executor cannot be reused: its fixed expected main and target are
 already consumed. Bootstrap and repair remain retired.
 
-## Corrected recovery execution and cleanup
+## Server-local provenance failure after the permission correction
 
-The owner authorized remaining corrective work and deployment without further
-conversational approval waits. The first corrected executor rehearsal
-[39445902029](https://github.com/civitaspo/securefix-server/actions/runs/39445902029)
-failed before writes because a test fixture prefix guard was stale. The next
-[39449157853](https://github.com/civitaspo/securefix-server/actions/runs/39449157853)
-exercised the merge and stale-head rejection but failed cleanup when the merged
-branch was already absent. Neither failed rehearsal enabled production review
-or merge; their temporary authorizations were removed. These failures are harness
-defects, not passing rejection scenarios.
-
-The frozen signed successor source
-`0e33d30d70c14aa8dcfdc0d44134583b66aa75cd` corrected cleanup and added offline
-regressions for already absent refs, exact-head deletion, concurrent 404/422
-removal, authorization failures, changed heads and surviving refs. Its
-[required code CI](https://github.com/civitaspo/securefix-server/actions/runs/39450313335)
-and [read-only qualification](https://github.com/civitaspo/securefix-server/actions/runs/39450791204)
-passed. Downloaded plan artifact `12278901305` matched the complete fixed record,
-including authorization digest
-`4e562713809db4f9f9db8ca2724032c406755cba8c43d48a6a89b19a7d23606c`.
-The [exact source-bound owner authorization](https://github.com/civitaspo/securefix-server/pull/143#issuecomment-6294878324)
-fixed PR #143 head `17de6fdb1fe4846acdc34d469662e1bab635de94`.
-
-[Fresh rehearsal 39451205606](https://github.com/civitaspo/securefix-server/actions/runs/39451205606)
-passed. Downloaded artifact `12277872667` and independent API reads confirmed
-scratch PR #336 merged as signed `828d4b6e35ad22a38bcfd9e0c4cd826898f2e6fa`,
-sole parent `fe75d490cecc5c26c2daeff371297d3d043ce656`, exact tree
-`4f0471c8deee35130e844a74bb0e0610209320e7`; stale PR #337 closed unmerged.
-All fixture refs were absent and scratch main remained
-`7594ee5f7586d4f126639c5458faeb095c6994fa`.
-
-The separate [Bot review 39451616538](https://github.com/civitaspo/securefix-server/actions/runs/39451616538)
-created exact-head approval `5587704704`. The separate
-[Server App merge 39451952259](https://github.com/civitaspo/securefix-server/actions/runs/39451952259)
-merged only PR #143 as signed main
+PR #143 merged through signed executor
+`0e33d30d70c14aa8dcfdc0d44134583b66aa75cd` after
+[successful exact-source CI](https://github.com/civitaspo/securefix-server/actions/runs/39450313335),
+[read-only qualification](https://github.com/civitaspo/securefix-server/actions/runs/39450791204),
+[fresh scratch rehearsal](https://github.com/civitaspo/securefix-server/actions/runs/39451205606),
+[exact-head Bot review](https://github.com/civitaspo/securefix-server/actions/runs/39451616538)
+and the separate [Server App merge](https://github.com/civitaspo/securefix-server/actions/runs/39451952259).
+Independent reads verified signed main
 `84fa5d889c1b7f204a6e7bc5ce08d5bdd0606f99`, sole parent
-`041268a86feec5eed7c9514cf2c7c56089ca79dd`, exact reviewed tree
-`35c2a86ec23cb52f3b8fdb3779f3cbcdb116f532`. Independent reads confirmed the
-complete generation-six descriptor was unchanged.
+`041268a86feec5eed7c9514cf2c7c56089ca79dd`, exact tree
+`35c2a86ec23cb52f3b8fdb3779f3cbcdb116f532` and the unchanged descriptor.
+Temporary admission `63728725` and the approval variable were removed; only
+original main admission `50334840` remains and the executor is locked and unmerged.
 
-The repository source-approval variable and new environment admission `63728725`
-were deleted. Readback confirmed only original main admission `50334840`, no
-approval variable in either scope, and the unmerged executor locked at its signed
-source with administrator enforcement and force pushes/deletion disabled.
-No ruleset bypass or native merge settings were changed. Normal request intake,
-candidate qualification, publication, activation and rollout require their own
-subsequent evidence.
+Fresh PR #141 command
+[6295132041](https://github.com/civitaspo/securefix-server/pull/141#issuecomment-6295132041)
+passed [caller capture 39452965186](https://github.com/civitaspo/securefix-server/actions/runs/39452965186),
+including the reaction and request dispatch. However,
+[server approval 39453000527](https://github.com/civitaspo/securefix-server/actions/runs/39453000527)
+failed closed with `source reusable workflow is not the single current revision`.
+The run's `referenced_workflows` records the old `f801960...` reusable while its
+caller main is `84fa5d8...`. Server-local provenance requires the reusable's exact
+caller revision and a local `./.github/workflows/...` wrapper reference.
+The SHA-pinned compatibility bridge was an implementation error; permission
+expansion alone did not test the server's provenance validation.
+
+Restore both wrappers to local references and temporarily grant the active old
+runtime's reaction permissions in the current reusable capture jobs as well as
+the wrappers. Keep both provenance guards unchanged. Regression tests must feed
+the actual wrapper files through the existing exact-pin validator and verify that
+the old runtime revision is rejected as a server-local reusable revision. Keep
+read-only distributed templates unchanged; restore the temporary declarations
+after activating the successor and publish that restored source before rollout.
+A new bounded executor must fix this new PR and main, use fresh scratch fixtures,
+obtain an exact-head Bot review and merge separately. The owner's authorization
+covers the remaining corrective work without another conversational approval wait.
+
+## Local provenance recovery completed
+
+PR #144 merged through locked, unmerged executor
+`947a9d81fd9917bdd900c0354e7bdd366b833f34` after
+[exact-source CI](https://github.com/civitaspo/securefix-server/actions/runs/39455566056),
+[read-only qualification](https://github.com/civitaspo/securefix-server/actions/runs/39455789016),
+[fresh scratch rehearsal](https://github.com/civitaspo/securefix-server/actions/runs/39456163857),
+[exact-head Bot review](https://github.com/civitaspo/securefix-server/actions/runs/39456580589)
+and a separate [Server App merge](https://github.com/civitaspo/securefix-server/actions/runs/39457048721).
+Independent reads verified signed main
+`c027458bfbece50cb04feefc44269b568a753b3a`, sole parent
+`84fa5d889c1b7f204a6e7bc5ce08d5bdd0606f99`, reviewed tree
+`6b849824edcbcdb6d7e16fdd0c4a8079265d0612` and unchanged generation-six descriptor.
+The rehearsal merged signed scratch PR #338, rejected stale-head PR #339,
+left scratch main unchanged and removed all three disposable fixture branches.
+Temporary admission `63732728` and the approval variable were removed; readback
+confirmed only original main admission `50334840` remains.
+
+Ordinary intake, candidate qualification, successor activation and final read-only
+workflow distribution still require their own evidence. PR #141 advances the
+package to v0.2.42 and fixes scratch acceptance timing before that qualification.
+The compatibility declarations must be restored after the first successor is
+active, then qualified and published before distributing read-only callers.

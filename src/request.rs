@@ -1849,6 +1849,40 @@ mod tests {
     }
 
     #[test]
+    fn actual_server_wrappers_preserve_local_reusable_provenance() {
+        let server = &crate::config::trusted()
+            .unwrap()
+            .deployment
+            .server
+            .repository;
+        let caller_sha = "a".repeat(40);
+        let active_sha = "b".repeat(40);
+        for (kind, bytes, path) in [
+            (
+                RequestKind::Approve,
+                include_bytes!("../.github/workflows/approve-request.yml").as_slice(),
+                ".github/workflows/reusable-approve-request.yml",
+            ),
+            (
+                RequestKind::Merge,
+                include_bytes!("../.github/workflows/merge-request.yml").as_slice(),
+                ".github/workflows/reusable-merge-request.yml",
+            ),
+        ] {
+            require_exact_reusable_pin(bytes, kind, &active_sha, true, server).unwrap();
+            let expected = reusable_source_revision(true, &caller_sha, &active_sha);
+            let reference = |sha: &str| ReferencedWorkflow {
+                path: format!("{server}/{path}@{sha}"),
+                sha: sha.to_owned(),
+            };
+            workflow::referenced_revision(&[reference(&caller_sha)], path, expected).unwrap();
+            assert!(
+                workflow::referenced_revision(&[reference(&active_sha)], path, expected).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn control_approval_is_bound_to_the_supplied_bot_and_generation() {
         let reviewer = crate::config::Principal {
             id: 501,
