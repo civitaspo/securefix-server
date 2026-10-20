@@ -1569,6 +1569,22 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     let published_runtime_tag = published_runtime_tag_from_env()?;
     let workflow_ref = std::env::var("GITHUB_REF").context("missing GITHUB_REF")?;
     validate_workflow_ref(&workflow_sha, &workflow_ref)?;
+    if candidate_sha != workflow_sha {
+        let api = GitHub::new(
+            "https://api.github.com",
+            std::env::var("SECUREFIX_SERVER_APP_TOKEN")?,
+        )?;
+        let limits: Value = api.get("/rate_limit")?;
+        println!(
+            "Read-only Server App core rate limit: {}",
+            json!({
+                "limit": limits["resources"]["core"]["limit"],
+                "remaining": limits["resources"]["core"]["remaining"],
+                "reset": limits["resources"]["core"]["reset"]
+            })
+        );
+        anyhow::bail!("Read-only diagnostic stopped before scratch mutations");
+    }
     let server = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
     let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
     crate::settings::validate_installation_scope(
