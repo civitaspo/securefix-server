@@ -36,6 +36,7 @@ A later distribution must preserve entries for other workflows.
 Reusable workflows use the lockfile in their defining repository at their referenced commit.
 Adding a lockfile to current main cannot repair an old commit.
 Publish and activate a lockfile-bearing runtime source through the normal control lifecycle before distributing its caller pins.
+The production distribution matrix excludes the configured integration repository; its testing callers are maintained by the dedicated testing distributor.
 A production runtime change is required here because the caller generator and reviewed migration validator are embedded in the published executable.
 
 ## Keep Renovate updates consistent
@@ -44,7 +45,9 @@ Renovate's GitHub Actions manager supports the official `actions.lock` format in
 For onboarded workflows it regenerates the lockfile after dependency edits with `--no-narrow` and `--no-migrate-local-actions`.
 Retain the existing Renovate configuration and signed server merge lane.
 Do not add overlapping Dependabot version updates.
-Check the deployed Renovate version and its PR diff before relying on this maintenance behavior.
+The eight settings-managed clients were running Renovate 44.164.1 on 2026-10-20, whose default `ghActionsLock` constraint is v0.2.0.
+The server records that constraint explicitly in `renovate.json`.
+Check the deployed Renovate version, tool constraint and PR diff when upgrading either tool.
 New workflows still need onboarding with the official generator.
 
 ## Enforce through repository settings
@@ -52,16 +55,20 @@ New workflows still need onboarding with the official generator.
 Actions policy changes belong only in `repo-settings.yml` with its dedicated administrator credential.
 Keep approval, merge, publication, activation, and distribution free of administrator reads and credentials.
 Enable Require lockfile only after all targeted workflows and pinned reusable workflow revisions have valid lockfiles.
+The proposed repository-settings API integration is held until its creation and update requests are accepted by GitHub.
+The active herdr-linear-agent policy is preserved during caller migration.
 
 As of the 2026-10-18 official REST OpenAPI revision, repository Actions policy rules document actor and event restrictions but no Require lockfile payload.
 The Actions permissions API exposes `sha_pinning_required`, which is a separate setting.
 Do not send an invented lockfile rule or treat SHA pinning as lockfile enforcement.
-Automated repository-settings enforcement remains unimplemented until a supported API is established.
+The authenticated GitHub Actions policy form exposes the Preview rule as `require_lockfile` with an empty parameter object.
+This UI schema establishes the rule type; it does not by itself prove that the REST endpoint accepts the preview rule.
+Record the actual reconciliation and policy readback before claiming native enforcement.
 
 ## Sources
 
 - [GitHub lockfile generation](https://docs.github.com/en/actions/how-tos/secure-your-work/lock-workflow-dependencies).
 - [GitHub lockfile enforcement](https://docs.github.com/en/actions/how-tos/administer/enforce-workflow-lockfiles).
 - [Official generator v0.2.0](https://github.com/github/gh-actions-lock/releases/tag/v0.2.0).
-- [Renovate GitHub Actions manager](https://github.com/renovatebot/renovate/blob/b28f4eb4b7d738b9c5664bf91e533e297ab366a4/lib/modules/manager/github-actions/readme.md).
+- [Renovate GitHub Actions manager](https://github.com/renovatebot/renovate/blob/6cc889803a44be232802143499d904799f58abc0/lib/modules/manager/github-actions/readme.md).
 - [GitHub REST OpenAPI snapshot](https://github.com/github/rest-api-description/blob/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json).
