@@ -2626,8 +2626,9 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
             "{operation}: only the temporary legacy bridge may add a reaction"
         );
         assert_eq!(
-            caller["jobs"]["request"]["permissions"]["pull-requests"], "read",
-            "{operation}: caller token is read-only"
+            caller["jobs"]["request"]["permissions"]["pull-requests"],
+            if legacy_bridge { "write" } else { "read" },
+            "{operation}: only the temporary legacy bridge may write PR reactions"
         );
         if legacy_bridge {
             let source =
