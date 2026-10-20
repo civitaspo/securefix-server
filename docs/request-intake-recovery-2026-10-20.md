@@ -186,3 +186,27 @@ after activating the successor and publish that restored source before rollout.
 A new bounded executor must fix this new PR and main, use fresh scratch fixtures,
 obtain an exact-head Bot review and merge separately. The owner's authorization
 covers the remaining corrective work without another conversational approval wait.
+
+## Local provenance recovery completed
+
+PR #144 merged through locked, unmerged executor
+`947a9d81fd9917bdd900c0354e7bdd366b833f34` after
+[exact-source CI](https://github.com/civitaspo/securefix-server/actions/runs/39455566056),
+[read-only qualification](https://github.com/civitaspo/securefix-server/actions/runs/39455789016),
+[fresh scratch rehearsal](https://github.com/civitaspo/securefix-server/actions/runs/39456163857),
+[exact-head Bot review](https://github.com/civitaspo/securefix-server/actions/runs/39456580589)
+and a separate [Server App merge](https://github.com/civitaspo/securefix-server/actions/runs/39457048721).
+Independent reads verified signed main
+`c027458bfbece50cb04feefc44269b568a753b3a`, sole parent
+`84fa5d889c1b7f204a6e7bc5ce08d5bdd0606f99`, reviewed tree
+`6b849824edcbcdb6d7e16fdd0c4a8079265d0612` and unchanged generation-six descriptor.
+The rehearsal merged signed scratch PR #338, rejected stale-head PR #339,
+left scratch main unchanged and removed all three disposable fixture branches.
+Temporary admission `63732728` and the approval variable were removed; readback
+confirmed only original main admission `50334840` remains.
+
+Ordinary intake, candidate qualification, successor activation and final read-only
+workflow distribution still require their own evidence. PR #141 advances the
+package to v0.2.42 and fixes scratch acceptance timing before that qualification.
+The compatibility declarations must be restored after the first successor is
+active, then qualified and published before distributing read-only callers.
