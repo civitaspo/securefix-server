@@ -46,14 +46,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/securefix-server
-          ref: ee98f4f12f3c32855c95feb3fe75bc2870b88460
+          ref: ${{ inputs.candidate_source_sha }}
           persist-credentials: false
       - name: Reuse the exact source-bound candidate artifact
         id: candidate
         uses: $/.github/actions/setup-cli
         with:
           candidate-run-id: ${{ inputs.candidate_run_id }}
-          candidate-source-sha: ${{ inputs.candidate_source_sha }}
       - uses: $/.github/actions/install-cli
         with:
           binary: ${{ steps.candidate.outputs.binary }}
