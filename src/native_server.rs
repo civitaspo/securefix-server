@@ -19,7 +19,7 @@ const SLSA_PREDICATE: &str = "https://slsa.dev/provenance/v1";
 const REQUEST_ARTIFACT_NAME: &str = "native-request-proof";
 const CHECK_NAME: &str = "securefix-native-request-policy-check";
 const CHECK_TITLE: &str = "Native request slice accepted";
-const CHECK_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, and the exact current PR head and base were verified. Signature and owner-review policy were not evaluated.";
+const CHECK_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, all PR commit signatures and trusted effective committers, and the exact current PR head and base were verified. Owner-review policy was not evaluated.";
 
 #[derive(clap::Subcommand)]
 pub enum CommandArgs {
@@ -146,6 +146,13 @@ fn verify_request(
     verify_run_identity(&run, &manifest)?;
     verify_artifact_binding(&api, &manifest, manifest_path, bundle_path)?;
     verify_current_pull_request(&api, &manifest)?;
+    crate::request::validate_native_pr_commit_policy(
+        &api,
+        &manifest.repository.full_name,
+        manifest.pull_request.number,
+        &manifest.pull_request.head_sha,
+        &config.policy.trusted_committers,
+    )?;
     let current_authority = securefix::api::capture_native_authority_snapshot(
         &api,
         &manifest.repository.full_name,

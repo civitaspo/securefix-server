@@ -882,7 +882,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                             if path == ".github/workflows/request-producer-probe.yml"
                                 && job_id == "capture"
                             {
-                                "961ffff5ab30be4a0197c64c9a4170515b787f5f"
+                                "96c2f3e9223f7f5f357660e59718558f3e2b283b"
                             } else if path == ".github/workflows/testing-securefix-server.yml" {
                                 if job_id == "baseline" {
                                     "${{ steps.resolve.outputs.sha }}"
@@ -913,7 +913,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
 
 #[test]
 fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
-    const SOURCE_SHA: &str = "961ffff5ab30be4a0197c64c9a4170515b787f5f";
+    const SOURCE_SHA: &str = "96c2f3e9223f7f5f357660e59718558f3e2b283b";
     let producer = workflow("request-producer-probe.yml");
     let capture = &producer["jobs"]["capture"];
     let steps = capture["steps"].as_array().unwrap();

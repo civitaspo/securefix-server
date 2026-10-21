@@ -1017,6 +1017,23 @@ pub fn validate_pr_authorization(
     validate_pr_authorization_inner(api, policy, repository, number, sha, owner_requested, false)
 }
 
+/// Apply the existing commit-signature and effective-committer policy to a
+/// native request using the trusted committer list from its explicit instance
+/// configuration.
+pub(crate) fn validate_native_pr_commit_policy(
+    api: &GitHub,
+    repository: &str,
+    number: u64,
+    head_sha: &str,
+    trusted_committers: &[String],
+) -> Result<()> {
+    validate_repository(repository)?;
+    validate_sha(head_sha)?;
+    let commits = api.paginate(&format!("/repos/{repository}/pulls/{number}/commits"))?;
+    let _ = validate_pr_commit_entries(api, repository, head_sha, &commits, trusted_committers)?;
+    Ok(())
+}
+
 pub(crate) fn validate_merge_policy(
     api: &GitHub,
     policy: &Policy,
@@ -1057,40 +1074,8 @@ fn validate_pr_authorization_inner(
         "pull request is not open at the authorized head"
     );
     let commits = api.paginate(&format!("/repos/{repository}/pulls/{number}/commits"))?;
-    ensure!(
-        !commits.is_empty()
-            && commits.len() < 250
-            && commits.last().and_then(|c| c["sha"].as_str()) == Some(sha),
-        "commit list is incomplete or does not end at the current head"
-    );
-    ensure!(
-        commits
-            .iter()
-            .all(|c| c["commit"]["verification"]["verified"] == true),
-        "every commit must have a verified signature"
-    );
-    let web_flow_commits = commits
-        .iter()
-        .filter(|commit| {
-            commit["committer"]["login"] == "web-flow"
-                && is_trusted_login(
-                    commit["author"]["login"].as_str(),
-                    &policy.trusted_committers,
-                )
-        })
-        .collect::<Vec<_>>();
-    let github_signed = github_signed_commits(api, repository, &web_flow_commits)?;
-    ensure!(
-        commits.iter().all(|commit| {
-            let sha = commit["sha"].as_str().unwrap_or_default();
-            repo_trusted_committer(
-                commit,
-                &policy.trusted_committers,
-                github_signed.contains(sha),
-            )
-        }),
-        "commit committer is not an allowed committer"
-    );
+    let github_signed =
+        validate_pr_commit_entries(api, repository, sha, &commits, &policy.trusted_committers)?;
     if renovate_requested {
         require_renovate_author(policy, &pr)?;
         let bot = policy
@@ -1134,6 +1119,43 @@ fn validate_pr_authorization_inner(
             )));
     }
     Ok(sensitive)
+}
+
+fn validate_pr_commit_entries(
+    api: &GitHub,
+    repository: &str,
+    expected_head: &str,
+    commits: &[Value],
+    trusted_committers: &[String],
+) -> Result<HashSet<String>> {
+    ensure!(
+        !commits.is_empty()
+            && commits.len() < 250
+            && commits.last().and_then(|commit| commit["sha"].as_str()) == Some(expected_head),
+        "commit list is incomplete or does not end at the current head"
+    );
+    ensure!(
+        commits
+            .iter()
+            .all(|commit| commit["commit"]["verification"]["verified"] == true),
+        "every commit must have a verified signature"
+    );
+    let web_flow_commits = commits
+        .iter()
+        .filter(|commit| {
+            commit["committer"]["login"] == "web-flow"
+                && is_trusted_login(commit["author"]["login"].as_str(), trusted_committers)
+        })
+        .collect::<Vec<_>>();
+    let github_signed = github_signed_commits(api, repository, &web_flow_commits)?;
+    ensure!(
+        commits.iter().all(|commit| {
+            let sha = commit["sha"].as_str().unwrap_or_default();
+            repo_trusted_committer(commit, trusted_committers, github_signed.contains(sha))
+        }),
+        "commit committer is not an allowed committer"
+    );
+    Ok(github_signed)
 }
 
 fn sensitive_path_approval_exempt(
@@ -2074,6 +2096,58 @@ mod tests {
     fn valid_commit(sha: &str) -> Value {
         json!({"sha":sha,"commit":{"verification":{"verified":true}},
             "author":{"login":"civitaspo"},"committer":{"login":"civitaspo"}})
+    }
+
+    #[test]
+    fn native_request_commit_policy_reuses_signature_and_effective_committer_checks() {
+        let sha = "a".repeat(40);
+        let trusted = vec!["civitaspo".to_owned()];
+        let path = "/repos/civitaspo/dbt-authorized-models/pulls/7/commits?per_page=100&page=1";
+
+        let fixture = Fixture::new(vec![Route::get(path, json!([valid_commit(&sha)]))]);
+        validate_native_pr_commit_policy(
+            &fixture.api,
+            "civitaspo/dbt-authorized-models",
+            7,
+            &sha,
+            &trusted,
+        )
+        .unwrap();
+        fixture.finish();
+
+        let mut unsigned = valid_commit(&sha);
+        unsigned["commit"]["verification"]["verified"] = json!(false);
+        let fixture = Fixture::new(vec![Route::get(path, json!([unsigned]))]);
+        let error = validate_native_pr_commit_policy(
+            &fixture.api,
+            "civitaspo/dbt-authorized-models",
+            7,
+            &sha,
+            &trusted,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "every commit must have a verified signature"
+        );
+        fixture.finish();
+
+        let mut untrusted = valid_commit(&sha);
+        untrusted["committer"]["login"] = json!("attacker");
+        let fixture = Fixture::new(vec![Route::get(path, json!([untrusted]))]);
+        let error = validate_native_pr_commit_policy(
+            &fixture.api,
+            "civitaspo/dbt-authorized-models",
+            7,
+            &sha,
+            &trusted,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "commit committer is not an allowed committer"
+        );
+        fixture.finish();
     }
 
     #[test]
