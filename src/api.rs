@@ -12,9 +12,9 @@ use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
 
 #[cfg(test)]
 const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
-const NATIVE_PROOF_CHECK: &str = "securefix-native-request-policy-check";
-const NATIVE_PROOF_TITLE: &str = "Native request slice accepted";
-const NATIVE_PROOF_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, and the exact current PR head and base were verified. Signature and owner-review policy were not evaluated.";
+pub const NATIVE_POLICY_CHECK_NAME: &str = "securefix-native-request-policy-check";
+pub const NATIVE_POLICY_CHECK_TITLE: &str = "Native request slice accepted";
+pub const NATIVE_POLICY_CHECK_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, all PR commit signatures and trusted effective committers, and the exact current PR head and base were verified. Owner-review policy was not evaluated.";
 
 pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check -->";
 
@@ -1340,16 +1340,24 @@ fn validate_native_scratch_check_body(
     ensure!(
         *method == Method::POST
             && path == format!("/repos/{target_repository}/check-runs")
-            && body["name"] == NATIVE_PROOF_CHECK
-            && body["head_sha"].as_str() == Some(head_sha)
-            && body["status"] == "completed"
-            && body["conclusion"] == "success"
-            && body["output"]["title"] == NATIVE_PROOF_TITLE
-            && body["output"]["summary"] == NATIVE_PROOF_SUMMARY
-            && body["external_id"].as_str() == Some(request_sha256),
+            && body == &native_policy_check_body(head_sha, request_sha256),
         "native scratch check body does not match the verified request"
     );
     Ok(())
+}
+
+pub fn native_policy_check_body(head_sha: &str, request_sha256: &str) -> Value {
+    serde_json::json!({
+        "name": NATIVE_POLICY_CHECK_NAME,
+        "head_sha": head_sha,
+        "external_id": request_sha256,
+        "status": "completed",
+        "conclusion": "success",
+        "output": {
+            "title": NATIVE_POLICY_CHECK_TITLE,
+            "summary": NATIVE_POLICY_CHECK_SUMMARY
+        }
+    })
 }
 
 pub fn validate_native_instance_config_path(path: &str) -> Result<()> {
@@ -1474,34 +1482,29 @@ mod tests {
     #[test]
     fn native_scratch_check_body_is_bound_to_the_verified_request() {
         let path = format!("/repos/{SCRATCH_REPOSITORY}/check-runs");
-        let body = serde_json::json!({
-            "name": NATIVE_PROOF_CHECK,
-            "head_sha": "b".repeat(40),
-            "external_id": "c".repeat(64),
-            "status": "completed",
-            "conclusion": "success",
-            "output": {"title": NATIVE_PROOF_TITLE, "summary": NATIVE_PROOF_SUMMARY}
-        });
+        let head_sha = "b".repeat(40);
+        let request_sha = "c".repeat(64);
+        let body = native_policy_check_body(&head_sha, &request_sha);
         assert!(
             validate_native_scratch_check_body(
                 &Method::POST,
                 &path,
                 SCRATCH_REPOSITORY,
-                &"b".repeat(40),
-                &"c".repeat(64),
+                &head_sha,
+                &request_sha,
                 &body,
             )
             .is_ok()
         );
         let mut forged = body;
-        forged["external_id"] = "d".repeat(64).into();
+        forged["output"]["summary"] = "a different claim".into();
         assert!(
             validate_native_scratch_check_body(
                 &Method::POST,
                 &path,
                 SCRATCH_REPOSITORY,
-                &"b".repeat(40),
-                &"c".repeat(64),
+                &head_sha,
+                &request_sha,
                 &forged,
             )
             .is_err()

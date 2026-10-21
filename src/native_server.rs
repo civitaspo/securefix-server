@@ -17,9 +17,6 @@ const MAX_ARTIFACT_ARCHIVE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_VERIFIER_OUTPUT_BYTES: u64 = 1024 * 1024;
 const SLSA_PREDICATE: &str = "https://slsa.dev/provenance/v1";
 const REQUEST_ARTIFACT_NAME: &str = "native-request-proof";
-const CHECK_NAME: &str = "securefix-native-request-policy-check";
-const CHECK_TITLE: &str = "Native request slice accepted";
-const CHECK_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, all PR commit signatures and trusted effective committers, and the exact current PR head and base were verified. Owner-review policy was not evaluated.";
 
 #[derive(clap::Subcommand)]
 pub enum CommandArgs {
@@ -356,9 +353,10 @@ fn publish_scratch_result(verified: &VerifiedRequest) -> Result<()> {
         .as_ref()
         .context("native scratch writer was not captured before proof validation")?;
     let checks: Value = api.get(&format!(
-        "/repos/{}/commits/{}/check-runs?per_page=100&page=1&filter=latest&check_name={CHECK_NAME}&app_id={}",
+        "/repos/{}/commits/{}/check-runs?per_page=100&page=1&filter=latest&check_name={}&app_id={}",
         manifest.repository.full_name,
         manifest.pull_request.head_sha,
+        securefix::api::NATIVE_POLICY_CHECK_NAME,
         verified.config.apps.policy_check_id
     ))?;
     let existing = checks["check_runs"]
@@ -369,19 +367,14 @@ fn publish_scratch_result(verified: &VerifiedRequest) -> Result<()> {
         "native request proof check already exists or check listing is incomplete"
     );
     let request_sha = securefix::hex_encode(Sha256::digest(&verified.manifest_bytes));
+    let body =
+        securefix::api::native_policy_check_body(&manifest.pull_request.head_sha, &request_sha);
     let result: Value = api.post(
         &format!("/repos/{}/check-runs", manifest.repository.full_name),
-        &serde_json::json!({
-            "name": CHECK_NAME,
-            "head_sha": manifest.pull_request.head_sha,
-            "external_id": request_sha,
-            "status": "completed",
-            "conclusion": "success",
-            "output": {"title": CHECK_TITLE, "summary": CHECK_SUMMARY}
-        }),
+        &body,
     )?;
     ensure!(
-        result["name"] == CHECK_NAME
+        result["name"] == securefix::api::NATIVE_POLICY_CHECK_NAME
             && result["head_sha"].as_str() == Some(manifest.pull_request.head_sha.as_str())
             && result["status"] == "completed"
             && result["conclusion"] == "success"
