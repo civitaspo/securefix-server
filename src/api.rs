@@ -1145,6 +1145,16 @@ impl GitHub {
     }
 }
 
+fn git_authorization_header(token: &str) -> String {
+    use base64::Engine;
+
+    let credentials = format!("x-access-token:{token}");
+    format!(
+        "Authorization: Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(credentials)
+    )
+}
+
 fn isolated_git_command(
     repository: &Path,
     args: &[&str],
@@ -1182,10 +1192,7 @@ fn isolated_git_command(
     if let Some(token) = token {
         command
             .env("GIT_CONFIG_KEY_1", "http.https://github.com/.extraheader")
-            .env(
-                "GIT_CONFIG_VALUE_1",
-                format!("Authorization: Bearer {token}"),
-            );
+            .env("GIT_CONFIG_VALUE_1", git_authorization_header(token));
     }
     Ok(command)
 }
@@ -1897,6 +1904,14 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output.stdout
+    }
+
+    #[test]
+    fn git_fetch_uses_basic_token_authorization() {
+        assert_eq!(
+            git_authorization_header("ghs_test"),
+            "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3Rlc3Q="
+        );
     }
 
     fn test_commit_file(repository: &Path, path: &str, contents: &str, message: &str) -> String {
