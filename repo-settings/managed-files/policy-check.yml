@@ -85,7 +85,7 @@ jobs:
 
   produce:
     if: inputs.mode == 'produce'
-    uses: civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@93f0c7b4c35e9946a899c2fdf5b09529894ac067
+    uses: civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@82e678f41d53896e4108811e8cff739575960210
     with:
       candidate_run_id: ${{ inputs.candidate_run_id }}
       pull_request_number: ${{ inputs.pull_request_number }}
