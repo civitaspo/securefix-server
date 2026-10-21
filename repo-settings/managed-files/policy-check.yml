@@ -15,7 +15,7 @@ on:
         description: Exact successful candidate build run
         type: string
         required: true
-        default: "39561090954"
+        default: "39575187035"
       pull_request_number:
         description: Owner-authored scratch pull request
         type: string
@@ -119,7 +119,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/securefix-server
-          ref: 961ffff5ab30be4a0197c64c9a4170515b787f5f
+          ref: 96c2f3e9223f7f5f357660e59718558f3e2b283b
           path: server-source
           persist-credentials: false
       - name: Require the exact source-bound candidate artifact
@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           GITHUB_WORKSPACE="$GITHUB_WORKSPACE/server-source" bash "$ACTION_PATH/reuse-build.sh"
           grep -qx "reused=true" "$GITHUB_OUTPUT"
-      - uses: civitaspo/securefix-server/.github/actions/install-cli@961ffff5ab30be4a0197c64c9a4170515b787f5f # source commit
+      - uses: civitaspo/securefix-server/.github/actions/install-cli@96c2f3e9223f7f5f357660e59718558f3e2b283b # source commit
         with:
           binary: ${{ github.workspace }}/server-source/target/release/securefix
       - name: Verify and publish the exact current-head policy check
