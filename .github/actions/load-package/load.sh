@@ -68,7 +68,7 @@ else
 fi
 if [[ "$CHANNEL" == scratch ]]; then
   destination_compare="$(gh api "repos/$DESTINATION_REPOSITORY/compare/$tag_commit...$destination_default_branch")"
-  jq -e '(.status == "ahead" or .status == "identical") and (.base_commit.sha | test("^[0-9a-f]{40}$")) and (.head_commit.sha | test("^[0-9a-f]{40}$"))' <<<"$destination_compare" >/dev/null || { echo 'scratch package tag is not reachable from the destination default branch' >&2; exit 1; }
+  jq -e --arg tag "$tag_commit" '(.status == "ahead" or .status == "identical") and .base_commit.sha == $tag and .merge_base_commit.sha == $tag and (.ahead_by | type == "number" and . >= 0) and .behind_by == 0' <<<"$destination_compare" >/dev/null || { echo 'scratch package tag is not reachable from the destination default branch' >&2; exit 1; }
 fi
 
 binary="$work/$asset_name"; response="$work/attestations.json"; bundle="$work/bundle.jsonl"; preverified="$work/preverified.json"; verified="$work/verified.json"
