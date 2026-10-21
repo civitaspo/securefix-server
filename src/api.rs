@@ -7,12 +7,78 @@ use reqwest::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
+use sha2::Digest;
+use std::{
+    collections::BTreeMap,
+    fmt,
+    io::Read,
+    path::Path,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
+pub const NATIVE_POLICY_CHECK_NAME: &str = "securefix-native-request-policy-check";
+pub const NATIVE_POLICY_CHECK_TITLE: &str = "Native request slice accepted";
+pub const NATIVE_POLICY_CHECK_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, all PR commit signatures and trusted effective committers, and the exact current PR head and base were verified. Owner-review policy was not evaluated.";
+const MAX_AUTHORITY_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_AUTHORITY_DIFF_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024;
+const MAX_GIT_OPERATION_TIME: Duration = Duration::from_secs(60);
+const MAX_AUTHORITY_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+const ISOLATED_GIT_PATH: &str = "/usr/bin:/bin";
 
 pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check -->";
+
+pub struct NativeScratchTarget<'a> {
+    pub mode: NativeScratchMode,
+    pub repository: &'a str,
+    pub repository_id: u64,
+    pub pull_number: u64,
+    pub head_sha: &'a str,
+    pub head_repository_id: u64,
+    pub base_ref: &'a str,
+    pub author_id: u64,
+    pub author_login: &'a str,
+    pub actor_id: u64,
+    pub actor_login: &'a str,
+    pub request_sha256: &'a str,
+    pub server_authority: &'a NativeAuthoritySnapshot,
+    pub caller_workflow_path: &'a str,
+    pub caller_workflow_sha: &'a str,
+    pub client_workflow_epoch: &'a str,
+    pub destination_branch: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeScratchMode {
+    PolicyCheck,
+    Securefix,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAuthoritySnapshot {
+    pub instance_repository: String,
+    pub instance_id: u64,
+    pub default_branch: String,
+    pub config_path: String,
+    pub config_sha256: String,
+    pub epoch: String,
+    pub workflows: Vec<NativeWorkflowAuthority>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeWorkflowAuthority {
+    pub role: crate::instance_config::WorkflowRole,
+    pub path: String,
+    pub sha256: String,
+    pub pins: Vec<String>,
+}
 
 #[derive(Clone)]
 enum WriteContext {
@@ -27,6 +93,37 @@ enum WriteContext {
     Scratch {
         candidate_sha: String,
     },
+    NativeScratch(Box<NativeScratchWrite>),
+}
+
+#[derive(Clone)]
+struct NativeScratchWrite {
+    mode: NativeScratchMode,
+    instance_repository: String,
+    instance_id: u64,
+    instance_owner_id: u64,
+    default_branch: String,
+    config_path: String,
+    config_bytes: Vec<u8>,
+    server_authority: NativeAuthoritySnapshot,
+    target_repository: String,
+    target_id: u64,
+    pull_number: u64,
+    head_sha: String,
+    head_repository_id: u64,
+    base_ref: String,
+    author_id: u64,
+    author_login: String,
+    actor_id: u64,
+    actor_login: String,
+    request_sha256: String,
+    reader_app_id: u64,
+    writer_app_id: u64,
+    policy_check_app_id: u64,
+    caller_workflow_path: String,
+    caller_workflow_sha: String,
+    client_workflow_epoch: String,
+    destination_branch: Option<String>,
 }
 
 #[derive(Debug)]
@@ -52,6 +149,7 @@ impl std::error::Error for ApiError {}
 pub struct GitHub {
     client: Client,
     token: String,
+    write_token: Option<String>,
     base: String,
     writes: WriteContext,
 }
@@ -118,6 +216,7 @@ impl GitHub {
                 .build()?,
             base,
             token,
+            write_token: None,
             writes: WriteContext::ReadOnly,
         })
     }
@@ -165,6 +264,323 @@ impl GitHub {
         Ok(api)
     }
 
+    /// Create the deliberately narrow writer for the first native request
+    /// scratch slice. Every check-run write reauthenticates the installation,
+    /// protected configuration snapshot, and exact PR head.
+    pub fn native_scratch_from_env(
+        read_name: &str,
+        write_name: &str,
+        config: &crate::instance_config::InstanceConfig,
+        config_path: &str,
+        config_bytes: &[u8],
+        request: &NativeScratchTarget<'_>,
+    ) -> Result<Self> {
+        validate_instance_config_path(config_path)?;
+        crate::policy::validate_repository(request.repository)?;
+        crate::policy::validate_sha(request.head_sha)?;
+        crate::config::validate_branch(request.base_ref)?;
+        ensure!(
+            request.repository_id > 0
+                && request.pull_number > 0
+                && request.head_repository_id > 0
+                && request.author_id > 0
+                && crate::config::is_valid_login(request.author_login)
+                && request.actor_id > 0
+                && request.request_sha256.len() == 64
+                && request
+                    .request_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                && crate::config::is_valid_login(request.actor_login),
+            "invalid native scratch target identity"
+        );
+        ensure!(
+            config_bytes.len() <= 256 * 1024,
+            "instance config exceeds size limit"
+        );
+        let configured_target = config
+            .repositories
+            .iter()
+            .find(|repository| {
+                repository.repository == request.repository
+                    && repository.id == request.repository_id
+            })
+            .context("native request target is not configured")?;
+        ensure!(
+            configured_target
+                .capabilities
+                .contains(&match request.mode {
+                    NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
+                    NativeScratchMode::Securefix => crate::policy::Capability::Securefix,
+                }),
+            "native request target lacks the required capability"
+        );
+        ensure!(
+            match request.mode {
+                NativeScratchMode::PolicyCheck => request.destination_branch.is_none(),
+                NativeScratchMode::Securefix => request
+                    .destination_branch
+                    .is_some_and(|branch| !branch.is_empty()),
+            },
+            "native request write target is incomplete"
+        );
+        ensure!(
+            config.identities.owner.id == request.actor_id
+                && config.identities.owner.login == request.actor_login
+                && config.identities.owner.id == request.author_id
+                && config.identities.owner.login == request.author_login,
+            "native scratch policy requires the configured owner as actor and PR author"
+        );
+        let execution_repository = std::env::var("GITHUB_REPOSITORY")
+            .context("missing GITHUB_REPOSITORY for native Server instance")?;
+        ensure!(
+            execution_repository == config.instance.repository,
+            "native Server instance differs from the current job repository"
+        );
+        validate_native_test_host_context(config, request.mode)?;
+        let read_token =
+            std::env::var(read_name).with_context(|| format!("missing {read_name}"))?;
+        ensure!(!read_token.is_empty(), "{read_name} is empty");
+        let write_token =
+            std::env::var(write_name).with_context(|| format!("missing {write_name}"))?;
+        ensure!(!write_token.is_empty(), "{write_name} is empty");
+        let (reader_app_id, writer_app_id) = native_scratch_app_ids(
+            request.mode,
+            config.apps.server_id,
+            config.apps.policy_check_id,
+        );
+        let mut api = Self::new("https://api.github.com", read_token)?;
+        require_single_repository_installation(
+            &api,
+            request.repository_id,
+            request.repository,
+            reader_app_id,
+        )?;
+        let write_api = Self::new("https://api.github.com", write_token.clone())?;
+        require_single_repository_installation(
+            &write_api,
+            request.repository_id,
+            request.repository,
+            writer_app_id,
+        )?;
+        let read_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+        ensure!(!read_token.is_empty(), "GITHUB_TOKEN is empty");
+        let server_reader = Self::new("https://api.github.com", read_token)?;
+        let (remote_config, server_authority) =
+            server_reader.capture_native_server_authority(config, config_path, config_bytes)?;
+        ensure!(
+            remote_config == config_bytes,
+            "local native Server config does not match the protected default branch"
+        );
+        require_native_authority_unchanged(request.server_authority, &server_authority)?;
+        api.write_token = Some(write_token);
+        api.writes = WriteContext::NativeScratch(Box::new(NativeScratchWrite {
+            mode: request.mode,
+            instance_repository: config.instance.repository.clone(),
+            instance_id: config.instance.id,
+            instance_owner_id: config.identities.repository_owner.id,
+            default_branch: config.instance.default_branch.clone(),
+            config_path: config_path.to_owned(),
+            config_bytes: config_bytes.to_vec(),
+            server_authority: server_authority.clone(),
+            target_repository: request.repository.to_owned(),
+            target_id: request.repository_id,
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.to_owned(),
+            head_repository_id: request.head_repository_id,
+            base_ref: request.base_ref.to_owned(),
+            author_id: request.author_id,
+            author_login: request.author_login.to_owned(),
+            actor_id: request.actor_id,
+            actor_login: request.actor_login.to_owned(),
+            request_sha256: request.request_sha256.to_owned(),
+            reader_app_id,
+            writer_app_id,
+            policy_check_app_id: config.apps.policy_check_id,
+            caller_workflow_path: request.caller_workflow_path.to_owned(),
+            caller_workflow_sha: request.caller_workflow_sha.to_owned(),
+            client_workflow_epoch: request.client_workflow_epoch.to_owned(),
+            destination_branch: request.destination_branch.map(str::to_owned),
+        }));
+        Ok(api)
+    }
+
+    pub fn capture_native_server_authority(
+        &self,
+        config: &crate::instance_config::InstanceConfig,
+        config_path: &str,
+        expected_config: &[u8],
+    ) -> Result<(Vec<u8>, NativeAuthoritySnapshot)> {
+        let execution_repository = std::env::var("GITHUB_REPOSITORY")
+            .context("missing GITHUB_REPOSITORY for native Server instance")?;
+        ensure!(
+            execution_repository == config.instance.repository,
+            "native Server instance differs from the current job repository"
+        );
+        self.capture_native_server_authority_for_repository(
+            config,
+            config_path,
+            expected_config,
+            &execution_repository,
+        )
+    }
+
+    /// Capture a protected Server authority snapshot from a request producer.
+    /// The repository and path are only locators here; a consuming Server must
+    /// match them to its own authenticated instance and configured path.
+    pub fn capture_remote_native_server_authority(
+        &self,
+        repository_name: &str,
+        config_path: &str,
+    ) -> Result<(Vec<u8>, NativeAuthoritySnapshot)> {
+        crate::policy::validate_repository(repository_name)?;
+        validate_instance_config_path(config_path)?;
+        let metadata: Value = self.get(&format!("/repos/{repository_name}"))?;
+        ensure!(
+            metadata["full_name"].as_str() == Some(repository_name),
+            "native Server locator does not match repository metadata"
+        );
+        let repository_id = metadata["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .context("native Server repository ID is missing")?;
+        let default_branch = metadata["default_branch"]
+            .as_str()
+            .context("native Server default branch is missing")?;
+        crate::config::validate_branch(default_branch)?;
+        let owner_id = metadata["owner"]["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .context("native Server owner ID is missing")?;
+        let source_sha = self.branch_head(repository_name, default_branch)?;
+        let config_bytes = self.content(repository_name, config_path, &source_sha)?;
+        let config = crate::instance_config::InstanceConfig::parse(&config_bytes)?;
+        ensure!(
+            config.instance.repository == repository_name
+                && config.instance.id == repository_id
+                && config.instance.default_branch == default_branch
+                && config.identities.repository_owner.id == owner_id,
+            "native Server locator does not match its configuration identity"
+        );
+        self.capture_native_server_authority_for_repository(
+            &config,
+            config_path,
+            &config_bytes,
+            repository_name,
+        )
+    }
+
+    fn capture_native_server_authority_for_repository(
+        &self,
+        config: &crate::instance_config::InstanceConfig,
+        config_path: &str,
+        expected_config: &[u8],
+        execution_repository: &str,
+    ) -> Result<(Vec<u8>, NativeAuthoritySnapshot)> {
+        validate_instance_config_path(config_path)?;
+        ensure!(
+            execution_repository == config.instance.repository,
+            "native Server instance differs from the authenticated repository"
+        );
+        let repository: Value = self.get(&format!("/repos/{execution_repository}"))?;
+        ensure!(
+            repository["id"].as_u64() == Some(config.instance.id)
+                && repository["full_name"].as_str() == Some(config.instance.repository.as_str())
+                && repository["default_branch"].as_str()
+                    == Some(config.instance.default_branch.as_str())
+                && repository["owner"]["id"].as_u64()
+                    == Some(config.identities.repository_owner.id),
+            "native Server instance repository identity mismatch"
+        );
+        let default_branch = &config.instance.default_branch;
+        let branch_path = format!(
+            "/repos/{execution_repository}/branches/{}",
+            encode_path_segment(default_branch)
+        );
+        let branch: Value = self.get(&branch_path)?;
+        let source_sha = branch["commit"]["sha"]
+            .as_str()
+            .filter(|sha| crate::policy::validate_sha(sha).is_ok())
+            .context("native Server default branch has no commit SHA")?;
+        let tree: Value = self.get(&format!(
+            "/repos/{execution_repository}/git/trees/{source_sha}?recursive=1"
+        ))?;
+        ensure!(
+            tree["truncated"] == false,
+            "native Server default-branch tree is incomplete"
+        );
+        let entries = tree["tree"]
+            .as_array()
+            .context("native Server default-branch tree is missing")?;
+        let mut paths = vec![config_path.to_owned()];
+        for path in config.workflow_roles.values() {
+            validate_instance_config_path(path)?;
+            paths.push(path.clone());
+        }
+        paths.sort();
+        paths.dedup();
+        for path in &paths {
+            let matches: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["path"].as_str() == Some(path.as_str()))
+                .collect();
+            ensure!(
+                matches.len() == 1
+                    && matches[0]["type"] == "blob"
+                    && matches[0]["mode"] == "100644",
+                "native Server config or role wrapper is missing or not a regular tracked file"
+            );
+        }
+        let remote_config = self.content(execution_repository, config_path, source_sha)?;
+        ensure!(
+            remote_config == expected_config,
+            "native Server config differs from the protected default-branch snapshot"
+        );
+        let current_config = crate::instance_config::InstanceConfig::parse(&remote_config)?;
+        ensure!(
+            current_config.instance.repository == config.instance.repository
+                && current_config.instance.id == config.instance.id
+                && current_config.instance.default_branch == config.instance.default_branch
+                && current_config.workflow_roles == config.workflow_roles,
+            "native Server workflow-role authority changed"
+        );
+        let mut workflows = Vec::new();
+        for (role, path) in &config.workflow_roles {
+            let bytes = self.content(execution_repository, path, source_sha)?;
+            ensure!(
+                bytes.len() <= 256 * 1024,
+                "Server role wrapper exceeds size limit"
+            );
+            workflows.push(NativeWorkflowAuthority {
+                role: *role,
+                path: path.clone(),
+                sha256: crate::hex_encode(sha2::Sha256::digest(&bytes)),
+                pins: workflow_uses_pins(&bytes)?,
+            });
+        }
+        let epoch = first_parent_path_epoch(
+            self,
+            execution_repository,
+            default_branch,
+            source_sha,
+            &paths,
+        )?;
+        ensure!(
+            self.branch_head(execution_repository, default_branch)? == source_sha,
+            "native Server authority ref moved during authority capture"
+        );
+        let snapshot = NativeAuthoritySnapshot {
+            instance_repository: config.instance.repository.clone(),
+            instance_id: config.instance.id,
+            default_branch: config.instance.default_branch.clone(),
+            config_path: config_path.to_owned(),
+            config_sha256: crate::hex_encode(sha2::Sha256::digest(&remote_config)),
+            epoch,
+            workflows,
+        };
+        Ok((remote_config, snapshot))
+    }
+
     fn require_write_target(&self, method: &Method, path: &str) -> Result<()> {
         if let WriteContext::ClientLabel { server } = &self.writes {
             ensure!(
@@ -174,6 +590,20 @@ impl GitHub {
         }
         if let WriteContext::Scratch { candidate_sha } = &self.writes {
             crate::policy::validate_sha(candidate_sha)?;
+        }
+        if let WriteContext::NativeScratch(write) = &self.writes {
+            match write.mode {
+                NativeScratchMode::PolicyCheck => ensure!(
+                    *method == Method::POST
+                        && path == format!("/repos/{}/check-runs", write.target_repository),
+                    "native scratch may only create the exact request-proof check run"
+                ),
+                NativeScratchMode::Securefix => ensure!(
+                    *method == Method::POST
+                        && path == format!("/repos/{}/git/commits", write.target_repository),
+                    "native Securefix may only create a commit for the exact PR head"
+                ),
+            }
         }
         let isolated = matches!(&self.writes, WriteContext::Scratch { .. })
             || (matches!(&self.writes, WriteContext::Production { .. })
@@ -238,14 +668,28 @@ impl GitHub {
     }
 
     fn builder(&self, method: Method, path: &str) -> Result<reqwest::blocking::RequestBuilder> {
+        let token = match &self.writes {
+            WriteContext::NativeScratch(write)
+                if method == Method::POST
+                    && match write.mode {
+                        NativeScratchMode::PolicyCheck => {
+                            path == format!("/repos/{}/check-runs", write.target_repository)
+                        }
+                        NativeScratchMode::Securefix => path == "/graphql",
+                    } =>
+            {
+                self.write_token.as_deref().unwrap_or(&self.token)
+            }
+            _ => &self.token,
+        };
         let mut request = self
             .client
             .request(method, self.url(path)?)
             .header("User-Agent", "securefix")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
-        if !self.token.is_empty() {
-            request = request.bearer_auth(&self.token);
+        if !token.is_empty() {
+            request = request.bearer_auth(token);
         }
         Ok(request)
     }
@@ -256,6 +700,23 @@ impl GitHub {
                 method == Method::POST && path == format!("/repos/{server}/labels"),
                 "client may only create configured server request labels"
             );
+        }
+        if let WriteContext::NativeScratch(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            ensure!(
+                write.mode == NativeScratchMode::PolicyCheck,
+                "Securefix writes must use the validated signed-commit path"
+            );
+            validate_native_scratch_check_body(
+                &method,
+                path,
+                &write.target_repository,
+                &write.head_sha,
+                &write.request_sha256,
+                body.context("native scratch check body is missing")?,
+            )?;
         }
         let read_only_graphql = path == "/graphql"
             && method == Method::POST
@@ -299,6 +760,9 @@ impl GitHub {
                 return Ok(());
             }
             WriteContext::Scratch { .. } => return Ok(()),
+            WriteContext::NativeScratch(_) => {
+                return self.require_native_scratch_current();
+            }
             WriteContext::Production {
                 revision,
                 control_id,
@@ -331,6 +795,141 @@ impl GitHub {
                 && active.identity()? == expected_control
                 && active.policy_sha256 == policy_sha,
             "control revision is no longer current; write denied"
+        );
+        Ok(())
+    }
+
+    fn require_native_scratch_current(&self) -> Result<()> {
+        let WriteContext::NativeScratch(write) = &self.writes else {
+            bail!("native scratch write context is missing");
+        };
+        let NativeScratchWrite {
+            mode,
+            instance_repository,
+            instance_id,
+            instance_owner_id,
+            default_branch,
+            config_path,
+            config_bytes,
+            server_authority,
+            target_repository,
+            target_id,
+            pull_number,
+            head_sha,
+            head_repository_id,
+            base_ref,
+            author_id,
+            author_login,
+            actor_id,
+            actor_login,
+            request_sha256: _,
+            reader_app_id,
+            writer_app_id,
+            policy_check_app_id,
+            caller_workflow_path,
+            caller_workflow_sha,
+            client_workflow_epoch,
+            destination_branch,
+        } = write.as_ref();
+
+        validate_instance_config_path(config_path)?;
+        require_single_repository_installation(
+            self,
+            *target_id,
+            target_repository,
+            *reader_app_id,
+        )?;
+        if let Some(token) = &self.write_token {
+            let write_api = Self::new("https://api.github.com", token.clone())?;
+            require_single_repository_installation(
+                &write_api,
+                *target_id,
+                target_repository,
+                *writer_app_id,
+            )?;
+        }
+
+        let execution_repository = std::env::var("GITHUB_REPOSITORY")
+            .context("missing GITHUB_REPOSITORY for native Server instance")?;
+        ensure!(
+            &execution_repository == instance_repository,
+            "native Server instance differs from the current job repository"
+        );
+        let config = crate::instance_config::InstanceConfig::parse(config_bytes)?;
+        ensure!(
+            config.instance.repository == *instance_repository
+                && config.instance.id == *instance_id
+                && config.instance.default_branch == *default_branch
+                && config.identities.repository_owner.id == *instance_owner_id
+                && config.apps.server_id == *reader_app_id
+                && config.apps.policy_check_id == *policy_check_app_id
+                && native_scratch_app_ids(*mode, *reader_app_id, *policy_check_app_id).1
+                    == *writer_app_id
+                && config.identities.owner.id == *actor_id
+                && config.identities.owner.login == *actor_login
+                && config.identities.owner.id == *author_id
+                && config.identities.owner.login == *author_login
+                && config.repositories.iter().any(|repository| {
+                    repository.repository == *target_repository
+                        && repository.id == *target_id
+                        && repository.capabilities.contains(&match mode {
+                            NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
+                            NativeScratchMode::Securefix => crate::policy::Capability::Securefix,
+                        })
+                }),
+            "native request no longer matches the captured owner and repository policy"
+        );
+        let read_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+        ensure!(!read_token.is_empty(), "GITHUB_TOKEN is empty");
+        let server_reader = Self::new("https://api.github.com", read_token)?;
+        validate_native_test_host_context(&config, *mode)?;
+        let (remote_config, current_authority) =
+            server_reader.capture_native_server_authority(&config, config_path, config_bytes)?;
+        ensure!(
+            remote_config.as_slice() == config_bytes.as_slice(),
+            "native Server config changed before write"
+        );
+        require_native_authority_unchanged(server_authority, &current_authority)
+            .context("native Server deployment authority changed before write")?;
+        let current_client_epoch = capture_native_client_workflow_epoch(
+            self,
+            target_repository,
+            *target_id,
+            base_ref,
+            caller_workflow_path,
+            caller_workflow_sha,
+        )?;
+        require_native_client_workflow_epoch_unchanged(
+            client_workflow_epoch,
+            &current_client_epoch,
+        )?;
+        let target: Value = self.get(&format!("/repos/{target_repository}"))?;
+        ensure!(
+            target["id"].as_u64() == Some(*target_id)
+                && target["full_name"].as_str() == Some(target_repository.as_str())
+                && target["default_branch"].as_str() == Some(base_ref.as_str()),
+            "native request target repository identity changed"
+        );
+        let pull: Value = self.get(&format!("/repos/{target_repository}/pulls/{pull_number}"))?;
+        ensure!(
+            pull["number"].as_u64() == Some(*pull_number)
+                && pull["state"] == "open"
+                && pull["base"]["repo"]["id"].as_u64() == Some(*target_id)
+                && pull["base"]["repo"]["full_name"].as_str() == Some(target_repository.as_str())
+                && pull["base"]["ref"].as_str() == Some(base_ref.as_str())
+                && pull["head"]["sha"].as_str() == Some(head_sha.as_str())
+                && match mode {
+                    NativeScratchMode::PolicyCheck => destination_branch.is_none(),
+                    NativeScratchMode::Securefix => {
+                        pull["head"]["ref"].as_str() == destination_branch.as_deref()
+                    }
+                }
+                && pull["head"]["repo"]["id"].as_u64() == Some(*head_repository_id)
+                && pull["user"]["id"].as_u64() == Some(*author_id)
+                && pull["user"]["login"].as_str() == Some(author_login.as_str())
+                && *author_id == *actor_id
+                && author_login == actor_login,
+            "native request PR is closed, retargeted, or has a different head or identity"
         );
         Ok(())
     }
@@ -388,6 +987,14 @@ impl GitHub {
         number: u64,
         comment_id: u64,
     ) -> Result<()> {
+        ensure!(
+            !matches!(
+                &self.writes,
+                WriteContext::NativeScratch(write)
+                    if write.mode == NativeScratchMode::Securefix
+            ),
+            "native Securefix writer cannot mutate policy comments"
+        );
         crate::policy::validate_repository(repository)?;
         ensure!(
             number > 0 && comment_id > 0,
@@ -505,6 +1112,15 @@ impl GitHub {
                         && part != ".."
                         && !part.eq_ignore_ascii_case(".git")),
                 "invalid commit file path"
+            );
+        }
+        if let WriteContext::NativeScratch(write) = &self.writes {
+            ensure!(
+                write.mode == NativeScratchMode::Securefix
+                    && repository == write.target_repository
+                    && write.destination_branch.as_deref() == Some(branch)
+                    && expected_head == write.head_sha,
+                "native Securefix commit differs from the exact target PR head"
             );
         }
         ensure!(
@@ -680,7 +1296,10 @@ impl GitHub {
     }
     pub fn upload(&self, path: &str, bytes: Vec<u8>, content_type: &str) -> Result<Value> {
         ensure!(
-            !matches!(self.writes, WriteContext::Scratch { .. }),
+            !matches!(
+                self.writes,
+                WriteContext::Scratch { .. } | WriteContext::NativeScratch(_)
+            ),
             "integration cannot upload release assets"
         );
         self.require_current_revision()?;
@@ -717,6 +1336,688 @@ impl GitHub {
             .replace('\n', "");
         Ok(base64::engine::general_purpose::STANDARD.decode(content)?)
     }
+
+    pub fn branch_head(&self, repository: &str, branch: &str) -> Result<String> {
+        crate::policy::validate_repository(repository)?;
+        crate::config::validate_branch(branch)?;
+        let commit: Value = self.get(&format!(
+            "/repos/{repository}/commits/{}",
+            encode_path_segment(branch)
+        ))?;
+        let sha = commit["sha"]
+            .as_str()
+            .context("branch commit SHA is missing")?;
+        crate::policy::validate_sha(sha)?;
+        Ok(sha.to_owned())
+    }
+}
+
+fn git_authorization_header(token: &str) -> String {
+    use base64::Engine;
+
+    let credentials = format!("x-access-token:{token}");
+    format!(
+        "Authorization: Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(credentials)
+    )
+}
+
+fn isolated_git_command(
+    repository: &Path,
+    args: &[&str],
+    global_config: &Path,
+    hooks: &Path,
+    token: Option<&str>,
+) -> Result<Command> {
+    let isolation_dir = global_config
+        .parent()
+        .context("isolated Git config has no parent directory")?;
+    let mut command = Command::new("git");
+    command
+        .env_clear()
+        .current_dir(repository)
+        .args(args)
+        .stdin(Stdio::null())
+        .env("PATH", ISOLATED_GIT_PATH)
+        .env("HOME", isolation_dir)
+        .env("XDG_CONFIG_HOME", isolation_dir)
+        .env("TMPDIR", isolation_dir)
+        .env("TMP", isolation_dir)
+        .env("TEMP", isolation_dir)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", global_config)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
+        .env("GIT_CONFIG_COUNT", if token.is_some() { "2" } else { "1" })
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", hooks);
+    if let Some(token) = token {
+        command
+            .env("GIT_CONFIG_KEY_1", "http.https://github.com/.extraheader")
+            .env("GIT_CONFIG_VALUE_1", git_authorization_header(token));
+    }
+    Ok(command)
+}
+
+fn git_output(
+    repository: &Path,
+    args: &[&str],
+    global_config: &Path,
+    hooks: &Path,
+    token: Option<&str>,
+    max_output: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let mut child = isolated_git_command(repository, args, global_config, hooks, token)?
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start isolated Git command")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("isolated Git stdout is unavailable")?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(max_output as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+
+    let mut output = None;
+    loop {
+        if output.is_none()
+            && let Ok(result) = receiver.try_recv()
+        {
+            let bytes = match result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err(error).context("read isolated Git output");
+                }
+            };
+            if bytes.len() > max_output {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                bail!("isolated Git output exceeded size limit");
+            }
+            output = Some(bytes);
+        }
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(error).context("check isolated Git command");
+            }
+        };
+        if let Some(status) = status {
+            if output.is_none() {
+                let result = receiver.recv_timeout(Duration::from_secs(1));
+                let bytes = match result {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(error)) => {
+                        let _ = reader.join();
+                        return Err(error).context("read isolated Git output");
+                    }
+                    Err(error) => {
+                        let _ = reader.join();
+                        return Err(error).context("isolated Git output did not finish");
+                    }
+                };
+                ensure!(
+                    bytes.len() <= max_output,
+                    "isolated Git output exceeded size limit"
+                );
+                output = Some(bytes);
+            }
+            reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("isolated Git output reader failed"))?;
+            ensure!(status.success(), "isolated Git command failed");
+            return output.context("isolated Git output is missing");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            bail!("isolated Git operation timed out");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn git_status(
+    repository: &Path,
+    args: &[&str],
+    global_config: &Path,
+    hooks: &Path,
+    token: Option<&str>,
+    object_directory: &Path,
+    deadline: Instant,
+) -> Result<()> {
+    let mut child = isolated_git_command(repository, args, global_config, hooks, token)?
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start isolated Git operation")?;
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("check isolated Git operation");
+            }
+        };
+        if let Some(status) = status {
+            ensure!(status.success(), "isolated Git operation failed");
+            let object_bytes = git_object_store_size(object_directory)?;
+            ensure!(
+                object_bytes <= MAX_AUTHORITY_OBJECT_BYTES,
+                "authority Git object store exceeded size limit"
+            );
+            return Ok(());
+        }
+        let object_bytes = match git_object_store_size(object_directory) {
+            Ok(size) => size,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("check authority Git object store size");
+            }
+        };
+        if object_bytes > MAX_AUTHORITY_OBJECT_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("authority Git object store exceeded size limit");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("isolated Git operation timed out");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn git_object_store_size(directory: &Path) -> Result<u64> {
+    let root = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("inspect Git object store"),
+    };
+    ensure!(
+        root.is_dir() && !root.file_type().is_symlink(),
+        "Git object store root is not a directory"
+    );
+    let mut pending = vec![directory.to_owned()];
+    let mut total = 0u64;
+    while let Some(current) = pending.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("read Git object store"),
+        };
+        for entry in entries {
+            let entry = entry.context("read Git object store entry")?;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error).context("inspect Git object store entry"),
+            };
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let size = match entry.metadata() {
+                    Ok(metadata) => metadata.len(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error).context("read Git object size"),
+                };
+                total = total
+                    .checked_add(size)
+                    .context("Git object store size overflow")?;
+            } else {
+                bail!("unexpected file type in Git object store");
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn first_parent_path_epoch_at(
+    repository: &Path,
+    revision: &str,
+    paths: &[String],
+    global_config: &Path,
+    hooks: &Path,
+    deadline: Instant,
+) -> Result<String> {
+    crate::policy::validate_sha(revision)?;
+    ensure!(!paths.is_empty(), "authority path set is empty");
+    for path in paths {
+        validate_instance_config_path(path)?;
+    }
+    let shallow = git_output(
+        repository,
+        &["rev-parse", "--is-shallow-repository"],
+        global_config,
+        hooks,
+        None,
+        16,
+        deadline,
+    )?;
+    ensure!(
+        shallow.as_slice() == b"false\n",
+        "authority history is shallow"
+    );
+    let history = git_output(
+        repository,
+        &["rev-list", "--first-parent", "--parents", revision],
+        global_config,
+        hooks,
+        None,
+        MAX_AUTHORITY_HISTORY_BYTES,
+        deadline,
+    )?;
+    let history = std::str::from_utf8(&history).context("invalid Git history output")?;
+    let mut commits = Vec::<(String, Option<String>)>::new();
+    for line in history.lines() {
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        ensure!(!fields.is_empty(), "empty Git history line");
+        crate::policy::validate_sha(fields[0])?;
+        for parent in &fields[1..] {
+            crate::policy::validate_sha(parent)?;
+        }
+        commits.push((
+            fields[0].to_owned(),
+            fields.get(1).map(|parent| (*parent).to_owned()),
+        ));
+    }
+    ensure!(
+        commits.first().is_some_and(|commit| commit.0 == revision),
+        "Git history does not start at the requested snapshot"
+    );
+    for pair in commits.windows(2) {
+        ensure!(
+            pair[0].1.as_deref() == Some(pair[1].0.as_str()),
+            "Git first-parent history is incomplete"
+        );
+    }
+    ensure!(
+        commits.last().is_some_and(|commit| commit.1.is_none()),
+        "Git first-parent history did not reach its root"
+    );
+
+    let path_specs = paths.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut epoch = None;
+    let mut diff_bytes = 0usize;
+    for (sha, parent) in &commits {
+        let mut args = if let Some(parent) = parent {
+            vec![
+                "--literal-pathspecs",
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                parent.as_str(),
+                sha.as_str(),
+                "--",
+            ]
+        } else {
+            vec![
+                "--literal-pathspecs",
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                sha.as_str(),
+                "--",
+            ]
+        };
+        args.extend_from_slice(&path_specs);
+        let changed = git_output(
+            repository,
+            &args,
+            global_config,
+            hooks,
+            None,
+            MAX_GIT_OUTPUT_BYTES,
+            deadline,
+        )?;
+        diff_bytes = diff_bytes
+            .checked_add(changed.len())
+            .context("authority diff output size overflow")?;
+        ensure!(
+            diff_bytes <= MAX_AUTHORITY_DIFF_BYTES,
+            "authority diff output exceeded size limit"
+        );
+        for path in changed
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            ensure!(
+                paths.iter().any(|candidate| candidate.as_bytes() == path),
+                "Git returned an unexpected authority path"
+            );
+            epoch.get_or_insert_with(|| sha.clone());
+        }
+        if epoch.is_some() {
+            break;
+        }
+    }
+    epoch.context("authority paths have no first-parent history")
+}
+
+fn first_parent_path_epoch(
+    api: &GitHub,
+    repository: &str,
+    branch: &str,
+    revision: &str,
+    paths: &[String],
+) -> Result<String> {
+    crate::policy::validate_repository(repository)?;
+    crate::config::validate_branch(branch)?;
+    crate::policy::validate_sha(revision)?;
+    ensure!(!paths.is_empty(), "authority path set is empty");
+    for path in paths {
+        validate_instance_config_path(path)?;
+    }
+    ensure!(
+        !api.token.is_empty() && !api.token.contains(['\r', '\n']),
+        "a valid GitHub read token is required for first-parent history"
+    );
+
+    let deadline = Instant::now() + MAX_GIT_OPERATION_TIME;
+    let directory = tempfile::tempdir().context("create isolated authority history repository")?;
+    let repository_dir = directory.path().join("repository.git");
+    let object_directory = repository_dir.join("objects");
+    let global_config = directory.path().join("global-config");
+    let hooks = directory.path().join("empty-hooks");
+    std::fs::write(
+        &global_config,
+        "[credential]\n\thelper =\n[http]\n\tfollowRedirects = false\n[protocol]\n\tallow = never\n[protocol \"https\"]\n\tallow = always\n",
+    )?;
+    std::fs::create_dir(&hooks)?;
+    git_output(
+        directory.path(),
+        &[
+            "init",
+            "--bare",
+            "--quiet",
+            "--template=",
+            repository_dir.to_str().context("Git path is not UTF-8")?,
+        ],
+        &global_config,
+        &hooks,
+        None,
+        MAX_GIT_OUTPUT_BYTES,
+        deadline,
+    )?;
+    ensure!(
+        git_object_store_size(&object_directory)? == 0,
+        "new authority Git object store is not empty"
+    );
+    let remote = format!("https://github.com/{repository}.git");
+    git_output(
+        &repository_dir,
+        &["remote", "add", "origin", &remote],
+        &global_config,
+        &hooks,
+        None,
+        MAX_GIT_OUTPUT_BYTES,
+        deadline,
+    )?;
+    git_status(
+        &repository_dir,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--filter=blob:none",
+            "origin",
+            revision,
+        ],
+        &global_config,
+        &hooks,
+        Some(&api.token),
+        &object_directory,
+        deadline,
+    )?;
+    let fetched = git_output(
+        &repository_dir,
+        &["rev-parse", "FETCH_HEAD^{commit}"],
+        &global_config,
+        &hooks,
+        None,
+        64,
+        deadline,
+    )?;
+    ensure!(
+        std::str::from_utf8(&fetched)?.trim() == revision,
+        "Git did not fetch the exact authority snapshot"
+    );
+    first_parent_path_epoch_at(
+        &repository_dir,
+        revision,
+        paths,
+        &global_config,
+        &hooks,
+        deadline,
+    )
+}
+
+pub fn capture_native_client_workflow_epoch(
+    api: &GitHub,
+    repository_name: &str,
+    repository_id: u64,
+    default_branch: &str,
+    workflow_path: &str,
+    workflow_revision: &str,
+) -> Result<String> {
+    crate::policy::validate_repository(repository_name)?;
+    ensure!(repository_id > 0, "invalid authority repository ID");
+    crate::config::validate_branch(default_branch)?;
+    crate::policy::validate_sha(workflow_revision)?;
+    let workflow_name = workflow_path
+        .strip_prefix(".github/workflows/")
+        .context("caller workflow path is outside .github/workflows")?;
+    ensure!(
+        workflow_name.ends_with(".yml")
+            && !workflow_name.is_empty()
+            && !workflow_path.contains(['\\', '%', '?', '#'])
+            && workflow_name
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+            && workflow_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        "invalid caller workflow path"
+    );
+
+    let repository: Value = api.get(&format!("/repos/{repository_name}"))?;
+    ensure!(
+        repository["id"].as_u64() == Some(repository_id)
+            && repository["full_name"].as_str() == Some(repository_name)
+            && repository["default_branch"].as_str() == Some(default_branch),
+        "native request repository or default branch identity changed"
+    );
+    let snapshot_sha = api.branch_head(repository_name, default_branch)?;
+    let workflow_bytes = api.content(repository_name, workflow_path, &snapshot_sha)?;
+    let captured_workflow = api.content(repository_name, workflow_path, workflow_revision)?;
+    ensure!(
+        workflow_bytes == captured_workflow,
+        "caller workflow differs from its protected default-branch version"
+    );
+    let compare: Value = api.get(&format!(
+        "/repos/{repository_name}/compare/{workflow_revision}...{snapshot_sha}"
+    ))?;
+    ensure!(
+        matches!(compare["status"].as_str(), Some("ahead" | "identical")),
+        "caller workflow revision is not on default-branch history"
+    );
+    let workflow_epoch = first_parent_path_epoch(
+        api,
+        repository_name,
+        default_branch,
+        &snapshot_sha,
+        &[workflow_path.to_owned()],
+    )?;
+    ensure!(
+        api.branch_head(repository_name, default_branch)? == snapshot_sha,
+        "instance default branch moved during authority capture"
+    );
+    Ok(workflow_epoch)
+}
+
+pub fn require_native_authority_unchanged(
+    captured: &NativeAuthoritySnapshot,
+    current: &NativeAuthoritySnapshot,
+) -> Result<()> {
+    ensure!(
+        captured == current,
+        "native request configuration or caller authority history changed"
+    );
+    Ok(())
+}
+
+pub fn validate_native_authority_snapshot(snapshot: &NativeAuthoritySnapshot) -> Result<()> {
+    crate::policy::validate_repository(&snapshot.instance_repository)?;
+    validate_instance_config_path(&snapshot.config_path)?;
+    crate::config::validate_branch(&snapshot.default_branch)?;
+    ensure!(
+        snapshot.instance_id > 0,
+        "native Server instance ID is invalid"
+    );
+    validate_sha256(&snapshot.config_sha256, "native Server config digest")?;
+    crate::policy::validate_sha(&snapshot.epoch)?;
+    ensure!(
+        !snapshot.workflows.is_empty() && snapshot.workflows.len() <= 16,
+        "native Server workflow authority set is invalid"
+    );
+    let mut roles = std::collections::BTreeSet::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for workflow in &snapshot.workflows {
+        validate_instance_config_path(&workflow.path)?;
+        validate_sha256(&workflow.sha256, "native Server workflow digest")?;
+        ensure!(
+            roles.insert(workflow.role) && paths.insert(workflow.path.as_str()),
+            "native Server workflow authority contains duplicates"
+        );
+        ensure!(workflow.pins.len() <= 256, "too many Server workflow pins");
+        for pin in &workflow.pins {
+            let (_, revision) = pin
+                .rsplit_once('@')
+                .context("native Server workflow pin is malformed")?;
+            crate::policy::validate_sha(revision)
+                .context("native Server workflow pin is not a full SHA")?;
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_native_test_host_context(
+    config: &crate::instance_config::InstanceConfig,
+    mode: NativeScratchMode,
+) -> Result<()> {
+    let expected_ref = format!("refs/heads/{}", config.instance.default_branch);
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(config.instance.repository.as_str())
+            && std::env::var("GITHUB_REF").as_deref() == Ok(expected_ref.as_str())
+            && std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("workflow_dispatch"),
+        "native test authority requires the configured Server repository's protected workflow-dispatch host"
+    );
+    let role = match mode {
+        NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
+        NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
+    };
+    let workflow_path = config
+        .workflow_roles
+        .get(&role)
+        .context("native Server test host role is not configured")?;
+    let expected_workflow_ref = format!(
+        "{}/{workflow_path}@{expected_ref}",
+        config.instance.repository
+    );
+    ensure!(
+        std::env::var("GITHUB_WORKFLOW_REF").as_deref() == Ok(expected_workflow_ref.as_str()),
+        "native test authority requires the configured workflow on the protected Server branch"
+    );
+    Ok(())
+}
+
+pub fn validate_native_server_execution_workflow(
+    snapshot: &NativeAuthoritySnapshot,
+    mode: NativeScratchMode,
+    workflow_ref: &str,
+    workflow_sha: &str,
+    workflow_bytes: &[u8],
+) -> Result<()> {
+    validate_native_authority_snapshot(snapshot)?;
+    crate::policy::validate_sha(workflow_sha)?;
+    let role = match mode {
+        NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
+        NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
+    };
+    let workflow = snapshot
+        .workflows
+        .iter()
+        .find(|workflow| workflow.role == role)
+        .context("Server instance does not configure the executing workflow role")?;
+    let expected = format!(
+        "{}/{}@refs/heads/{}",
+        snapshot.instance_repository, workflow.path, snapshot.default_branch
+    );
+    ensure!(
+        workflow_ref == expected,
+        "native Server execution is not the configured protected-default-branch workflow"
+    );
+    ensure!(
+        workflow_bytes.len() <= 256 * 1024
+            && crate::hex_encode(sha2::Sha256::digest(workflow_bytes)) == workflow.sha256
+            && workflow_uses_pins(workflow_bytes)? == workflow.pins,
+        "native Server workflow revision differs from the captured role wrapper"
+    );
+    Ok(())
+}
+
+fn validate_sha256(value: &str, description: &str) -> Result<()> {
+    ensure!(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "{description} is not canonical SHA-256"
+    );
+    Ok(())
+}
+
+pub fn require_native_client_workflow_epoch_unchanged(captured: &str, current: &str) -> Result<()> {
+    crate::policy::validate_sha(captured)?;
+    crate::policy::validate_sha(current)?;
+    ensure!(
+        captured == current,
+        "Client workflow authority changed since request capture"
+    );
+    Ok(())
 }
 
 fn testing_label_cleanup_matches(
@@ -792,6 +2093,154 @@ fn testing_label_cleanup_matches(
         && described_run.to_string() == description.rsplit('/').next().unwrap_or_default())
 }
 
+fn require_single_repository_installation(
+    api: &GitHub,
+    repository_id: u64,
+    repository_name: &str,
+    expected_app_id: u64,
+) -> Result<()> {
+    let installation: Value = api.get("/installation")?;
+    ensure!(
+        installation["app_id"].as_u64() == Some(expected_app_id),
+        "native request token belongs to a different Server App"
+    );
+    let installation: Value = api.get("/installation/repositories?per_page=100")?;
+    let repositories = installation["repositories"]
+        .as_array()
+        .context("native request token is not an installation token")?;
+    ensure!(
+        installation["total_count"].as_u64() == Some(repositories.len() as u64)
+            && repositories.len() == 1
+            && repositories[0]["id"].as_u64() == Some(repository_id)
+            && repositories[0]["full_name"].as_str() == Some(repository_name),
+        "native request token must be installed only on the configured Client repository"
+    );
+    Ok(())
+}
+
+fn native_scratch_app_ids(
+    mode: NativeScratchMode,
+    server_app_id: u64,
+    policy_check_app_id: u64,
+) -> (u64, u64) {
+    let writer = match mode {
+        NativeScratchMode::PolicyCheck => policy_check_app_id,
+        NativeScratchMode::Securefix => server_app_id,
+    };
+    (server_app_id, writer)
+}
+
+fn validate_instance_config_path(path: &str) -> Result<()> {
+    ensure!(
+        !path.is_empty()
+            && path.len() <= 1024
+            && !path.starts_with('/')
+            && path.split('/').all(|component| {
+                !component.is_empty()
+                    && component != "."
+                    && component != ".."
+                    && component != ".git"
+                    && component
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }),
+        "invalid native Server config path"
+    );
+    Ok(())
+}
+
+fn validate_native_scratch_check_body(
+    method: &Method,
+    path: &str,
+    target_repository: &str,
+    head_sha: &str,
+    request_sha256: &str,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::POST
+            && path == format!("/repos/{target_repository}/check-runs")
+            && body == &native_policy_check_body(head_sha, request_sha256),
+        "native scratch check body does not match the verified request"
+    );
+    Ok(())
+}
+
+pub fn native_policy_check_body(head_sha: &str, request_sha256: &str) -> Value {
+    serde_json::json!({
+        "name": NATIVE_POLICY_CHECK_NAME,
+        "head_sha": head_sha,
+        "external_id": request_sha256,
+        "status": "completed",
+        "conclusion": "success",
+        "output": {
+            "title": NATIVE_POLICY_CHECK_TITLE,
+            "summary": NATIVE_POLICY_CHECK_SUMMARY
+        }
+    })
+}
+
+pub fn validate_native_instance_config_path(path: &str) -> Result<()> {
+    validate_instance_config_path(path)
+}
+
+fn workflow_uses_pins(bytes: &[u8]) -> Result<Vec<String>> {
+    fn visit(value: &serde_yaml::Value, pins: &mut Vec<String>) -> Result<()> {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                for (key, value) in mapping {
+                    if key.as_str() == Some("uses") {
+                        let reference = value
+                            .as_str()
+                            .context("workflow uses value is not a string")?;
+                        if reference.starts_with("./") || reference.starts_with("$/") {
+                            bail!("Server role wrapper has an unpinned local dependency");
+                        }
+                        let (_, revision) = reference
+                            .rsplit_once('@')
+                            .context("workflow dependency is not pinned")?;
+                        crate::policy::validate_sha(revision)
+                            .context("workflow dependency is not pinned to a full SHA")?;
+                        pins.push(reference.to_owned());
+                    } else {
+                        visit(value, pins)?;
+                    }
+                }
+            }
+            serde_yaml::Value::Sequence(values) => {
+                for value in values {
+                    visit(value, pins)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    ensure!(
+        bytes.len() <= 256 * 1024,
+        "workflow role exceeds size limit"
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_slice(bytes).context("parse workflow role")?;
+    let mut pins = Vec::new();
+    visit(&yaml, &mut pins)?;
+    pins.sort();
+    pins.dedup();
+    Ok(pins)
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
 fn read_only_query(query: &str) -> bool {
     let query = query.trim_start();
     query
@@ -810,6 +2259,689 @@ fn bounded_read(reader: impl Read, max: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_CONFIG_PATH: &str = "securefix-server.toml";
+    const TEST_WORKFLOW_PATH: &str = ".github/workflows/policy-check.yml";
+
+    fn test_git(repository: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .current_dir(repository)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    #[test]
+    fn git_fetch_uses_basic_token_authorization() {
+        assert_eq!(
+            git_authorization_header("ghs_test"),
+            "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3Rlc3Q="
+        );
+    }
+
+    fn test_commit_file(repository: &Path, path: &str, contents: &str, message: &str) -> String {
+        let file = repository.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, contents).unwrap();
+        test_git(repository, &["add", "--", path]);
+        test_git(
+            repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Securefix Test",
+                "-c",
+                "user.email=securefix-test@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+        String::from_utf8(test_git(repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn test_authority_snapshot(
+        repository: &Path,
+        revision: &str,
+        global_config: &Path,
+        hooks: &Path,
+    ) -> NativeAuthoritySnapshot {
+        let config = test_git(
+            repository,
+            &["show", &format!("{revision}:{TEST_CONFIG_PATH}")],
+        );
+        let workflow = test_git(
+            repository,
+            &["show", &format!("{revision}:{TEST_WORKFLOW_PATH}")],
+        );
+        let epoch = first_parent_path_epoch_at(
+            repository,
+            revision,
+            &[TEST_CONFIG_PATH.to_owned(), TEST_WORKFLOW_PATH.to_owned()],
+            global_config,
+            hooks,
+            Instant::now() + MAX_GIT_OPERATION_TIME,
+        )
+        .unwrap();
+        NativeAuthoritySnapshot {
+            instance_repository: "example-org/securefix-server".into(),
+            instance_id: 404,
+            default_branch: "main".into(),
+            config_path: TEST_CONFIG_PATH.into(),
+            config_sha256: crate::hex_encode(sha2::Sha256::digest(config)),
+            epoch,
+            workflows: vec![NativeWorkflowAuthority {
+                role: crate::instance_config::WorkflowRole::PolicyCheck,
+                path: TEST_WORKFLOW_PATH.into(),
+                sha256: crate::hex_encode(sha2::Sha256::digest(workflow)),
+                pins: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn authority_fetch_pins_exact_sha_and_reads_complete_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let bare_remote = directory.path().join("remote.git");
+        let checkout = directory.path().join("authority.git");
+        test_git(
+            directory.path(),
+            &[
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+                source.to_str().unwrap(),
+            ],
+        );
+        test_commit_file(
+            &source,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"test\"\n",
+            "initial config",
+        );
+        let revision = test_commit_file(
+            &source,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@old\n",
+            "initial workflow",
+        );
+        test_git(
+            directory.path(),
+            &["init", "--bare", "--quiet", bare_remote.to_str().unwrap()],
+        );
+        test_git(
+            &source,
+            &["remote", "add", "origin", bare_remote.to_str().unwrap()],
+        );
+        test_git(
+            &source,
+            &["push", "--quiet", "origin", "HEAD:refs/heads/main"],
+        );
+
+        let global_config = directory.path().join("global-config");
+        let hooks = directory.path().join("empty-hooks");
+        std::fs::write(
+            &global_config,
+            "[credential]\n\thelper =\n[protocol]\n\tallow = never\n[protocol \"file\"]\n\tallow = always\n",
+        )
+        .unwrap();
+        std::fs::create_dir(&hooks).unwrap();
+        let deadline = Instant::now() + MAX_GIT_OPERATION_TIME;
+        git_output(
+            directory.path(),
+            &[
+                "init",
+                "--bare",
+                "--quiet",
+                "--template=",
+                checkout.to_str().unwrap(),
+            ],
+            &global_config,
+            &hooks,
+            None,
+            MAX_GIT_OUTPUT_BYTES,
+            deadline,
+        )
+        .unwrap();
+        let file_remote = format!("file://{}", bare_remote.display());
+        git_output(
+            &checkout,
+            &["remote", "add", "origin", &file_remote],
+            &global_config,
+            &hooks,
+            None,
+            MAX_GIT_OUTPUT_BYTES,
+            deadline,
+        )
+        .unwrap();
+        let objects = checkout.join("objects");
+        git_status(
+            &checkout,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--filter=blob:none",
+                "origin",
+                &revision,
+            ],
+            &global_config,
+            &hooks,
+            None,
+            &objects,
+            deadline,
+        )
+        .unwrap();
+        let fetched = git_output(
+            &checkout,
+            &["rev-parse", "FETCH_HEAD^{commit}"],
+            &global_config,
+            &hooks,
+            None,
+            64,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(std::str::from_utf8(&fetched).unwrap().trim(), revision);
+        let epoch = first_parent_path_epoch_at(
+            &checkout,
+            &revision,
+            &[TEST_CONFIG_PATH.to_owned(), TEST_WORKFLOW_PATH.to_owned()],
+            &global_config,
+            &hooks,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(epoch, revision);
+        assert!(git_object_store_size(&objects).unwrap() <= MAX_AUTHORITY_OBJECT_BYTES);
+    }
+
+    fn native_scratch_api() -> GitHub {
+        let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        api.writes = WriteContext::NativeScratch(Box::new(NativeScratchWrite {
+            mode: NativeScratchMode::PolicyCheck,
+            instance_repository: "civitaspo/securefix-server".into(),
+            instance_id: 1,
+            instance_owner_id: 2,
+            default_branch: "main".into(),
+            config_path: "securefix-server.toml".into(),
+            config_bytes: vec![],
+            server_authority: NativeAuthoritySnapshot {
+                instance_repository: "civitaspo/securefix-server".into(),
+                instance_id: 1,
+                default_branch: "main".into(),
+                config_path: "securefix-server.toml".into(),
+                config_sha256: "d".repeat(64),
+                epoch: "e".repeat(40),
+                workflows: vec![],
+            },
+            target_repository: SCRATCH_REPOSITORY.into(),
+            target_id: 3,
+            pull_number: 4,
+            head_sha: "b".repeat(40),
+            head_repository_id: 3,
+            base_ref: "main".into(),
+            author_id: 5,
+            author_login: "maintainer".into(),
+            actor_id: 5,
+            actor_login: "maintainer".into(),
+            request_sha256: "c".repeat(64),
+            reader_app_id: 6,
+            writer_app_id: 7,
+            policy_check_app_id: 7,
+            caller_workflow_path: ".github/workflows/policy-check.yml".into(),
+            caller_workflow_sha: "2".repeat(40),
+            client_workflow_epoch: "3".repeat(40),
+            destination_branch: None,
+        }));
+        api
+    }
+
+    fn native_securefix_api() -> GitHub {
+        let mut api = native_scratch_api();
+        let WriteContext::NativeScratch(write) = &api.writes else {
+            unreachable!();
+        };
+        let mut write = write.as_ref().clone();
+        write.mode = NativeScratchMode::Securefix;
+        write.destination_branch = Some("scratch".to_owned());
+        api.writes = WriteContext::NativeScratch(Box::new(write));
+        api
+    }
+
+    #[test]
+    fn native_scratch_writer_allows_only_one_bound_check_run() {
+        let api = native_scratch_api();
+        let path = format!("/repos/{SCRATCH_REPOSITORY}/check-runs");
+        assert!(api.require_write_target(&Method::POST, &path).is_ok());
+        for (method, path) in [
+            (Method::PATCH, path.as_str()),
+            (Method::DELETE, path.as_str()),
+            (Method::POST, "/graphql"),
+            (Method::POST, "/repos/other/repo/check-runs"),
+        ] {
+            assert!(api.require_write_target(&method, path).is_err());
+        }
+        assert!(
+            api.upload(
+                "https://uploads.github.com/repos/owner/repo/releases/1/assets?name=x",
+                Vec::new(),
+                "application/octet-stream"
+            )
+            .is_err()
+        );
+        assert!(
+            api.create_commit(
+                SCRATCH_REPOSITORY,
+                "fixture",
+                &"b".repeat(40),
+                "test",
+                BTreeMap::from([("file.txt".into(), b"x".to_vec())]),
+                vec![],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_securefix_writer_allows_only_a_commit_to_the_bound_pr_branch_and_head() {
+        let api = native_securefix_api();
+        let path = format!("/repos/{SCRATCH_REPOSITORY}/git/commits");
+        assert!(api.require_write_target(&Method::POST, &path).is_ok());
+        assert!(
+            api.require_write_target(
+                &Method::POST,
+                &format!("/repos/{SCRATCH_REPOSITORY}/check-runs")
+            )
+            .is_err()
+        );
+        assert!(api.require_write_target(&Method::POST, "/graphql").is_err());
+        let mut additions = std::collections::BTreeMap::new();
+        additions.insert("file.txt".to_owned(), b"contents".to_vec());
+        assert!(
+            api.create_commit(
+                SCRATCH_REPOSITORY,
+                "different-branch",
+                &"b".repeat(40),
+                "Securefix",
+                additions.clone(),
+                Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            api.create_commit(
+                SCRATCH_REPOSITORY,
+                "scratch",
+                &"a".repeat(40),
+                "Securefix",
+                additions,
+                Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            api.post::<Value>(
+                &format!("/repos/{SCRATCH_REPOSITORY}/git/commits"),
+                &serde_json::json!({})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_modes_keep_server_reader_policy_check_and_securefix_writer_apps_distinct() {
+        assert_eq!(
+            native_scratch_app_ids(NativeScratchMode::PolicyCheck, 6, 7),
+            (6, 7)
+        );
+        assert_eq!(
+            native_scratch_app_ids(NativeScratchMode::Securefix, 6, 7),
+            (6, 6)
+        );
+    }
+
+    #[test]
+    fn native_server_execution_is_bound_to_the_configured_role_and_protected_revision() {
+        let snapshot = NativeAuthoritySnapshot {
+            instance_repository: "example-org/securefix-server".to_owned(),
+            instance_id: 404,
+            default_branch: "main".to_owned(),
+            config_path: "securefix-server.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![NativeWorkflowAuthority {
+                role: crate::instance_config::WorkflowRole::PolicyCheck,
+                path: ".github/workflows/policy-check.yml".to_owned(),
+                sha256: "d".repeat(64),
+                pins: vec![],
+            }],
+        };
+        let ref_path =
+            "example-org/securefix-server/.github/workflows/policy-check.yml@refs/heads/main";
+        let workflow_bytes = b"name: policy check\n";
+        let mut snapshot = snapshot;
+        snapshot.workflows[0].sha256 = crate::hex_encode(sha2::Sha256::digest(workflow_bytes));
+        assert!(
+            validate_native_server_execution_workflow(
+                &snapshot,
+                NativeScratchMode::PolicyCheck,
+                ref_path,
+                &"a".repeat(40),
+                workflow_bytes,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_native_server_execution_workflow(
+                &snapshot,
+                NativeScratchMode::PolicyCheck,
+                "example-org/securefix-server/.github/workflows/other.yml@refs/heads/main",
+                &"a".repeat(40),
+                workflow_bytes,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_server_execution_workflow(
+                &snapshot,
+                NativeScratchMode::PolicyCheck,
+                ref_path,
+                "not-a-sha",
+                workflow_bytes,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_server_execution_workflow(
+                &snapshot,
+                NativeScratchMode::PolicyCheck,
+                ref_path,
+                &"a".repeat(40),
+                b"name: changed\n",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_server_execution_workflow(
+                &snapshot,
+                NativeScratchMode::Securefix,
+                ref_path,
+                &"a".repeat(40),
+                workflow_bytes,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_scratch_uses_separate_client_read_and_check_write_tokens() {
+        let mut api = native_scratch_api();
+        api.token = "client-read-token".into();
+        api.write_token = Some("check-write-token".into());
+        let path = format!("/repos/{SCRATCH_REPOSITORY}/check-runs");
+        let read = api.builder(Method::GET, &path).unwrap().build().unwrap();
+        let graphql_read = api
+            .builder(Method::POST, "/graphql")
+            .unwrap()
+            .build()
+            .unwrap();
+        let write = api.builder(Method::POST, &path).unwrap().build().unwrap();
+        assert_eq!(
+            read.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer client-read-token"
+        );
+        assert_eq!(
+            graphql_read
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer client-read-token"
+        );
+        assert_eq!(
+            write.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer check-write-token"
+        );
+    }
+
+    #[test]
+    fn client_workflow_epoch_is_checked_independently_of_server_authority() {
+        let captured = "a".repeat(40);
+        assert!(require_native_client_workflow_epoch_unchanged(&captured, &captured).is_ok());
+        assert!(
+            require_native_client_workflow_epoch_unchanged(&captured, &"b".repeat(40)).is_err()
+        );
+    }
+
+    #[test]
+    fn authority_epochs_ignore_unrelated_and_second_parent_changes_but_reject_reverts() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let global_config = directory.path().join("global-config");
+        let hooks = directory.path().join("empty-hooks");
+        std::fs::write(&global_config, []).unwrap();
+        std::fs::create_dir(&hooks).unwrap();
+        test_git(
+            directory.path(),
+            &[
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+                repository.to_str().unwrap(),
+            ],
+        );
+
+        let initial_file = repository.join(TEST_CONFIG_PATH);
+        std::fs::write(&initial_file, "[instance]\nname = \"old\"\n").unwrap();
+        let workflow_file = repository.join(TEST_WORKFLOW_PATH);
+        std::fs::create_dir_all(workflow_file.parent().unwrap()).unwrap();
+        std::fs::write(&workflow_file, "uses: securefix@old\n").unwrap();
+        test_git(&repository, &["add", "."]);
+        test_git(
+            &repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Securefix Test",
+                "-c",
+                "user.email=securefix-test@example.invalid",
+                "commit",
+                "-m",
+                "initial authority",
+            ],
+        );
+        let initial = String::from_utf8(test_git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+
+        test_git(&repository, &["checkout", "-b", "second-parent"]);
+        let second_parent = test_commit_file(
+            &repository,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"second parent\"\n",
+            "change config on second parent",
+        );
+        test_git(&repository, &["checkout", "main"]);
+        let workflow_change = test_commit_file(
+            &repository,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@changed\n",
+            "change caller workflow",
+        );
+        test_git(
+            &repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Securefix Test",
+                "-c",
+                "user.email=securefix-test@example.invalid",
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "second-parent",
+                "-m",
+                "merge second parent without its config tree",
+            ],
+        );
+        let merged = String::from_utf8(test_git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_ne!(second_parent, initial);
+        let baseline = test_authority_snapshot(&repository, &merged, &global_config, &hooks);
+        assert_eq!(baseline.epoch, workflow_change);
+        assert_ne!(baseline.epoch, initial);
+
+        test_commit_file(
+            &repository,
+            "src/main.rs",
+            "fn main() {}\n",
+            "unrelated source change",
+        );
+        test_commit_file(
+            &repository,
+            "docs/README.md",
+            "Unrelated documentation.\n",
+            "unrelated documentation change",
+        );
+        let unrelated_head = String::from_utf8(test_git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let after_unrelated =
+            test_authority_snapshot(&repository, &unrelated_head, &global_config, &hooks);
+        assert_eq!(baseline, after_unrelated);
+        assert!(require_native_authority_unchanged(&baseline, &after_unrelated).is_ok());
+        assert!(
+            git_output(
+                &repository,
+                &["rev-list", "--first-parent", "--parents", &unrelated_head],
+                &global_config,
+                &hooks,
+                None,
+                8,
+                Instant::now() + MAX_GIT_OPERATION_TIME,
+            )
+            .is_err()
+        );
+
+        test_commit_file(
+            &repository,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"temporary\"\n",
+            "change config",
+        );
+        let config_revert = test_commit_file(
+            &repository,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"old\"\n",
+            "revert config",
+        );
+        let after_config_revert =
+            test_authority_snapshot(&repository, &config_revert, &global_config, &hooks);
+        assert_eq!(baseline.config_sha256, after_config_revert.config_sha256);
+        assert_ne!(baseline.epoch, after_config_revert.epoch);
+        assert_eq!(
+            baseline.workflows[0].sha256,
+            after_config_revert.workflows[0].sha256
+        );
+        assert!(require_native_authority_unchanged(&baseline, &after_config_revert).is_err());
+
+        test_commit_file(
+            &repository,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@temporary\n",
+            "change caller pin",
+        );
+        let workflow_revert = test_commit_file(
+            &repository,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@changed\n",
+            "revert caller pin",
+        );
+        let after_workflow_revert =
+            test_authority_snapshot(&repository, &workflow_revert, &global_config, &hooks);
+        assert_ne!(after_config_revert.epoch, after_workflow_revert.epoch);
+        assert_eq!(
+            baseline.workflows[0].sha256,
+            after_workflow_revert.workflows[0].sha256
+        );
+        assert!(
+            require_native_authority_unchanged(&after_config_revert, &after_workflow_revert)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_scratch_check_body_is_bound_to_the_verified_request() {
+        let path = format!("/repos/{SCRATCH_REPOSITORY}/check-runs");
+        let head_sha = "b".repeat(40);
+        let request_sha = "c".repeat(64);
+        let body = native_policy_check_body(&head_sha, &request_sha);
+        assert!(
+            validate_native_scratch_check_body(
+                &Method::POST,
+                &path,
+                SCRATCH_REPOSITORY,
+                &head_sha,
+                &request_sha,
+                &body,
+            )
+            .is_ok()
+        );
+        let mut forged = body;
+        forged["output"]["summary"] = "a different claim".into();
+        assert!(
+            validate_native_scratch_check_body(
+                &Method::POST,
+                &path,
+                SCRATCH_REPOSITORY,
+                &head_sha,
+                &request_sha,
+                &forged,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn server_workflow_roles_record_only_full_sha_remote_pins() {
+        let sha = "a".repeat(40);
+        let workflow =
+            format!("jobs:\n  build:\n    uses: owner/server/.github/workflows/build.yml@{sha}\n");
+        let pins = workflow_uses_pins(workflow.as_bytes()).unwrap();
+        assert!(pins.contains(&format!("owner/server/.github/workflows/build.yml@{sha}")));
+        assert!(
+            workflow_uses_pins(b"jobs:\n  build:\n    uses: $/.github/actions/install-cli\n")
+                .is_err()
+        );
+        assert!(
+            workflow_uses_pins(
+                b"jobs:\n  build:\n    uses: owner/server/.github/workflows/build.yml@main\n"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn bounds_downloads_and_rejects_external_paths() {

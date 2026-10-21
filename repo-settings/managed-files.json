@@ -1,0 +1,15 @@
+{
+  "repository": "civitaspo/testing-securefix-server",
+  "repository_id": 1410312556,
+  "default_branch": "main",
+  "files": [
+    {
+      "source": "repo-settings/managed-files/policy-check.yml",
+      "target": ".github/workflows/policy-check.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/securefix-server.toml",
+      "target": "securefix-server.toml"
+    }
+  ]
+}
