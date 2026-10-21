@@ -38,7 +38,7 @@ jobs:
           ACTION_PATH: ${{ github.workspace }}/.github/actions/setup-cli
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: bash .github/actions/setup-cli/reuse-build.sh
-      - uses: ./.github/actions/install-cli
+      - uses: $/.github/actions/install-cli
         with:
           binary: ${{ steps.candidate.outputs.binary }}
       - name: Require the exact source-bound candidate artifact
