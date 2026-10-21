@@ -3,16 +3,26 @@ name: Native request producer proof
 on:
   workflow_call:
     inputs:
+      operation:
+        description: Request operation to capture
+        required: false
+        type: string
+        default: policy_check
       candidate_run_id:
         description: Successful source-bound Securefix CLI run to reuse
         required: true
         type: string
+      candidate_source_sha:
+        description: Exact source SHA represented by the selected candidate artifact
+        required: false
+        type: string
+        default: 7b5da5d248078c774d44d54a0e7fd145ddf67fd7
       pull_request_number:
-        description: Owner-authored scratch pull request for this policy-check probe
+        description: Owner-authored scratch pull request for this probe
         required: true
         type: string
       server_repository:
-        description: Untrusted Server locator captured into the signed request and checked by the receiver
+        description: Server repository locator captured into the signed request
         required: true
         type: string
       instance_config_path:
@@ -36,27 +46,49 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/securefix-server
-          ref: 96c2f3e9223f7f5f357660e59718558f3e2b283b
+          ref: ee98f4f12f3c32855c95feb3fe75bc2870b88460
           persist-credentials: false
       - name: Reuse the exact source-bound candidate artifact
         id: candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          ACTION_PATH: ${{ github.workspace }}/.github/actions/setup-cli
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-        run: bash .github/actions/setup-cli/reuse-build.sh
+        uses: $/.github/actions/setup-cli
+        with:
+          candidate-run-id: ${{ inputs.candidate_run_id }}
+          candidate-source-sha: ${{ inputs.candidate_source_sha }}
       - uses: $/.github/actions/install-cli
         with:
           binary: ${{ steps.candidate.outputs.binary }}
       - name: Require the exact source-bound candidate artifact
         if: steps.candidate.outputs.reused != 'true'
         run: exit 1
-      - name: Capture the exact pull request request
+      - name: Prepare a fixed Securefix source artifact
+        id: source
+        if: inputs.operation == 'securefix'
+        env:
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'native producer proof fixture' > native-producer-proof.txt
+          securefix securefix client-prepare \
+            --root-dir '' \
+            --files native-producer-proof.txt \
+            --repository "$GITHUB_REPOSITORY" \
+            --branch "$SOURCE_BRANCH" \
+            --commit-message 'test: exercise native Securefix request' \
+            --custom-json '{}' \
+            --output-dir .securefix-artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.operation == 'securefix'
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          path: ${{ steps.source.outputs.artifact_path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+      - name: Capture the exact pull request policy-check request
+        if: inputs.operation == 'policy_check'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
-          SECUREFIX_SOURCE_SHA: 96c2f3e9223f7f5f357660e59718558f3e2b283b
           SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
@@ -64,6 +96,21 @@ jobs:
           set -euo pipefail
           securefix new-client policy-check capture \
             --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --output native-policy-check/manifest.json
+      - name: Capture the exact pull request Securefix request
+        if: inputs.operation == 'securefix'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          SOURCE_ARTIFACT_NAME: ${{ steps.source.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          securefix new-client securefix capture \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --artifact-name "$SOURCE_ARTIFACT_NAME" \
             --output native-policy-check/manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: manifest
