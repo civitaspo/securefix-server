@@ -1,10 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
-use reqwest::{
-    Method, StatusCode,
-    blocking::Client,
-    header::{ACCEPT, HeaderMap, HeaderValue},
-    redirect::Policy,
-};
+use reqwest::{Method, StatusCode, blocking::Client, redirect::Policy};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::Digest;
@@ -731,6 +726,15 @@ impl GitHub {
     }
 
     fn builder(&self, method: Method, path: &str) -> Result<reqwest::blocking::RequestBuilder> {
+        self.builder_with_accept(method, path, "application/vnd.github+json")
+    }
+
+    fn builder_with_accept(
+        &self,
+        method: Method,
+        path: &str,
+        accept: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
         let token = match &self.writes {
             WriteContext::NativeScratch(write)
                 if method == Method::POST
@@ -749,7 +753,7 @@ impl GitHub {
             .client
             .request(method, self.url(path)?)
             .header("User-Agent", "securefix")
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", accept)
             .header("X-GitHub-Api-Version", "2022-11-28");
         if !token.is_empty() {
             request = request.bearer_auth(token);
@@ -1348,12 +1352,12 @@ impl GitHub {
         bail!("GitHub pagination exceeded limit")
     }
     pub fn download(&self, path: &str, max: usize) -> Result<Vec<u8>> {
-        let mut request = self.builder(Method::GET, path)?;
-        if path.contains("/releases/assets/") || path.contains("/actions/artifacts/") {
-            let mut headers = HeaderMap::new();
-            headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
-            request = request.headers(headers);
-        }
+        let accept = if path.contains("/releases/assets/") {
+            "application/octet-stream"
+        } else {
+            "application/vnd.github+json"
+        };
+        let request = self.builder_with_accept(Method::GET, path, accept)?;
         let response = request.send()?;
         if response.status().is_redirection() {
             let location = response
@@ -3269,7 +3273,7 @@ mod tests {
         );
     }
     #[test]
-    fn release_asset_download_requests_binary_bytes() {
+    fn release_assets_use_binary_accept_and_actions_artifacts_use_json_accept() {
         use crate::fixtures::{Fixture, Route};
         let fixture = Fixture::new(vec![
             Route::raw(
@@ -3285,7 +3289,7 @@ mod tests {
                 200,
                 vec![0, 255, 2],
             )
-            .with_request_header("Accept", "application/octet-stream"),
+            .with_request_header("Accept", "application/vnd.github+json"),
         ]);
         assert_eq!(
             fixture

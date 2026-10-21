@@ -2,7 +2,7 @@
   "schema_version": 1,
   "component": "securefix-server",
   "protocol": "securefix-native-request/v1",
-  "version": "0.2.45-pre.5",
+  "version": "0.2.45-pre.6",
   "producer_workflow": ".github/workflows/testing-native-package-build.yml",
   "max_bytes": 134217728,
   "assets": { "linux-x86_64": "securefix-linux-x86_64" }
