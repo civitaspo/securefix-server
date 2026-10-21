@@ -879,7 +879,11 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     if step["with"]["repository"] == "civitaspo/securefix-server" {
                         assert_eq!(
                             step["with"]["ref"],
-                            if path == ".github/workflows/testing-securefix-server.yml" {
+                            if path == ".github/workflows/request-producer-probe.yml"
+                                && job_id == "capture"
+                            {
+                                "ee98f4f12f3c32855c95feb3fe75bc2870b88460"
+                            } else if path == ".github/workflows/testing-securefix-server.yml" {
                                 if job_id == "baseline" {
                                     "${{ steps.resolve.outputs.sha }}"
                                 } else if job_id == "build" {
@@ -905,6 +909,68 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
             }
         }
     }
+}
+
+#[test]
+fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
+    const HELPER_SHA: &str = "ee98f4f12f3c32855c95feb3fe75bc2870b88460";
+    const CANDIDATE_SOURCE_SHA: &str = "7b5da5d248078c774d44d54a0e7fd145ddf67fd7";
+    let producer = workflow("request-producer-probe.yml");
+    let inputs = &producer["on"]["workflow_call"]["inputs"];
+    assert_eq!(
+        inputs["candidate_source_sha"]["default"],
+        CANDIDATE_SOURCE_SHA
+    );
+
+    let capture = &producer["jobs"]["capture"];
+    let steps = capture["steps"].as_array().unwrap();
+    let checkout = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .unwrap();
+    assert_eq!(checkout["with"]["repository"], "civitaspo/securefix-server");
+    assert_eq!(checkout["with"]["ref"], HELPER_SHA);
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+
+    let reuse = steps
+        .iter()
+        .find(|step| step["name"] == "Reuse the exact source-bound candidate artifact")
+        .unwrap();
+    assert_eq!(reuse["uses"], "$/.github/actions/setup-cli");
+    assert_eq!(
+        reuse["with"]["candidate-run-id"],
+        "${{ inputs.candidate_run_id }}"
+    );
+    assert_eq!(
+        reuse["with"]["candidate-source-sha"],
+        "${{ inputs.candidate_source_sha }}"
+    );
+    assert!(steps.iter().any(|step| {
+        step["name"] == "Require the exact source-bound candidate artifact"
+            && step["if"] == "steps.candidate.outputs.reused != 'true'"
+    }));
+
+    let prepare = steps
+        .iter()
+        .find(|step| step["name"] == "Prepare a fixed Securefix source artifact")
+        .unwrap();
+    assert_eq!(prepare["if"], "inputs.operation == 'securefix'");
+    assert_eq!(
+        prepare["env"]["SOURCE_BRANCH"],
+        "${{ github.event.pull_request.head.ref }}"
+    );
+    let capture_request = steps
+        .iter()
+        .find(|step| step["name"] == "Capture the exact pull request Securefix request")
+        .unwrap();
+    assert_eq!(
+        capture_request["env"]["SOURCE_ARTIFACT_NAME"],
+        "${{ steps.source.outputs.artifact_name }}"
+    );
 }
 
 #[test]
@@ -2370,7 +2436,14 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
+            let downloads_request_manifest = path == ".github/workflows/request-producer-probe.yml"
+                && job_id == "attest"
+                && steps.iter().any(|step| {
+                    step["name"] == "Download request manifest"
+                        && step["with"]["path"] == "native-policy-check"
+                });
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
+                && !downloads_request_manifest
                 && steps.iter().any(|step| {
                     step["uses"]
                         .as_str()
@@ -2592,9 +2665,18 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         );
                     }
                     if !run.contains("--help") && !run.contains("policy validate") {
+                        let source_bound_native_candidate = path
+                            == ".github/workflows/request-producer-probe.yml"
+                            && job_id == "capture"
+                            && steps.iter().any(|candidate| {
+                                candidate["uses"] == "$/.github/actions/setup-cli"
+                                    && candidate["with"]["candidate-source-sha"]
+                                        == "${{ inputs.candidate_source_sha }}"
+                            });
                         assert!(
                             job["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || step["env"]["SECUREFIX_SOURCE_SHA"].is_string()
+                                || source_bound_native_candidate
                                 || (path == ".github/workflows/testing-securefix-server.yml"
                                     && (step["env"]["CANDIDATE_SHA"].is_string()
                                         || job["env"]["CANDIDATE_SHA"].is_string()
