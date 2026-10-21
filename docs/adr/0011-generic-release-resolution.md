@@ -1,0 +1,100 @@
+# Generic package release resolution
+
+Status: accepted for the read-only metadata resolver and bounded asset-integrity
+download only. D01 remains open.
+
+## Context
+
+The instance-configuration design selects the implementation with a literal
+full-SHA workflow or action pin and accepts compatible package versions with a
+trusted `semver::VersionReq`. Those are separate facts: a version range cannot
+select executable code, and a pinned source revision alone does not prove that
+the release asset was produced by an authorized workflow.
+
+The existing runtime publisher and active descriptor use the legacy runtime
+archive contract. This decision adds no call site to that flow and does not
+change its schema or behavior. A generic package resolver needs to establish
+the bounded GitHub metadata relationship that a later caller can use without
+enumerating releases or silently choosing a fallback.
+
+## Decision
+
+`package::resolve_release` accepts four explicit inputs: a trusted publisher's
+canonical repository name and numeric ID, the already selected full lowercase
+implementation SHA, an expected component/platform/asset name, and an accepted
+`VersionReq`. A successful resolution makes four read-only GitHub GET
+requests; any failed check stops before later requests:
+
+1. Read the publisher repository and require the returned full name and ID to
+   match the trusted input.
+2. Read `Cargo.toml` with `ref` set to the exact implementation SHA. Require
+   the expected file identity, base64 encoding, matching declared and decoded
+   sizes within 64 KiB, valid UTF-8/TOML, and a canonical stable package
+   version without prerelease or build metadata. Require that version to match
+   the accepted range.
+3. Read exactly `v<version>` and require a lightweight commit ref whose target
+   is the implementation SHA.
+4. Read the release for that exact tag and require its tag and target commit to
+   match, the release to be published, immutable and stable, and exactly one
+   uploaded asset. The display name is not part of release identity. The asset
+   must have the caller-selected name, a positive ID, a positive size no
+   greater than 512 MiB, and a canonical lowercase `sha256:` digest.
+
+The first contract equates implementation SHA and source SHA. It rejects
+annotated tags and releases with multiple assets; supporting either requires a
+separately bounded proof design. Repository contents, Git refs, and release
+metadata are read using GitHub's REST interfaces for [repository
+contents](https://docs.github.com/en/rest/repos/contents#get-repository-content),
+[Git references](https://docs.github.com/en/rest/git/refs#get-a-reference),
+[releases](https://docs.github.com/en/rest/releases/releases#get-a-release-by-tag-name),
+and [release assets](https://docs.github.com/en/rest/releases/assets#get-a-release-asset).
+
+`resolve_release` returns only publisher, source, implementation, version, tag,
+release ID, and expected asset identity/size/digest claims. It does not fetch
+asset bytes or establish their provenance. `download_release_asset` repeats the
+same four metadata checks, then requests the exact asset ID from the validated
+repository using GitHub's release-asset endpoint. It bounds the response by the
+declared size, requires the returned length to match, and compares the bytes'
+SHA-256 with the immutable-release API digest. The existing API download helper
+requests the raw asset representation and enforces its HTTPS redirect-host
+allowlist without forwarding the API bearer token.
+
+The returned `DownloadedAsset` exposes read-only metadata and bytes but does
+not mark them as attested or executable. GitHub's release API digest only binds
+the fetched bytes to release metadata; it does not prove the producer workflow,
+source, run/attempt, or signature. A host loader must independently verify that
+evidence before executing any downloaded binary. The expected asset platform
+and component come from the trusted caller; the resolver only checks that the
+release has the one expected asset name.
+
+The resolver does not load legacy `Policy::active()` or `config::trusted()`,
+read an active descriptor, enumerate latest releases, choose a version, or
+write GitHub state. No workflow, operational caller, repository settings,
+credential, or release-publishing path changes in this decision.
+
+## Consequences and limits
+
+The resolver and mock API tests prove the local request paths, metadata
+rejection behavior, bounded download, and byte length/digest comparison. A
+separate read-only probe against public GitHub APIs resolved and downloaded the
+existing `civitaspo/securefix-server` v0.2.44 legacy runtime archive as data:
+publisher ID `1250079425`, implementation/source
+`1b35591e74eeae8fe848d16c6fcae0ba8fb75f6c`, release ID `418770067`, asset ID
+`660228208`, 4,264,106 bytes, SHA-256
+`d40309b8b574947bd9900e6996a804b38950749e7cf799161bec534cf68061b8`. The probe
+used `cargo run --locked` with the repository lockfile and a temporary harness
+entry. Its local logs are `/private/tmp/securefix-package-probe/probe.log` and
+`/private/tmp/securefix-package-probe/probe-build.txt`; they are not persisted CI
+evidence. The bytes remained in memory and were not written, executed, extracted,
+or unpacked. This establishes only that this existing legacy archive's release
+metadata and downloaded bytes fit the resolver's metadata and data-integrity
+contract. It does not qualify the generic package format or publisher path,
+nor any bounded publication adapter that a later transition may prove
+necessary.
+
+GitHub-hosted defining-revision acquisition, artifact attestation, producer-run
+binding, and pre-execution verification remain unproved under D01. Do not
+describe a `ResolvedRelease` or `DownloadedAsset` as attestation-qualified,
+verified executable, or ready to install. Candidate qualification and the
+ordinary reviewed promotion flow are required before any production caller can
+depend on a new package format.

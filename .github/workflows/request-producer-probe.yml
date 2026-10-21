@@ -1,0 +1,112 @@
+name: Native request producer proof
+
+on:
+  workflow_call:
+    inputs:
+      candidate_run_id:
+        description: Successful source-bound Securefix CLI run to reuse
+        required: true
+        type: string
+      pull_request_number:
+        description: Owner-authored scratch pull request for this policy-check probe
+        required: true
+        type: string
+      server_repository:
+        description: Untrusted Server locator captured into the signed request and checked by the receiver
+        required: true
+        type: string
+      instance_config_path:
+        description: Server instance config path relative to its repository root
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact-id: ${{ steps.manifest.outputs.artifact-id }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: 96c2f3e9223f7f5f357660e59718558f3e2b283b
+          persist-credentials: false
+      - name: Reuse the exact source-bound candidate artifact
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION_PATH: ${{ github.workspace }}/.github/actions/setup-cli
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: bash .github/actions/setup-cli/reuse-build.sh
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: ${{ steps.candidate.outputs.binary }}
+      - name: Require the exact source-bound candidate artifact
+        if: steps.candidate.outputs.reused != 'true'
+        run: exit 1
+      - name: Capture the exact pull request request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_SOURCE_SHA: 96c2f3e9223f7f5f357660e59718558f3e2b283b
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          securefix new-client policy-check capture \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --output native-policy-check/manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: manifest
+        with:
+          name: native-request-manifest
+          path: native-policy-check/manifest.json
+          if-no-files-found: error
+          retention-days: 2
+
+  attest:
+    needs: capture
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 10
+    steps:
+      - name: Download request manifest
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.capture.outputs.artifact-id }}
+          path: native-policy-check
+          merge-multiple: true
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attestation
+        with:
+          subject-path: native-policy-check/manifest.json
+          create-storage-record: false
+      - name: Place the generated bundle beside the request manifest
+        env:
+          BUNDLE_PATH: ${{ steps.attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE_PATH"
+          test -s "$BUNDLE_PATH"
+          cp -- "$BUNDLE_PATH" native-policy-check/bundle.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-request-proof
+          path: |
+            native-policy-check/manifest.json
+            native-policy-check/bundle.json
+          if-no-files-found: error
+          retention-days: 2

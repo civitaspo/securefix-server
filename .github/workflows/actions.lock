@@ -52,6 +52,10 @@ workflows:
     '.github/workflows/repo-settings.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+    '.github/workflows/request-producer-probe.yml':
+        - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
+        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/reusable-approve-request.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -112,11 +116,6 @@ workflows:
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-    '.github/workflows/testing-native-securefix-server.yml':
-        - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-        - 'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460'
     '.github/workflows/testing-policy-check.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -209,11 +208,6 @@ dependencies:
         commit: 'sha1-ea165f8d65b6e75b540449e92b4886f43607fa02'
         owner_id: 44036562
         repo_id: 192625955
-    'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460':
-        ref: 'integration/native-managed-files-c80e'
-        commit: 'sha1-ee98f4f12f3c32855c95feb3fe75bc2870b88460'
-        owner_id: 4525500
-        repo_id: 1250079425
     'crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd':
         ref: 'v7.0.0'
         commit: 'sha1-2dc316deee8e90f13e1a351ab510b4d5bc0c82cd'
