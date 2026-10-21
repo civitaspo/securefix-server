@@ -104,10 +104,16 @@ jobs:
           else
             command_status=$?
           fi
+          {
+            printf 'case=%s\ncommand_status=%s\n' "$CASE_KIND" "$command_status"
+            if [[ -s "$command_log" ]]; then
+              tail -c 8192 "$command_log" | sed -E \
+                -e 's/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+)/[REDACTED_TOKEN]/g' \
+                -e 's/(Bearer[[:space:]]+)[^[:space:]" ]+/\1[REDACTED]/Ig'
+            fi
+          } > native-securefix-result.txt
           if [[ "$CASE_KIND" == apply ]]; then
             [[ "$command_status" == 0 ]]
-            printf '%s\n' 'case=apply' > native-securefix-result.txt
-            cat "$command_log" >> native-securefix-result.txt
           else
             [[ "$command_status" != 0 ]]
             case "$CASE_KIND" in
@@ -122,8 +128,7 @@ jobs:
                 ;;
             esac
             grep -F "$expected_error" "$command_log" >/dev/null
-            printf 'case=%s\nexpected_rejection=%s\n' "$CASE_KIND" "$expected_error" > native-securefix-result.txt
-            cat "$command_log" >> native-securefix-result.txt
+            printf 'expected_rejection=%s\n' "$expected_error" >> native-securefix-result.txt
           fi
       - name: Independently read back the PR and signed commit state
         env:
