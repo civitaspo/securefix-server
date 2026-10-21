@@ -85,7 +85,7 @@ GH_TOKEN= GITHUB_TOKEN= GH_CONFIG_DIR="$work/gh-config" HOME="$work" XDG_CACHE_H
 source_sha="$(jq -er '.[0].verificationResult.signature.certificate.sourceRepositoryDigest | select(test("^[0-9a-f]{40}$"))' "$preverified")"
 source_ref="$(jq -er '.[0].verificationResult.signature.certificate.sourceRepositoryRef | select(type == "string")' "$preverified")"
 [[ "$source_ref" =~ ^refs/heads/([A-Za-z0-9._/-]+)$ ]] || { echo 'attested package source ref is not a branch' >&2; exit 1; }
-source_branch="$BASH_REMATCH[1]"
+source_branch="${BASH_REMATCH[1]}"
 [[ "$source_branch" != *..* && "$source_branch" != */ && "$source_branch" != *//* ]] || { echo 'attested package source branch is not canonical' >&2; exit 1; }
 signer="https://github.com/$SOURCE_REPOSITORY/$workflow@$source_ref"
 jq -e --arg repo "$SOURCE_REPOSITORY" --argjson repo_id "$SOURCE_REPOSITORY_ID" --argjson owner_id "$OWNER_ID" --arg sha "$source_sha" --arg ref "$source_ref" --arg workflow "$workflow" --arg signer "$signer" --arg name "$asset_name" --arg digest "$digest" '
@@ -104,7 +104,7 @@ source_manifest_response="$work/source-manifest-response.json"
 source_manifest="$work/source-package.json"
 gh api "repos/$SOURCE_REPOSITORY/contents/.github/actions/load-package/package.json?ref=$source_sha" > "$source_manifest_response"
 jq -e '.path == ".github/actions/load-package/package.json" and .type == "file" and .encoding == "base64" and (.size | type == "number" and . > 0 and . <= 16384) and (.content | type == "string" and length <= 24576)' "$source_manifest_response" >/dev/null || { echo 'attested source package manifest is missing or oversized' >&2; exit 1; }
-jq -er '.content | gsub("[\\r\\n]"; "") | @base64d' "$source_manifest_response" > "$source_manifest"
+jq -erj '.content | gsub("[\\r\\n]"; "") | @base64d' "$source_manifest_response" > "$source_manifest"
 cmp -s "$manifest" "$source_manifest" || { echo 'attested source package manifest differs from the fixed loader manifest' >&2; exit 1; }
 if [[ "$CHANNEL" == stable ]]; then
   [[ "$source_branch" == "$SOURCE_DEFAULT_BRANCH" && "$tag_commit" == "$source_sha" && "$release_target" == "$source_sha" ]] || { echo 'stable package release tag differs from the attested default-branch source' >&2; exit 1; }
