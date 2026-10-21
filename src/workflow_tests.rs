@@ -1418,6 +1418,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/ci.yml",
             ".github/workflows/control-bootstrap.yml",
             ".github/workflows/publish-runtime.yml",
+            ".github/workflows/request-producer-probe.yml",
             ".github/workflows/testing-control-fixture.yml",
             ".github/workflows/testing-distribute-runtime.yml",
             ".github/workflows/testing-merge-caller-migration.yml",
@@ -1426,7 +1427,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             ".github/workflows/testing-release-pr.yml",
             ".github/workflows/testing-securefix-server.yml"
         ],
-        "only secret-free CI and runtime producer compile CLI"
+        "only approved source-bound workflows set up the CLI"
     );
     for (path, workflow) in workflows() {
         if matches!(
