@@ -1,0 +1,14 @@
+{
+  "id": 12351518519,
+  "name": "securefix-39614598405-283e20a98e65",
+  "size_in_bytes": 3613,
+  "expired": false,
+  "digest": "sha256:d7d641af6b9c9a6aa20ff819e3cb644a0f29c814cc5e4722240e822de8444fec",
+  "workflow_run": {
+    "id": 39614598405,
+    "repository_id": 1410312556,
+    "head_repository_id": 1410312556,
+    "head_branch": "testing/native-producer-trigger-20261021-c80e",
+    "head_sha": "a499b4ede1752c1ddb83e0651d74d1ce73faa76d"
+  }
+}

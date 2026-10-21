@@ -879,7 +879,11 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     if step["with"]["repository"] == "civitaspo/securefix-server" {
                         assert_eq!(
                             step["with"]["ref"],
-                            if path == ".github/workflows/testing-securefix-server.yml" {
+                            if path == ".github/workflows/request-producer-probe.yml"
+                                && job_id == "capture"
+                            {
+                                "96c2f3e9223f7f5f357660e59718558f3e2b283b"
+                            } else if path == ".github/workflows/testing-securefix-server.yml" {
                                 if job_id == "baseline" {
                                     "${{ steps.resolve.outputs.sha }}"
                                 } else if job_id == "build" {
@@ -905,6 +909,52 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
             }
         }
     }
+}
+
+#[test]
+fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
+    const SOURCE_SHA: &str = "96c2f3e9223f7f5f357660e59718558f3e2b283b";
+    let producer = workflow("request-producer-probe.yml");
+    let capture = &producer["jobs"]["capture"];
+    let steps = capture["steps"].as_array().unwrap();
+    let checkout = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .unwrap();
+    assert_eq!(checkout["with"]["repository"], "civitaspo/securefix-server");
+    assert_eq!(checkout["with"]["ref"], SOURCE_SHA);
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+
+    let reuse = steps
+        .iter()
+        .find(|step| step["name"] == "Reuse the exact source-bound candidate artifact")
+        .unwrap();
+    assert_eq!(
+        reuse["env"]["CANDIDATE_RUN_ID"],
+        "${{ inputs.candidate_run_id }}"
+    );
+    assert_eq!(
+        reuse["env"]["ACTION_PATH"],
+        "${{ github.workspace }}/.github/actions/setup-cli"
+    );
+    assert_eq!(
+        reuse["run"],
+        "bash .github/actions/setup-cli/reuse-build.sh"
+    );
+    assert!(steps.iter().any(|step| {
+        step["name"] == "Require the exact source-bound candidate artifact"
+            && step["if"] == "steps.candidate.outputs.reused != 'true'"
+    }));
+
+    let capture_request = steps
+        .iter()
+        .find(|step| step["name"] == "Capture the exact pull request request")
+        .unwrap();
+    assert_eq!(capture_request["env"]["SECUREFIX_SOURCE_SHA"], SOURCE_SHA);
 }
 
 #[test]
@@ -2370,7 +2420,14 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
+            let downloads_request_manifest = path == ".github/workflows/request-producer-probe.yml"
+                && job_id == "attest"
+                && steps.iter().any(|step| {
+                    step["name"] == "Download request manifest"
+                        && step["with"]["path"] == "native-policy-check"
+                });
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
+                && !downloads_request_manifest
                 && steps.iter().any(|step| {
                     step["uses"]
                         .as_str()
@@ -2543,28 +2600,6 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             && run.contains("conclusion == \"success\"")))
                     && !run.contains("gh api -X")
                     && !run.contains("--method");
-                let native_test_precondition = step["name"]
-                    == "Verify the selected scratch pull request head"
-                    && run.contains(
-                        "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER",
-                    )
-                    && run.matches("gh api ").count() == 1;
-                let native_test_readback = step["name"] == "Independently read back the PR and signed commit state"
-                    && run.contains("repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")
-                    && run.contains("repos/civitaspo/testing-securefix-server/commits/$current_head")
-                    && run.contains("repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head")
-                    && run.matches("gh api ").count() == 3;
-                let bounded_native_test_assertion = path
-                    == ".github/workflows/testing-native-securefix-server.yml"
-                    && job_id == "apply"
-                    && (native_test_precondition || native_test_readback)
-                    && !run.contains("gh api -X")
-                    && !run.contains("--method")
-                    && !run.contains("--input")
-                    && !run.contains("--raw-field")
-                    && !run.contains("--field")
-                    && !run.contains(" -f ")
-                    && !run.contains(" -F ");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
@@ -2572,8 +2607,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && (!run.contains("jq ")
                             || bounded_baseline_reads
                             || bounded_legacy_runtime_reads
-                            || bounded_release_artifact_lookup
-                            || bounded_native_test_assertion)
+                            || bounded_release_artifact_lookup)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
