@@ -2370,7 +2370,15 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
+            let downloads_request_manifest = path
+                == ".github/workflows/request-producer-probe.yml"
+                && job_id == "attest"
+                && steps.iter().any(|step| {
+                    step["name"] == "Download request manifest"
+                        && step["with"]["path"] == "native-policy-check"
+                });
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
+                && !downloads_request_manifest
                 && steps.iter().any(|step| {
                     step["uses"]
                         .as_str()
