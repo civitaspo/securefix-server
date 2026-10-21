@@ -98,14 +98,7 @@ impl Deployment {
             &self.server_bot_login,
             &self.approval_reviewer.login,
         ] {
-            ensure!(
-                !login.is_empty()
-                    && login.len() <= 100
-                    && login
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_[].".contains(&b)),
-                "invalid configured login"
-            );
+            ensure!(is_valid_login(login), "invalid configured login");
         }
         validate_branch(&self.release_branch)?;
         validate_branch(&self.runtime_update_branch)?;
@@ -214,6 +207,14 @@ impl Deployment {
         output.push_str(remaining);
         Ok(output)
     }
+}
+
+pub(crate) fn is_valid_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 100
+        && login
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_[].".contains(&b))
 }
 
 pub fn workflow_path(canonical: &str) -> Result<String> {

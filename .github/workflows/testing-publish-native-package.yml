@@ -1,0 +1,149 @@
+name: testing-publish-native-package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact Server source SHA from the attested package build
+        required: true
+        type: string
+      producer_run_id:
+        description: Exact successful first-attempt package build run
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  host-build:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the protected-main publisher host
+        run: |
+          cargo +1.99.0 build --locked --release --bin securefix
+          mkdir -p publisher
+          install -m 755 target/release/securefix publisher/securefix
+          install -m 644 .github/testing-policy.json publisher/policy.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: native-package-publisher-host-${{ github.run_id }}
+          path: publisher/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: host-build
+    if: needs.host-build.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 20
+    outputs:
+      source-sha: ${{ steps.publish.outputs.source-sha }}
+      source-branch: ${{ steps.publish.outputs.source-branch }}
+      tag: ${{ steps.publish.outputs.tag }}
+      release-id: ${{ steps.publish.outputs.release-id }}
+      asset-id: ${{ steps.publish.outputs.asset-id }}
+      asset-sha256: ${{ steps.publish.outputs.asset-sha256 }}
+      asset-size: ${{ steps.publish.outputs.asset-size }}
+      producer-run-id: ${{ steps.publish.outputs.producer-run-id }}
+      producer-run-attempt: ${{ steps.publish.outputs.producer-run-attempt }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.host-build.outputs.artifact-id }}
+          path: publisher
+          merge-multiple: true
+      - name: Validate the selected package inputs
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+        run: |
+          set -euo pipefail
+          [[ -f publisher/securefix && ! -L publisher/securefix ]]
+          chmod 700 publisher/securefix
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          test -x publisher/securefix
+          test -s publisher/policy.json
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+      - name: Publish the verified data to the scratch prerelease
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_PACKAGE_TOKEN: ${{ steps.scratch.outputs.token }}
+          SECUREFIX_POLICY_PATH: publisher/policy.json
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+        run: |
+          set -euo pipefail
+          result="$(publisher/securefix integration publish-package --source-sha "$SOURCE_SHA" --producer-run-id "$PRODUCER_RUN_ID")"
+          jq -r '"source-sha=\(.source_sha)\nsource-branch=\(.source_branch)\ntag=\(.tag)\nrelease-id=\(.release_id)\nasset-id=\(.asset_id)\nasset-sha256=\(.asset_sha256)\nasset-size=\(.asset_size)\nproducer-run-id=\(.producer_run_id)\nproducer-run-attempt=\(.producer_run_attempt)"' <<<"$result" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    needs: publish
+    if: needs.publish.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Read the configured package identities
+        id: config
+        run: |
+          set -euo pipefail
+          jq -r '"source-repository=" + .deployment.server.repository, "source-repository-id=" + (.deployment.server.id|tostring), "source-default-branch=" + .deployment.server.default_branch, "destination-repository=" + .deployment.integration.repository, "destination-repository-id=" + (.deployment.integration.id|tostring), "owner-id=" + (.owner_id|tostring)' .github/testing-policy.json >> "$GITHUB_OUTPUT"
+      - name: Load and verify the immutable scratch package
+        id: package
+        uses: $/.github/actions/load-package
+        with:
+          action-sha: ${{ github.workflow_sha }}
+          source-repository: ${{ steps.config.outputs.source-repository }}
+          source-repository-id: ${{ steps.config.outputs.source-repository-id }}
+          destination-repository: ${{ steps.config.outputs.destination-repository }}
+          destination-repository-id: ${{ steps.config.outputs.destination-repository-id }}
+          source-default-branch: ${{ steps.config.outputs.source-default-branch }}
+          owner-id: ${{ steps.config.outputs.owner-id }}
+          channel: scratch
+          publication-source-sha: ${{ needs.publish.outputs.source-sha }}
+          publication-source-branch: ${{ needs.publish.outputs.source-branch }}
+          publication-tag: ${{ needs.publish.outputs.tag }}
+          publication-release-id: ${{ needs.publish.outputs.release-id }}
+          publication-asset-id: ${{ needs.publish.outputs.asset-id }}
+          publication-asset-sha256: ${{ needs.publish.outputs.asset-sha256 }}
+          publication-asset-size: ${{ needs.publish.outputs.asset-size }}
+          publication-producer-run-id: ${{ needs.publish.outputs.producer-run-id }}
+          publication-producer-run-attempt: ${{ needs.publish.outputs.producer-run-attempt }}
+          token: ${{ github.token }}
+      - name: Execute the verified package without credentials
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: securefix --version

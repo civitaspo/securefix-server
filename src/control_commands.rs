@@ -441,68 +441,24 @@ fn verify_public_attestation(
     let bytes = public_bundles(&response, config::trusted()?.deployment.server.id)?;
     let mut bundles = tempfile::Builder::new().suffix(".jsonl").tempfile()?;
     std::io::Write::write_all(&mut bundles, &bytes)?;
-    let empty_config = tempfile::tempdir()?;
     let branch = &config::trusted()?.deployment.server.default_branch;
-    let status = Process::new("gh")
-        .args(["attestation", "verify"])
-        .arg(archive)
-        .arg("--bundle")
-        .arg(bundles.path())
-        .args([
-            "--repo",
+    let source_ref = format!("refs/heads/{branch}");
+    securefix::attestation::verify_with_gh(
+        archive,
+        bundles.path(),
+        securefix::attestation::VerifyRequest {
             repository,
-            "--source-digest",
-            source,
-            "--source-ref",
-            &format!("refs/heads/{branch}"),
-            "--signer-workflow",
-            &format!("{repository}/{workflow}"),
-            "--signer-digest",
-            source,
-            "--cert-oidc-issuer",
-            "https://token.actions.githubusercontent.com",
-            "--predicate-type",
-            "https://slsa.dev/provenance/v1",
-            "--deny-self-hosted-runners",
-        ])
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
-        .env("GH_CONFIG_DIR", empty_config.path())
-        .env("XDG_CACHE_HOME", empty_config.path().join("cache"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .status()?;
-    ensure!(
-        status.success(),
-        "public testing runtime attestation verification failed"
-    );
+            signer_repository: repository,
+            signer_workflow: workflow,
+            signer_sha: source,
+            source: Some((source, &source_ref)),
+        },
+    )?;
     Ok(())
 }
 
 fn public_bundles(response: &Value, repository_id: u64) -> Result<Vec<u8>> {
-    let attestations = response["attestations"]
-        .as_array()
-        .context("public attestation list is missing")?;
-    ensure!(
-        !attestations.is_empty() && attestations.len() < 100,
-        "public attestations are absent or truncated"
-    );
-    let mut bytes = Vec::new();
-    for attestation in attestations {
-        ensure!(
-            attestation["repository_id"].as_u64() == Some(repository_id)
-                && attestation["bundle"].is_object(),
-            "public attestation repository or inline bundle is invalid"
-        );
-        serde_json::to_writer(&mut bytes, &attestation["bundle"])?;
-        bytes.push(b'\n');
-        ensure!(
-            bytes.len() <= 16 * 1024 * 1024,
-            "public attestation bundles exceed size limit"
-        );
-    }
-    Ok(bytes)
+    securefix::attestation::public_bundles(response, repository_id)
 }
 
 fn verify_archive_attestation(
