@@ -550,6 +550,8 @@ fn release_pr(
                 branch: release_branch.clone(),
                 run_id,
                 source_sha: base_sha.clone(),
+                event_name: "workflow_dispatch".into(),
+                pull_request_context: None,
                 commit_message: format!("chore(release): prepare v{version}"),
                 create_pull_request: Some(create_pull_request),
                 additions,
@@ -577,7 +579,7 @@ fn release_pr(
             let applied = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
                 read_api: &api,
                 write_api: &api,
-                policy: &policy,
+                server_bot_id: policy.server_bot_id,
                 source,
                 plan: &plan,
                 fix: &fix,
@@ -712,6 +714,8 @@ fn release_pr(
                 branch: state.release_branch.clone(),
                 run_id,
                 source_sha: base_sha.clone(),
+                event_name: "workflow_dispatch".into(),
+                pull_request_context: None,
                 commit_message: format!("chore(release): refresh v{version}"),
                 create_pull_request: Some(
                     json!({
@@ -748,7 +752,7 @@ fn release_pr(
             let applied = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
                 read_api: &api,
                 write_api: &api,
-                policy: &policy,
+                server_bot_id: policy.server_bot_id,
                 source,
                 plan: &plan,
                 fix: &fix,
@@ -1603,14 +1607,8 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let positive_branch = format!("{BRANCH_PREFIX}positive-{nonce}");
     let mut positive_fix = prepare_positive_artifact(candidate_sha, &positive_branch)?;
-    positive_fix.create_pull_request = Some(
-        json!({
-            "title":format!("test: Securefix native apply integration {}", &candidate_sha[..12]),
-            "body":"Created by the native Securefix integration apply core.",
-            "base":default_branch.clone(),
-        })
-        .to_string(),
-    );
+    positive_fix.create_pull_request =
+        Some(positive_fixture_pull_request_options(candidate_sha, &default_branch).to_string());
     let scratch_policy = scratch_policy(candidate_sha)?;
     let positive = create_nativefix_positive_pr(
         &server,
@@ -1641,6 +1639,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             format!("{FIX_PATH_PREFIX}stale-{nonce}.txt"),
             format!("candidate={candidate_sha}\nscenario=stale-head\n").into_bytes(),
         )]),
+        true,
     )?;
 
     let mut rendered = distribution_fixture_files(
@@ -1674,6 +1673,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
         ),
         rendered.clone(),
         obsolete_workflows.clone(),
+        false,
     )?;
     validate_rendered_files(&rendered)?;
 
@@ -1702,6 +1702,7 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             .context("scratch policy control fixture missing")?,
         Phase::Prepare,
     )?;
+    crate::settings::managed_reconcile_scratch(candidate_sha)?;
     println!("Prepared Securefix scratch integration state.");
     println!(
         "Positive PR (add the current-head control-bound owner review, then post separate /approve and /merge comments): {}",
@@ -1726,10 +1727,21 @@ fn create_pr(
     branch: &str,
     title: &str,
     files: BTreeMap<String, Vec<u8>>,
+    draft: bool,
 ) -> Result<PullRequestFixture> {
-    create_pr_with_changes(api, base_sha, base_branch, branch, title, files, Vec::new())
+    create_pr_with_changes(
+        api,
+        base_sha,
+        base_branch,
+        branch,
+        title,
+        files,
+        Vec::new(),
+        draft,
+    )
 }
 
+#[expect(clippy::too_many_arguments)]
 fn create_pr_with_changes(
     api: &GitHub,
     base_sha: &str,
@@ -1738,6 +1750,7 @@ fn create_pr_with_changes(
     title: &str,
     files: BTreeMap<String, Vec<u8>>,
     deletions: Vec<String>,
+    draft: bool,
 ) -> Result<PullRequestFixture> {
     validate_branch(branch)?;
     ensure!(
@@ -1759,10 +1772,11 @@ fn create_pr_with_changes(
     )?;
     let pull: Value = api.post(
         &format!("/repos/{}/pulls", integration_repository()?),
-        &json!({"title":title,"head":branch,"base":base_branch,"body":"Created by the native Securefix scratch integration harness."}),
+        &json!({"title":title,"head":branch,"base":base_branch,"body":"Created by the native Securefix scratch integration harness.","draft":draft}),
     )?;
     ensure!(
         pull["state"] == "open"
+            && pull["draft"] == draft
             && pull["base"]["ref"] == base_branch
             && pull["head"]["sha"] == head_sha
             && pull["head"]["ref"] == branch,
@@ -2174,7 +2188,7 @@ fn create_nativefix_positive_pr(
     let first = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
         read_api: api,
         write_api: api,
-        policy,
+        server_bot_id: policy.server_bot_id,
         source,
         plan: &plan,
         fix,
@@ -2230,7 +2244,7 @@ fn create_nativefix_positive_pr(
     let retry = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
         read_api: api,
         write_api: api,
-        policy,
+        server_bot_id: policy.server_bot_id,
         source,
         plan: &retry_plan,
         fix,
@@ -2250,6 +2264,7 @@ fn create_nativefix_positive_pr(
     ))?;
     ensure!(
         pull["state"] == "open"
+            && pull["draft"] == true
             && pull["base"]["ref"] == base_branch
             && pull["head"]["sha"] == first.commit_sha
             && pull["head"]["ref"] == branch,
@@ -2275,6 +2290,15 @@ fn create_nativefix_positive_pr(
             .as_str()
             .context("nativefix scratch pull request has no URL")?
             .to_owned(),
+    })
+}
+
+fn positive_fixture_pull_request_options(candidate_sha: &str, base_branch: &str) -> Value {
+    json!({
+        "title":format!("test: Securefix native apply integration {}", &candidate_sha[..12]),
+        "body":"Created by the native Securefix integration apply core.",
+        "base":base_branch,
+        "draft":true,
     })
 }
 
@@ -2527,6 +2551,7 @@ fn verify(candidate_sha: &str, state_file: &Path, timeout_seconds: u64) -> Resul
     let _client = GitHub::scratch_from_env("SECUREFIX_CLIENT_APP_TOKEN", candidate_sha)?;
     let policy = scratch_policy(candidate_sha)?;
     verify_remote_identity(&server, &scenario)?;
+    verify_prepared_prs_ready(&server, &scenario)?;
 
     let result = verify_inner(
         &server,
@@ -2568,25 +2593,6 @@ fn verify_inner(
     timeout_seconds: u64,
 ) -> Result<Verification> {
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
-    verify_pr_identity(
-        api,
-        &scenario.positive,
-        &scenario.default_branch,
-        &scenario.positive.head_sha,
-    )?;
-    verify_pr_identity(
-        api,
-        &scenario.stale,
-        &scenario.default_branch,
-        &scenario.stale.head_sha,
-    )?;
-    verify_pr_identity(
-        api,
-        &scenario.distribution,
-        &scenario.default_branch,
-        &scenario.distribution.head_sha,
-    )?;
-
     let approve_comment =
         wait_for_owner_comment(api, &scenario.positive, RequestKind::Approve, deadline)?;
     let positive_merge_comment =
@@ -4243,6 +4249,7 @@ fn verify_pr_identity(
     ))?;
     ensure!(
         pull["state"] == "open"
+            && pull["draft"] == false
             && pull["base"]["repo"]["full_name"] == integration_repository()?
             && pull["base"]["ref"] == base
             && pull["head"]["repo"]["full_name"] == integration_repository()?
@@ -4250,6 +4257,13 @@ fn verify_pr_identity(
             && pull["head"]["sha"] == expected_head,
         "scratch pull request changed after preparation"
     );
+    Ok(())
+}
+
+fn verify_prepared_prs_ready(api: &GitHub, scenario: &Scenario) -> Result<()> {
+    for fixture in [&scenario.positive, &scenario.stale, &scenario.distribution] {
+        verify_pr_identity(api, fixture, &scenario.default_branch, &fixture.head_sha)?;
+    }
     Ok(())
 }
 
@@ -5606,6 +5620,279 @@ mod tests {
             .unwrap();
         archive.write_all(&encoded).unwrap();
         assert!(scenario_from_zip(&archive.finish().unwrap().into_inner()).is_err());
+    }
+
+    #[test]
+    fn prepare_requests_draft_positive_and_stale_prs_but_ready_distribution_pr() {
+        use crate::fixtures::{Fixture, Route};
+        use base64::Engine;
+
+        let repository = super::integration_repository().unwrap();
+        let candidate_sha = "d".repeat(40);
+        let base_sha = "b".repeat(40);
+        let positive_branch = format!("{BRANCH_PREFIX}positive-test");
+        let positive_path = "fixes/positive.txt";
+        let positive_content = b"positive fixture";
+        let run_id = 17;
+        let positive_label = format!("securefix-integration-{run_id}");
+        let policy = super::scratch_policy(&candidate_sha).unwrap();
+        let options = super::positive_fixture_pull_request_options(&candidate_sha, "main");
+        let positive_head = "c".repeat(40);
+        let positive_pull = json!({
+            "number":17,
+            "state":"open",
+            "draft":true,
+            "base":{"ref":"main"},
+            "head":{"sha":positive_head,"ref":positive_branch},
+            "html_url":format!("https://github.com/{repository}/pull/17"),
+        });
+        let commit = json!({
+            "author":{"id":policy.server_bot_id,"type":"Bot"},
+            "commit":{
+                "verification":{"verified":true},
+                "message":format!("Securefix-Artifact: {repository}/{run_id}/{positive_label}"),
+            },
+            "parents":[{"sha":base_sha}],
+            "files":[{"filename":positive_path}],
+        });
+        let control = Fixture::control_revision();
+        let mut routes = vec![
+            Route::get(format!("/repos/{repository}/commits/{base_sha}"), commit),
+            Route::get(
+                format!("/repos/{repository}/contents/{positive_path}?ref={base_sha}"),
+                json!({
+                    "encoding":"base64",
+                    "content":base64::engine::general_purpose::STANDARD.encode(positive_content),
+                }),
+            ),
+            Route::get(
+                format!(
+                    "/repos/{repository}/pulls?head=civitaspo:{positive_branch}&base=main&state=open&per_page=100"
+                ),
+                json!([]),
+            ),
+            Route::active_control(&control),
+            Route::request(
+                "POST",
+                format!("/repos/{repository}/pulls"),
+                201,
+                positive_pull,
+            )
+            .with_request_body(json!({
+                "title":options["title"],
+                "body":options["body"],
+                "head":positive_branch,
+                "base":"main",
+                "draft":true,
+            })),
+        ];
+        let stale_fixture = fixture(18);
+        let distribution_fixture = fixture(19);
+        routes.extend(generic_create_pr_routes(
+            repository,
+            &control,
+            &base_sha,
+            "test: stale fixture",
+            &stale_fixture,
+            true,
+        ));
+        routes.extend(generic_create_pr_routes(
+            repository,
+            &control,
+            &base_sha,
+            "test: distribution fixture",
+            &distribution_fixture,
+            false,
+        ));
+
+        let fixture = Fixture::new(routes);
+        let positive_fix = crate::securefix_gate::artifact::FixArtifact {
+            repository: repository.to_owned(),
+            branch: positive_branch.clone(),
+            run_id,
+            source_sha: candidate_sha.clone(),
+            event_name: "workflow_dispatch".into(),
+            pull_request_context: None,
+            commit_message: "test: positive fixture".into(),
+            create_pull_request: Some(options.to_string()),
+            additions: BTreeMap::from([(positive_path.into(), positive_content.to_vec())]),
+            deletions: Vec::new(),
+        };
+        let source = crate::securefix_gate::SourceRequest {
+            repository,
+            run_id,
+            label: &positive_label,
+            branch: &positive_branch,
+            sha: &candidate_sha,
+        };
+        let plan = crate::securefix_gate::FixPlan {
+            version: 1,
+            source_repository: repository.to_owned(),
+            source_run_id: run_id,
+            source_sha: candidate_sha.clone(),
+            artifact_name: positive_label.clone(),
+            artifact_id: 1,
+            destination_repository: repository.to_owned(),
+            destination_branch: positive_branch.clone(),
+            expected_head: base_sha.clone(),
+            destination_branch_exists: true,
+            existing_pull_request: None,
+        };
+        let positive = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
+            read_api: &fixture.api,
+            write_api: &fixture.api,
+            server_bot_id: policy.server_bot_id,
+            source,
+            plan: &plan,
+            fix: &positive_fix,
+            server_url: "https://github.com",
+            server_repository: "civitaspo/securefix-server",
+            server_run: "integration",
+        })
+        .unwrap();
+        assert_eq!(positive.pull_request_number, Some(17));
+        assert!(positive.already_applied);
+
+        let stale = super::create_pr(
+            &fixture.api,
+            &base_sha,
+            "main",
+            &stale_fixture.branch,
+            "test: stale fixture",
+            BTreeMap::from([("fixes/stale.txt".into(), b"stale".to_vec())]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(stale.number, 18);
+
+        let distribution = super::create_pr_with_changes(
+            &fixture.api,
+            &base_sha,
+            "main",
+            &distribution_fixture.branch,
+            "test: distribution fixture",
+            BTreeMap::from([("fixes/distribution.txt".into(), b"distribution".to_vec())]),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(distribution.number, 19);
+        fixture.finish();
+    }
+
+    #[test]
+    fn verify_preflight_rejects_each_draft_fixture_and_accepts_all_ready() {
+        use crate::fixtures::{Fixture, Route};
+
+        let scenario = Scenario {
+            version: STATE_VERSION,
+            repository: super::integration_repository().unwrap().to_owned(),
+            repository_id: super::integration_repository_id().unwrap(),
+            candidate_sha: "a".repeat(40),
+            published_runtime_sha: "d".repeat(40),
+            workflow_sha: "c".repeat(40),
+            default_branch: "main".into(),
+            base_sha: "b".repeat(40),
+            prepared_at: Utc::now(),
+            positive: fixture(17),
+            stale: fixture(18),
+            distribution: fixture(19),
+        };
+        let pr_response = |pr: &PullRequestFixture, draft| {
+            json!({
+                "number":pr.number,
+                "state":"open",
+                "draft":draft,
+                "base":{"ref":scenario.default_branch,"repo":{"full_name":scenario.repository}},
+                "head":{"sha":pr.head_sha,"ref":pr.branch,"repo":{"full_name":scenario.repository}},
+            })
+        };
+        let route = |pr: &PullRequestFixture, draft| {
+            Route::get(
+                format!("/repos/{}/pulls/{}", scenario.repository, pr.number),
+                pr_response(pr, draft),
+            )
+        };
+
+        for routes in [
+            vec![route(&scenario.positive, true)],
+            vec![
+                route(&scenario.positive, false),
+                route(&scenario.stale, true),
+            ],
+            vec![
+                route(&scenario.positive, false),
+                route(&scenario.stale, false),
+                route(&scenario.distribution, true),
+            ],
+        ] {
+            let fixture = Fixture::new(routes);
+            assert!(super::verify_prepared_prs_ready(&fixture.api, &scenario).is_err());
+            fixture.finish();
+        }
+
+        let fixture = Fixture::new(vec![
+            route(&scenario.positive, false),
+            route(&scenario.stale, false),
+            route(&scenario.distribution, false),
+        ]);
+        super::verify_prepared_prs_ready(&fixture.api, &scenario).unwrap();
+        fixture.finish();
+    }
+
+    fn generic_create_pr_routes(
+        repository: &str,
+        control: &crate::control::ControlRevision,
+        base_sha: &str,
+        title: &str,
+        fixture: &PullRequestFixture,
+        draft: bool,
+    ) -> Vec<crate::fixtures::Route> {
+        use crate::fixtures::Route;
+
+        let base = "main";
+        let pulls_path = format!("/repos/{repository}/pulls");
+        let pull = json!({
+            "number":fixture.number,
+            "state":"open",
+            "draft":draft,
+            "base":{"ref":base},
+            "head":{"sha":fixture.head_sha,"ref":fixture.branch},
+            "html_url":format!("https://github.com/{repository}/pull/{}", fixture.number),
+        });
+        vec![
+            Route::active_control(control),
+            Route::request(
+                "POST",
+                format!("/repos/{repository}/git/refs"),
+                201,
+                json!({"object":{"sha":base_sha}}),
+            )
+            .with_request_body(
+                json!({"ref":format!("refs/heads/{}", fixture.branch),"sha":base_sha}),
+            ),
+            Route::active_control(control),
+            Route::request(
+                "POST",
+                "/graphql",
+                200,
+                json!({
+                    "data":{"createCommitOnBranch":{"commit":{
+                        "oid":fixture.head_sha,
+                        "parents":{"nodes":[{"oid":base_sha}]},
+                        "signature":{"isValid":true,"state":"VALID"},
+                    }}},
+                }),
+            ),
+            Route::active_control(control),
+            Route::request("POST", pulls_path, 201, pull).with_request_body(json!({
+                "title":title,
+                "head":fixture.branch,
+                "base":base,
+                "body":"Created by the native Securefix scratch integration harness.",
+                "draft":draft,
+            })),
+        ]
     }
 
     fn fixture(number: u64) -> PullRequestFixture {
