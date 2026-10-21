@@ -24,6 +24,9 @@ pub enum PolicyCheckCommand {
     Capture {
         #[arg(long)]
         pull_request_number: u64,
+        /// Explicit path to this instance's protected-main TOML configuration.
+        #[arg(long)]
+        config_path: String,
         #[arg(long, default_value = "native-policy-check/manifest.json")]
         output: PathBuf,
     },
@@ -37,6 +40,7 @@ pub struct RequestManifest {
     pub repository: RepositoryIdentity,
     pub pull_request: PullRequestIdentity,
     pub producer: ProducerIdentity,
+    pub authority: securefix::api::NativeAuthoritySnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -104,6 +108,11 @@ impl RequestManifest {
         validate_sha(&self.producer.source_sha)?;
         validate_sha(&self.producer.workflow_sha)?;
         validate_workflow_path(&self.producer.workflow_path)?;
+        securefix::api::validate_native_instance_config_path(&self.authority.config_path)?;
+        validate_digest(&self.authority.config_sha256)?;
+        validate_sha(&self.authority.config_epoch)?;
+        validate_digest(&self.authority.workflow_sha256)?;
+        validate_sha(&self.authority.workflow_epoch)?;
         ensure!(
             self.producer.actor_id > 0 && valid_login(&self.producer.actor_login),
             "invalid request producer actor"
@@ -117,13 +126,18 @@ pub fn run(command: Command) -> Result<()> {
         Command::PolicyCheck { command } => match command {
             PolicyCheckCommand::Capture {
                 pull_request_number,
+                config_path,
                 output,
-            } => capture_policy_check(pull_request_number, &output),
+            } => capture_policy_check(pull_request_number, &config_path, &output),
         },
     }
 }
 
-fn capture_policy_check(pull_request_number: u64, output: &std::path::Path) -> Result<()> {
+fn capture_policy_check(
+    pull_request_number: u64,
+    config_path: &str,
+    output: &std::path::Path,
+) -> Result<()> {
     ensure!(pull_request_number > 0, "invalid pull request number");
     let repository_name =
         std::env::var("GITHUB_REPOSITORY").context("missing GITHUB_REPOSITORY")?;
@@ -211,6 +225,22 @@ fn capture_policy_check(pull_request_number: u64, output: &std::path::Path) -> R
         .as_str()
         .context("pull request author login is missing")?
         .to_owned();
+    ensure!(
+        pull_request["base"]["ref"].as_str() == repository["default_branch"].as_str(),
+        "native request PR must target the repository default branch"
+    );
+    let default_branch = repository["default_branch"]
+        .as_str()
+        .context("request repository default branch is missing")?;
+    let authority = securefix::api::capture_native_authority_snapshot(
+        &api,
+        &repository_name,
+        repository_id,
+        default_branch,
+        config_path,
+        &workflow_path,
+        &workflow_sha,
+    )?;
 
     let manifest = RequestManifest {
         protocol: PROTOCOL.to_owned(),
@@ -237,6 +267,7 @@ fn capture_policy_check(pull_request_number: u64, output: &std::path::Path) -> R
             actor_id,
             actor_login,
         },
+        authority,
     };
     manifest.validate()?;
     let bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -253,6 +284,17 @@ fn capture_policy_check(pull_request_number: u64, output: &std::path::Path) -> R
         securefix::hex_encode(sha2::Sha256::digest(&bytes))
     );
     println!("request_path={}", output.display());
+    Ok(())
+}
+
+fn validate_digest(value: &str) -> Result<()> {
+    ensure!(
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "invalid native authority digest"
+    );
     Ok(())
 }
 
@@ -326,6 +368,13 @@ mod tests {
                 actor_id: 4525500,
                 actor_login: "civitaspo".to_owned(),
             },
+            authority: securefix::api::NativeAuthoritySnapshot {
+                config_path: "securefix-server.toml".to_owned(),
+                config_sha256: "d".repeat(64),
+                config_epoch: "e".repeat(40),
+                workflow_sha256: "f".repeat(64),
+                workflow_epoch: "1".repeat(40),
+            },
         }
     }
 
@@ -364,5 +413,32 @@ mod tests {
         ] {
             assert!(canonical_workflow_path(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn authority_snapshot_rejects_config_changes_and_change_revert_epochs() {
+        let captured = securefix::api::NativeAuthoritySnapshot {
+            config_path: "securefix-server.toml".to_owned(),
+            config_sha256: "a".repeat(64),
+            config_epoch: "b".repeat(40),
+            workflow_sha256: "c".repeat(64),
+            workflow_epoch: "d".repeat(40),
+        };
+        assert!(securefix::api::require_native_authority_unchanged(&captured, &captured).is_ok());
+
+        let mut changed_config = captured.clone();
+        changed_config.config_sha256 = "e".repeat(64);
+        changed_config.config_epoch = "f".repeat(40);
+        assert!(
+            securefix::api::require_native_authority_unchanged(&captured, &changed_config).is_err()
+        );
+
+        let mut reverted_config = captured.clone();
+        reverted_config.config_epoch = "e".repeat(40);
+        assert_eq!(reverted_config.config_sha256, captured.config_sha256);
+        assert!(
+            securefix::api::require_native_authority_unchanged(&captured, &reverted_config)
+                .is_err()
+        );
     }
 }

@@ -54,6 +54,7 @@ jobs:
           set -euo pipefail
           securefix new-client policy-check capture \
             --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --config-path securefix-server.toml \
             --output native-policy-check/manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: manifest

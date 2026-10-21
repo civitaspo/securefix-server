@@ -30,6 +30,19 @@ pub struct NativeScratchTarget<'a> {
     pub actor_id: u64,
     pub actor_login: &'a str,
     pub request_sha256: &'a str,
+    pub authority: &'a NativeAuthoritySnapshot,
+    pub caller_workflow_path: &'a str,
+    pub caller_workflow_sha: &'a str,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAuthoritySnapshot {
+    pub config_path: String,
+    pub config_sha256: String,
+    pub config_epoch: String,
+    pub workflow_sha256: String,
+    pub workflow_epoch: String,
 }
 
 #[derive(Clone)]
@@ -70,6 +83,9 @@ struct NativeScratchWrite {
     actor_login: String,
     request_sha256: String,
     policy_app_id: u64,
+    request_authority: NativeAuthoritySnapshot,
+    caller_workflow_path: String,
+    caller_workflow_sha: String,
 }
 
 #[derive(Debug)]
@@ -312,6 +328,9 @@ impl GitHub {
             actor_login: request.actor_login.to_owned(),
             request_sha256: request.request_sha256.to_owned(),
             policy_app_id: config.apps.policy_check_id,
+            request_authority: request.authority.clone(),
+            caller_workflow_path: request.caller_workflow_path.to_owned(),
+            caller_workflow_sha: request.caller_workflow_sha.to_owned(),
         }));
         Ok(api)
     }
@@ -618,6 +637,9 @@ impl GitHub {
             actor_login,
             request_sha256: _,
             policy_app_id,
+            request_authority,
+            caller_workflow_path,
+            caller_workflow_sha,
         } = write.as_ref();
 
         validate_instance_config_path(config_path)?;
@@ -671,6 +693,17 @@ impl GitHub {
                     == *policy_workflow_sha256,
             "native Server config or policy-check wrapper changed before write"
         );
+        let current_authority = capture_native_authority_snapshot(
+            &server_reader,
+            target_repository,
+            *target_id,
+            base_ref,
+            config_path,
+            caller_workflow_path,
+            caller_workflow_sha,
+        )?;
+        require_native_authority_unchanged(request_authority, &current_authority)
+            .context("native request authority changed before write")?;
         let target: Value = self.get(&format!("/repos/{target_repository}"))?;
         ensure!(
             target["id"].as_u64() == Some(*target_id)
@@ -1081,6 +1114,127 @@ impl GitHub {
             .replace('\n', "");
         Ok(base64::engine::general_purpose::STANDARD.decode(content)?)
     }
+
+    pub fn latest_path_commit(
+        &self,
+        repository: &str,
+        path: &str,
+        revision: &str,
+    ) -> Result<String> {
+        crate::policy::validate_repository(repository)?;
+        crate::policy::validate_sha(revision)?;
+        validate_instance_config_path(path)?;
+        let commits: Value = self.get(&format!(
+            "/repos/{repository}/commits?path={}&sha={revision}&per_page=1",
+            encode_query_component(path)
+        ))?;
+        let commits = commits.as_array().context("path history is missing")?;
+        ensure!(commits.len() == 1, "path has no commit history");
+        let sha = commits[0]["sha"]
+            .as_str()
+            .context("path history commit SHA is missing")?;
+        crate::policy::validate_sha(sha)?;
+        Ok(sha.to_owned())
+    }
+
+    pub fn branch_head(&self, repository: &str, branch: &str) -> Result<String> {
+        crate::policy::validate_repository(repository)?;
+        crate::config::validate_branch(branch)?;
+        let commit: Value = self.get(&format!(
+            "/repos/{repository}/commits/{}",
+            encode_path_segment(branch)
+        ))?;
+        let sha = commit["sha"]
+            .as_str()
+            .context("branch commit SHA is missing")?;
+        crate::policy::validate_sha(sha)?;
+        Ok(sha.to_owned())
+    }
+}
+
+pub fn capture_native_authority_snapshot(
+    api: &GitHub,
+    repository_name: &str,
+    repository_id: u64,
+    default_branch: &str,
+    config_path: &str,
+    workflow_path: &str,
+    workflow_revision: &str,
+) -> Result<NativeAuthoritySnapshot> {
+    crate::policy::validate_repository(repository_name)?;
+    ensure!(repository_id > 0, "invalid authority repository ID");
+    crate::config::validate_branch(default_branch)?;
+    validate_instance_config_path(config_path)?;
+    crate::policy::validate_sha(workflow_revision)?;
+    let workflow_name = workflow_path
+        .strip_prefix(".github/workflows/")
+        .context("caller workflow path is outside .github/workflows")?;
+    ensure!(
+        workflow_name.ends_with(".yml")
+            && !workflow_name.is_empty()
+            && !workflow_path.contains(['\\', '%', '?', '#'])
+            && workflow_name
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+            && workflow_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        "invalid caller workflow path"
+    );
+
+    let repository: Value = api.get(&format!("/repos/{repository_name}"))?;
+    ensure!(
+        repository["id"].as_u64() == Some(repository_id)
+            && repository["full_name"].as_str() == Some(repository_name)
+            && repository["default_branch"].as_str() == Some(default_branch),
+        "native request repository or default branch identity changed"
+    );
+    let snapshot_sha = api.branch_head(repository_name, default_branch)?;
+    let config_bytes = api.content(repository_name, config_path, &snapshot_sha)?;
+    let instance = crate::instance_config::InstanceConfig::parse(&config_bytes)?;
+    ensure!(
+        instance.instance.repository == repository_name
+            && instance.instance.id == repository_id
+            && instance.instance.default_branch == default_branch,
+        "captured instance config identity differs from the request repository"
+    );
+    let workflow_bytes = api.content(repository_name, workflow_path, &snapshot_sha)?;
+    let captured_workflow = api.content(repository_name, workflow_path, workflow_revision)?;
+    ensure!(
+        workflow_bytes == captured_workflow,
+        "caller workflow differs from its protected default-branch version"
+    );
+    let compare: Value = api.get(&format!(
+        "/repos/{repository_name}/compare/{workflow_revision}...{snapshot_sha}"
+    ))?;
+    ensure!(
+        matches!(compare["status"].as_str(), Some("ahead" | "identical")),
+        "caller workflow revision is not on default-branch history"
+    );
+    let config_epoch = api.latest_path_commit(repository_name, config_path, &snapshot_sha)?;
+    let workflow_epoch = api.latest_path_commit(repository_name, workflow_path, &snapshot_sha)?;
+    ensure!(
+        api.branch_head(repository_name, default_branch)? == snapshot_sha,
+        "instance default branch moved during authority capture"
+    );
+    Ok(NativeAuthoritySnapshot {
+        config_path: config_path.to_owned(),
+        config_sha256: crate::hex_encode(sha2::Sha256::digest(&config_bytes)),
+        config_epoch,
+        workflow_sha256: crate::hex_encode(sha2::Sha256::digest(&workflow_bytes)),
+        workflow_epoch,
+    })
+}
+
+pub fn require_native_authority_unchanged(
+    captured: &NativeAuthoritySnapshot,
+    current: &NativeAuthoritySnapshot,
+) -> Result<()> {
+    ensure!(
+        captured == current,
+        "native request configuration or caller authority history changed"
+    );
+    Ok(())
 }
 
 fn testing_label_cleanup_matches(
@@ -1215,6 +1369,19 @@ fn encode_path_segment(value: &str) -> String {
     encoded
 }
 
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
 fn read_only_query(query: &str) -> bool {
     let query = query.trim_start();
     query
@@ -1257,6 +1424,15 @@ mod tests {
             actor_login: "maintainer".into(),
             request_sha256: "c".repeat(64),
             policy_app_id: 6,
+            request_authority: NativeAuthoritySnapshot {
+                config_path: "securefix-server.toml".into(),
+                config_sha256: "d".repeat(64),
+                config_epoch: "e".repeat(40),
+                workflow_sha256: "f".repeat(64),
+                workflow_epoch: "1".repeat(40),
+            },
+            caller_workflow_path: ".github/workflows/policy-check.yml".into(),
+            caller_workflow_sha: "2".repeat(40),
         }));
         api
     }

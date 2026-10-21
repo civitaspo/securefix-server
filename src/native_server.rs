@@ -94,6 +94,15 @@ fn verify_request(
         serde_json::from_slice(&manifest_bytes).context("parse native request manifest")?;
     manifest.validate()?;
     ensure!(
+        manifest.authority.config_path == instance_config_path
+            && config.instance.repository == manifest.repository.full_name
+            && config.instance.id == manifest.repository.id
+            && config.instance.default_branch == manifest.pull_request.base_ref
+            && securefix::hex_encode(Sha256::digest(&config_bytes))
+                == manifest.authority.config_sha256,
+        "native request was captured under a different instance configuration"
+    );
+    ensure!(
         config.repositories.iter().any(|repository| {
             repository.id == manifest.repository.id
                 && repository.repository == manifest.repository.full_name
@@ -137,6 +146,16 @@ fn verify_request(
     verify_run_identity(&run, &manifest)?;
     verify_artifact_binding(&api, &manifest, manifest_path, bundle_path)?;
     verify_current_pull_request(&api, &manifest)?;
+    let current_authority = securefix::api::capture_native_authority_snapshot(
+        &api,
+        &manifest.repository.full_name,
+        manifest.repository.id,
+        &manifest.pull_request.base_ref,
+        instance_config_path,
+        &manifest.producer.workflow_path,
+        &manifest.producer.workflow_sha,
+    )?;
+    securefix::api::require_native_authority_unchanged(&manifest.authority, &current_authority)?;
 
     let references: Vec<securefix::workflow::ReferencedWorkflow> = serde_json::from_value(
         run.get("referenced_workflows")
@@ -310,6 +329,9 @@ fn native_scratch_writer(
         actor_id: manifest.producer.actor_id,
         actor_login: &manifest.producer.actor_login,
         request_sha256: &request_sha256,
+        authority: &manifest.authority,
+        caller_workflow_path: &manifest.producer.workflow_path,
+        caller_workflow_sha: &manifest.producer.workflow_sha,
     };
     securefix::api::GitHub::native_scratch_from_env(
         "SECUREFIX_NATIVE_CHECK_TOKEN",
@@ -674,6 +696,13 @@ mod tests {
                 workflow_sha: "b".repeat(40),
                 actor_id: 12,
                 actor_login: "maintainer".to_owned(),
+            },
+            authority: securefix::api::NativeAuthoritySnapshot {
+                config_path: "securefix-server.toml".to_owned(),
+                config_sha256: "1".repeat(64),
+                config_epoch: "2".repeat(40),
+                workflow_sha256: "3".repeat(64),
+                workflow_epoch: "4".repeat(40),
             },
         }
     }
