@@ -1,4 +1,4 @@
-name: Native Securefix scratch receiver
+name: testing-Native Securefix scratch receiver
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/securefix-server
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
       - name: Reuse the exact source-bound candidate CLI
         id: candidate
@@ -153,8 +153,9 @@ jobs:
               (.parents | length == 1 and .[0].sha == $parent) and
               (.files | length == 1 and .[0].filename == "native-producer-proof.txt" and .[0].status == "added")
             ' <<<"$commit" >/dev/null
-            content="$(gh api "repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head" --jq .content | base64 -d)"
-            [[ "$content" == $'native producer proof fixture\n' ]]
+            gh api "repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head" --jq .content | base64 -d > "$RUNNER_TEMP/native-producer-proof.txt"
+            printf '%s\n' 'native producer proof fixture' > "$RUNNER_TEMP/native-producer-proof.expected"
+            cmp -s "$RUNNER_TEMP/native-producer-proof.expected" "$RUNNER_TEMP/native-producer-proof.txt"
             jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '{case:$case,pull_request:($pr|tonumber),commit_sha:$head,parent_sha:$parent,signed:true,added_file:"native-producer-proof.txt"}' > native-securefix-readback.json
           else
             [[ "$current_head" == "$EXPECTED_CURRENT_HEAD_SHA" ]]

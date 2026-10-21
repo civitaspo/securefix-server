@@ -2543,6 +2543,28 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             && run.contains("conclusion == \"success\"")))
                     && !run.contains("gh api -X")
                     && !run.contains("--method");
+                let native_test_precondition = step["name"]
+                    == "Verify the selected scratch pull request head"
+                    && run.contains(
+                        "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER",
+                    )
+                    && run.matches("gh api ").count() == 1;
+                let native_test_readback = step["name"] == "Independently read back the PR and signed commit state"
+                    && run.contains("repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")
+                    && run.contains("repos/civitaspo/testing-securefix-server/commits/$current_head")
+                    && run.contains("repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head")
+                    && run.matches("gh api ").count() == 3;
+                let bounded_native_test_assertion = path
+                    == ".github/workflows/testing-native-securefix-server.yml"
+                    && job_id == "apply"
+                    && (native_test_precondition || native_test_readback)
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method")
+                    && !run.contains("--input")
+                    && !run.contains("--raw-field")
+                    && !run.contains("--field")
+                    && !run.contains(" -f ")
+                    && !run.contains(" -F ");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
@@ -2550,7 +2572,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && (!run.contains("jq ")
                             || bounded_baseline_reads
                             || bounded_legacy_runtime_reads
-                            || bounded_release_artifact_lookup)
+                            || bounded_release_artifact_lookup
+                            || bounded_native_test_assertion)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
