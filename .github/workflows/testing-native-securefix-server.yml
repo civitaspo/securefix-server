@@ -138,11 +138,49 @@ jobs:
           EXPECTED_CURRENT_HEAD_SHA: ${{ inputs.expected_current_head_sha }}
         run: |
           set -euo pipefail
-          pull="$(gh api "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")"
-          current_head="$(jq -r '.head.sha' <<<"$pull")"
-          if [[ "$CASE_KIND" == apply ]]; then
-            [[ "$current_head" =~ ^[0-9a-f]{40}$ && "$current_head" != "$EXPECTED_CURRENT_HEAD_SHA" ]]
-            jq -e --arg sha "$current_head" --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '
+          readback_file=native-securefix-readback.json
+          api_error="$RUNNER_TEMP/native-securefix-readback-api-error.log"
+          attempts='[]'
+          current_head=''
+          record_readback() {
+            jq -n \
+              --arg case "$CASE_KIND" \
+              --arg pr "$PULL_REQUEST_NUMBER" \
+              --arg stage "$1" \
+              --arg reason "$2" \
+              --arg head "$current_head" \
+              --arg expected "$EXPECTED_CURRENT_HEAD_SHA" \
+              --argjson attempts "$attempts" \
+              '{case:$case,pull_request:($pr|tonumber),stage:$stage,reason:$reason,current_head:$head,expected_head:$expected,attempts:$attempts}' \
+              > "$readback_file"
+          }
+          record_attempt() {
+            attempts="$(jq -cn --argjson previous "$attempts" --argjson attempt "$1" --arg check "$2" --arg reason "$3" '$previous + [{attempt:$attempt,check:$check,reason:$reason}]')"
+            record_readback "$2" "$3"
+          }
+          record_readback readback starting
+          printf '%s\n' 'native producer proof fixture' > "$RUNNER_TEMP/native-producer-proof.expected"
+          for attempt in 1 2 3 4 5 6; do
+            current_head=''
+            cache_probe="${GITHUB_RUN_ID}-${attempt}-pull"
+            if ! pull="$(gh api -H 'Cache-Control: no-cache' "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER?native_probe=$cache_probe" 2>"$api_error")"; then
+              record_attempt "$attempt" pull_request api_unavailable
+            elif ! current_head="$(jq -er '.head.sha | strings' <<<"$pull" 2>/dev/null)"; then
+              record_attempt "$attempt" pull_request head_missing
+            elif [[ "$CASE_KIND" != apply ]]; then
+              if [[ "$current_head" == "$EXPECTED_CURRENT_HEAD_SHA" ]]; then
+                record_attempt "$attempt" pull_request head_unchanged
+                jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" --argjson attempts "$attempts" '{case:$case,pull_request:($pr|tonumber),head_sha:$head,no_write:true,attempts:$attempts}' > "$readback_file"
+                exit 0
+              fi
+              record_attempt "$attempt" pull_request head_changed
+              exit 1
+            elif [[ "$current_head" == "$EXPECTED_CURRENT_HEAD_SHA" ]]; then
+              record_attempt "$attempt" pull_request head_not_advanced
+            elif [[ ! "$current_head" =~ ^[0-9a-f]{40}$ ]]; then
+              record_attempt "$attempt" pull_request head_invalid
+              exit 1
+            elif ! jq -e --arg sha "$current_head" '
               .state == "open" and
               .base.ref == "main" and
               .head.sha == $sha and
@@ -150,22 +188,37 @@ jobs:
               .head.repo.full_name == "civitaspo/testing-securefix-server" and
               .user.id == 4525500 and
               .user.login == "civitaspo"
-            ' <<<"$pull" >/dev/null
-            commit="$(gh api "repos/civitaspo/testing-securefix-server/commits/$current_head")"
-            jq -e --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '
-              .commit.verification.verified == true and
-              .author.id == 288069019 and
-              (.parents | length == 1 and .[0].sha == $parent) and
-              (.files | length == 1 and .[0].filename == "native-producer-proof.txt" and .[0].status == "added")
-            ' <<<"$commit" >/dev/null
-            gh api "repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head" --jq .content | base64 -d > "$RUNNER_TEMP/native-producer-proof.txt"
-            printf '%s\n' 'native producer proof fixture' > "$RUNNER_TEMP/native-producer-proof.expected"
-            cmp -s "$RUNNER_TEMP/native-producer-proof.expected" "$RUNNER_TEMP/native-producer-proof.txt"
-            jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '{case:$case,pull_request:($pr|tonumber),commit_sha:$head,parent_sha:$parent,signed:true,added_file:"native-producer-proof.txt"}' > native-securefix-readback.json
-          else
-            [[ "$current_head" == "$EXPECTED_CURRENT_HEAD_SHA" ]]
-            jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" '{case:$case,pull_request:($pr|tonumber),head_sha:$head,no_write:true}' > native-securefix-readback.json
-          fi
+            ' <<<"$pull" >/dev/null 2>&1; then
+              record_attempt "$attempt" pull_request identity_or_state_mismatch
+              exit 1
+            else
+              cache_probe="${GITHUB_RUN_ID}-${attempt}-commit"
+              if ! commit="$(gh api -H 'Cache-Control: no-cache' "repos/civitaspo/testing-securefix-server/commits/$current_head?native_probe=$cache_probe" 2>"$api_error")"; then
+                record_attempt "$attempt" commit api_unavailable
+              elif ! jq -e --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '
+                .commit.verification.verified == true and
+                .author.id == 288069019 and
+                (.parents | length == 1 and .[0].sha == $parent) and
+                (.files | length == 1 and .[0].filename == "native-producer-proof.txt" and .[0].status == "added")
+              ' <<<"$commit" >/dev/null 2>&1; then
+                record_attempt "$attempt" commit signature_or_commit_shape_not_visible
+              else
+                cache_probe="${GITHUB_RUN_ID}-${attempt}-content"
+                if ! (gh api -H 'Cache-Control: no-cache' "repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head&native_probe=$cache_probe" --jq .content | base64 -d > "$RUNNER_TEMP/native-producer-proof.txt") 2>"$api_error"; then
+                  record_attempt "$attempt" file_contents api_or_decode_unavailable
+                elif ! cmp -s "$RUNNER_TEMP/native-producer-proof.expected" "$RUNNER_TEMP/native-producer-proof.txt"; then
+                  record_attempt "$attempt" file_contents exact_bytes_mismatch
+                else
+                  record_attempt "$attempt" readback all_invariants_verified
+                  jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" --arg parent "$EXPECTED_CURRENT_HEAD_SHA" --argjson attempts "$attempts" '{case:$case,pull_request:($pr|tonumber),commit_sha:$head,parent_sha:$parent,signed:true,added_file:"native-producer-proof.txt",attempts:$attempts}' > "$readback_file"
+                  exit 0
+                fi
+              fi
+            fi
+            if [[ "$attempt" == 6 ]]; then exit 1; fi
+            sleep 1
+          done
+          exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
