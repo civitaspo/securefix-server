@@ -135,7 +135,10 @@ impl Policy {
             !policy.trusted_committers.is_empty(),
             "no trusted committers"
         );
-        validate_sensitive_path_approval_exemptions(&policy)?;
+        validate_sensitive_path_approval_exemptions(
+            &policy.sensitive_path_approval_exemptions,
+            &policy.trusted_committers,
+        )?;
         ensure!(
             !policy.default_sensitive_paths.is_empty(),
             "missing default sensitive paths"
@@ -254,17 +257,18 @@ impl Policy {
     }
 }
 
-fn validate_sensitive_path_approval_exemptions(policy: &Policy) -> Result<()> {
+pub(crate) fn validate_sensitive_path_approval_exemptions(
+    exemptions: &SensitivePathApprovalExemptions,
+    trusted_committers: &[String],
+) -> Result<()> {
     let mut ids = HashSet::new();
     let mut logins = HashSet::new();
-    for (id, login, is_app) in policy
-        .sensitive_path_approval_exemptions
+    for (id, login, is_app) in exemptions
         .users
         .iter()
         .map(|user| (user.id, user.login.as_str(), false))
         .chain(
-            policy
-                .sensitive_path_approval_exemptions
+            exemptions
                 .github_apps
                 .iter()
                 .map(|app| (app.bot_id, app.bot_login.as_str(), true)),
@@ -275,11 +279,7 @@ fn validate_sensitive_path_approval_exemptions(policy: &Policy) -> Result<()> {
             "sensitive-path approval exemption ID must be nonzero"
         );
         ensure!(
-            !login.is_empty()
-                && login.len() <= 100
-                && login
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_[].".contains(&b)),
+            crate::config::is_valid_login(login),
             "invalid sensitive-path approval exemption login"
         );
         ensure!(
@@ -291,8 +291,7 @@ fn validate_sensitive_path_approval_exemptions(policy: &Policy) -> Result<()> {
             "duplicate sensitive-path approval exemption principal"
         );
         ensure!(
-            policy
-                .trusted_committers
+            trusted_committers
                 .iter()
                 .any(|trusted| trusted.eq_ignore_ascii_case(login)),
             "sensitive-path approval exemption must be a trusted committer"
