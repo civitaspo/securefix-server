@@ -84,7 +84,7 @@ jobs:
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           -shellcheck=
           -ignore 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
-          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/(install-cli|load-runtime|setup-cli|install-actions-lock)" in invalid format because ref is missing'
+          -ignore 'property "workflow_sha" is not defined in object type \{check_run_id: number; container:|specifying action "\$/\.github/actions/(install-cli|load-runtime|setup-cli|install-actions-lock|load-package)" in invalid format because ref is missing'
 
       - name: Publish reusable CLI build
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1

@@ -1,0 +1,113 @@
+name: Load source-bound Securefix package
+description: Verify one raw package from the pinned implementation and add it to PATH
+inputs:
+  action-sha:
+    description: Full SHA of this loader action's protected source revision
+    required: true
+  source-repository:
+    description: Trusted source and attestation repository from deployment configuration
+    required: true
+  source-repository-id:
+    description: Numeric source repository ID from deployment configuration
+    required: true
+  destination-repository:
+    description: Repository that owns the immutable package release
+    required: true
+  destination-repository-id:
+    description: Numeric release destination ID from deployment configuration
+    required: true
+  source-default-branch:
+    description: Configured source repository default branch
+    required: true
+  owner-id:
+    description: Configured repository owner ID used to qualify a scratch prerelease
+    required: true
+  channel:
+    description: stable for normal consumers or scratch for an explicit prerelease probe
+    required: true
+  publication-source-sha:
+    description: Source commit in the current trusted scratch publication record
+    required: false
+  publication-source-branch:
+    description: Source branch in the current trusted scratch publication record
+    required: false
+  publication-tag:
+    description: Release tag in the current trusted scratch publication record
+    required: false
+  publication-release-id:
+    description: Immutable release ID in the current trusted scratch publication record
+    required: false
+  publication-asset-id:
+    description: Immutable release asset ID in the current trusted scratch publication record
+    required: false
+  publication-asset-sha256:
+    description: Release asset digest in the current trusted scratch publication record
+    required: false
+  publication-asset-size:
+    description: Release asset size in the current trusted scratch publication record
+    required: false
+  publication-producer-run-id:
+    description: Producer run ID in the current trusted scratch publication record
+    required: false
+  publication-producer-run-attempt:
+    description: Producer run attempt in the current trusted scratch publication record
+    required: false
+  token:
+    description: Read token for release and source metadata
+    required: true
+outputs:
+  binary:
+    description: Verified executable path
+    value: ${{ steps.load.outputs.binary }}
+  version:
+    description: Verified package version
+    value: ${{ steps.load.outputs.version }}
+  asset-id:
+    description: Release asset ID whose bytes passed verification
+    value: ${{ steps.load.outputs.asset-id }}
+  release-id:
+    description: Immutable release ID
+    value: ${{ steps.load.outputs.release-id }}
+  source-sha:
+    description: Source commit derived from the verified binary attestation
+    value: ${{ steps.load.outputs.source-sha }}
+  source-branch:
+    description: Source branch derived from the verified binary attestation
+    value: ${{ steps.load.outputs.source-branch }}
+  producer-run-id:
+    description: Producer run derived from the verified binary attestation
+    value: ${{ steps.load.outputs.producer-run-id }}
+  producer-run-attempt:
+    description: Producer attempt derived from the verified binary attestation
+    value: ${{ steps.load.outputs.producer-run-attempt }}
+runs:
+  using: composite
+  steps:
+    - id: load
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_SHA: ${{ inputs.action-sha }}
+        SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+        SOURCE_REPOSITORY_ID: ${{ inputs.source-repository-id }}
+        DESTINATION_REPOSITORY: ${{ inputs.destination-repository }}
+        DESTINATION_REPOSITORY_ID: ${{ inputs.destination-repository-id }}
+        SOURCE_DEFAULT_BRANCH: ${{ inputs.source-default-branch }}
+        OWNER_ID: ${{ inputs.owner-id }}
+        CHANNEL: ${{ inputs.channel }}
+        PUBLICATION_SOURCE_SHA: ${{ inputs.publication-source-sha }}
+        PUBLICATION_SOURCE_BRANCH: ${{ inputs.publication-source-branch }}
+        PUBLICATION_TAG: ${{ inputs.publication-tag }}
+        PUBLICATION_RELEASE_ID: ${{ inputs.publication-release-id }}
+        PUBLICATION_ASSET_ID: ${{ inputs.publication-asset-id }}
+        PUBLICATION_ASSET_SHA256: ${{ inputs.publication-asset-sha256 }}
+        PUBLICATION_ASSET_SIZE: ${{ inputs.publication-asset-size }}
+        PUBLICATION_PRODUCER_RUN_ID: ${{ inputs.publication-producer-run-id }}
+        PUBLICATION_PRODUCER_RUN_ATTEMPT: ${{ inputs.publication-producer-run-attempt }}
+        GH_TOKEN: ${{ inputs.token }}
+        CALLER_REPOSITORY: ${{ github.repository }}
+        EVENT_NAME: ${{ github.event_name }}
+        ACTOR_ID: ${{ github.actor_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: bash "$ACTION_PATH/load.sh"
