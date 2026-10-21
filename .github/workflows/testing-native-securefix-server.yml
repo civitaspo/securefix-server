@@ -1,0 +1,171 @@
+name: Native Securefix scratch receiver
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: Apply one request or require a stale request to be rejected without a write
+        required: true
+        type: choice
+        options: [apply, stale-head, stale-config, stale-deployment]
+      producer_run_id:
+        description: Exact successful Client pull_request_target producer run
+        required: true
+        type: string
+      pull_request_number:
+        description: Exact owner-authored PR number in the scratch Client repository
+        required: true
+        type: string
+      expected_current_head_sha:
+        description: PR head that must remain unchanged for rejection cases
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  apply:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Reuse the exact source-bound candidate CLI
+        id: candidate
+        uses: civitaspo/securefix-server/.github/actions/setup-cli@ee98f4f12f3c32855c95feb3fe75bc2870b88460 # native candidate loader H2 ee98f4f12f3c32855c95feb3fe75bc2870b88460
+        with:
+          candidate-run-id: '39604246654'
+          candidate-source-sha: 7b5da5d248078c774d44d54a0e7fd145ddf67fd7
+      - name: Require the exact candidate build artifact
+        if: steps.candidate.outputs.reused != 'true'
+        run: exit 1
+      - name: Verify the selected scratch pull request head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_current_head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          pull="$(gh api "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")"
+          jq -e --arg sha "$EXPECTED_HEAD_SHA" '
+            .state == "open" and
+            .base.repo.full_name == "civitaspo/testing-securefix-server" and
+            .base.repo.id == 1410312556 and
+            .base.ref == "main" and
+            .head.repo.full_name == "civitaspo/testing-securefix-server" and
+            .head.repo.id == 1410312556 and
+            .head.sha == $sha and
+            .user.login == "civitaspo" and
+            .user.id == 4525500
+          ' <<<"$pull" >/dev/null
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: server
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: read
+      - name: Execute the selected source-bound Securefix request
+        env:
+          CLI_BINARY: ${{ steps.candidate.outputs.binary }}
+          CASE_KIND: ${{ inputs.case }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_CURRENT_HEAD_SHA: ${{ inputs.expected_current_head_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.server.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.server.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_CURRENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          command_log="$RUNNER_TEMP/native-securefix-command.log"
+          if "$CLI_BINARY" new-server securefix-apply \
+            --config repo-settings/native-securefix-test-instance.toml \
+            --config-path repo-settings/native-securefix-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID" >"$command_log" 2>&1; then
+            command_status=0
+          else
+            command_status=$?
+          fi
+          if [[ "$CASE_KIND" == apply ]]; then
+            [[ "$command_status" == 0 ]]
+            printf '%s\n' 'case=apply' > native-securefix-result.txt
+            cat "$command_log" >> native-securefix-result.txt
+          else
+            [[ "$command_status" != 0 ]]
+            case "$CASE_KIND" in
+              stale-head)
+                expected_error='native request PR is closed, retargeted, or has a different head or identity'
+                ;;
+              stale-config|stale-deployment)
+                expected_error='native request configuration or caller authority history changed'
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+            grep -F "$expected_error" "$command_log" >/dev/null
+            printf 'case=%s\nexpected_rejection=%s\n' "$CASE_KIND" "$expected_error" > native-securefix-result.txt
+            cat "$command_log" >> native-securefix-result.txt
+          fi
+      - name: Independently read back the PR and signed commit state
+        env:
+          GH_TOKEN: ${{ steps.server.outputs.token }}
+          CASE_KIND: ${{ inputs.case }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_CURRENT_HEAD_SHA: ${{ inputs.expected_current_head_sha }}
+        run: |
+          set -euo pipefail
+          pull="$(gh api "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")"
+          current_head="$(jq -r '.head.sha' <<<"$pull")"
+          if [[ "$CASE_KIND" == apply ]]; then
+            [[ "$current_head" =~ ^[0-9a-f]{40}$ && "$current_head" != "$EXPECTED_CURRENT_HEAD_SHA" ]]
+            jq -e --arg sha "$current_head" --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '
+              .state == "open" and
+              .base.ref == "main" and
+              .head.sha == $sha and
+              .head.repo.id == 1410312556 and
+              .head.repo.full_name == "civitaspo/testing-securefix-server" and
+              .user.id == 4525500 and
+              .user.login == "civitaspo"
+            ' <<<"$pull" >/dev/null
+            commit="$(gh api "repos/civitaspo/testing-securefix-server/commits/$current_head")"
+            jq -e --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '
+              .commit.verification.verified == true and
+              .author.id == 288069019 and
+              (.parents | length == 1 and .[0].sha == $parent) and
+              (.files | length == 1 and .[0].filename == "native-producer-proof.txt" and .[0].status == "added")
+            ' <<<"$commit" >/dev/null
+            content="$(gh api "repos/civitaspo/testing-securefix-server/contents/native-producer-proof.txt?ref=$current_head" --jq .content | base64 -d)"
+            [[ "$content" == $'native producer proof fixture\n' ]]
+            jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" --arg parent "$EXPECTED_CURRENT_HEAD_SHA" '{case:$case,pull_request:($pr|tonumber),commit_sha:$head,parent_sha:$parent,signed:true,added_file:"native-producer-proof.txt"}' > native-securefix-readback.json
+          else
+            [[ "$current_head" == "$EXPECTED_CURRENT_HEAD_SHA" ]]
+            jq -n --arg case "$CASE_KIND" --arg pr "$PULL_REQUEST_NUMBER" --arg head "$current_head" '{case:$case,pull_request:($pr|tonumber),head_sha:$head,no_write:true}' > native-securefix-readback.json
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-securefix-server-result-${{ github.run_id }}
+          path: |
+            native-securefix-result.txt
+            native-securefix-readback.json
+          if-no-files-found: warn
+          retention-days: 7
