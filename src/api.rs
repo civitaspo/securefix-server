@@ -8,13 +8,28 @@ use reqwest::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::Digest;
-use std::{collections::BTreeMap, fmt, io::Read, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    io::Read,
+    path::Path,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 const SCRATCH_REPOSITORY: &str = "civitaspo/testing-securefix-server";
 pub const NATIVE_POLICY_CHECK_NAME: &str = "securefix-native-request-policy-check";
 pub const NATIVE_POLICY_CHECK_TITLE: &str = "Native request slice accepted";
 pub const NATIVE_POLICY_CHECK_SUMMARY: &str = "Configured merge capability, owner producer and PR author identities, all PR commit signatures and trusted effective committers, and the exact current PR head and base were verified. Owner-review policy was not evaluated.";
+const MAX_AUTHORITY_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_AUTHORITY_DIFF_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024;
+const MAX_GIT_OPERATION_TIME: Duration = Duration::from_secs(60);
+const MAX_AUTHORITY_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+const ISOLATED_GIT_PATH: &str = "/usr/bin:/bin";
 
 pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check -->";
 
@@ -1115,28 +1130,6 @@ impl GitHub {
         Ok(base64::engine::general_purpose::STANDARD.decode(content)?)
     }
 
-    pub fn latest_path_commit(
-        &self,
-        repository: &str,
-        path: &str,
-        revision: &str,
-    ) -> Result<String> {
-        crate::policy::validate_repository(repository)?;
-        crate::policy::validate_sha(revision)?;
-        validate_instance_config_path(path)?;
-        let commits: Value = self.get(&format!(
-            "/repos/{repository}/commits?path={}&sha={revision}&per_page=1",
-            encode_query_component(path)
-        ))?;
-        let commits = commits.as_array().context("path history is missing")?;
-        ensure!(commits.len() == 1, "path has no commit history");
-        let sha = commits[0]["sha"]
-            .as_str()
-            .context("path history commit SHA is missing")?;
-        crate::policy::validate_sha(sha)?;
-        Ok(sha.to_owned())
-    }
-
     pub fn branch_head(&self, repository: &str, branch: &str) -> Result<String> {
         crate::policy::validate_repository(repository)?;
         crate::config::validate_branch(branch)?;
@@ -1150,6 +1143,491 @@ impl GitHub {
         crate::policy::validate_sha(sha)?;
         Ok(sha.to_owned())
     }
+}
+
+fn isolated_git_command(
+    repository: &Path,
+    args: &[&str],
+    global_config: &Path,
+    hooks: &Path,
+    token: Option<&str>,
+) -> Result<Command> {
+    let isolation_dir = global_config
+        .parent()
+        .context("isolated Git config has no parent directory")?;
+    let mut command = Command::new("git");
+    command
+        .env_clear()
+        .current_dir(repository)
+        .args(args)
+        .stdin(Stdio::null())
+        .env("PATH", ISOLATED_GIT_PATH)
+        .env("HOME", isolation_dir)
+        .env("XDG_CONFIG_HOME", isolation_dir)
+        .env("TMPDIR", isolation_dir)
+        .env("TMP", isolation_dir)
+        .env("TEMP", isolation_dir)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", global_config)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
+        .env("GIT_CONFIG_COUNT", if token.is_some() { "2" } else { "1" })
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", hooks);
+    if let Some(token) = token {
+        command
+            .env("GIT_CONFIG_KEY_1", "http.https://github.com/.extraheader")
+            .env(
+                "GIT_CONFIG_VALUE_1",
+                format!("Authorization: Bearer {token}"),
+            );
+    }
+    Ok(command)
+}
+
+fn git_output(
+    repository: &Path,
+    args: &[&str],
+    global_config: &Path,
+    hooks: &Path,
+    token: Option<&str>,
+    max_output: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let mut child = isolated_git_command(repository, args, global_config, hooks, token)?
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start isolated Git command")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("isolated Git stdout is unavailable")?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(max_output as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+
+    let mut output = None;
+    loop {
+        if output.is_none()
+            && let Ok(result) = receiver.try_recv()
+        {
+            let bytes = match result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err(error).context("read isolated Git output");
+                }
+            };
+            if bytes.len() > max_output {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                bail!("isolated Git output exceeded size limit");
+            }
+            output = Some(bytes);
+        }
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(error).context("check isolated Git command");
+            }
+        };
+        if let Some(status) = status {
+            if output.is_none() {
+                let result = receiver.recv_timeout(Duration::from_secs(1));
+                let bytes = match result {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(error)) => {
+                        let _ = reader.join();
+                        return Err(error).context("read isolated Git output");
+                    }
+                    Err(error) => {
+                        let _ = reader.join();
+                        return Err(error).context("isolated Git output did not finish");
+                    }
+                };
+                ensure!(
+                    bytes.len() <= max_output,
+                    "isolated Git output exceeded size limit"
+                );
+                output = Some(bytes);
+            }
+            reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("isolated Git output reader failed"))?;
+            ensure!(status.success(), "isolated Git command failed");
+            return output.context("isolated Git output is missing");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            bail!("isolated Git operation timed out");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn git_status(
+    repository: &Path,
+    args: &[&str],
+    global_config: &Path,
+    hooks: &Path,
+    token: Option<&str>,
+    object_directory: &Path,
+    deadline: Instant,
+) -> Result<()> {
+    let mut child = isolated_git_command(repository, args, global_config, hooks, token)?
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start isolated Git operation")?;
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("check isolated Git operation");
+            }
+        };
+        if let Some(status) = status {
+            ensure!(status.success(), "isolated Git operation failed");
+            let object_bytes = git_object_store_size(object_directory)?;
+            ensure!(
+                object_bytes <= MAX_AUTHORITY_OBJECT_BYTES,
+                "authority Git object store exceeded size limit"
+            );
+            return Ok(());
+        }
+        let object_bytes = match git_object_store_size(object_directory) {
+            Ok(size) => size,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("check authority Git object store size");
+            }
+        };
+        if object_bytes > MAX_AUTHORITY_OBJECT_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("authority Git object store exceeded size limit");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("isolated Git operation timed out");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn git_object_store_size(directory: &Path) -> Result<u64> {
+    let root = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("inspect Git object store"),
+    };
+    ensure!(
+        root.is_dir() && !root.file_type().is_symlink(),
+        "Git object store root is not a directory"
+    );
+    let mut pending = vec![directory.to_owned()];
+    let mut total = 0u64;
+    while let Some(current) = pending.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("read Git object store"),
+        };
+        for entry in entries {
+            let entry = entry.context("read Git object store entry")?;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error).context("inspect Git object store entry"),
+            };
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let size = match entry.metadata() {
+                    Ok(metadata) => metadata.len(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error).context("read Git object size"),
+                };
+                total = total
+                    .checked_add(size)
+                    .context("Git object store size overflow")?;
+            } else {
+                bail!("unexpected file type in Git object store");
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn first_parent_path_epochs_at(
+    repository: &Path,
+    revision: &str,
+    config_path: &str,
+    workflow_path: &str,
+    global_config: &Path,
+    hooks: &Path,
+    deadline: Instant,
+) -> Result<(String, String)> {
+    crate::policy::validate_sha(revision)?;
+    validate_instance_config_path(config_path)?;
+    validate_instance_config_path(workflow_path)?;
+    ensure!(
+        config_path != workflow_path,
+        "authority paths must be distinct"
+    );
+    let shallow = git_output(
+        repository,
+        &["rev-parse", "--is-shallow-repository"],
+        global_config,
+        hooks,
+        None,
+        16,
+        deadline,
+    )?;
+    ensure!(
+        shallow.as_slice() == b"false\n",
+        "authority history is shallow"
+    );
+    let history = git_output(
+        repository,
+        &["rev-list", "--first-parent", "--parents", revision],
+        global_config,
+        hooks,
+        None,
+        MAX_AUTHORITY_HISTORY_BYTES,
+        deadline,
+    )?;
+    let history = std::str::from_utf8(&history).context("invalid Git history output")?;
+    let mut commits = Vec::<(String, Option<String>)>::new();
+    for line in history.lines() {
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        ensure!(!fields.is_empty(), "empty Git history line");
+        crate::policy::validate_sha(fields[0])?;
+        for parent in &fields[1..] {
+            crate::policy::validate_sha(parent)?;
+        }
+        commits.push((
+            fields[0].to_owned(),
+            fields.get(1).map(|parent| (*parent).to_owned()),
+        ));
+    }
+    ensure!(
+        commits.first().is_some_and(|commit| commit.0 == revision),
+        "Git history does not start at the requested snapshot"
+    );
+    for pair in commits.windows(2) {
+        ensure!(
+            pair[0].1.as_deref() == Some(pair[1].0.as_str()),
+            "Git first-parent history is incomplete"
+        );
+    }
+    ensure!(
+        commits.last().is_some_and(|commit| commit.1.is_none()),
+        "Git first-parent history did not reach its root"
+    );
+
+    let config_spec = config_path;
+    let workflow_spec = workflow_path;
+    let mut config_epoch = None;
+    let mut workflow_epoch = None;
+    let mut diff_bytes = 0usize;
+    for (sha, parent) in &commits {
+        let args = if let Some(parent) = parent {
+            vec![
+                "--literal-pathspecs",
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                parent.as_str(),
+                sha.as_str(),
+                "--",
+                config_spec,
+                workflow_spec,
+            ]
+        } else {
+            vec![
+                "--literal-pathspecs",
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                sha.as_str(),
+                "--",
+                config_spec,
+                workflow_spec,
+            ]
+        };
+        let changed = git_output(
+            repository,
+            &args,
+            global_config,
+            hooks,
+            None,
+            MAX_GIT_OUTPUT_BYTES,
+            deadline,
+        )?;
+        diff_bytes = diff_bytes
+            .checked_add(changed.len())
+            .context("authority diff output size overflow")?;
+        ensure!(
+            diff_bytes <= MAX_AUTHORITY_DIFF_BYTES,
+            "authority diff output exceeded size limit"
+        );
+        for path in changed
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            match path {
+                path if path == config_path.as_bytes() => {
+                    config_epoch.get_or_insert_with(|| sha.clone());
+                }
+                path if path == workflow_path.as_bytes() => {
+                    workflow_epoch.get_or_insert_with(|| sha.clone());
+                }
+                _ => bail!("Git returned an unexpected authority path"),
+            }
+        }
+        if config_epoch.is_some() && workflow_epoch.is_some() {
+            break;
+        }
+    }
+    Ok((
+        config_epoch.context("instance config has no first-parent history")?,
+        workflow_epoch.context("caller workflow has no first-parent history")?,
+    ))
+}
+
+fn first_parent_path_epochs(
+    api: &GitHub,
+    repository: &str,
+    branch: &str,
+    revision: &str,
+    config_path: &str,
+    workflow_path: &str,
+) -> Result<(String, String)> {
+    crate::policy::validate_repository(repository)?;
+    crate::config::validate_branch(branch)?;
+    crate::policy::validate_sha(revision)?;
+    validate_instance_config_path(config_path)?;
+    validate_instance_config_path(workflow_path)?;
+    ensure!(
+        config_path != workflow_path,
+        "authority paths must be distinct"
+    );
+    ensure!(
+        !api.token.is_empty() && !api.token.contains(['\r', '\n']),
+        "a valid GitHub read token is required for first-parent history"
+    );
+
+    let deadline = Instant::now() + MAX_GIT_OPERATION_TIME;
+    let directory = tempfile::tempdir().context("create isolated authority history repository")?;
+    let repository_dir = directory.path().join("repository.git");
+    let object_directory = repository_dir.join("objects");
+    let global_config = directory.path().join("global-config");
+    let hooks = directory.path().join("empty-hooks");
+    std::fs::write(
+        &global_config,
+        "[credential]\n\thelper =\n[http]\n\tfollowRedirects = false\n[protocol]\n\tallow = never\n[protocol \"https\"]\n\tallow = always\n",
+    )?;
+    std::fs::create_dir(&hooks)?;
+    git_output(
+        directory.path(),
+        &[
+            "init",
+            "--bare",
+            "--quiet",
+            "--template=",
+            repository_dir.to_str().context("Git path is not UTF-8")?,
+        ],
+        &global_config,
+        &hooks,
+        None,
+        MAX_GIT_OUTPUT_BYTES,
+        deadline,
+    )?;
+    ensure!(
+        git_object_store_size(&object_directory)? == 0,
+        "new authority Git object store is not empty"
+    );
+    let remote = format!("https://github.com/{repository}.git");
+    git_output(
+        &repository_dir,
+        &["remote", "add", "origin", &remote],
+        &global_config,
+        &hooks,
+        None,
+        MAX_GIT_OUTPUT_BYTES,
+        deadline,
+    )?;
+    git_status(
+        &repository_dir,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--filter=blob:none",
+            "origin",
+            revision,
+        ],
+        &global_config,
+        &hooks,
+        Some(&api.token),
+        &object_directory,
+        deadline,
+    )?;
+    let fetched = git_output(
+        &repository_dir,
+        &["rev-parse", "FETCH_HEAD^{commit}"],
+        &global_config,
+        &hooks,
+        None,
+        64,
+        deadline,
+    )?;
+    ensure!(
+        std::str::from_utf8(&fetched)?.trim() == revision,
+        "Git did not fetch the exact authority snapshot"
+    );
+    first_parent_path_epochs_at(
+        &repository_dir,
+        revision,
+        config_path,
+        workflow_path,
+        &global_config,
+        &hooks,
+        deadline,
+    )
 }
 
 pub fn capture_native_authority_snapshot(
@@ -1211,8 +1689,14 @@ pub fn capture_native_authority_snapshot(
         matches!(compare["status"].as_str(), Some("ahead" | "identical")),
         "caller workflow revision is not on default-branch history"
     );
-    let config_epoch = api.latest_path_commit(repository_name, config_path, &snapshot_sha)?;
-    let workflow_epoch = api.latest_path_commit(repository_name, workflow_path, &snapshot_sha)?;
+    let (config_epoch, workflow_epoch) = first_parent_path_epochs(
+        api,
+        repository_name,
+        default_branch,
+        &snapshot_sha,
+        config_path,
+        workflow_path,
+    )?;
     ensure!(
         api.branch_head(repository_name, default_branch)? == snapshot_sha,
         "instance default branch moved during authority capture"
@@ -1377,19 +1861,6 @@ fn encode_path_segment(value: &str) -> String {
     encoded
 }
 
-fn encode_query_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write;
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
-}
-
 fn read_only_query(query: &str) -> bool {
     let query = query.trim_start();
     query
@@ -1408,6 +1879,204 @@ fn bounded_read(reader: impl Read, max: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_CONFIG_PATH: &str = "securefix-server.toml";
+    const TEST_WORKFLOW_PATH: &str = ".github/workflows/policy-check.yml";
+
+    fn test_git(repository: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .current_dir(repository)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn test_commit_file(repository: &Path, path: &str, contents: &str, message: &str) -> String {
+        let file = repository.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, contents).unwrap();
+        test_git(repository, &["add", "--", path]);
+        test_git(
+            repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Securefix Test",
+                "-c",
+                "user.email=securefix-test@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+        String::from_utf8(test_git(repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn test_authority_snapshot(
+        repository: &Path,
+        revision: &str,
+        global_config: &Path,
+        hooks: &Path,
+    ) -> NativeAuthoritySnapshot {
+        let config = test_git(
+            repository,
+            &["show", &format!("{revision}:{TEST_CONFIG_PATH}")],
+        );
+        let workflow = test_git(
+            repository,
+            &["show", &format!("{revision}:{TEST_WORKFLOW_PATH}")],
+        );
+        let (config_epoch, workflow_epoch) = first_parent_path_epochs_at(
+            repository,
+            revision,
+            TEST_CONFIG_PATH,
+            TEST_WORKFLOW_PATH,
+            global_config,
+            hooks,
+            Instant::now() + MAX_GIT_OPERATION_TIME,
+        )
+        .unwrap();
+        NativeAuthoritySnapshot {
+            config_path: TEST_CONFIG_PATH.into(),
+            config_sha256: crate::hex_encode(sha2::Sha256::digest(config)),
+            config_epoch,
+            workflow_sha256: crate::hex_encode(sha2::Sha256::digest(workflow)),
+            workflow_epoch,
+        }
+    }
+
+    #[test]
+    fn authority_fetch_pins_exact_sha_and_reads_complete_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let bare_remote = directory.path().join("remote.git");
+        let checkout = directory.path().join("authority.git");
+        test_git(
+            directory.path(),
+            &[
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+                source.to_str().unwrap(),
+            ],
+        );
+        let config_revision = test_commit_file(
+            &source,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"test\"\n",
+            "initial config",
+        );
+        let revision = test_commit_file(
+            &source,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@sha\n",
+            "initial workflow",
+        );
+        test_git(
+            directory.path(),
+            &["init", "--bare", "--quiet", bare_remote.to_str().unwrap()],
+        );
+        test_git(
+            &source,
+            &["remote", "add", "origin", bare_remote.to_str().unwrap()],
+        );
+        test_git(
+            &source,
+            &["push", "--quiet", "origin", "HEAD:refs/heads/main"],
+        );
+
+        let global_config = directory.path().join("global-config");
+        let hooks = directory.path().join("empty-hooks");
+        std::fs::write(
+            &global_config,
+            "[credential]\n\thelper =\n[protocol]\n\tallow = never\n[protocol \"file\"]\n\tallow = always\n",
+        )
+        .unwrap();
+        std::fs::create_dir(&hooks).unwrap();
+        let deadline = Instant::now() + MAX_GIT_OPERATION_TIME;
+        git_output(
+            directory.path(),
+            &[
+                "init",
+                "--bare",
+                "--quiet",
+                "--template=",
+                checkout.to_str().unwrap(),
+            ],
+            &global_config,
+            &hooks,
+            None,
+            MAX_GIT_OUTPUT_BYTES,
+            deadline,
+        )
+        .unwrap();
+        let file_remote = format!("file://{}", bare_remote.display());
+        git_output(
+            &checkout,
+            &["remote", "add", "origin", &file_remote],
+            &global_config,
+            &hooks,
+            None,
+            MAX_GIT_OUTPUT_BYTES,
+            deadline,
+        )
+        .unwrap();
+        let objects = checkout.join("objects");
+        git_status(
+            &checkout,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--filter=blob:none",
+                "origin",
+                &revision,
+            ],
+            &global_config,
+            &hooks,
+            None,
+            &objects,
+            deadline,
+        )
+        .unwrap();
+        let fetched = git_output(
+            &checkout,
+            &["rev-parse", "FETCH_HEAD^{commit}"],
+            &global_config,
+            &hooks,
+            None,
+            64,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(std::str::from_utf8(&fetched).unwrap().trim(), revision);
+        let (config_epoch, workflow_epoch) = first_parent_path_epochs_at(
+            &checkout,
+            &revision,
+            TEST_CONFIG_PATH,
+            TEST_WORKFLOW_PATH,
+            &global_config,
+            &hooks,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(config_epoch, config_revision);
+        assert_eq!(workflow_epoch, revision);
+        assert!(git_object_store_size(&objects).unwrap() <= MAX_AUTHORITY_OBJECT_BYTES);
+    }
 
     fn native_scratch_api() -> GitHub {
         let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
@@ -1476,6 +2145,171 @@ mod tests {
                 vec![],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn authority_epochs_ignore_unrelated_and_second_parent_changes_but_reject_reverts() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let global_config = directory.path().join("global-config");
+        let hooks = directory.path().join("empty-hooks");
+        std::fs::write(&global_config, []).unwrap();
+        std::fs::create_dir(&hooks).unwrap();
+        test_git(
+            &directory.path(),
+            &[
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+                repository.to_str().unwrap(),
+            ],
+        );
+
+        let initial_file = repository.join(TEST_CONFIG_PATH);
+        std::fs::write(&initial_file, "[instance]\nname = \"old\"\n").unwrap();
+        let workflow_file = repository.join(TEST_WORKFLOW_PATH);
+        std::fs::create_dir_all(workflow_file.parent().unwrap()).unwrap();
+        std::fs::write(&workflow_file, "uses: securefix@old\n").unwrap();
+        test_git(&repository, &["add", "."]);
+        test_git(
+            &repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Securefix Test",
+                "-c",
+                "user.email=securefix-test@example.invalid",
+                "commit",
+                "-m",
+                "initial authority",
+            ],
+        );
+        let initial = String::from_utf8(test_git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+
+        test_git(&repository, &["checkout", "-b", "second-parent"]);
+        let second_parent = test_commit_file(
+            &repository,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"second parent\"\n",
+            "change config on second parent",
+        );
+        test_git(&repository, &["checkout", "main"]);
+        let workflow_change = test_commit_file(
+            &repository,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@changed\n",
+            "change caller workflow",
+        );
+        test_git(
+            &repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "second-parent",
+                "-m",
+                "merge second parent without its config tree",
+            ],
+        );
+        let merged = String::from_utf8(test_git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_ne!(second_parent, initial);
+        let baseline = test_authority_snapshot(&repository, &merged, &global_config, &hooks);
+        assert_eq!(baseline.config_epoch, initial);
+        assert_eq!(baseline.workflow_epoch, workflow_change);
+
+        test_commit_file(
+            &repository,
+            "src/main.rs",
+            "fn main() {}\n",
+            "unrelated source change",
+        );
+        test_commit_file(
+            &repository,
+            "docs/README.md",
+            "Unrelated documentation.\n",
+            "unrelated documentation change",
+        );
+        let unrelated_head = String::from_utf8(test_git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let after_unrelated =
+            test_authority_snapshot(&repository, &unrelated_head, &global_config, &hooks);
+        assert_eq!(baseline, after_unrelated);
+        assert!(require_native_authority_unchanged(&baseline, &after_unrelated).is_ok());
+        assert!(
+            git_output(
+                &repository,
+                &["rev-list", "--first-parent", "--parents", &unrelated_head],
+                &global_config,
+                &hooks,
+                None,
+                8,
+                Instant::now() + MAX_GIT_OPERATION_TIME,
+            )
+            .is_err()
+        );
+
+        test_commit_file(
+            &repository,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"temporary\"\n",
+            "change config",
+        );
+        let config_revert = test_commit_file(
+            &repository,
+            TEST_CONFIG_PATH,
+            "[instance]\nname = \"old\"\n",
+            "revert config",
+        );
+        let after_config_revert =
+            test_authority_snapshot(&repository, &config_revert, &global_config, &hooks);
+        assert_eq!(baseline.config_sha256, after_config_revert.config_sha256);
+        assert_ne!(baseline.config_epoch, after_config_revert.config_epoch);
+        assert_eq!(baseline.workflow_epoch, after_config_revert.workflow_epoch);
+        assert!(require_native_authority_unchanged(&baseline, &after_config_revert).is_err());
+
+        test_commit_file(
+            &repository,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@temporary\n",
+            "change caller pin",
+        );
+        let workflow_revert = test_commit_file(
+            &repository,
+            TEST_WORKFLOW_PATH,
+            "uses: securefix@changed\n",
+            "revert caller pin",
+        );
+        let after_workflow_revert =
+            test_authority_snapshot(&repository, &workflow_revert, &global_config, &hooks);
+        assert_eq!(
+            after_config_revert.config_epoch,
+            after_workflow_revert.config_epoch
+        );
+        assert_eq!(
+            after_config_revert.workflow_sha256,
+            after_workflow_revert.workflow_sha256
+        );
+        assert_ne!(
+            after_config_revert.workflow_epoch,
+            after_workflow_revert.workflow_epoch
+        );
+        assert!(
+            require_native_authority_unchanged(&after_config_revert, &after_workflow_revert)
+                .is_err()
         );
     }
 
