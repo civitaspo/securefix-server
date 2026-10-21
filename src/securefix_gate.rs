@@ -70,7 +70,7 @@ pub(crate) struct SourceRequest<'a> {
 pub(crate) struct ApplyCore<'a> {
     pub(crate) read_api: &'a GitHub,
     pub(crate) write_api: &'a GitHub,
-    pub(crate) policy: &'a Policy,
+    pub(crate) server_bot_id: u64,
     pub(crate) source: SourceRequest<'a>,
     pub(crate) plan: &'a FixPlan,
     pub(crate) fix: &'a artifact::FixArtifact,
@@ -702,7 +702,7 @@ fn apply(plan_path: &Path) -> Result<()> {
     let result = apply_core(ApplyCore {
         read_api: &read_api,
         write_api: &write_api,
-        policy: &p,
+        server_bot_id: p.server_bot_id,
         source,
         plan: &plan,
         fix: &fix,
@@ -724,7 +724,7 @@ pub(crate) fn apply_core(input: ApplyCore<'_>) -> Result<ApplyResult> {
     let ApplyCore {
         read_api,
         write_api,
-        policy,
+        server_bot_id,
         source,
         plan,
         fix,
@@ -757,7 +757,7 @@ pub(crate) fn apply_core(input: ApplyCore<'_>) -> Result<ApplyResult> {
         &source,
         None,
         fix,
-        policy.server_bot_id,
+        server_bot_id,
     )?;
     if !already_applied && !plan.destination_branch_exists {
         let created: Value = write_api.post(
@@ -789,7 +789,7 @@ pub(crate) fn apply_core(input: ApplyCore<'_>) -> Result<ApplyResult> {
             .context("release pull request base missing")?;
         if let Some(number) = release_pull_request(
             read_api,
-            policy,
+            server_bot_id,
             &plan.destination_repository,
             &plan.destination_branch,
             base,
@@ -1065,7 +1065,7 @@ fn validate_release_comparison(comparison: &Value, server_bot_id: u64) -> Result
 
 fn release_pull_request(
     api: &GitHub,
-    policy: &Policy,
+    server_bot_id: u64,
     repository: &str,
     branch: &str,
     base: &str,
@@ -1092,7 +1092,7 @@ fn release_pull_request(
     );
     if let Some(pr) = matching.first() {
         ensure!(
-            pr["user"]["id"].as_u64() == Some(policy.server_bot_id),
+            pr["user"]["id"].as_u64() == Some(server_bot_id),
             "release pull request is not owned by the Securefix Server bot"
         );
         Ok(pr["number"].as_u64())
@@ -1555,6 +1555,8 @@ mod tests {
             branch: "release/feature/2026-10".into(),
             run_id: 18,
             source_sha: source_sha.clone(),
+            event_name: "workflow_dispatch".into(),
+            pull_request_context: None,
             commit_message: "release".into(),
             create_pull_request: Some(json!({"title":"Release", "base":"main"}).to_string()),
             additions: std::collections::BTreeMap::from([("README.md".into(), b"x".to_vec())]),
@@ -1619,16 +1621,28 @@ mod tests {
         };
         let fixture = Fixture::new(vec![route(policy.server_bot_id)]);
         assert_eq!(
-            release_pull_request(&fixture.api, &policy, repository, "release/feature", "main")
-                .unwrap(),
+            release_pull_request(
+                &fixture.api,
+                policy.server_bot_id,
+                repository,
+                "release/feature",
+                "main"
+            )
+            .unwrap(),
             Some(42)
         );
         fixture.finish();
 
         let fixture = Fixture::new(vec![route(policy.client_bot_id)]);
         assert!(
-            release_pull_request(&fixture.api, &policy, repository, "release/feature", "main")
-                .is_err()
+            release_pull_request(
+                &fixture.api,
+                policy.server_bot_id,
+                repository,
+                "release/feature",
+                "main"
+            )
+            .is_err()
         );
         fixture.finish();
     }
@@ -1667,6 +1681,8 @@ mod tests {
             branch: "release/feature".into(),
             run_id: 18,
             source_sha: source_sha.clone(),
+            event_name: "workflow_dispatch".into(),
+            pull_request_context: None,
             commit_message: "release".into(),
             create_pull_request: Some(json!({"title":"Release", "base":"main"}).to_string()),
             additions: std::collections::BTreeMap::from([("README.md".into(), b"x".to_vec())]),
@@ -1750,6 +1766,8 @@ mod tests {
             branch: "feature".into(),
             run_id: 7,
             source_sha: source_sha.clone(),
+            event_name: "workflow_dispatch".into(),
+            pull_request_context: None,
             commit_message: "fix".into(),
             create_pull_request: None,
             additions: std::collections::BTreeMap::from([(

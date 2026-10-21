@@ -93,6 +93,45 @@ pub struct ReferencedWorkflow {
     pub sha: String,
 }
 
+const MAX_CALLER_WORKFLOW_BYTES: usize = 64 * 1024;
+
+/// Check that bounded caller YAML and reusable-workflow run references name the
+/// same exact implementation revision. The caller is responsible for acquiring
+/// the references from an authenticated run and the YAML at `caller_sha`;
+/// this function checks correspondence only and does not authenticate either
+/// input or prove that the supplied bytes came from `caller_sha`.
+pub fn require_reusable_correspondence(
+    references: &[ReferencedWorkflow],
+    caller_sha: &str,
+    caller_yaml: &[u8],
+    publisher_repository: &str,
+    workflow_path: &str,
+    implementation_sha: &str,
+) -> Result<()> {
+    crate::policy::validate_sha(caller_sha)?;
+    crate::policy::validate_sha(implementation_sha)?;
+    crate::policy::validate_repository(publisher_repository)?;
+    validate_canonical_workflow_path(workflow_path)?;
+    ensure!(
+        !caller_yaml.is_empty() && caller_yaml.len() <= MAX_CALLER_WORKFLOW_BYTES,
+        "caller workflow YAML is empty or exceeds size limit"
+    );
+
+    require_reusable_pin_for_repository(
+        caller_yaml,
+        publisher_repository,
+        workflow_path,
+        implementation_sha,
+        true,
+    )?;
+    referenced_revision_for_repository(
+        publisher_repository,
+        workflow_path,
+        references,
+        implementation_sha,
+    )
+}
+
 pub fn referenced_revision(
     workflows: &[ReferencedWorkflow],
     path: &str,
@@ -113,7 +152,16 @@ fn referenced_revision_for(
     expected: &str,
 ) -> Result<()> {
     let path = deployment.workflow_path(path)?;
-    let prefix = format!("{}/{path}@", deployment.server.repository);
+    referenced_revision_for_repository(&deployment.server.repository, &path, workflows, expected)
+}
+
+fn referenced_revision_for_repository(
+    repository: &str,
+    path: &str,
+    workflows: &[ReferencedWorkflow],
+    expected: &str,
+) -> Result<()> {
+    let prefix = format!("{repository}/{path}@");
     let matching: Vec<_> = workflows
         .iter()
         .filter(|w| w.path.starts_with(&prefix))
@@ -138,19 +186,66 @@ fn require_reusable_pin_for(
     revision: &str,
 ) -> Result<()> {
     let path = deployment.workflow_path(path)?;
+    require_reusable_pin_for_repository(
+        bytes,
+        &deployment.server.repository,
+        &path,
+        revision,
+        false,
+    )
+}
+
+fn require_reusable_pin_for_repository(
+    bytes: &[u8],
+    repository: &str,
+    path: &str,
+    revision: &str,
+    reject_non_string_uses: bool,
+) -> Result<()> {
     let yaml: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
     let jobs = yaml["jobs"]
         .as_mapping()
         .context("caller workflow has no jobs")?;
-    let prefix = format!("{}/{path}@", deployment.server.repository);
-    let calls: Vec<_> = jobs
-        .values()
-        .filter_map(|job| job["uses"].as_str())
-        .filter(|uses| uses.starts_with(&prefix))
-        .collect();
+    let prefix = format!("{repository}/{path}@");
+    let mut calls = Vec::new();
+    for job in jobs.values() {
+        let Some(job) = job.as_mapping() else {
+            continue;
+        };
+        let Some(uses) = job.get("uses") else {
+            continue;
+        };
+        let Some(uses) = uses.as_str() else {
+            ensure!(
+                !reject_non_string_uses,
+                "caller workflow job uses value must be a string"
+            );
+            continue;
+        };
+        if uses.starts_with(&prefix) {
+            calls.push(uses);
+        }
+    }
     ensure!(
         calls.len() == 1 && calls[0] == format!("{prefix}{revision}"),
         "caller must pin one current reusable workflow"
+    );
+    Ok(())
+}
+
+fn validate_canonical_workflow_path(path: &str) -> Result<()> {
+    let name = path
+        .strip_prefix(".github/workflows/")
+        .context("workflow path must be under .github/workflows")?;
+    let stem = name
+        .strip_suffix(".yml")
+        .context("workflow path must end in .yml")?;
+    ensure!(
+        !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)),
+        "invalid workflow path"
     );
     Ok(())
 }
@@ -209,6 +304,202 @@ mod tests {
         );
         let duplicate = format!("{}  second:\n    uses: {expected}\n", wrapper(&expected));
         assert!(require_reusable_pin_for(&deployment, duplicate.as_bytes(), path, &sha).is_err());
+    }
+
+    #[test]
+    fn reusable_correspondence_keeps_caller_and_implementation_revisions_separate() {
+        let repository = "civitaspo/securefix-server";
+        let path = ".github/workflows/reusable-merge-request.yml";
+        let caller_sha = "b".repeat(40);
+        let implementation_sha = "a".repeat(40);
+        let pin = format!("{repository}/{path}@{implementation_sha}");
+        let yaml = format!("jobs:\n  merge:\n    uses: {pin}\n");
+        let references = [ReferencedWorkflow {
+            path: pin,
+            sha: implementation_sha.clone(),
+        }];
+
+        assert!(
+            require_reusable_correspondence(
+                &references,
+                &caller_sha,
+                yaml.as_bytes(),
+                repository,
+                path,
+                &implementation_sha,
+            )
+            .is_ok()
+        );
+        assert!(
+            require_reusable_correspondence(
+                &references,
+                "not-a-sha",
+                yaml.as_bytes(),
+                repository,
+                path,
+                &implementation_sha,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reusable_correspondence_rejects_pin_and_reference_mismatches() {
+        let repository = "civitaspo/securefix-server";
+        let path = ".github/workflows/reusable-merge-request.yml";
+        let caller_sha = "b".repeat(40);
+        let implementation_sha = "a".repeat(40);
+        let pin = format!("{repository}/{path}@{implementation_sha}");
+        let yaml = |uses: &str| format!("jobs:\n  merge:\n    uses: {uses}\n");
+        let reference = |reference_path: &str, sha: &str| ReferencedWorkflow {
+            path: reference_path.into(),
+            sha: sha.into(),
+        };
+        let matching = reference(&pin, &implementation_sha);
+
+        for invalid_pin in [
+            format!("{repository}/{path}@main"),
+            format!("{repository}/{path}@v1.2.3"),
+            format!("other/server/{path}@{implementation_sha}"),
+            format!("{repository}/.github/workflows/other.yml@{implementation_sha}"),
+            format!("{repository}/{path}@{}", "c".repeat(40)),
+        ] {
+            assert!(
+                require_reusable_correspondence(
+                    &[reference(&pin, &implementation_sha)],
+                    &caller_sha,
+                    yaml(&invalid_pin).as_bytes(),
+                    repository,
+                    path,
+                    &implementation_sha,
+                )
+                .is_err(),
+                "accepted pin {invalid_pin}"
+            );
+        }
+
+        let duplicate_pin =
+            format!("jobs:\n  merge:\n    uses: {pin}\n  second:\n    uses: {pin}\n");
+        assert!(
+            require_reusable_correspondence(
+                &[matching],
+                &caller_sha,
+                duplicate_pin.as_bytes(),
+                repository,
+                path,
+                &implementation_sha,
+            )
+            .is_err()
+        );
+
+        let duplicate_key = format!("jobs:\n  merge:\n    uses: {pin}\n    uses: {pin}\n");
+        assert!(
+            require_reusable_correspondence(
+                &[reference(&pin, &implementation_sha)],
+                &caller_sha,
+                duplicate_key.as_bytes(),
+                repository,
+                path,
+                &implementation_sha,
+            )
+            .is_err()
+        );
+
+        let non_string_uses = "jobs:\n  merge:\n    uses: [ambiguous]\n";
+        assert!(
+            require_reusable_correspondence(
+                &[reference(&pin, &implementation_sha)],
+                &caller_sha,
+                non_string_uses.as_bytes(),
+                repository,
+                path,
+                &implementation_sha,
+            )
+            .is_err()
+        );
+
+        let wrong_references = [
+            reference(
+                &format!("other/server/{path}@{implementation_sha}"),
+                &implementation_sha,
+            ),
+            reference(
+                &format!("{repository}/.github/workflows/other.yml@{implementation_sha}"),
+                &implementation_sha,
+            ),
+            reference(&format!("{repository}/{path}@main"), &implementation_sha),
+            reference(&pin, &"c".repeat(40)),
+        ];
+        for invalid_reference in wrong_references {
+            assert!(
+                require_reusable_correspondence(
+                    &[invalid_reference],
+                    &caller_sha,
+                    yaml(&pin).as_bytes(),
+                    repository,
+                    path,
+                    &implementation_sha,
+                )
+                .is_err()
+            );
+        }
+
+        assert!(
+            require_reusable_correspondence(
+                &[
+                    reference(&pin, &implementation_sha),
+                    reference(&pin, &implementation_sha),
+                ],
+                &caller_sha,
+                yaml(&pin).as_bytes(),
+                repository,
+                path,
+                &implementation_sha,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reusable_correspondence_bounds_yaml_and_validates_explicit_identity() {
+        let repository = "civitaspo/securefix-server";
+        let path = ".github/workflows/reusable-merge-request.yml";
+        let caller_sha = "b".repeat(40);
+        let implementation_sha = "a".repeat(40);
+        let pin = format!("{repository}/{path}@{implementation_sha}");
+        let yaml = format!("jobs:\n  merge:\n    uses: {pin}\n");
+        let references = [ReferencedWorkflow {
+            path: pin,
+            sha: implementation_sha.clone(),
+        }];
+
+        for (invalid_repository, invalid_path, invalid_yaml) in [
+            ("missing-owner", path, yaml.as_bytes()),
+            (repository, "workflows/reusable.yml", yaml.as_bytes()),
+            (
+                repository,
+                ".github/workflows/../other.yml",
+                yaml.as_bytes(),
+            ),
+            (repository, path, b"jobs: [".as_slice()),
+            (
+                repository,
+                path,
+                vec![b' '; MAX_CALLER_WORKFLOW_BYTES + 1].as_slice(),
+            ),
+        ] {
+            assert!(
+                require_reusable_correspondence(
+                    &references,
+                    &caller_sha,
+                    invalid_yaml,
+                    invalid_repository,
+                    invalid_path,
+                    &implementation_sha,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[derive(Debug, Deserialize, PartialEq)]
