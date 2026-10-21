@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/securefix-server
-          ref: 961ffff5ab30be4a0197c64c9a4170515b787f5f
+          ref: 96c2f3e9223f7f5f357660e59718558f3e2b283b
           persist-credentials: false
       - name: Reuse the exact source-bound candidate artifact
         id: candidate
@@ -48,7 +48,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
-          SECUREFIX_SOURCE_SHA: 961ffff5ab30be4a0197c64c9a4170515b787f5f
+          SECUREFIX_SOURCE_SHA: 96c2f3e9223f7f5f357660e59718558f3e2b283b
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
         run: |
           set -euo pipefail
