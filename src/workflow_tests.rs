@@ -882,7 +882,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                             if path == ".github/workflows/request-producer-probe.yml"
                                 && job_id == "capture"
                             {
-                                "96c2f3e9223f7f5f357660e59718558f3e2b283b"
+                                "ee98f4f12f3c32855c95feb3fe75bc2870b88460"
                             } else if path == ".github/workflows/testing-securefix-server.yml" {
                                 if job_id == "baseline" {
                                     "${{ steps.resolve.outputs.sha }}"
@@ -913,8 +913,15 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
 
 #[test]
 fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
-    const SOURCE_SHA: &str = "96c2f3e9223f7f5f357660e59718558f3e2b283b";
+    const HELPER_SHA: &str = "ee98f4f12f3c32855c95feb3fe75bc2870b88460";
+    const CANDIDATE_SOURCE_SHA: &str = "7b5da5d248078c774d44d54a0e7fd145ddf67fd7";
     let producer = workflow("request-producer-probe.yml");
+    let inputs = &producer["on"]["workflow_call"]["inputs"];
+    assert_eq!(
+        inputs["candidate_source_sha"]["default"],
+        CANDIDATE_SOURCE_SHA
+    );
+
     let capture = &producer["jobs"]["capture"];
     let steps = capture["steps"].as_array().unwrap();
     let checkout = steps
@@ -926,35 +933,44 @@ fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
         })
         .unwrap();
     assert_eq!(checkout["with"]["repository"], "civitaspo/securefix-server");
-    assert_eq!(checkout["with"]["ref"], SOURCE_SHA);
+    assert_eq!(checkout["with"]["ref"], HELPER_SHA);
     assert_eq!(checkout["with"]["persist-credentials"], false);
 
     let reuse = steps
         .iter()
         .find(|step| step["name"] == "Reuse the exact source-bound candidate artifact")
         .unwrap();
+    assert_eq!(reuse["uses"], "$/.github/actions/setup-cli");
     assert_eq!(
-        reuse["env"]["CANDIDATE_RUN_ID"],
+        reuse["with"]["candidate-run-id"],
         "${{ inputs.candidate_run_id }}"
     );
     assert_eq!(
-        reuse["env"]["ACTION_PATH"],
-        "${{ github.workspace }}/.github/actions/setup-cli"
-    );
-    assert_eq!(
-        reuse["run"],
-        "bash .github/actions/setup-cli/reuse-build.sh"
+        reuse["with"]["candidate-source-sha"],
+        "${{ inputs.candidate_source_sha }}"
     );
     assert!(steps.iter().any(|step| {
         step["name"] == "Require the exact source-bound candidate artifact"
             && step["if"] == "steps.candidate.outputs.reused != 'true'"
     }));
 
+    let prepare = steps
+        .iter()
+        .find(|step| step["name"] == "Prepare a fixed Securefix source artifact")
+        .unwrap();
+    assert_eq!(prepare["if"], "inputs.operation == 'securefix'");
+    assert_eq!(
+        prepare["env"]["SOURCE_BRANCH"],
+        "${{ github.event.pull_request.head.ref }}"
+    );
     let capture_request = steps
         .iter()
-        .find(|step| step["name"] == "Capture the exact pull request request")
+        .find(|step| step["name"] == "Capture the exact pull request Securefix request")
         .unwrap();
-    assert_eq!(capture_request["env"]["SECUREFIX_SOURCE_SHA"], SOURCE_SHA);
+    assert_eq!(
+        capture_request["env"]["SOURCE_ARTIFACT_NAME"],
+        "${{ steps.source.outputs.artifact_name }}"
+    );
 }
 
 #[test]
