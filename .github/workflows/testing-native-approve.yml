@@ -1,0 +1,229 @@
+name: testing-Native owner approval
+
+on:
+  workflow_dispatch:
+    inputs:
+      producer_run_id:
+        description: Exact successful scratch Client run containing the attested approval request
+        required: true
+        type: string
+      pull_request_number:
+        description: Exact owner-authored scratch PR selected for approval
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact owner-authored scratch PR head selected for approval
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: native-approval-${{ inputs.producer_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build-host:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.host.outputs.artifact-id }}
+      binary-sha256: ${{ steps.host-sha.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Require the exact protected workflow source
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.workflow_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the protected approval host without secrets
+        run: cargo +1.99.0 build --locked --bin securefix
+      - name: Record the protected host digest
+        id: host-sha
+        run: echo "sha256=$(sha256sum target/debug/securefix | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: host
+        with:
+          name: native-approval-host-${{ github.run_id }}
+          path: target/debug/securefix
+          if-no-files-found: error
+          retention-days: 1
+
+  validate-request:
+    needs: build-host
+    if: needs.build-host.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build-host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/native-approval-host
+          merge-multiple: true
+      - name: Verify the protected host handoff
+        env:
+          EXPECTED_SHA256: ${{ needs.build-host.outputs.binary-sha256 }}
+        run: |
+          set -euo pipefail
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/native-approval-host/securefix" | sha256sum --check
+          chmod 755 "$RUNNER_TEMP/native-approval-host/securefix"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch-reader
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Validate the owner-selected request without approval credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          "$RUNNER_TEMP/native-approval-host/securefix" new-server approval \
+            --config repo-settings/native-securefix-test-instance.toml \
+            --config-path repo-settings/native-securefix-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID" \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --expected-head-sha "$EXPECTED_HEAD_SHA"
+
+  apply-approval:
+    needs: [build-host, validate-request]
+    if: needs.build-host.result == 'success' && needs.validate-request.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      approval-marker: ${{ steps.approve.outputs.approval_marker }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build-host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/native-approval-host
+          merge-multiple: true
+      - name: Verify the protected host handoff
+        env:
+          EXPECTED_SHA256: ${{ needs.build-host.outputs.binary-sha256 }}
+        run: |
+          set -euo pipefail
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/native-approval-host/securefix" | sha256sum --check
+          chmod 755 "$RUNNER_TEMP/native-approval-host/securefix"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch-reader
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Apply the current-head approval with the trusted Bot credential
+        id: approve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          SECUREFIX_APPROVE_TOKEN: ${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          command_log="$RUNNER_TEMP/native-approval-apply.log"
+          "$RUNNER_TEMP/native-approval-host/securefix" new-server approval \
+            --config repo-settings/native-securefix-test-instance.toml \
+            --config-path repo-settings/native-securefix-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID" \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --expected-head-sha "$EXPECTED_HEAD_SHA" \
+            --apply | tee "$command_log"
+          grep '^approval_marker=' "$command_log" >> "$GITHUB_OUTPUT"
+      - name: Independently read back the exact reviewer decision
+        env:
+          GH_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          APPROVAL_MARKER: ${{ steps.approve.outputs.approval_marker }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          readback_ok=false
+          pull=''
+          reviews=''
+          for attempt in {1..5}; do
+            if pull="$(gh api -H 'Cache-Control: no-cache' "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")" \
+              && jq -e --arg sha "$EXPECTED_HEAD_SHA" '
+                .state == "open" and .base.ref == "main" and
+                .base.repo.id == 1410312556 and
+                .head.sha == $sha and .head.repo.id == 1410312556 and
+                .user.id == 4525500
+              ' <<<"$pull" >/dev/null 2>&1 \
+              && reviews="$(gh api --paginate -H 'Cache-Control: no-cache' "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER/reviews?per_page=100")" \
+              && jq -s -e --arg head "$EXPECTED_HEAD_SHA" --arg marker "$APPROVAL_MARKER" '
+                add | [ .[] | select(
+                  .user.id == 308696683 and .user.login == "civitaspo-bot" and
+                  .state == "APPROVED" and .commit_id == $head and
+                  ((.body // "") | split("\n") | index($marker) != null)
+                ) ] | length == 1
+              ' <<<"$reviews" >/dev/null 2>&1; then
+              readback_ok=true
+              break
+            fi
+            if [[ "$attempt" != 5 ]]; then
+              sleep 2
+            fi
+          done
+          if [[ "$readback_ok" != true ]]; then
+            printf 'Review POST completed, but fresh readback did not confirm it after five bounded attempts; no second review was submitted.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            if [[ -n "$pull" ]]; then
+              printf '\nCurrent PR identity:\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+              jq -c '{state, base_ref: .base.ref, base_repo_id: .base.repo.id, head_sha: .head.sha, head_repo_id: .head.repo.id, author_id: .user.id}' <<<"$pull" |
+                head -c 4096 >> "$GITHUB_STEP_SUMMARY"
+              printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [[ -n "$reviews" ]]; then
+              printf '\nLatest reviewer records (without review bodies):\n```json\n' \
+                >> "$GITHUB_STEP_SUMMARY"
+              jq -s -c --argjson reviewer 308696683 '
+                add | [ .[] | select(.user.id == $reviewer) ] | .[-5:] |
+                map({id, state, commit_id, submitted_at, user: {id: .user.id, login: .user.login}})
+              ' <<<"$reviews" | head -c 8192 >> "$GITHUB_STEP_SUMMARY"
+              printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 1
+          fi
+          printf 'Native approval was independently read back for PR #%s at %s.\n' \
+            "$PULL_REQUEST_NUMBER" "$EXPECTED_HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"

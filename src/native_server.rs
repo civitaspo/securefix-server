@@ -48,6 +48,29 @@ pub enum CommandArgs {
         #[arg(long)]
         producer_run_id: u64,
     },
+    #[command(
+        about = "Validate an owner-authorized request and optionally apply its exact-head approval"
+    )]
+    Approval {
+        #[arg(long)]
+        config: PathBuf,
+        /// Explicit path, relative to the Server instance repository root.
+        #[arg(long)]
+        config_path: String,
+        /// Exact Client repository that owns the producer run.
+        #[arg(long)]
+        producer_repository: String,
+        /// Successful Client workflow run containing the attested approval request.
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long)]
+        pull_request_number: u64,
+        #[arg(long)]
+        expected_head_sha: String,
+        /// Post the review using the configured User credential after all fences pass.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
 }
 
 pub fn run(command: CommandArgs) -> Result<()> {
@@ -92,6 +115,23 @@ pub fn run(command: CommandArgs) -> Result<()> {
             producer_repository,
             producer_run_id,
         } => apply_securefix_from_run(&config, &config_path, &producer_repository, producer_run_id),
+        CommandArgs::Approval {
+            config,
+            config_path,
+            producer_repository,
+            producer_run_id,
+            pull_request_number,
+            expected_head_sha,
+            apply,
+        } => apply_native_approval_from_run(
+            &config,
+            &config_path,
+            &producer_repository,
+            producer_run_id,
+            pull_request_number,
+            &expected_head_sha,
+            apply,
+        ),
     }
 }
 
@@ -123,6 +163,7 @@ fn verify_request(
     ensure!(
         match mode {
             securefix::api::NativeScratchMode::PolicyCheck => manifest.operation == "policy_check",
+            securefix::api::NativeScratchMode::Approval => manifest.operation == "approval",
             securefix::api::NativeScratchMode::Securefix => manifest.operation == "securefix",
         },
         "native request operation does not match the Server command"
@@ -161,6 +202,9 @@ fn verify_request(
     let role = match mode {
         securefix::api::NativeScratchMode::PolicyCheck => {
             securefix::instance_config::WorkflowRole::PolicyCheck
+        }
+        securefix::api::NativeScratchMode::Approval => {
+            securefix::instance_config::WorkflowRole::Approve
         }
         securefix::api::NativeScratchMode::Securefix => {
             securefix::instance_config::WorkflowRole::Securefix
@@ -269,7 +313,12 @@ fn verify_request(
         signer_sha,
         &manifest_bytes,
     )?;
-    let writer = if publish && mode == securefix::api::NativeScratchMode::PolicyCheck {
+    let writer = if publish
+        && matches!(
+            mode,
+            securefix::api::NativeScratchMode::PolicyCheck
+                | securefix::api::NativeScratchMode::Approval
+        ) {
         Some(native_scratch_writer(
             &config,
             &config_bytes,
@@ -400,12 +449,13 @@ fn validate_first_slice_policy(
         .context("native request repository is not configured")?;
     let required_capability = match mode {
         securefix::api::NativeScratchMode::PolicyCheck => securefix::policy::Capability::Merge,
+        securefix::api::NativeScratchMode::Approval => securefix::policy::Capability::Approve,
         securefix::api::NativeScratchMode::Securefix => securefix::policy::Capability::Securefix,
     };
-    ensure!(
-        repository.capabilities.contains(&required_capability),
-        "native request repository lacks the required capability"
-    );
+    repository
+        .policy()
+        .require(required_capability)
+        .context("native request repository lacks the required capability")?;
     ensure!(
         config.identities.owner.id == manifest.producer.actor_id
             && config.identities.owner.login == manifest.producer.actor_login
@@ -447,6 +497,7 @@ fn native_scratch_writer(
     };
     let write_token = match mode {
         securefix::api::NativeScratchMode::PolicyCheck => "SECUREFIX_NATIVE_CHECK_TOKEN",
+        securefix::api::NativeScratchMode::Approval => "SECUREFIX_APPROVE_TOKEN",
         securefix::api::NativeScratchMode::Securefix => "SECUREFIX_WRITE_TOKEN",
     };
     securefix::api::GitHub::native_scratch_from_env(
@@ -628,6 +679,96 @@ fn apply_securefix_from_run(
     producer_repository: &str,
     producer_run_id: u64,
 ) -> Result<()> {
+    let (manifest_bytes, bundle_bytes) = download_request_from_run(
+        config_path,
+        producer_repository,
+        producer_run_id,
+        securefix::policy::Capability::Securefix,
+    )?;
+    let directory = tempfile::tempdir()?;
+    let manifest_path = directory.path().join("manifest.json");
+    let bundle_path = directory.path().join("bundle.json");
+    fs::write(&manifest_path, manifest_bytes)?;
+    fs::write(&bundle_path, bundle_bytes)?;
+    apply_securefix(
+        config_path,
+        instance_config_path,
+        &manifest_path,
+        &bundle_path,
+    )
+}
+
+fn apply_native_approval_from_run(
+    config_path: &std::path::Path,
+    instance_config_path: &str,
+    producer_repository: &str,
+    producer_run_id: u64,
+    pull_request_number: u64,
+    expected_head_sha: &str,
+    apply: bool,
+) -> Result<()> {
+    securefix::policy::validate_sha(expected_head_sha)?;
+    ensure!(pull_request_number > 0, "invalid approval PR number");
+    let (manifest_bytes, bundle_bytes) = download_request_from_run(
+        config_path,
+        producer_repository,
+        producer_run_id,
+        securefix::policy::Capability::Approve,
+    )?;
+    let manifest: RequestManifest = serde_json::from_slice(&manifest_bytes)
+        .context("parse downloaded native approval request")?;
+    ensure!(
+        manifest.pull_request.number == pull_request_number
+            && manifest.pull_request.head_sha == expected_head_sha,
+        "producer request does not match the owner-selected PR number and head"
+    );
+    let directory = tempfile::tempdir()?;
+    let manifest_path = directory.path().join("manifest.json");
+    let bundle_path = directory.path().join("bundle.json");
+    fs::write(&manifest_path, manifest_bytes)?;
+    fs::write(&bundle_path, bundle_bytes)?;
+    let verified = verify_request(
+        config_path,
+        instance_config_path,
+        &manifest_path,
+        &bundle_path,
+        securefix::api::NativeScratchMode::Approval,
+        apply,
+    )?;
+    if apply {
+        let writer = verified
+            .writer
+            .as_ref()
+            .context("native approval writer was not captured before apply")?;
+        let marker = crate::approval::approve_native_current_head(
+            &verified.client_api,
+            writer,
+            &verified.manifest,
+            &verified.config.identities.approval_reviewer,
+            &verified.manifest_bytes,
+        )?;
+        println!("approval_marker={marker}");
+    }
+    println!("approval_validated=true");
+    println!("approval_applied={apply}");
+    println!("producer_run_id={}", verified.manifest.producer.run_id);
+    println!(
+        "pull_request_number={}",
+        verified.manifest.pull_request.number
+    );
+    println!(
+        "request_head_sha={}",
+        verified.manifest.pull_request.head_sha
+    );
+    Ok(())
+}
+
+fn download_request_from_run(
+    config_path: &std::path::Path,
+    producer_repository: &str,
+    producer_run_id: u64,
+    capability: securefix::policy::Capability,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     securefix::policy::validate_repository(producer_repository)?;
     ensure!(producer_run_id > 0, "invalid producer run ID");
     let config_bytes = read_bounded(config_path, 256 * 1024)?;
@@ -637,12 +778,10 @@ fn apply_securefix_from_run(
         .iter()
         .find(|repository| repository.repository == producer_repository)
         .context("producer Client repository is not configured")?;
-    ensure!(
-        target
-            .capabilities
-            .contains(&securefix::policy::Capability::Securefix),
-        "producer Client repository lacks Securefix capability"
-    );
+    target
+        .policy()
+        .require(capability)
+        .context("producer Client repository lacks the required capability")?;
     let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
     let repository: Value = api.get(&format!("/repos/{producer_repository}"))?;
     ensure!(
@@ -711,17 +850,7 @@ fn apply_securefix_from_run(
             && manifest.repository.full_name == producer_repository,
         "downloaded request does not identify the selected producer run and Client repository"
     );
-    let directory = tempfile::tempdir()?;
-    let manifest_path = directory.path().join("manifest.json");
-    let bundle_path = directory.path().join("bundle.json");
-    fs::write(&manifest_path, manifest_bytes)?;
-    fs::write(&bundle_path, bundle_bytes)?;
-    apply_securefix(
-        config_path,
-        instance_config_path,
-        &manifest_path,
-        &bundle_path,
-    )
+    Ok((manifest_bytes, bundle_bytes))
 }
 
 fn validate_request_artifact_metadata(
@@ -1417,6 +1546,111 @@ mod tests {
                 securefix::api::NativeScratchMode::Securefix,
             )
             .is_ok()
+        );
+
+        request.repository.id += 1;
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Securefix,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_approval_requires_approve_capability_and_owner_request() {
+        let mut config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let mut request = manifest();
+        request.operation = "approval".to_owned();
+        request.repository = crate::native_client::RepositoryIdentity {
+            id: 987654,
+            full_name: "example-org/project".to_owned(),
+        };
+        request.pull_request.head_repository_id = 987654;
+        request.pull_request.author_id = 101;
+        request.pull_request.author_login = "maintainer".to_owned();
+        request.producer.actor_id = 101;
+        request.producer.actor_login = "maintainer".to_owned();
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Approval,
+            )
+            .is_ok()
+        );
+
+        config.repositories[0]
+            .capabilities
+            .retain(|capability| *capability != securefix::policy::Capability::Approve);
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Approval,
+            )
+            .is_err()
+        );
+
+        config.repositories[0]
+            .capabilities
+            .push(securefix::policy::Capability::Approve);
+        request.producer.actor_id = 12;
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Approval,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_repository_policy_rejects_missing_capability_and_wrong_identity() {
+        let mut config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let mut request = manifest();
+        request.repository = crate::native_client::RepositoryIdentity {
+            id: 987654,
+            full_name: "example-org/project".to_owned(),
+        };
+        request.pull_request.head_repository_id = 987654;
+        request.pull_request.author_id = 101;
+        request.pull_request.author_login = "maintainer".to_owned();
+        request.producer.actor_id = 101;
+        request.producer.actor_login = "maintainer".to_owned();
+
+        config.repositories[0]
+            .capabilities
+            .retain(|capability| *capability != securefix::policy::Capability::Securefix);
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Securefix,
+            )
+            .is_err()
+        );
+
+        config.repositories[0]
+            .capabilities
+            .push(securefix::policy::Capability::Securefix);
+        request.repository.id += 1;
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Securefix,
+            )
+            .is_err()
         );
     }
 

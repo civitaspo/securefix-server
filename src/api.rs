@@ -52,6 +52,7 @@ pub struct NativeScratchTarget<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeScratchMode {
     PolicyCheck,
+    Approval,
     Securefix,
 }
 
@@ -375,16 +376,19 @@ impl GitHub {
             .context("native request target is not configured")?;
         ensure!(
             configured_target
-                .capabilities
-                .contains(&match request.mode {
+                .policy()
+                .require(match request.mode {
                     NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
+                    NativeScratchMode::Approval => crate::policy::Capability::Approve,
                     NativeScratchMode::Securefix => crate::policy::Capability::Securefix,
-                }),
+                })
+                .is_ok(),
             "native request target lacks the required capability"
         );
         ensure!(
             match request.mode {
                 NativeScratchMode::PolicyCheck => request.destination_branch.is_none(),
+                NativeScratchMode::Approval => request.destination_branch.is_none(),
                 NativeScratchMode::Securefix => request
                     .destination_branch
                     .is_some_and(|branch| !branch.is_empty()),
@@ -414,11 +418,22 @@ impl GitHub {
         let mut api = Self::new("https://api.github.com", read_token)?;
         require_single_repository_installation(&api, request.repository_id, request.repository)?;
         let write_api = Self::new("https://api.github.com", write_token.clone())?;
-        require_single_repository_installation(
-            &write_api,
-            request.repository_id,
-            request.repository,
-        )?;
+        if request.mode == NativeScratchMode::Approval {
+            let reviewer: Value = write_api.get("/user")?;
+            ensure!(
+                reviewer["id"].as_u64() == Some(config.identities.approval_reviewer.id)
+                    && reviewer["login"].as_str()
+                        == Some(config.identities.approval_reviewer.login.as_str())
+                    && reviewer["type"] == "User",
+                "approval token must authenticate as the configured review account"
+            );
+        } else {
+            require_single_repository_installation(
+                &write_api,
+                request.repository_id,
+                request.repository,
+            )?;
+        }
         let read_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
         ensure!(!read_token.is_empty(), "GITHUB_TOKEN is empty");
         let server_reader = Self::new("https://api.github.com", read_token)?;
@@ -659,6 +674,15 @@ impl GitHub {
                         && path == format!("/repos/{}/git/commits", write.target_repository),
                     "native Securefix may only create a commit for the exact PR head"
                 ),
+                NativeScratchMode::Approval => ensure!(
+                    *method == Method::POST
+                        && path
+                            == format!(
+                                "/repos/{}/pulls/{}/reviews",
+                                write.target_repository, write.pull_number
+                            ),
+                    "native approval may only submit the exact PR review"
+                ),
             }
         }
         let isolated = matches!(
@@ -742,6 +766,12 @@ impl GitHub {
                         NativeScratchMode::PolicyCheck => {
                             path == format!("/repos/{}/check-runs", write.target_repository)
                         }
+                        NativeScratchMode::Approval => {
+                            path == format!(
+                                "/repos/{}/pulls/{}/reviews",
+                                write.target_repository, write.pull_number
+                            )
+                        }
                         NativeScratchMode::Securefix => path == "/graphql",
                     } =>
             {
@@ -762,6 +792,16 @@ impl GitHub {
     }
 
     pub fn request(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+        self.request_with_cache_control(method, path, body, false)
+    }
+
+    fn request_with_cache_control(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        no_cache: bool,
+    ) -> Result<Value> {
         if let WriteContext::ClientLabel { server } = &self.writes {
             ensure!(
                 method == Method::POST && path == format!("/repos/{server}/labels"),
@@ -772,18 +812,25 @@ impl GitHub {
             && method != Method::GET
             && method != Method::HEAD
         {
-            ensure!(
-                write.mode == NativeScratchMode::PolicyCheck,
-                "Securefix writes must use the validated signed-commit path"
-            );
-            validate_native_scratch_check_body(
-                &method,
-                path,
-                &write.target_repository,
-                &write.head_sha,
-                &write.request_sha256,
-                body.context("native scratch check body is missing")?,
-            )?;
+            match write.mode {
+                NativeScratchMode::PolicyCheck => validate_native_scratch_check_body(
+                    &method,
+                    path,
+                    &write.target_repository,
+                    &write.head_sha,
+                    &write.request_sha256,
+                    body.context("native scratch check body is missing")?,
+                )?,
+                NativeScratchMode::Approval => validate_native_approval_body(
+                    &method,
+                    path,
+                    write,
+                    body.context("native approval body is missing")?,
+                )?,
+                NativeScratchMode::Securefix => {
+                    bail!("Securefix writes must use the validated signed-commit path")
+                }
+            }
         }
         if let WriteContext::PackageScratch {
             destination_repository,
@@ -855,6 +902,9 @@ impl GitHub {
             self.require_current_revision()?;
         }
         let mut request = self.builder(method.clone(), path)?;
+        if no_cache {
+            request = request.header(reqwest::header::CACHE_CONTROL, "no-cache");
+        }
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -956,7 +1006,9 @@ impl GitHub {
 
         validate_instance_config_path(config_path)?;
         require_single_repository_installation(self, *target_id, target_repository)?;
-        if let Some(token) = &self.write_token {
+        if let Some(token) = &self.write_token
+            && *mode != NativeScratchMode::Approval
+        {
             let write_api = Self::new("https://api.github.com", token.clone())?;
             require_single_repository_installation(&write_api, *target_id, target_repository)?;
         }
@@ -968,6 +1020,19 @@ impl GitHub {
             "native Server instance differs from the current job repository"
         );
         let config = crate::instance_config::InstanceConfig::parse(config_bytes)?;
+        if *mode == NativeScratchMode::Approval
+            && let Some(token) = &self.write_token
+        {
+            let review_api = Self::new("https://api.github.com", token.clone())?;
+            let reviewer: Value = review_api.get("/user")?;
+            ensure!(
+                reviewer["id"].as_u64() == Some(config.identities.approval_reviewer.id)
+                    && reviewer["login"].as_str()
+                        == Some(config.identities.approval_reviewer.login.as_str())
+                    && reviewer["type"] == "User",
+                "approval token no longer authenticates as the configured review account"
+            );
+        }
         ensure!(
             config.instance.repository == *instance_repository
                 && config.instance.id == *instance_id
@@ -980,10 +1045,16 @@ impl GitHub {
                 && config.repositories.iter().any(|repository| {
                     repository.repository == *target_repository
                         && repository.id == *target_id
-                        && repository.capabilities.contains(&match mode {
-                            NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
-                            NativeScratchMode::Securefix => crate::policy::Capability::Securefix,
-                        })
+                        && repository
+                            .policy()
+                            .require(match mode {
+                                NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
+                                NativeScratchMode::Approval => crate::policy::Capability::Approve,
+                                NativeScratchMode::Securefix => {
+                                    crate::policy::Capability::Securefix
+                                }
+                            })
+                            .is_ok()
                 }),
             "native request no longer matches the captured owner and repository policy"
         );
@@ -1028,6 +1099,7 @@ impl GitHub {
                 && pull["head"]["sha"].as_str() == Some(head_sha.as_str())
                 && match mode {
                     NativeScratchMode::PolicyCheck => destination_branch.is_none(),
+                    NativeScratchMode::Approval => destination_branch.is_none(),
                     NativeScratchMode::Securefix => {
                         pull["head"]["ref"].as_str() == destination_branch.as_deref()
                     }
@@ -1047,6 +1119,14 @@ impl GitHub {
             Method::GET,
             path,
             None,
+        )?)?)
+    }
+    pub fn get_uncached<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Ok(serde_json::from_value(self.request_with_cache_control(
+            Method::GET,
+            path,
+            None,
+            true,
         )?)?)
     }
     pub fn post<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
@@ -1340,11 +1420,21 @@ impl GitHub {
     }
 
     pub fn paginate(&self, path: &str) -> Result<Vec<Value>> {
+        self.paginate_with_cache_control(path, false)
+    }
+    pub fn paginate_uncached(&self, path: &str) -> Result<Vec<Value>> {
+        self.paginate_with_cache_control(path, true)
+    }
+    fn paginate_with_cache_control(&self, path: &str, no_cache: bool) -> Result<Vec<Value>> {
         let delimiter = if path.contains('?') { '&' } else { '?' };
         let mut result = Vec::new();
         for page in 1..=100 {
-            let values: Vec<Value> =
-                self.get(&format!("{path}{delimiter}per_page=100&page={page}"))?;
+            let page_path = format!("{path}{delimiter}per_page=100&page={page}");
+            let values: Vec<Value> = if no_cache {
+                self.get_uncached(&page_path)?
+            } else {
+                self.get(&page_path)?
+            };
             let last = values.len() < 100;
             result.extend(values);
             if last {
@@ -2101,8 +2191,16 @@ pub fn validate_native_test_host_context(
     );
     let role = match mode {
         NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
+        NativeScratchMode::Approval => crate::instance_config::WorkflowRole::Approve,
         NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
     };
+    let actor_id = std::env::var("GITHUB_ACTOR_ID")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    ensure!(
+        actor_id == Some(config.identities.owner.id),
+        "native test authority requires a dispatch by the configured owner"
+    );
     let workflow_path = config
         .workflow_roles
         .get(&role)
@@ -2129,6 +2227,7 @@ pub fn validate_native_server_execution_workflow(
     crate::policy::validate_sha(workflow_sha)?;
     let role = match mode {
         NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
+        NativeScratchMode::Approval => crate::instance_config::WorkflowRole::Approve,
         NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
     };
     let workflow = snapshot
@@ -2380,6 +2479,46 @@ fn validate_native_scratch_check_body(
         "native scratch check body does not match the verified request"
     );
     Ok(())
+}
+
+fn validate_native_approval_body(
+    method: &Method,
+    path: &str,
+    write: &NativeScratchWrite,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::POST
+            && path
+                == format!(
+                    "/repos/{}/pulls/{}/reviews",
+                    write.target_repository, write.pull_number
+                )
+            && body
+                == &native_approval_body(
+                    &write.server_authority,
+                    &write.head_sha,
+                    &write.request_sha256
+                )?,
+        "native approval body does not match the verified request and Server authority"
+    );
+    Ok(())
+}
+
+pub fn native_approval_body(
+    authority: &NativeAuthoritySnapshot,
+    head_sha: &str,
+    request_sha256: &str,
+) -> Result<Value> {
+    crate::policy::validate_sha(head_sha)?;
+    validate_sha256(request_sha256, "native request digest")?;
+    let authority_id = crate::hex_encode(sha2::Sha256::digest(serde_json::to_vec(authority)?));
+    let marker = format!("<!-- securefix:native-approval:v1:{authority_id}:{request_sha256} -->");
+    Ok(serde_json::json!({
+        "event": "APPROVE",
+        "commit_id": head_sha,
+        "body": marker
+    }))
 }
 
 pub fn native_policy_check_body(head_sha: &str, request_sha256: &str) -> Value {
@@ -2781,6 +2920,17 @@ mod tests {
         api
     }
 
+    fn native_approval_api() -> GitHub {
+        let mut api = native_scratch_api();
+        let WriteContext::NativeScratch(write) = &api.writes else {
+            unreachable!();
+        };
+        let mut write = write.as_ref().clone();
+        write.mode = NativeScratchMode::Approval;
+        api.writes = WriteContext::NativeScratch(Box::new(write));
+        api
+    }
+
     #[test]
     fn native_scratch_writer_allows_only_one_bound_check_run() {
         let api = native_scratch_api();
@@ -2858,6 +3008,45 @@ mod tests {
                 &serde_json::json!({})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn native_approval_writer_allows_only_the_bound_current_head_review() {
+        let mut api = native_approval_api();
+        api.token = "client-read-token".into();
+        api.write_token = Some("review-user-token".into());
+        let path = format!("/repos/{SCRATCH_REPOSITORY}/pulls/4/reviews");
+        assert!(api.require_write_target(&Method::POST, &path).is_ok());
+        assert!(api.require_write_target(&Method::POST, "/graphql").is_err());
+        assert!(
+            api.require_write_target(&Method::POST, "/repos/other/repo/pulls/4/reviews")
+                .is_err()
+        );
+        assert!(api.require_write_target(&Method::PATCH, &path).is_err());
+
+        let WriteContext::NativeScratch(write) = &api.writes else {
+            unreachable!();
+        };
+        let body = native_approval_body(
+            &write.server_authority,
+            &write.head_sha,
+            &write.request_sha256,
+        )
+        .unwrap();
+        assert!(validate_native_approval_body(&Method::POST, &path, write, &body,).is_ok());
+        let mut stale_write = write.clone();
+        stale_write.head_sha = "f".repeat(40);
+        assert!(validate_native_approval_body(&Method::POST, &path, &stale_write, &body,).is_err());
+        let read = api.builder(Method::GET, &path).unwrap().build().unwrap();
+        let post = api.builder(Method::POST, &path).unwrap().build().unwrap();
+        assert_eq!(
+            read.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer client-read-token"
+        );
+        assert_eq!(
+            post.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer review-user-token"
         );
     }
 
