@@ -43,8 +43,8 @@ jobs:
         id: candidate
         uses: civitaspo/securefix-server/.github/actions/setup-cli@ee98f4f12f3c32855c95feb3fe75bc2870b88460 # native candidate loader H2 ee98f4f12f3c32855c95feb3fe75bc2870b88460
         with:
-          candidate-run-id: '39621507109'
-          candidate-source-sha: 6c3a50d1f7a1b750329f6f307ac2c1da5fc9bd3e
+          candidate-run-id: '39637183252'
+          candidate-source-sha: fe29608a9734b3c19237af540f7df635aadedb53
       - name: Require the exact candidate build artifact
         if: steps.candidate.outputs.reused != 'true'
         run: exit 1
