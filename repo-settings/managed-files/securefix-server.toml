@@ -1,0 +1,67 @@
+schema_version = 1
+
+[instance]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+default_branch = "main"
+
+[identities.owner]
+login = "civitaspo"
+id = 4525500
+
+[identities.repository_owner]
+login = "civitaspo"
+id = 4525500
+
+[identities.client_bot]
+login = "civitaspo-securefix-client[bot]"
+id = 288068203
+
+[identities.server_bot]
+login = "civitaspo-securefix-server[bot]"
+id = 288069019
+
+[identities.approval_reviewer]
+login = "civitaspo-bot"
+id = 308696683
+
+[apps]
+client_id = 3872492
+server_id = 15368
+status_check_id = 15368
+policy_check_id = 15368
+
+[workflow_roles]
+approve = ".github/workflows/testing-approve-request.yml"
+merge = ".github/workflows/testing-merge-request.yml"
+policy_check = ".github/workflows/policy-check.yml"
+
+[policy]
+trusted_committers = [
+  "civitaspo",
+  "civitaspo-securefix-server[bot]",
+  "civitaspo-bot",
+]
+default_sensitive_paths = [
+  ".github/workflows/**",
+  ".github/actions/**",
+  "**/Cargo.toml",
+  "**/Cargo.lock",
+]
+merge_controls_enabled = true
+
+[policy.sensitive_path_approval_exemptions]
+users = []
+github_apps = []
+
+[[repositories]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+capabilities = ["merge"]
+protect_tags = false
+
+[acceptable_clients]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+producer_workflow = ".github/workflows/request-producer-probe.yml"
+version = ">=0.1.0"

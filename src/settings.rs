@@ -6,10 +6,21 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use clap::Subcommand;
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 const RULESET_DIR: &str = "repo-settings/rulesets";
+const MANAGED_FILES_MANIFEST: &str = "repo-settings/managed-files.json";
+const MANAGED_FILES_LIMIT: u64 = 1024 * 1024;
+const MANAGED_TARGETS: &[&str] = &[
+    ".github/workflows/policy-check.yml",
+    "securefix-server.toml",
+];
 const CLIENT_WORKFLOWS: &[(&str, &str)] = &[
     (
         ".github/workflows/merge-request.yml",
@@ -33,6 +44,10 @@ pub enum Command {
     },
     ActivationPreflight,
     ControlledMerges,
+    ManagedRender {
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -41,7 +56,412 @@ pub fn run(command: Command) -> Result<()> {
         Command::Reconcile { repository } => reconcile(&repository),
         Command::ActivationPreflight => activation_preflight(),
         Command::ControlledMerges => controlled_merges(),
+        Command::ManagedRender { output_dir } => managed_render(&output_dir),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedFilesManifest {
+    repository: String,
+    repository_id: u64,
+    default_branch: String,
+    files: Vec<ManagedFileEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedFileEntry {
+    source: String,
+    target: String,
+}
+
+fn managed_desired_files() -> Result<(ManagedFilesManifest, BTreeMap<String, Vec<u8>>)> {
+    let manifest_bytes = read_bounded_regular_file(MANAGED_FILES_MANIFEST)?;
+    let manifest = parse_managed_manifest(&manifest_bytes)?;
+    let mut desired = BTreeMap::new();
+    for file in &manifest.files {
+        desired.insert(
+            file.target.clone(),
+            read_bounded_regular_file(&file.source)?,
+        );
+    }
+    validate_managed_instance_config(&manifest, &desired)?;
+    Ok((manifest, desired))
+}
+
+fn parse_managed_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
+    ensure!(
+        bytes.len() <= 32 * 1024,
+        "managed-files manifest exceeds size limit"
+    );
+    let manifest: ManagedFilesManifest = serde_json::from_slice(bytes)?;
+    let scratch = &config::trusted()?.deployment.integration;
+    ensure!(
+        manifest.repository == scratch.repository && manifest.repository_id == scratch.id,
+        "managed-files target differs from the configured scratch repository"
+    );
+    config::validate_branch(&manifest.default_branch)?;
+    validate_managed_targets(&manifest.files)?;
+    for file in &manifest.files {
+        ensure!(
+            file.source.starts_with("repo-settings/managed-files/")
+                && safe_relative_path(&file.source)
+                && safe_relative_path(&file.target),
+            "managed-files manifest contains an unsafe source or target"
+        );
+    }
+    Ok(manifest)
+}
+
+fn validate_managed_instance_config(
+    manifest: &ManagedFilesManifest,
+    desired: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    let parsed_config = securefix::instance_config::InstanceConfig::parse(
+        desired
+            .get("securefix-server.toml")
+            .context("managed instance config missing")?,
+    )?;
+    ensure!(
+        parsed_config.instance.repository == manifest.repository
+            && parsed_config.instance.id == manifest.repository_id
+            && parsed_config.instance.default_branch == manifest.default_branch,
+        "managed instance config does not match its declared scratch target"
+    );
+    Ok(())
+}
+
+fn validate_managed_targets(files: &[ManagedFileEntry]) -> Result<()> {
+    let targets = files
+        .iter()
+        .map(|file| file.target.as_str())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        files.len() == targets.len()
+            && targets.len() == MANAGED_TARGETS.len()
+            && MANAGED_TARGETS
+                .iter()
+                .all(|target| targets.contains(target)),
+        "managed-files manifest has duplicate or unexpected targets"
+    );
+    Ok(())
+}
+
+fn safe_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains(['\\', '\0', '\r', '\n'])
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn read_bounded_regular_file(path: &str) -> Result<Vec<u8>> {
+    ensure!(safe_relative_path(path), "unsafe managed-file path");
+    let mut current = PathBuf::new();
+    for component in Path::new(path).components() {
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)
+            .with_context(|| format!("stat {}", current.display()))?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "managed-file path contains a symlink: {path}"
+        );
+        if current == Path::new(path) {
+            ensure!(
+                metadata.is_file(),
+                "managed-file source is not a regular file: {path}"
+            );
+            ensure!(
+                metadata.len() <= MANAGED_FILES_LIMIT,
+                "managed-file source exceeds size limit: {path}"
+            );
+        }
+    }
+    let bytes = fs::read(path).with_context(|| format!("read {path}"))?;
+    ensure!(
+        bytes.len() as u64 <= MANAGED_FILES_LIMIT,
+        "managed-file source exceeds size limit: {path}"
+    );
+    Ok(bytes)
+}
+
+fn managed_changes(
+    desired: &BTreeMap<String, Vec<u8>>,
+    current: &BTreeMap<String, Vec<u8>>,
+) -> BTreeMap<String, Vec<u8>> {
+    desired
+        .iter()
+        .filter_map(|(path, bytes)| {
+            (current.get(path) != Some(bytes)).then(|| (path.clone(), bytes.clone()))
+        })
+        .collect()
+}
+
+fn workflow_uses(bytes: &[u8]) -> Result<BTreeSet<String>> {
+    fn collect(value: &serde_yaml::Value, output: &mut BTreeSet<String>) -> Result<()> {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                for (key, child) in mapping {
+                    if key.as_str() == Some("uses") {
+                        output.insert(
+                            child
+                                .as_str()
+                                .context("workflow uses value is not a string")?
+                                .to_owned(),
+                        );
+                    }
+                    collect(child, output)?;
+                }
+            }
+            serde_yaml::Value::Sequence(values) => {
+                for value in values {
+                    collect(value, output)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let workflow: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
+    let mut uses = BTreeSet::new();
+    collect(&workflow, &mut uses)?;
+    Ok(uses)
+}
+
+fn validate_supported_pin_state(path: &str, current: &[u8], desired: &[u8]) -> Result<()> {
+    if path == ".github/workflows/policy-check.yml" {
+        ensure!(
+            workflow_uses(current)? == workflow_uses(desired)?,
+            "managed workflow action or reusable-workflow pins changed; refusing to replace them"
+        );
+    }
+    Ok(())
+}
+
+fn managed_render(output_dir: &Path) -> Result<()> {
+    ensure!(
+        !output_dir.exists(),
+        "managed render output directory already exists"
+    );
+    let (_, desired) = managed_desired_files()?;
+    for (path, bytes) in desired {
+        let output = output_dir.join(&path);
+        fs::create_dir_all(output.parent().context("managed output has no parent")?)?;
+        fs::write(output, bytes)?;
+    }
+    println!("rendered {} managed files", MANAGED_TARGETS.len());
+    Ok(())
+}
+
+fn managed_desired_files_from_source(
+    source_sha: &str,
+) -> Result<(ManagedFilesManifest, BTreeMap<String, Vec<u8>>)> {
+    crate::policy::validate_sha(source_sha)?;
+    let trusted = config::trusted()?;
+    let source_repository = &trusted.deployment.server.repository;
+    let source_api = GitHub::from_env("GITHUB_TOKEN")?;
+    let commit: Value =
+        source_api.get(&format!("/repos/{source_repository}/commits/{source_sha}"))?;
+    ensure!(
+        commit["sha"].as_str() == Some(source_sha),
+        "managed-files source commit changed"
+    );
+    let tree_sha = commit["commit"]["tree"]["sha"]
+        .as_str()
+        .context("candidate source commit has no tree SHA")?;
+    crate::policy::validate_sha(tree_sha)?;
+    let tree: Value = source_api.get(&format!(
+        "/repos/{source_repository}/git/trees/{tree_sha}?recursive=1"
+    ))?;
+    ensure!(
+        tree["truncated"] == false,
+        "candidate source tree was truncated"
+    );
+    let tree_entries = tree["tree"]
+        .as_array()
+        .context("candidate source tree entries are missing")?;
+    let mut entries = BTreeMap::new();
+    for entry in tree_entries {
+        if let Some(path) = entry["path"].as_str() {
+            ensure!(
+                entries.insert(path.to_owned(), entry.clone()).is_none(),
+                "candidate source tree has duplicate paths"
+            );
+        }
+    }
+    let manifest_bytes = read_managed_source_file(
+        &source_api,
+        source_repository,
+        source_sha,
+        &entries,
+        MANAGED_FILES_MANIFEST,
+    )?;
+    let manifest = parse_managed_manifest(&manifest_bytes)?;
+    let mut desired = BTreeMap::new();
+    for file in &manifest.files {
+        desired.insert(
+            file.target.clone(),
+            read_managed_source_file(
+                &source_api,
+                source_repository,
+                source_sha,
+                &entries,
+                &file.source,
+            )?,
+        );
+    }
+    validate_managed_instance_config(&manifest, &desired)?;
+    Ok((manifest, desired))
+}
+
+fn read_managed_source_file(
+    api: &GitHub,
+    repository: &str,
+    source_sha: &str,
+    tree: &BTreeMap<String, Value>,
+    path: &str,
+) -> Result<Vec<u8>> {
+    let entry = tree
+        .get(path)
+        .with_context(|| format!("managed-file source is absent at {source_sha}: {path}"))?;
+    ensure!(
+        entry["type"] == "blob" && entry["mode"] == "100644",
+        "managed-file source is not a regular non-executable blob: {path}"
+    );
+    let size = entry["size"]
+        .as_u64()
+        .context("managed-file source size is missing")?;
+    ensure!(
+        size <= MANAGED_FILES_LIMIT,
+        "managed-file source exceeds size limit: {path}"
+    );
+    let bytes = api.content(repository, path, source_sha)?;
+    ensure!(
+        bytes.len() as u64 == size,
+        "managed-file source size differs from its candidate tree entry: {path}"
+    );
+    Ok(bytes)
+}
+
+pub(crate) fn managed_reconcile_scratch(candidate_sha: &str) -> Result<()> {
+    crate::policy::validate_sha(candidate_sha)?;
+    let (manifest, desired) = managed_desired_files_from_source(candidate_sha)?;
+    let api = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
+    let repository: Value = api.get(&format!("/repos/{}", manifest.repository))?;
+    ensure!(
+        repository["id"].as_u64() == Some(manifest.repository_id)
+            && repository["full_name"].as_str() == Some(manifest.repository.as_str())
+            && repository["default_branch"].as_str() == Some(manifest.default_branch.as_str()),
+        "managed-files scratch repository identity or default branch changed"
+    );
+    let reference: Value = api.get(&format!(
+        "/repos/{}/git/ref/heads/{}",
+        manifest.repository, manifest.default_branch
+    ))?;
+    let base_sha = reference["object"]["sha"]
+        .as_str()
+        .context("scratch main ref has no SHA")?;
+    let mut current_files = BTreeMap::new();
+    for (path, bytes) in &desired {
+        let current = match api.content(&manifest.repository, path, base_sha) {
+            Ok(bytes) => Some(bytes),
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(current) = current {
+            if current != *bytes {
+                validate_supported_pin_state(path, &current, bytes)?;
+            }
+            current_files.insert(path.clone(), current);
+        }
+    }
+    let additions = managed_changes(&desired, &current_files);
+    if additions.is_empty() {
+        println!("managed files already match scratch main at {base_sha}; no PR created");
+        return Ok(());
+    }
+    let expected_changed = additions.keys().cloned().collect::<BTreeSet<_>>();
+    let branch = format!(
+        "securefix/managed-files/{}-{}",
+        env_u64("GITHUB_RUN_ID")?,
+        env_u64("GITHUB_RUN_ATTEMPT")?
+    );
+    let reference_path = format!("/repos/{}/git/refs/heads/{}", manifest.repository, branch);
+    let create_ref_path = format!("/repos/{}/git/refs", manifest.repository);
+    api.post::<Value>(
+        &create_ref_path,
+        &json!({"ref":format!("refs/heads/{branch}"),"sha":base_sha}),
+    )?;
+    let head_sha = api.create_commit(
+        &manifest.repository,
+        &branch,
+        base_sha,
+        "Reconcile managed scratch files",
+        additions,
+        Vec::new(),
+    )?;
+    let branch_ref: Value = api.get(&reference_path)?;
+    ensure!(
+        branch_ref["object"]["sha"].as_str() == Some(head_sha.as_str()),
+        "managed-files branch does not point at the signed commit"
+    );
+    let latest_reference: Value = api.get(&format!(
+        "/repos/{}/git/ref/heads/{}",
+        manifest.repository, manifest.default_branch
+    ))?;
+    ensure!(
+        latest_reference["object"]["sha"].as_str() == Some(base_sha),
+        "scratch default branch changed before managed-files PR creation"
+    );
+    let pull: Value = api.post(
+        &format!("/repos/{}/pulls", manifest.repository),
+        &json!({"title":"Reconcile managed scratch files","head":branch,"base":manifest.default_branch,"body":"This PR reconciles the exact workflow and configuration files declared in `repo-settings/managed-files.json`."}),
+    )?;
+    let number = pull["number"]
+        .as_u64()
+        .context("managed-files PR has no number")?;
+    ensure!(
+        pull["state"] == "open"
+            && pull["base"]["ref"] == manifest.default_branch
+            && pull["base"]["sha"] == base_sha
+            && pull["base"]["repo"]["id"].as_u64() == Some(manifest.repository_id)
+            && pull["head"]["ref"] == branch
+            && pull["head"]["repo"]["id"].as_u64() == Some(manifest.repository_id)
+            && pull["head"]["sha"] == head_sha,
+        "GitHub created an unexpected managed-files PR"
+    );
+    let files = api.paginate(&format!(
+        "/repos/{}/pulls/{number}/files?per_page=100",
+        manifest.repository
+    ))?;
+    let changed = files
+        .iter()
+        .map(|file| file["filename"].as_str().unwrap_or_default())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        changed.len() == expected_changed.len()
+            && expected_changed
+                .iter()
+                .all(|path| changed.contains(path.as_str())),
+        "managed-files PR contains files outside the exact desired-state set"
+    );
+    println!("created reviewable managed-files PR #{number} at {head_sha} from base {base_sha}");
+    Ok(())
+}
+
+fn env_u64(name: &str) -> Result<u64> {
+    std::env::var(name)
+        .with_context(|| format!("missing {name}"))?
+        .parse()
+        .with_context(|| format!("invalid {name}"))
 }
 
 fn api() -> Result<GitHub> {
@@ -1132,6 +1552,92 @@ fn env_bool(name: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::fixtures::{Fixture, Route};
+
+    fn managed_entry(target: &str) -> ManagedFileEntry {
+        ManagedFileEntry {
+            source: format!(
+                "repo-settings/managed-files/{}",
+                target.rsplit('/').next().unwrap()
+            ),
+            target: target.to_owned(),
+        }
+    }
+
+    #[test]
+    fn managed_planner_changes_only_the_drifted_file() {
+        let desired = BTreeMap::from([
+            (
+                ".github/workflows/policy-check.yml".into(),
+                b"workflow".to_vec(),
+            ),
+            ("securefix-server.toml".into(), b"config".to_vec()),
+        ]);
+        let current = BTreeMap::from([
+            (
+                ".github/workflows/policy-check.yml".into(),
+                b"old workflow".to_vec(),
+            ),
+            ("securefix-server.toml".into(), b"config".to_vec()),
+            ("unmanaged.txt".into(), b"leave alone".to_vec()),
+        ]);
+        let changes = managed_changes(&desired, &current);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes.get(".github/workflows/policy-check.yml"),
+            Some(&b"workflow".to_vec())
+        );
+        assert!(changes.get("unmanaged.txt").is_none());
+        assert!(managed_changes(&desired, &desired).is_empty());
+    }
+
+    #[test]
+    fn managed_planner_adds_a_missing_file_without_deleting_unmanaged_files() {
+        let desired = BTreeMap::from([
+            (
+                ".github/workflows/policy-check.yml".into(),
+                b"workflow".to_vec(),
+            ),
+            ("securefix-server.toml".into(), b"config".to_vec()),
+        ]);
+        let current = BTreeMap::from([
+            (
+                ".github/workflows/policy-check.yml".into(),
+                b"workflow".to_vec(),
+            ),
+            ("unmanaged.txt".into(), b"leave alone".to_vec()),
+        ]);
+        let changes = managed_changes(&desired, &current);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes.get("securefix-server.toml"),
+            Some(&b"config".to_vec())
+        );
+        assert!(changes.get("unmanaged.txt").is_none());
+    }
+
+    #[test]
+    fn managed_workflow_rejects_a_different_immutable_pin() {
+        let expected = b"jobs:\n  call:\n    uses: owner/repo/.github/workflows/check.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+        let changed = b"jobs:\n  call:\n    uses: owner/repo/.github/workflows/check.yml@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n";
+        assert!(
+            validate_supported_pin_state(".github/workflows/policy-check.yml", changed, expected)
+                .is_err()
+        );
+        assert!(
+            validate_supported_pin_state(".github/workflows/policy-check.yml", expected, expected)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn managed_manifest_rejects_duplicate_targets() {
+        let files = vec![
+            managed_entry(".github/workflows/policy-check.yml"),
+            managed_entry("securefix-server.toml"),
+            managed_entry(".github/workflows/policy-check.yml"),
+        ];
+        assert!(validate_managed_targets(&files).is_err());
+    }
 
     fn installation_repository(id: u64, full_name: &str, owner_id: u64) -> Value {
         json!({"id":id,"full_name":full_name,"owner":{"id":owner_id}})
