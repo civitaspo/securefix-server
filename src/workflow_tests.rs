@@ -971,6 +971,140 @@ fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
         capture_request["env"]["SOURCE_ARTIFACT_NAME"],
         "${{ steps.source.outputs.artifact_name }}"
     );
+    let capture_approval = steps
+        .iter()
+        .find(|step| step["name"] == "Capture the exact pull request approval request")
+        .unwrap();
+    assert_eq!(capture_approval["if"], "inputs.operation == 'approval'");
+    assert_eq!(
+        capture_approval["env"]["SECUREFIX_CALLER_WORKFLOW_SHA"],
+        "${{ github.workflow_sha }}"
+    );
+    assert!(
+        capture_approval["run"]
+            .as_str()
+            .unwrap()
+            .contains("securefix new-client approve capture")
+    );
+}
+
+#[test]
+fn native_approval_host_keeps_the_existing_user_token_in_one_protected_step() {
+    const CONFIG_PATH: &str = "repo-settings/native-securefix-test-instance.toml";
+    const WORKFLOW_PATH: &str = ".github/workflows/testing-native-approve.yml";
+
+    let config_bytes = fs::read(CONFIG_PATH).unwrap();
+    let config = securefix::instance_config::InstanceConfig::parse(&config_bytes).unwrap();
+    assert_eq!(
+        config
+            .workflow_roles
+            .get(&securefix::instance_config::WorkflowRole::Approve)
+            .map(String::as_str),
+        Some(WORKFLOW_PATH)
+    );
+    let scratch = config
+        .repositories
+        .iter()
+        .find(|repository| repository.repository == "civitaspo/testing-securefix-server")
+        .unwrap();
+    assert!(
+        scratch
+            .capabilities
+            .contains(&crate::policy::Capability::Approve)
+    );
+
+    let wrapper = workflow("testing-native-approve.yml");
+    assert!(wrapper["on"]["workflow_dispatch"].is_object());
+    let jobs = wrapper["jobs"].as_object().unwrap();
+    for (name, job) in jobs {
+        let guard = job["if"].as_str().unwrap();
+        for condition in [
+            "github.repository == 'civitaspo/securefix-server'",
+            "github.ref == 'refs/heads/main'",
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+        ] {
+            assert!(guard.contains(condition), "{name}: missing {condition}");
+        }
+        if name != "build-host" {
+            assert_eq!(job["environment"], "main", "{name}");
+        }
+    }
+
+    let build_steps = jobs["build-host"]["steps"].as_array().unwrap();
+    assert!(build_steps.iter().any(|step| {
+        step["with"]["ref"] == "${{ github.workflow_sha }}"
+            && step["with"]["persist-credentials"] == false
+    }));
+    assert!(build_steps.iter().any(|step| {
+        step["name"] == "Build the protected approval host without secrets"
+            && step["run"] == "cargo +1.99.0 build --locked --bin securefix"
+    }));
+    assert!(
+        build_steps
+            .iter()
+            .all(|step| step["env"]["SECUREFIX_APPROVE_TOKEN"].is_null())
+    );
+
+    for job_name in ["validate-request", "apply-approval"] {
+        let steps = jobs[job_name]["steps"].as_array().unwrap();
+        assert!(steps.iter().any(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+                && step["with"]["artifact-ids"] == "${{ needs.build-host.outputs.artifact-id }}"
+        }));
+        assert!(steps.iter().any(|step| {
+            step["name"] == "Verify the protected host handoff"
+                && step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("sha256sum --check"))
+        }));
+        assert!(steps.iter().any(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("$RUNNER_TEMP/native-approval-host/securefix"))
+        }));
+    }
+
+    let validate_steps = jobs["validate-request"]["steps"].as_array().unwrap();
+    assert!(validate_steps.iter().all(|step| {
+        step["env"]["SECUREFIX_APPROVE_TOKEN"].is_null()
+            && step["env"]["CIVITASPO_BOT_PR_APPROVE_TOKEN"].is_null()
+    }));
+    let apply_steps = jobs["apply-approval"]["steps"].as_array().unwrap();
+    let credential_steps = apply_steps
+        .iter()
+        .filter(|step| {
+            step["env"]["SECUREFIX_APPROVE_TOKEN"]
+                == "${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(credential_steps.len(), 1);
+    assert_eq!(
+        credential_steps[0]["name"],
+        "Apply the current-head approval with the trusted Bot credential"
+    );
+    assert!(
+        credential_steps[0]["run"]
+            .as_str()
+            .unwrap()
+            .contains("--apply")
+    );
+    assert!(apply_steps.iter().any(|step| {
+        step["name"] == "Independently read back the exact reviewer decision"
+            && step["run"].as_str().is_some_and(|run| {
+                run.contains("Cache-Control: no-cache")
+                    && run.contains("for attempt in {1..5}")
+                    && run.contains("no second review was submitted")
+                    && !run.contains("--apply")
+            })
+    }));
+    assert!(
+        apply_steps
+            .iter()
+            .all(|step| { step["with"]["permission-pull-requests"] != "write" })
+    );
 }
 
 #[test]
@@ -1513,6 +1647,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
         }
         for (job_id, job) in workflow["jobs"].as_object().unwrap() {
             if path == ".github/workflows/testing-securefix-server.yml" && job_id == "build" {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-approve.yml" && job_id == "build-host" {
                 continue;
             }
             if path == ".github/workflows/testing-native-package-build.yml" && job_id == "build" {
@@ -2784,6 +2921,9 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && step["with"]["path"] == "native-policy-check"
                 });
             if path == ".github/workflows/testing-native-package-build.yml" && job_id == "attest" {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-approve.yml" {
                 continue;
             }
             if path == ".github/workflows/testing-publish-native-package.yml" && job_id == "publish"

@@ -45,3 +45,13 @@ loader and native capture/host relay now have local implementations described in
 `integration-testing.md`. Fixture-control initialization, reviewed successor
 activation and hosted migration scenarios remain unfinished. Publication alone
 does not establish a working testing deployment.
+
+The separate `testing-native-approve.yml` workflow is a test-only owner-dispatched
+probe for applying an approval to one configured scratch PR. It builds its host
+from the workflow's protected-main source without secrets, validates the captured
+producer run, request attestation, Server authority, owner identity, and exact
+open PR head with a scratch-scoped read token, then exposes the existing Bot User
+token only to the exact-head review step. A bounded no-cache readback follows;
+readback failure does not submit a second review. This probe does not replace the
+production `/approve` command or authorize production PRs. It has local contract
+and behavior tests; hosted scratch qualification remains pending.

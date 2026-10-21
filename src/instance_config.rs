@@ -86,6 +86,18 @@ pub struct ConfiguredRepository {
     pub protect_tags: bool,
 }
 
+impl ConfiguredRepository {
+    pub fn policy(&self) -> crate::policy::RepositoryPolicy {
+        crate::policy::RepositoryPolicy {
+            repository: self.repository.clone(),
+            capabilities: self.capabilities.clone(),
+            release: self.release,
+            sensitive_paths: self.sensitive_paths.clone(),
+            protect_tags: self.protect_tags,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptableClients {
@@ -632,13 +644,7 @@ mod tests {
         assert_eq!(new_repository.release, old_repository.release);
         assert_eq!(new_repository.protect_tags, old_repository.protect_tags);
 
-        let parsed_repository = crate::policy::RepositoryPolicy {
-            repository: new_repository.repository.clone(),
-            capabilities: new_repository.capabilities.clone(),
-            release: new_repository.release,
-            sensitive_paths: new_repository.sensitive_paths.clone(),
-            protect_tags: new_repository.protect_tags,
-        };
+        let parsed_repository = new_repository.policy();
         for capability in [
             crate::policy::Capability::Approve,
             crate::policy::Capability::Merge,
@@ -747,13 +753,7 @@ mod tests {
             old_repository.sensitive_paths
         );
 
-        let converted_repository = crate::policy::RepositoryPolicy {
-            repository: new_repository.repository.clone(),
-            capabilities: new_repository.capabilities.clone(),
-            release: new_repository.release,
-            sensitive_paths: new_repository.sensitive_paths.clone(),
-            protect_tags: new_repository.protect_tags,
-        };
+        let converted_repository = new_repository.policy();
         for capability in [
             crate::policy::Capability::Approve,
             crate::policy::Capability::Merge,

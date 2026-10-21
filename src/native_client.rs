@@ -22,6 +22,11 @@ pub enum Command {
         #[command(subcommand)]
         command: SecurefixCommand,
     },
+    #[command(about = "Capture one exact pull request head for a native approval request")]
+    Approve {
+        #[command(subcommand)]
+        command: ApprovalCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -41,6 +46,16 @@ pub enum SecurefixCommand {
         pull_request_number: u64,
         #[arg(long)]
         artifact_name: String,
+        #[arg(long, default_value = "native-policy-check/manifest.json")]
+        output: PathBuf,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub enum ApprovalCommand {
+    Capture {
+        #[arg(long)]
+        pull_request_number: u64,
         #[arg(long, default_value = "native-policy-check/manifest.json")]
         output: PathBuf,
     },
@@ -118,6 +133,10 @@ impl RequestManifest {
             "policy_check" => ensure!(
                 self.securefix_artifact.is_none(),
                 "policy-check request unexpectedly names a Securefix artifact"
+            ),
+            "approval" => ensure!(
+                self.securefix_artifact.is_none(),
+                "approval request unexpectedly names a Securefix artifact"
             ),
             "securefix" => {
                 let artifact = self
@@ -197,6 +216,12 @@ pub fn run(command: Command) -> Result<()> {
                 artifact_name,
                 output,
             } => capture_securefix(pull_request_number, &artifact_name, &output),
+        },
+        Command::Approve { command } => match command {
+            ApprovalCommand::Capture {
+                pull_request_number,
+                output,
+            } => capture_request(pull_request_number, "approval", None, &output),
         },
     }
 }
@@ -710,6 +735,19 @@ mod tests {
         assert!(request.validate().is_err());
         request.securefix_artifact = None;
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn approval_request_is_an_artifact_free_exact_head_request() {
+        let mut value = manifest();
+        value.operation = "approval".to_owned();
+        value.validate().unwrap();
+        value.securefix_artifact = Some(SecurefixArtifactIdentity {
+            id: 1,
+            name: "securefix-source".to_owned(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+        });
+        assert!(value.validate().is_err());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use serde_json::{Value, json};
+use sha2::Digest;
+use std::{thread, time::Duration};
 
 use crate::config;
 use crate::request::{self, Authorization, RequestKind, RequestManifest};
@@ -350,6 +352,79 @@ pub(crate) fn approve_current_head(
         "expected reviewer approval is not attached to the accepted head"
     );
     Ok(())
+}
+
+pub(crate) fn approve_native_current_head(
+    read: &GitHub,
+    review_api: &GitHub,
+    manifest: &crate::native_client::RequestManifest,
+    reviewer: &config::Principal,
+    request_bytes: &[u8],
+) -> Result<String> {
+    let repository = &manifest.repository.full_name;
+    let pull_number = manifest.pull_request.number;
+    let expected_head = &manifest.pull_request.head_sha;
+    let identity: Value = review_api.get("/user")?;
+    ensure!(
+        identity["id"].as_u64() == Some(reviewer.id)
+            && identity["login"].as_str() == Some(reviewer.login.as_str())
+            && identity["type"] == "User",
+        "approval token must authenticate as the configured review account"
+    );
+    let pull: Value = read.get(&format!("/repos/{repository}/pulls/{pull_number}"))?;
+    validate_review_target(&pull, expected_head, reviewer.id)?;
+    let request_sha256 = securefix::hex_encode(sha2::Sha256::digest(request_bytes));
+    let body = securefix::api::native_approval_body(
+        &manifest.server_authority,
+        expected_head,
+        &request_sha256,
+    )?;
+    let marker = body["body"]
+        .as_str()
+        .context("native approval marker is missing")?;
+    let path = format!("/repos/{repository}/pulls/{pull_number}/reviews");
+    let reviews = read.paginate(&path)?;
+    if !latest_reviewer_approval(&reviews, reviewer, "User", expected_head)
+        || !reviews.iter().any(|review| {
+            expected_approval(review, reviewer, "User", expected_head)
+                && review["body"]
+                    .as_str()
+                    .is_some_and(|comment| comment.lines().any(|line| line == marker))
+        })
+    {
+        let response: Value = review_api.post(&path, &body)?;
+        ensure!(
+            expected_approval(&response, reviewer, "User", expected_head)
+                && response["body"] == marker,
+            "GitHub returned an approval for a different reviewer, head, or authority"
+        );
+    }
+    let mut confirmed = false;
+    for attempt in 0..5 {
+        let current_pull: Value =
+            read.get_uncached(&format!("/repos/{repository}/pulls/{pull_number}"))?;
+        validate_review_target(&current_pull, expected_head, reviewer.id)?;
+        let current_reviews = read.paginate_uncached(&path)?;
+        if latest_reviewer_approval(&current_reviews, reviewer, "User", expected_head)
+            && current_reviews.iter().any(|review| {
+                expected_approval(review, reviewer, "User", expected_head)
+                    && review["body"]
+                        .as_str()
+                        .is_some_and(|comment| comment.lines().any(|line| line == marker))
+            })
+        {
+            confirmed = true;
+            break;
+        }
+        if attempt < 4 {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    ensure!(
+        confirmed,
+        "native approval was submitted, but bounded no-cache readback did not confirm the accepted PR head and authority; the review was not resubmitted"
+    );
+    Ok(marker.to_owned())
 }
 
 fn validate_review_target(pull: &Value, expected_head: &str, reviewer_id: u64) -> Result<()> {
@@ -846,5 +921,266 @@ mod tests {
             .is_err()
         );
         fixture.finish();
+    }
+
+    #[test]
+    fn native_approval_posts_only_the_current_authorized_head_and_reads_it_back() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repository = &config::trusted().unwrap().deployment.integration.repository;
+        let number = 23;
+        let reviewer = config::trusted()
+            .unwrap()
+            .deployment
+            .approval_reviewer
+            .clone();
+        let head = "a".repeat(40);
+        let request_bytes = br#"{"request":"bound"}"#;
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "civitaspo/securefix-server".to_owned(),
+            instance_id: 1250079425,
+            default_branch: "main".to_owned(),
+            config_path: "repo-settings/native-securefix-test-instance.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![],
+        };
+        let manifest = native_approval_manifest(repository, number, &head, &authority);
+        let body = securefix::api::native_approval_body(
+            &authority,
+            &head,
+            &securefix::hex_encode(sha2::Sha256::digest(request_bytes)),
+        )
+        .unwrap();
+        let marker = body["body"].as_str().unwrap().to_owned();
+        let mut approval = reviewer_response("User", reviewer.id, &reviewer.login, &head);
+        approval["body"] = json!(marker);
+        let pull_path = format!("/repos/{repository}/pulls/{number}");
+        let reviews_path = format!("{pull_path}/reviews");
+        let pull = json!({"state":"open","head":{"sha":head},"user":{"id":7}});
+        let control = test_control();
+        let fixture = Fixture::new(vec![
+            Route::get(
+                "/user",
+                json!({"id":reviewer.id,"login":reviewer.login,"type":"User"}),
+            ),
+            Route::get(&pull_path, pull.clone()),
+            Route::get(format!("{reviews_path}?per_page=100&page=1"), json!([])),
+            Route::active_control(&control),
+            Route::request("POST", &reviews_path, 200, approval.clone()).with_request_body(body),
+            Route::get(&pull_path, pull).with_request_header("Cache-Control", "no-cache"),
+            Route::get(
+                format!("{reviews_path}?per_page=100&page=1"),
+                json!([approval]),
+            )
+            .with_request_header("Cache-Control", "no-cache"),
+        ]);
+        approve_native_current_head(
+            &fixture.api,
+            &fixture.api,
+            &manifest,
+            &reviewer,
+            request_bytes,
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn native_approval_readback_retries_without_resubmitting_the_review() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repository = &config::trusted().unwrap().deployment.integration.repository;
+        let number = 26;
+        let reviewer = config::trusted()
+            .unwrap()
+            .deployment
+            .approval_reviewer
+            .clone();
+        let head = "a".repeat(40);
+        let request_bytes = br#"{"request":"delayed"}"#;
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "civitaspo/securefix-server".to_owned(),
+            instance_id: 1250079425,
+            default_branch: "main".to_owned(),
+            config_path: "repo-settings/native-securefix-test-instance.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![],
+        };
+        let manifest = native_approval_manifest(repository, number, &head, &authority);
+        let body = securefix::api::native_approval_body(
+            &authority,
+            &head,
+            &securefix::hex_encode(sha2::Sha256::digest(request_bytes)),
+        )
+        .unwrap();
+        let mut approval = reviewer_response("User", reviewer.id, &reviewer.login, &head);
+        approval["body"] = json!(body["body"]);
+        let pull_path = format!("/repos/{repository}/pulls/{number}");
+        let reviews_path = format!("{pull_path}/reviews");
+        let pull = json!({"state":"open","head":{"sha":head},"user":{"id":7}});
+        let control = test_control();
+        let fixture = Fixture::new(vec![
+            Route::get(
+                "/user",
+                json!({"id":reviewer.id,"login":reviewer.login,"type":"User"}),
+            ),
+            Route::get(&pull_path, pull.clone()),
+            Route::get(format!("{reviews_path}?per_page=100&page=1"), json!([])),
+            Route::active_control(&control),
+            Route::request("POST", &reviews_path, 200, approval.clone()).with_request_body(body),
+            Route::get(&pull_path, pull.clone()).with_request_header("Cache-Control", "no-cache"),
+            Route::get(format!("{reviews_path}?per_page=100&page=1"), json!([]))
+                .with_request_header("Cache-Control", "no-cache"),
+            Route::get(&pull_path, pull).with_request_header("Cache-Control", "no-cache"),
+            Route::get(
+                format!("{reviews_path}?per_page=100&page=1"),
+                json!([approval]),
+            )
+            .with_request_header("Cache-Control", "no-cache"),
+        ]);
+
+        approve_native_current_head(
+            &fixture.api,
+            &fixture.api,
+            &manifest,
+            &reviewer,
+            request_bytes,
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn native_approval_rejects_a_stale_head_or_self_review_before_posting() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repository = &config::trusted().unwrap().deployment.integration.repository;
+        let number = 24;
+        let reviewer = config::trusted()
+            .unwrap()
+            .deployment
+            .approval_reviewer
+            .clone();
+        let expected_head = "a".repeat(40);
+        let request_bytes = br#"{"request":"bound"}"#;
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "civitaspo/securefix-server".to_owned(),
+            instance_id: 1250079425,
+            default_branch: "main".to_owned(),
+            config_path: "repo-settings/native-securefix-test-instance.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![],
+        };
+        let manifest = native_approval_manifest(repository, number, &expected_head, &authority);
+        let pull_path = format!("/repos/{repository}/pulls/{number}");
+
+        for pull in [
+            json!({"state":"open","head":{"sha":"d".repeat(40)},"user":{"id":7}}),
+            json!({"state":"open","head":{"sha":expected_head},"user":{"id":reviewer.id}}),
+        ] {
+            let fixture = Fixture::new(vec![
+                Route::get(
+                    "/user",
+                    json!({"id":reviewer.id,"login":reviewer.login,"type":"User"}),
+                ),
+                Route::get(&pull_path, pull),
+            ]);
+            assert!(
+                approve_native_current_head(
+                    &fixture.api,
+                    &fixture.api,
+                    &manifest,
+                    &reviewer,
+                    request_bytes,
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn native_approval_rejects_a_non_user_or_wrong_reviewer_token() {
+        use crate::fixtures::{Fixture, Route};
+
+        let repository = &config::trusted().unwrap().deployment.integration.repository;
+        let reviewer = config::trusted()
+            .unwrap()
+            .deployment
+            .approval_reviewer
+            .clone();
+        let head = "a".repeat(40);
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "civitaspo/securefix-server".to_owned(),
+            instance_id: 1250079425,
+            default_branch: "main".to_owned(),
+            config_path: "repo-settings/native-securefix-test-instance.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![],
+        };
+        let manifest = native_approval_manifest(repository, 25, &head, &authority);
+
+        for identity in [
+            json!({"id":reviewer.id,"login":reviewer.login,"type":"Bot"}),
+            json!({"id":reviewer.id + 1,"login":"different-user","type":"User"}),
+        ] {
+            let fixture = Fixture::new(vec![Route::get("/user", identity)]);
+            assert!(
+                approve_native_current_head(
+                    &fixture.api,
+                    &fixture.api,
+                    &manifest,
+                    &reviewer,
+                    br#"{"request":"bound"}"#,
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    fn native_approval_manifest(
+        repository: &str,
+        number: u64,
+        head: &str,
+        authority: &securefix::api::NativeAuthoritySnapshot,
+    ) -> crate::native_client::RequestManifest {
+        crate::native_client::RequestManifest {
+            protocol: "securefix-native-request-v1".to_owned(),
+            operation: "approval".to_owned(),
+            repository: crate::native_client::RepositoryIdentity {
+                id: 1,
+                full_name: repository.to_owned(),
+            },
+            pull_request: crate::native_client::PullRequestIdentity {
+                number,
+                head_sha: head.to_owned(),
+                head_branch: "owner/change".to_owned(),
+                head_repository_id: 1,
+                base_sha: "e".repeat(40),
+                base_ref: "main".to_owned(),
+                author_id: 7,
+                author_login: "owner".to_owned(),
+            },
+            producer: crate::native_client::ProducerIdentity {
+                run_id: 1,
+                run_attempt: 1,
+                event: "workflow_dispatch".to_owned(),
+                context_sha: head.to_owned(),
+                source_sha: head.to_owned(),
+                workflow_path: ".github/workflows/request-producer-probe.yml".to_owned(),
+                workflow_ref: "civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@refs/heads/main".to_owned(),
+                workflow_sha: "f".repeat(40),
+                actor_id: 7,
+                actor_login: "owner".to_owned(),
+            },
+            securefix_artifact: None,
+            client_workflow_epoch: "d".repeat(40),
+            server_authority: authority.clone(),
+        }
     }
 }
