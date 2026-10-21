@@ -2309,9 +2309,25 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(host["permissions"], serde_json::json!({"contents":"read"}));
     assert!(!serde_json::to_string(host).unwrap().contains("secrets."));
     let host_steps = host["steps"].as_array().unwrap();
+    let validate_source = host_steps
+        .iter()
+        .find(|step| step["name"] == "Validate the selected source SHA")
+        .unwrap();
+    assert!(
+        validate_source["run"]
+            .as_str()
+            .unwrap()
+            .contains("^[0-9a-f]{40}$")
+    );
+    let checkout = host_steps
+        .iter()
+        .find(|step| step["uses"] == "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
+        .unwrap();
+    assert_eq!(checkout["with"]["ref"], "${{ inputs.source_sha }}");
+    assert_eq!(checkout["with"]["persist-credentials"], false);
     let build_host = host_steps
         .iter()
-        .find(|step| step["name"] == "Build the protected-main publisher host")
+        .find(|step| step["name"] == "Build the selected-source publisher host")
         .unwrap();
     let build_host_run = build_host["run"].as_str().unwrap();
     assert!(build_host_run.contains("install -m 755 target/release/securefix publisher/securefix"));
@@ -2352,7 +2368,9 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert!(validate_host_run.contains("chmod 700 publisher/securefix"));
     assert!(validate_host_run.contains("test -x publisher/securefix"));
     let app = steps.iter().find(|step| step["id"] == "scratch").unwrap();
+    assert_eq!(app["with"]["owner"], "civitaspo");
     assert_eq!(app["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(app["with"]["app-id"], "3872533");
     assert_eq!(app["with"]["permission-contents"], "write");
     assert!(app["with"].get("permission-administration").is_none());
     let publish_step = steps.iter().find(|step| step["id"] == "publish").unwrap();

@@ -792,6 +792,8 @@ impl GitHub {
             release_id,
             ..
         } = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
         {
             let release_path = format!("/repos/{destination_repository}/releases");
             let expected_patch =
@@ -4076,5 +4078,90 @@ mod tests {
                 "accepted upload target={target} repo={target_repository} release={release_id} asset={target_asset} max={max_bytes} size={size} type={content_type}"
             );
         }
+    }
+
+    #[test]
+    fn package_scratch_reads_preflight_the_selected_release_before_scoped_writes() {
+        use crate::fixtures::{Fixture, Route};
+        use serde_json::json;
+
+        let repository = "civitaspo/testing-securefix-server";
+        let release_path = format!("/repos/{repository}/releases/7");
+        let release = json!({
+            "id":7,
+            "tag_name":"v0.2.45-pre.7",
+            "prerelease":true,
+            "draft":true
+        });
+        let mut fixture = Fixture::new(vec![
+            Route::get(release_path.clone(), release.clone()),
+            Route::raw("HEAD", release_path.clone(), 200, vec![]),
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"id":1410312556,"full_name":repository}),
+            ),
+            Route::request(
+                "POST",
+                format!("/repos/{repository}/releases"),
+                201,
+                release.clone(),
+            )
+            .with_request_body(json!({
+                "tag_name":"v0.2.45-pre.7",
+                "draft":true,
+                "prerelease":true
+            })),
+            Route::get(release_path.clone(), release.clone()),
+            Route::get(
+                format!("/repos/{repository}"),
+                json!({"id":1410312556,"full_name":repository}),
+            ),
+            Route::request("PATCH", release_path.clone(), 200, json!({"draft":false}))
+                .with_request_body(json!({"draft":false})),
+        ]);
+        fixture.api.writes = WriteContext::PackageScratch {
+            candidate_sha: "a".repeat(40),
+            destination_repository: repository.into(),
+            destination_repository_id: 1410312556,
+            tag: "v0.2.45-pre.7".into(),
+            asset_name: "securefix-linux-x86_64".into(),
+            max_asset_bytes: 1024,
+            release_id: Some(7),
+        };
+
+        let selected: Value = fixture.api.get(&release_path).unwrap();
+        assert_eq!(selected["id"], 7);
+        assert!(
+            fixture
+                .api
+                .request(Method::HEAD, &release_path, None)
+                .unwrap()
+                .is_null()
+        );
+        let created: Value = fixture
+            .api
+            .post(
+                &format!("/repos/{repository}/releases"),
+                &json!({
+                    "tag_name":"v0.2.45-pre.7",
+                    "draft":true,
+                    "prerelease":true
+                }),
+            )
+            .unwrap();
+        assert_eq!(created["id"], 7);
+        let published: Value = fixture
+            .api
+            .request(Method::PATCH, &release_path, Some(&json!({"draft":false})))
+            .unwrap();
+        assert_eq!(published["draft"], false);
+
+        let error = fixture
+            .api
+            .post::<Value>(&format!("/repos/{repository}/issues"), &json!({}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("package scratch write target is not the selected release"));
+        fixture.finish();
     }
 }
