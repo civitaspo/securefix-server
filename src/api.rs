@@ -2211,6 +2211,10 @@ mod tests {
             &[
                 "-c",
                 "commit.gpgsign=false",
+                "-c",
+                "user.name=Securefix Test",
+                "-c",
+                "user.email=securefix-test@example.invalid",
                 "merge",
                 "--no-ff",
                 "-s",
