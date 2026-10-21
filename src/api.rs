@@ -117,9 +117,6 @@ struct NativeScratchWrite {
     actor_id: u64,
     actor_login: String,
     request_sha256: String,
-    reader_app_id: u64,
-    writer_app_id: u64,
-    policy_check_app_id: u64,
     caller_workflow_path: String,
     caller_workflow_sha: String,
     client_workflow_epoch: String,
@@ -344,24 +341,13 @@ impl GitHub {
         let write_token =
             std::env::var(write_name).with_context(|| format!("missing {write_name}"))?;
         ensure!(!write_token.is_empty(), "{write_name} is empty");
-        let (reader_app_id, writer_app_id) = native_scratch_app_ids(
-            request.mode,
-            config.apps.server_id,
-            config.apps.policy_check_id,
-        );
         let mut api = Self::new("https://api.github.com", read_token)?;
-        require_single_repository_installation(
-            &api,
-            request.repository_id,
-            request.repository,
-            reader_app_id,
-        )?;
+        require_single_repository_installation(&api, request.repository_id, request.repository)?;
         let write_api = Self::new("https://api.github.com", write_token.clone())?;
         require_single_repository_installation(
             &write_api,
             request.repository_id,
             request.repository,
-            writer_app_id,
         )?;
         let read_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
         ensure!(!read_token.is_empty(), "GITHUB_TOKEN is empty");
@@ -394,9 +380,6 @@ impl GitHub {
             actor_id: request.actor_id,
             actor_login: request.actor_login.to_owned(),
             request_sha256: request.request_sha256.to_owned(),
-            reader_app_id,
-            writer_app_id,
-            policy_check_app_id: config.apps.policy_check_id,
             caller_workflow_path: request.caller_workflow_path.to_owned(),
             caller_workflow_sha: request.caller_workflow_sha.to_owned(),
             client_workflow_epoch: request.client_workflow_epoch.to_owned(),
@@ -823,9 +806,6 @@ impl GitHub {
             actor_id,
             actor_login,
             request_sha256: _,
-            reader_app_id,
-            writer_app_id,
-            policy_check_app_id,
             caller_workflow_path,
             caller_workflow_sha,
             client_workflow_epoch,
@@ -833,20 +813,10 @@ impl GitHub {
         } = write.as_ref();
 
         validate_instance_config_path(config_path)?;
-        require_single_repository_installation(
-            self,
-            *target_id,
-            target_repository,
-            *reader_app_id,
-        )?;
+        require_single_repository_installation(self, *target_id, target_repository)?;
         if let Some(token) = &self.write_token {
             let write_api = Self::new("https://api.github.com", token.clone())?;
-            require_single_repository_installation(
-                &write_api,
-                *target_id,
-                target_repository,
-                *writer_app_id,
-            )?;
+            require_single_repository_installation(&write_api, *target_id, target_repository)?;
         }
 
         let execution_repository = std::env::var("GITHUB_REPOSITORY")
@@ -861,10 +831,6 @@ impl GitHub {
                 && config.instance.id == *instance_id
                 && config.instance.default_branch == *default_branch
                 && config.identities.repository_owner.id == *instance_owner_id
-                && config.apps.server_id == *reader_app_id
-                && config.apps.policy_check_id == *policy_check_app_id
-                && native_scratch_app_ids(*mode, *reader_app_id, *policy_check_app_id).1
-                    == *writer_app_id
                 && config.identities.owner.id == *actor_id
                 && config.identities.owner.login == *actor_login
                 && config.identities.owner.id == *author_id
@@ -2097,13 +2063,7 @@ fn require_single_repository_installation(
     api: &GitHub,
     repository_id: u64,
     repository_name: &str,
-    expected_app_id: u64,
 ) -> Result<()> {
-    let installation: Value = api.get("/installation")?;
-    ensure!(
-        installation["app_id"].as_u64() == Some(expected_app_id),
-        "native request token belongs to a different Server App"
-    );
     let installation: Value = api.get("/installation/repositories?per_page=100")?;
     let repositories = installation["repositories"]
         .as_array()
@@ -2118,16 +2078,12 @@ fn require_single_repository_installation(
     Ok(())
 }
 
-fn native_scratch_app_ids(
-    mode: NativeScratchMode,
-    server_app_id: u64,
-    policy_check_app_id: u64,
-) -> (u64, u64) {
-    let writer = match mode {
-        NativeScratchMode::PolicyCheck => policy_check_app_id,
-        NativeScratchMode::Securefix => server_app_id,
-    };
-    (server_app_id, writer)
+#[cfg(test)]
+fn native_installation_repository_response_fixture() -> Value {
+    serde_json::from_slice(include_bytes!(
+        "../tests/fixtures/native-installation-repositories-response.json"
+    ))
+    .unwrap()
 }
 
 fn validate_instance_config_path(path: &str) -> Result<()> {
@@ -2500,15 +2456,57 @@ mod tests {
             actor_id: 5,
             actor_login: "maintainer".into(),
             request_sha256: "c".repeat(64),
-            reader_app_id: 6,
-            writer_app_id: 7,
-            policy_check_app_id: 7,
             caller_workflow_path: ".github/workflows/policy-check.yml".into(),
             caller_workflow_sha: "2".repeat(40),
             client_workflow_epoch: "3".repeat(40),
             destination_branch: None,
         }));
         api
+    }
+
+    #[test]
+    fn native_installation_check_uses_only_the_saved_supported_repository_response() {
+        use crate::fixtures::{Fixture, Route};
+
+        let fixture = Fixture::new(vec![Route::get(
+            "/installation/repositories?per_page=100",
+            native_installation_repository_response_fixture(),
+        )]);
+        require_single_repository_installation(
+            &fixture.api,
+            1_410_312_556,
+            "civitaspo/testing-securefix-server",
+        )
+        .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn native_installation_check_rejects_a_saved_response_with_an_extra_repository() {
+        use crate::fixtures::{Fixture, Route};
+
+        let mut response = native_installation_repository_response_fixture();
+        response["total_count"] = 2.into();
+        response["repositories"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": 9,
+                "full_name": "civitaspo/unexpected-repository"
+            }));
+        let fixture = Fixture::new(vec![Route::get(
+            "/installation/repositories?per_page=100",
+            response,
+        )]);
+        assert!(
+            require_single_repository_installation(
+                &fixture.api,
+                1_410_312_556,
+                "civitaspo/testing-securefix-server",
+            )
+            .is_err()
+        );
+        fixture.finish();
     }
 
     fn native_securefix_api() -> GitHub {
@@ -2600,18 +2598,6 @@ mod tests {
                 &serde_json::json!({})
             )
             .is_err()
-        );
-    }
-
-    #[test]
-    fn native_modes_keep_server_reader_policy_check_and_securefix_writer_apps_distinct() {
-        assert_eq!(
-            native_scratch_app_ids(NativeScratchMode::PolicyCheck, 6, 7),
-            (6, 7)
-        );
-        assert_eq!(
-            native_scratch_app_ids(NativeScratchMode::Securefix, 6, 7),
-            (6, 6)
         );
     }
 

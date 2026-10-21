@@ -974,6 +974,79 @@ fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
 }
 
 #[test]
+fn native_securefix_test_wrapper_mints_the_configured_single_repo_app_token() {
+    const CONFIG_PATH: &str = "repo-settings/native-securefix-test-instance.toml";
+    const WORKFLOW_PATH: &str = ".github/workflows/testing-native-securefix-server.yml";
+
+    let config_bytes = fs::read(CONFIG_PATH).unwrap();
+    let config = securefix::instance_config::InstanceConfig::parse(&config_bytes).unwrap();
+    assert_eq!(config.instance.repository, "civitaspo/securefix-server");
+    assert_eq!(config.instance.default_branch, "main");
+    assert_eq!(config.apps.server_id, 3_872_533);
+    assert_eq!(
+        config
+            .workflow_roles
+            .get(&securefix::instance_config::WorkflowRole::Securefix)
+            .map(String::as_str),
+        Some(WORKFLOW_PATH)
+    );
+    let scratch = config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository
+                .capabilities
+                .contains(&crate::policy::Capability::Securefix)
+        })
+        .unwrap();
+    assert_eq!(scratch.repository, "civitaspo/testing-securefix-server");
+    assert_eq!(scratch.id, 1_410_312_556);
+
+    let wrapper = workflow("testing-native-securefix-server.yml");
+    assert!(wrapper["on"]["workflow_dispatch"].is_object());
+    let apply = &wrapper["jobs"]["apply"];
+    for condition in [
+        "github.repository == 'civitaspo/securefix-server'",
+        "github.ref == 'refs/heads/main'",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+    ] {
+        assert!(apply["if"].as_str().unwrap().contains(condition));
+    }
+    assert_eq!(apply["environment"], "main");
+
+    let steps = apply["steps"].as_array().unwrap();
+    let mint = steps.iter().find(|step| step["id"] == "server").unwrap();
+    let action = mint["uses"].as_str().unwrap();
+    assert!(action.starts_with("actions/create-github-app-token@"));
+    assert_eq!(action.rsplit_once('@').unwrap().1.len(), 40);
+    assert_eq!(mint["with"]["app-id"], config.apps.server_id.to_string());
+    assert_eq!(
+        mint["with"]["private-key"],
+        "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+    );
+    assert_eq!(mint["with"]["owner"], "civitaspo");
+    assert_eq!(mint["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(mint["with"]["permission-actions"], "read");
+    assert_eq!(mint["with"]["permission-contents"], "write");
+    assert_eq!(mint["with"]["permission-pull-requests"], "read");
+
+    let execute = steps
+        .iter()
+        .find(|step| step["name"] == "Execute the selected source-bound Securefix request")
+        .unwrap();
+    assert_eq!(
+        execute["env"]["SECUREFIX_CLIENT_TOKEN"],
+        "${{ steps.server.outputs.token }}"
+    );
+    assert_eq!(
+        execute["env"]["SECUREFIX_WRITE_TOKEN"],
+        "${{ steps.server.outputs.token }}"
+    );
+    assert_eq!(execute["env"]["GITHUB_TOKEN"], "${{ github.token }}");
+}
+
+#[test]
 fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     let loader = workflow("load-cli.yml");
     let load = &loader["jobs"]["load"];

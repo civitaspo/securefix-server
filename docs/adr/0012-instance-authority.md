@@ -43,11 +43,19 @@ authorizes the independent Client request repository; `[acceptable_clients]`
 identifies the reusable Client producer. The Server recomputes the Client
 workflow epoch through a Client-scoped read token, separately from the Server
 `E`. Immediately before a write it rechecks both snapshots and the exact Client
-PR head. The Client read token and operation writer are independently verified
-as Server-App installations limited to the configured Client repository; the
-Server `GITHUB_TOKEN` reads only Server authority. Exact runtime build-artifact
-identity in hosted scratch remains unqualified. This slice does not yet define
-the final canonical `K`/`D` digest or generic release acceptance.
+PR head. The protected, hash-bound Server wrapper obtains the Client read token
+and operation writer with its pinned `actions/create-github-app-token` step,
+using the configured App identity and limiting each token to the configured
+Client repository. Rust verifies that each installation token lists exactly
+that repository. The installation-token API does not expose an endpoint that
+proves the bearer token's App ID, so the repository-list response is not App
+identity evidence; that identity comes from the authenticated wrapper's token
+mint inputs. The current scratch-host contract test checks those inputs against
+its strict test TOML, while runtime checks bind execution to the configured
+protected workflow and its current bytes. The Server `GITHUB_TOKEN` reads only
+Server authority. Exact runtime build-artifact identity in hosted scratch
+remains unqualified. This slice does not yet define the final canonical
+`K`/`D` digest or generic release acceptance.
 
 The current config parser denies unknown fields. Add a required closed
 `[workflow_roles]` table before freezing schema version 1, or bump the schema
