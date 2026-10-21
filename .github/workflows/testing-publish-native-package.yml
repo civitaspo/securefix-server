@@ -24,13 +24,19 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+      - name: Validate the selected source SHA
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal
-      - name: Build the protected-main publisher host
+      - name: Build the selected-source publisher host
         run: |
           cargo +1.99.0 build --locked --release --bin securefix
           mkdir -p publisher
