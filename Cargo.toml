@@ -1,6 +1,6 @@
 [package]
 name = "securefix"
-version = "0.2.44"
+version = "0.2.45-pre.1"
 edition = "2024"
 publish = false
 default-run = "securefix"
@@ -24,7 +24,7 @@ serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2 = "0.11"
 tar = { version = "0.4", default-features = false }
 tempfile = "3"
-toml_edit = "0.22"
+toml_edit = { version = "0.22", features = ["serde"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.release]

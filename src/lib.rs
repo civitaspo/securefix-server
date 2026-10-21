@@ -3,6 +3,8 @@ pub mod config;
 pub mod control;
 #[cfg(test)]
 mod fixtures;
+pub mod instance_config;
+pub mod package;
 pub mod policy;
 pub mod runtime_archive;
 pub mod workflow;

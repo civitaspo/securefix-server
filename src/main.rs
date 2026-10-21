@@ -11,6 +11,8 @@ mod distribution;
 mod fixtures;
 mod integration;
 mod merge;
+mod native_client;
+mod native_server;
 mod policy_check;
 mod release;
 mod request;
@@ -98,6 +100,16 @@ enum Command {
         #[command(subcommand)]
         command: policy_check::Command,
     },
+    #[command(about = "Capture a strict request for the new Server protocol")]
+    NewClient {
+        #[command(subcommand)]
+        command: native_client::Command,
+    },
+    #[command(about = "Verify requests for the new Server protocol")]
+    NewServer {
+        #[command(subcommand)]
+        command: native_server::CommandArgs,
+    },
 }
 
 fn main() -> Result<()> {
@@ -115,5 +127,7 @@ fn main() -> Result<()> {
         Command::Settings { command } => settings::run(command),
         Command::Securefix { command } => securefix_gate::run(command),
         Command::Check { command } => policy_check::run(command),
+        Command::NewClient { command } => native_client::run(command),
+        Command::NewServer { command } => native_server::run(command),
     }
 }

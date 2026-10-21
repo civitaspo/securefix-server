@@ -1,0 +1,89 @@
+name: Native request producer proof
+
+on:
+  workflow_call:
+    inputs:
+      candidate_run_id:
+        description: Completed scratch build run containing the source-bound Securefix CLI
+        required: true
+        type: string
+      candidate_source_sha:
+        description: Exact securefix-server source SHA used for the candidate build
+        required: true
+        type: string
+      pull_request_number:
+        description: Owner-authored scratch pull request for this policy-check probe
+        required: true
+        type: string
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          repository: civitaspo/testing-securefix-server
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          name: native-candidate
+          path: candidate
+      - name: Verify the candidate receipt
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+        run: |
+          set -euo pipefail
+          jq -e --arg source "$CANDIDATE_SOURCE_SHA" --arg run "$CANDIDATE_RUN_ID" \
+            '.source_sha == $source and .build_run_id == ($run | tonumber)' candidate/candidate.json >/dev/null
+          (cd candidate && sha256sum --check securefix.tar.gz.sha256)
+          tar -xzf candidate/securefix.tar.gz -C candidate
+          test -x candidate/securefix
+      - name: Capture the exact pull request request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          candidate/securefix new-client policy-check capture \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --output native-policy-check/manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-request-manifest
+          path: native-policy-check/manifest.json
+          if-no-files-found: error
+          retention-days: 2
+
+  attest:
+    needs: capture
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: native-request-manifest
+          path: native-policy-check
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: native-policy-check/manifest.json
+          bundle-path: native-policy-check/bundle.json
+          create-storage-record: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-request-proof
+          path: |
+            native-policy-check/manifest.json
+            native-policy-check/bundle.json
+          if-no-files-found: error
+          retention-days: 2
