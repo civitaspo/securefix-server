@@ -193,9 +193,8 @@ fn managed_changes(
 ) -> BTreeMap<String, Vec<u8>> {
     desired
         .iter()
-        .filter_map(|(path, bytes)| {
-            (current.get(path) != Some(bytes)).then(|| (path.clone(), bytes.clone()))
-        })
+        .filter(|(path, bytes)| current.get(*path) != Some(*bytes))
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
         .collect()
 }
 
@@ -1586,7 +1585,7 @@ mod tests {
             changes.get(".github/workflows/policy-check.yml"),
             Some(&b"workflow".to_vec())
         );
-        assert!(changes.get("unmanaged.txt").is_none());
+        assert!(!changes.contains_key("unmanaged.txt"));
         assert!(managed_changes(&desired, &desired).is_empty());
     }
 
@@ -1612,7 +1611,7 @@ mod tests {
             changes.get("securefix-server.toml"),
             Some(&b"config".to_vec())
         );
-        assert!(changes.get("unmanaged.txt").is_none());
+        assert!(!changes.contains_key("unmanaged.txt"));
     }
 
     #[test]

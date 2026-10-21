@@ -35,6 +35,20 @@ pub enum CommandArgs {
         #[arg(long, default_value_t = false)]
         publish: bool,
     },
+    #[command(about = "Validate a bound Securefix artifact and commit its exact PR changes")]
+    SecurefixApply {
+        #[arg(long)]
+        config: PathBuf,
+        /// Explicit path, relative to the Server instance repository root.
+        #[arg(long)]
+        config_path: String,
+        /// Exact Client repository that owns the producer run.
+        #[arg(long)]
+        producer_repository: String,
+        /// Successful Client workflow run containing the attested request and fix artifact.
+        #[arg(long)]
+        producer_run_id: u64,
+    },
 }
 
 pub fn run(command: CommandArgs) -> Result<()> {
@@ -46,7 +60,14 @@ pub fn run(command: CommandArgs) -> Result<()> {
             bundle,
             publish,
         } => {
-            let verified = verify_request(&config, &config_path, &manifest, &bundle, publish)?;
+            let verified = verify_request(
+                &config,
+                &config_path,
+                &manifest,
+                &bundle,
+                securefix::api::NativeScratchMode::PolicyCheck,
+                publish,
+            )?;
             if publish {
                 publish_scratch_result(&verified)?;
             }
@@ -66,14 +87,23 @@ pub fn run(command: CommandArgs) -> Result<()> {
             println!("result_published={publish}");
             Ok(())
         }
+        CommandArgs::SecurefixApply {
+            config,
+            config_path,
+            producer_repository,
+            producer_run_id,
+        } => apply_securefix_from_run(&config, &config_path, &producer_repository, producer_run_id),
     }
 }
 
 struct VerifiedRequest {
     config: securefix::instance_config::InstanceConfig,
+    config_bytes: Vec<u8>,
     manifest: RequestManifest,
     manifest_bytes: Vec<u8>,
     writer: Option<securefix::api::GitHub>,
+    client_api: securefix::api::GitHub,
+    producer_run: Value,
 }
 
 fn verify_request(
@@ -81,6 +111,7 @@ fn verify_request(
     instance_config_path: &str,
     manifest_path: &std::path::Path,
     bundle_path: &std::path::Path,
+    mode: securefix::api::NativeScratchMode,
     publish: bool,
 ) -> Result<VerifiedRequest> {
     let config_bytes = read_bounded(config_path, 256 * 1024)?;
@@ -91,44 +122,69 @@ fn verify_request(
         serde_json::from_slice(&manifest_bytes).context("parse native request manifest")?;
     manifest.validate()?;
     ensure!(
-        manifest.authority.config_path == instance_config_path
-            && config.instance.repository == manifest.repository.full_name
-            && config.instance.id == manifest.repository.id
-            && config.instance.default_branch == manifest.pull_request.base_ref
-            && securefix::hex_encode(Sha256::digest(&config_bytes))
-                == manifest.authority.config_sha256,
-        "native request was captured under a different instance configuration"
+        match mode {
+            securefix::api::NativeScratchMode::PolicyCheck => manifest.operation == "policy_check",
+            securefix::api::NativeScratchMode::Securefix => manifest.operation == "securefix",
+        },
+        "native request operation does not match the Server command"
+    );
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(config.instance.repository.as_str()),
+        "native Server config does not match the current job repository"
     );
     ensure!(
         config.repositories.iter().any(|repository| {
             repository.id == manifest.repository.id
                 && repository.repository == manifest.repository.full_name
-                && repository
-                    .capabilities
-                    .contains(&securefix::policy::Capability::Merge)
         }),
-        "native request repository is not configured for policy checks"
+        "native request repository is not configured"
     );
-    validate_first_slice_policy(&config, &manifest)?;
-    let writer = if publish {
-        Some(native_scratch_writer(
-            &config,
-            &config_bytes,
-            instance_config_path,
-            &manifest,
-            &manifest_bytes,
-        )?)
-    } else {
-        None
-    };
-    let bundle_bytes = read_bounded(bundle_path, MAX_BUNDLE_BYTES)?;
-    ensure!(!bundle_bytes.is_empty(), "attestation bundle is empty");
-
+    securefix::api::validate_native_test_host_context(&config, mode)?;
+    validate_request_server_locator(&config, instance_config_path, &manifest.server_authority)?;
+    validate_first_slice_policy(&config, &manifest, mode)?;
     let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
     ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
-    let api = securefix::api::GitHub::new("https://api.github.com", token)?;
+    let server_api = securefix::api::GitHub::new("https://api.github.com", token)?;
+    let (remote_config, server_authority) =
+        server_api.capture_native_server_authority(&config, instance_config_path, &config_bytes)?;
+    ensure!(
+        remote_config == config_bytes,
+        "Server config is not the protected default-branch snapshot"
+    );
+    securefix::api::require_native_authority_unchanged(
+        &manifest.server_authority,
+        &server_authority,
+    )?;
+    let workflow_ref = std::env::var("GITHUB_WORKFLOW_REF")
+        .context("missing GITHUB_WORKFLOW_REF for native Server execution")?;
+    let workflow_sha = std::env::var("GITHUB_WORKFLOW_SHA")
+        .context("missing GITHUB_WORKFLOW_SHA for native Server execution")?;
+    let role = match mode {
+        securefix::api::NativeScratchMode::PolicyCheck => {
+            securefix::instance_config::WorkflowRole::PolicyCheck
+        }
+        securefix::api::NativeScratchMode::Securefix => {
+            securefix::instance_config::WorkflowRole::Securefix
+        }
+    };
+    let workflow_path = config
+        .workflow_roles
+        .get(&role)
+        .context("native Server workflow role is not configured")?;
+    let workflow_bytes =
+        server_api.content(&config.instance.repository, workflow_path, &workflow_sha)?;
+    securefix::api::validate_native_server_execution_workflow(
+        &server_authority,
+        mode,
+        &workflow_ref,
+        &workflow_sha,
+        &workflow_bytes,
+    )?;
+    let bundle_bytes = read_bounded(bundle_path, MAX_BUNDLE_BYTES)?;
+    ensure!(!bundle_bytes.is_empty(), "attestation bundle is empty");
+    let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
     let acceptable_client: Value =
-        api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
+        server_api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
     ensure!(
         acceptable_client["id"].as_u64() == Some(config.acceptable_clients.id)
             && acceptable_client["full_name"].as_str()
@@ -150,16 +206,18 @@ fn verify_request(
         &manifest.pull_request.head_sha,
         &config.policy.trusted_committers,
     )?;
-    let current_authority = securefix::api::capture_native_authority_snapshot(
+    let current_client_epoch = securefix::api::capture_native_client_workflow_epoch(
         &api,
         &manifest.repository.full_name,
         manifest.repository.id,
         &manifest.pull_request.base_ref,
-        instance_config_path,
         &manifest.producer.workflow_path,
         &manifest.producer.workflow_sha,
     )?;
-    securefix::api::require_native_authority_unchanged(&manifest.authority, &current_authority)?;
+    securefix::api::require_native_client_workflow_epoch_unchanged(
+        &manifest.client_workflow_epoch,
+        &current_client_epoch,
+    )?;
 
     let references: Vec<securefix::workflow::ReferencedWorkflow> = serde_json::from_value(
         run.get("referenced_workflows")
@@ -212,12 +270,43 @@ fn verify_request(
         signer_sha,
         &manifest_bytes,
     )?;
+    let writer = if publish && mode == securefix::api::NativeScratchMode::PolicyCheck {
+        Some(native_scratch_writer(
+            &config,
+            &config_bytes,
+            instance_config_path,
+            &manifest,
+            &manifest_bytes,
+            mode,
+        )?)
+    } else {
+        None
+    };
     Ok(VerifiedRequest {
         config,
+        config_bytes,
         manifest,
         manifest_bytes,
         writer,
+        client_api: api,
+        producer_run: run,
     })
+}
+
+fn validate_request_server_locator(
+    config: &securefix::instance_config::InstanceConfig,
+    config_path: &str,
+    captured: &securefix::api::NativeAuthoritySnapshot,
+) -> Result<()> {
+    securefix::api::validate_native_authority_snapshot(captured)?;
+    ensure!(
+        captured.instance_repository == config.instance.repository
+            && captured.instance_id == config.instance.id
+            && captured.default_branch == config.instance.default_branch
+            && captured.config_path == config_path,
+        "request Server locator does not match the authenticated execution instance and config path"
+    );
+    Ok(())
 }
 
 fn verify_run_identity(run: &Value, manifest: &RequestManifest) -> Result<()> {
@@ -270,6 +359,7 @@ fn validate_current_pull_request_state(
             && pull["base"]["repo"]["full_name"].as_str() == Some(repository.as_str())
             && pull["base"]["ref"].as_str() == Some(manifest.pull_request.base_ref.as_str())
             && pull["head"]["sha"].as_str() == Some(manifest.pull_request.head_sha.as_str())
+            && pull["head"]["ref"].as_str() == Some(manifest.pull_request.head_branch.as_str())
             && pull["head"]["repo"]["id"].as_u64()
                 == Some(manifest.pull_request.head_repository_id)
             && pull["user"]["id"].as_u64() == Some(manifest.pull_request.author_id)
@@ -288,6 +378,7 @@ fn validate_current_pull_request_state(
 fn validate_first_slice_policy(
     config: &securefix::instance_config::InstanceConfig,
     manifest: &RequestManifest,
+    mode: securefix::api::NativeScratchMode,
 ) -> Result<()> {
     let repository = config
         .repositories
@@ -297,11 +388,13 @@ fn validate_first_slice_policy(
                 && repository.id == manifest.repository.id
         })
         .context("native request repository is not configured")?;
+    let required_capability = match mode {
+        securefix::api::NativeScratchMode::PolicyCheck => securefix::policy::Capability::Merge,
+        securefix::api::NativeScratchMode::Securefix => securefix::policy::Capability::Securefix,
+    };
     ensure!(
-        repository
-            .capabilities
-            .contains(&securefix::policy::Capability::Merge),
-        "native request repository lacks merge capability"
+        repository.capabilities.contains(&required_capability),
+        "native request repository lacks the required capability"
     );
     ensure!(
         config.identities.owner.id == manifest.producer.actor_id
@@ -319,9 +412,11 @@ fn native_scratch_writer(
     config_path: &str,
     manifest: &RequestManifest,
     manifest_bytes: &[u8],
+    mode: securefix::api::NativeScratchMode,
 ) -> Result<securefix::api::GitHub> {
     let request_sha256 = securefix::hex_encode(Sha256::digest(manifest_bytes));
     let target = securefix::api::NativeScratchTarget {
+        mode,
         repository: &manifest.repository.full_name,
         repository_id: manifest.repository.id,
         pull_number: manifest.pull_request.number,
@@ -333,12 +428,20 @@ fn native_scratch_writer(
         actor_id: manifest.producer.actor_id,
         actor_login: &manifest.producer.actor_login,
         request_sha256: &request_sha256,
-        authority: &manifest.authority,
+        server_authority: &manifest.server_authority,
         caller_workflow_path: &manifest.producer.workflow_path,
         caller_workflow_sha: &manifest.producer.workflow_sha,
+        client_workflow_epoch: &manifest.client_workflow_epoch,
+        destination_branch: (mode == securefix::api::NativeScratchMode::Securefix)
+            .then_some(manifest.pull_request.head_branch.as_str()),
+    };
+    let write_token = match mode {
+        securefix::api::NativeScratchMode::PolicyCheck => "SECUREFIX_NATIVE_CHECK_TOKEN",
+        securefix::api::NativeScratchMode::Securefix => "SECUREFIX_WRITE_TOKEN",
     };
     securefix::api::GitHub::native_scratch_from_env(
-        "SECUREFIX_NATIVE_CHECK_TOKEN",
+        "SECUREFIX_CLIENT_TOKEN",
+        write_token,
         config,
         config_path,
         config_bytes,
@@ -383,6 +486,323 @@ fn publish_scratch_result(verified: &VerifiedRequest) -> Result<()> {
     );
     println!("native_check_run_id={}", result["id"]);
     Ok(())
+}
+
+fn apply_securefix(
+    config_path: &std::path::Path,
+    instance_config_path: &str,
+    manifest_path: &std::path::Path,
+    bundle_path: &std::path::Path,
+) -> Result<()> {
+    let verified = verify_request(
+        config_path,
+        instance_config_path,
+        manifest_path,
+        bundle_path,
+        securefix::api::NativeScratchMode::Securefix,
+        true,
+    )?;
+    let manifest = &verified.manifest;
+    let artifact_identity = manifest
+        .securefix_artifact
+        .as_ref()
+        .context("Securefix request has no bound source artifact")?;
+    let run_branch = verified.producer_run["head_branch"]
+        .as_str()
+        .context("Securefix producer run branch is missing")?;
+    securefix::config::validate_branch(run_branch)?;
+    ensure!(
+        manifest.producer.event == "pull_request_target",
+        "native Securefix requires pull_request_target"
+    );
+    let artifact_bytes =
+        download_securefix_artifact(&verified.client_api, manifest, artifact_identity)?;
+    let fix = crate::securefix_gate::artifact::parse(
+        &artifact_bytes,
+        &artifact_identity.name,
+        &manifest.repository.full_name,
+        manifest.producer.run_id,
+        &manifest.producer.source_sha,
+        &manifest.pull_request.head_branch,
+    )?;
+    validate_securefix_artifact_context(manifest, run_branch, &fix)?;
+    let source = crate::securefix_gate::SourceRequest {
+        repository: &manifest.repository.full_name,
+        run_id: manifest.producer.run_id,
+        label: &artifact_identity.name,
+        branch: run_branch,
+        sha: &manifest.producer.source_sha,
+    };
+    let plan = crate::securefix_gate::FixPlan {
+        version: 1,
+        source_repository: manifest.repository.full_name.clone(),
+        source_run_id: manifest.producer.run_id,
+        source_sha: manifest.producer.source_sha.clone(),
+        artifact_name: artifact_identity.name.clone(),
+        artifact_id: artifact_identity.id,
+        destination_repository: fix.repository.clone(),
+        destination_branch: fix.branch.clone(),
+        expected_head: manifest.pull_request.head_sha.clone(),
+        destination_branch_exists: true,
+        existing_pull_request: Some(manifest.pull_request.number),
+    };
+    let writer = native_scratch_writer(
+        &verified.config,
+        &verified.config_bytes,
+        instance_config_path,
+        manifest,
+        &verified.manifest_bytes,
+        securefix::api::NativeScratchMode::Securefix,
+    )?;
+    let server_run = std::env::var("GITHUB_RUN_ID").unwrap_or_default();
+    let server_url =
+        std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".to_owned());
+    let result = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
+        read_api: &verified.client_api,
+        write_api: &writer,
+        server_bot_id: verified.config.identities.server_bot.id,
+        source,
+        plan: &plan,
+        fix: &fix,
+        server_url: &server_url,
+        server_repository: &verified.config.instance.repository,
+        server_run: &server_run,
+    })?;
+    println!("commit_sha={}", result.commit_sha);
+    println!("already_applied={}", result.already_applied);
+    println!("pull_request_number={}", manifest.pull_request.number);
+    Ok(())
+}
+
+fn validate_securefix_artifact_context(
+    manifest: &RequestManifest,
+    run_branch: &str,
+    fix: &crate::securefix_gate::artifact::FixArtifact,
+) -> Result<()> {
+    ensure!(
+        manifest.producer.event == "pull_request_target"
+            && run_branch == manifest.pull_request.base_ref
+            && fix.event_name == manifest.producer.event,
+        "native Securefix requires a protected-base pull_request_target producer run"
+    );
+    let event_pr = fix
+        .pull_request_context
+        .as_ref()
+        .context("Securefix artifact does not contain its pull_request_target context")?;
+    ensure!(
+        event_pr.number == manifest.pull_request.number
+            && event_pr.head_sha == manifest.pull_request.head_sha
+            && event_pr.head_branch == manifest.pull_request.head_branch
+            && event_pr.head_repository_id == manifest.pull_request.head_repository_id
+            && event_pr.head_repository == manifest.repository.full_name
+            && event_pr.base_sha == manifest.producer.source_sha
+            && event_pr.base_branch == manifest.pull_request.base_ref
+            && event_pr.base_repository_id == manifest.repository.id
+            && event_pr.base_repository == manifest.repository.full_name
+            && fix.repository == manifest.repository.full_name
+            && fix.branch == manifest.pull_request.head_branch
+            && fix.create_pull_request.is_none(),
+        "Securefix artifact event does not match the attested exact PR and producer context"
+    );
+    ensure!(
+        manifest.pull_request.head_repository_id == manifest.repository.id,
+        "native Securefix cannot write to a fork PR branch"
+    );
+    Ok(())
+}
+
+fn apply_securefix_from_run(
+    config_path: &std::path::Path,
+    instance_config_path: &str,
+    producer_repository: &str,
+    producer_run_id: u64,
+) -> Result<()> {
+    securefix::policy::validate_repository(producer_repository)?;
+    ensure!(producer_run_id > 0, "invalid producer run ID");
+    let config_bytes = read_bounded(config_path, 256 * 1024)?;
+    let config = securefix::instance_config::InstanceConfig::parse(&config_bytes)?;
+    let target = config
+        .repositories
+        .iter()
+        .find(|repository| repository.repository == producer_repository)
+        .context("producer Client repository is not configured")?;
+    ensure!(
+        target
+            .capabilities
+            .contains(&securefix::policy::Capability::Securefix),
+        "producer Client repository lacks Securefix capability"
+    );
+    let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
+    let repository: Value = api.get(&format!("/repos/{producer_repository}"))?;
+    ensure!(
+        repository["id"].as_u64() == Some(target.id)
+            && repository["full_name"].as_str() == Some(producer_repository),
+        "producer Client repository identity mismatch"
+    );
+    let run: Value = api.get(&format!(
+        "/repos/{producer_repository}/actions/runs/{producer_run_id}"
+    ))?;
+    ensure!(
+        run["id"].as_u64() == Some(producer_run_id)
+            && run["status"] == "completed"
+            && run["conclusion"] == "success"
+            && run["repository"]["id"].as_u64() == Some(target.id)
+            && run["repository"]["full_name"].as_str() == Some(producer_repository),
+        "producer run is incomplete, unsuccessful, or belongs to another repository"
+    );
+    let artifacts: Value = api.get(&format!(
+        "/repos/{producer_repository}/actions/runs/{producer_run_id}/artifacts?per_page=100"
+    ))?;
+    let rows = artifacts["artifacts"]
+        .as_array()
+        .context("producer artifact list is missing")?;
+    ensure!(
+        artifacts["total_count"].as_u64() == Some(rows.len() as u64),
+        "producer artifact listing is incomplete"
+    );
+    let named: Vec<_> = rows
+        .iter()
+        .filter(|artifact| artifact["name"] == REQUEST_ARTIFACT_NAME)
+        .collect();
+    ensure!(
+        named.len() == 1,
+        "producer run must contain exactly one native request proof artifact"
+    );
+    let artifact_id = named[0]["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("native request proof artifact ID is missing")?;
+    let artifact: Value = api.get(&format!(
+        "/repos/{producer_repository}/actions/artifacts/{artifact_id}"
+    ))?;
+    let (size, digest) = validate_request_artifact_metadata(
+        &artifact,
+        &run,
+        artifact_id,
+        producer_run_id,
+        target.id,
+    )?;
+    let bytes = api.download(
+        &format!("/repos/{producer_repository}/actions/artifacts/{artifact_id}/zip"),
+        MAX_ARTIFACT_ARCHIVE_BYTES,
+    )?;
+    ensure!(
+        bytes.len() as u64 == size && securefix::hex_encode(Sha256::digest(&bytes)) == digest,
+        "native request proof artifact bytes differ from GitHub metadata"
+    );
+    let (manifest_bytes, bundle_bytes) = request_files_from_zip(&bytes)?;
+    let manifest: RequestManifest =
+        serde_json::from_slice(&manifest_bytes).context("parse downloaded request manifest")?;
+    manifest.validate()?;
+    ensure!(
+        manifest.producer.run_id == producer_run_id
+            && manifest.repository.id == target.id
+            && manifest.repository.full_name == producer_repository,
+        "downloaded request does not identify the selected producer run and Client repository"
+    );
+    let directory = tempfile::tempdir()?;
+    let manifest_path = directory.path().join("manifest.json");
+    let bundle_path = directory.path().join("bundle.json");
+    fs::write(&manifest_path, manifest_bytes)?;
+    fs::write(&bundle_path, bundle_bytes)?;
+    apply_securefix(
+        config_path,
+        instance_config_path,
+        &manifest_path,
+        &bundle_path,
+    )
+}
+
+fn validate_request_artifact_metadata(
+    artifact: &Value,
+    run: &Value,
+    artifact_id: u64,
+    producer_run_id: u64,
+    repository_id: u64,
+) -> Result<(u64, String)> {
+    let size = artifact["size_in_bytes"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= MAX_ARTIFACT_ARCHIVE_BYTES as u64)
+        .context("native request proof artifact size is invalid")?;
+    let digest = artifact["digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .context("native request proof artifact has no SHA-256 digest")?;
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && artifact["id"].as_u64() == Some(artifact_id)
+            && artifact["name"] == REQUEST_ARTIFACT_NAME
+            && artifact["expired"] == false
+            && artifact["workflow_run"]["id"].as_u64() == Some(producer_run_id)
+            && artifact["workflow_run"]["run_attempt"].as_u64() == run["run_attempt"].as_u64()
+            && artifact["workflow_run"]["repository_id"].as_u64() == Some(repository_id)
+            && artifact["workflow_run"]["head_sha"].as_str() == run["head_sha"].as_str(),
+        "native request proof artifact metadata does not match its producer run"
+    );
+    Ok((size, digest.to_owned()))
+}
+
+fn download_securefix_artifact(
+    api: &securefix::api::GitHub,
+    manifest: &RequestManifest,
+    identity: &crate::native_client::SecurefixArtifactIdentity,
+) -> Result<Vec<u8>> {
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let repository = &manifest.repository.full_name;
+    let artifacts: Value = api.get(&format!(
+        "/repos/{repository}/actions/runs/{}/artifacts?per_page=100",
+        manifest.producer.run_id
+    ))?;
+    let rows = artifacts["artifacts"]
+        .as_array()
+        .context("source run artifact list is missing")?;
+    ensure!(
+        artifacts["total_count"].as_u64() == Some(rows.len() as u64),
+        "source run artifact list is incomplete"
+    );
+    let named: Vec<_> = rows
+        .iter()
+        .filter(|row| row["name"] == identity.name)
+        .collect();
+    ensure!(
+        named.len() == 1 && named[0]["id"].as_u64() == Some(identity.id),
+        "Securefix artifact ID is not the unique artifact with the accepted name"
+    );
+    let artifact: Value = api.get(&format!(
+        "/repos/{repository}/actions/artifacts/{}",
+        identity.id
+    ))?;
+    let size = artifact["size_in_bytes"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= MAX_BYTES)
+        .context("Securefix artifact size is invalid")?;
+    ensure!(
+        artifact["id"].as_u64() == Some(identity.id)
+            && artifact["name"].as_str() == Some(identity.name.as_str())
+            && artifact["digest"].as_str() == Some(identity.digest.as_str())
+            && artifact["expired"] == false
+            && artifact["workflow_run"]["id"].as_u64() == Some(manifest.producer.run_id)
+            && artifact["workflow_run"]["run_attempt"].as_u64()
+                == Some(u64::from(manifest.producer.run_attempt))
+            && artifact["workflow_run"]["repository_id"].as_u64() == Some(manifest.repository.id)
+            && artifact["workflow_run"]["head_sha"].as_str()
+                == Some(manifest.producer.source_sha.as_str()),
+        "Securefix artifact metadata does not match the signed request"
+    );
+    let bytes = api.download(
+        &format!("/repos/{repository}/actions/artifacts/{}/zip", identity.id),
+        MAX_BYTES as usize,
+    )?;
+    ensure!(
+        bytes.len() as u64 == size
+            && format!("sha256:{}", securefix::hex_encode(Sha256::digest(&bytes)))
+                == identity.digest,
+        "Securefix artifact bytes differ from the signed request digest"
+    );
+    Ok(bytes)
 }
 
 fn verify_artifact_binding(
@@ -682,6 +1102,7 @@ mod tests {
             pull_request: crate::native_client::PullRequestIdentity {
                 number: 7,
                 head_sha: "d".repeat(40),
+                head_branch: "scratch".to_owned(),
                 head_repository_id: 10,
                 base_ref: "main".to_owned(),
                 author_id: 11,
@@ -697,14 +1118,61 @@ mod tests {
                 actor_id: 12,
                 actor_login: "maintainer".to_owned(),
             },
-            authority: securefix::api::NativeAuthoritySnapshot {
+            securefix_artifact: None,
+            client_workflow_epoch: "4".repeat(40),
+            server_authority: securefix::api::NativeAuthoritySnapshot {
+                instance_repository: "example-org/securefix-server".to_owned(),
+                instance_id: 404,
+                default_branch: "main".to_owned(),
                 config_path: "securefix-server.toml".to_owned(),
-                config_sha256: "1".repeat(64),
-                config_epoch: "2".repeat(40),
-                workflow_sha256: "3".repeat(64),
-                workflow_epoch: "4".repeat(40),
+                config_sha256: "5".repeat(64),
+                epoch: "6".repeat(40),
+                workflows: vec![securefix::api::NativeWorkflowAuthority {
+                    role: securefix::instance_config::WorkflowRole::PolicyCheck,
+                    path: ".github/workflows/policy-check.yml".to_owned(),
+                    sha256: "7".repeat(64),
+                    pins: vec!["actions/checkout@".to_owned() + &"8".repeat(40)],
+                }],
             },
         }
+    }
+
+    #[test]
+    fn securefix_artifact_binds_protected_base_run_to_separate_pr_head() {
+        let mut manifest = manifest();
+        manifest.operation = "securefix".into();
+        manifest.producer.event = "pull_request_target".into();
+        manifest.pull_request.head_sha = "d".repeat(40);
+        let fix = crate::securefix_gate::artifact::FixArtifact {
+            repository: manifest.repository.full_name.clone(),
+            branch: manifest.pull_request.head_branch.clone(),
+            run_id: manifest.producer.run_id,
+            source_sha: manifest.producer.source_sha.clone(),
+            event_name: "pull_request_target".into(),
+            pull_request_context: Some(
+                crate::securefix_gate::artifact::PullRequestArtifactContext {
+                    number: manifest.pull_request.number,
+                    head_sha: manifest.pull_request.head_sha.clone(),
+                    head_branch: manifest.pull_request.head_branch.clone(),
+                    head_repository_id: manifest.pull_request.head_repository_id,
+                    head_repository: manifest.repository.full_name.clone(),
+                    base_sha: manifest.producer.source_sha.clone(),
+                    base_branch: manifest.pull_request.base_ref.clone(),
+                    base_repository_id: manifest.repository.id,
+                    base_repository: manifest.repository.full_name.clone(),
+                },
+            ),
+            commit_message: "test".into(),
+            create_pull_request: None,
+            additions: std::collections::BTreeMap::from([("README.md".into(), b"test".to_vec())]),
+            deletions: vec![],
+        };
+        assert!(validate_securefix_artifact_context(&manifest, "main", &fix).is_ok());
+        assert!(validate_securefix_artifact_context(&manifest, "scratch", &fix).is_err());
+
+        let mut changed_head = fix;
+        changed_head.pull_request_context.as_mut().unwrap().head_sha = "e".repeat(40);
+        assert!(validate_securefix_artifact_context(&manifest, "main", &changed_head).is_err());
     }
 
     fn verifier_result(manifest: &RequestManifest, run_invocation: String) -> Value {
@@ -852,13 +1320,134 @@ mod tests {
         request.pull_request.author_login = "maintainer".to_owned();
         request.producer.actor_id = 101;
         request.producer.actor_login = "maintainer".to_owned();
-        assert!(validate_first_slice_policy(&config, &request).is_ok());
+        assert_ne!(config.instance.repository, request.repository.full_name);
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::PolicyCheck,
+            )
+            .is_ok()
+        );
 
         request.producer.actor_id = 12;
-        assert!(validate_first_slice_policy(&config, &request).is_err());
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::PolicyCheck,
+            )
+            .is_err()
+        );
         request.producer.actor_id = 101;
         request.pull_request.author_login = "contributor".to_owned();
-        assert!(validate_first_slice_policy(&config, &request).is_err());
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::PolicyCheck,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn securefix_first_slice_requires_securefix_capability() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let mut request = manifest();
+        request.repository = crate::native_client::RepositoryIdentity {
+            id: 987654,
+            full_name: "example-org/project".to_owned(),
+        };
+        request.pull_request.head_repository_id = 987654;
+        request.pull_request.author_id = 101;
+        request.pull_request.author_login = "maintainer".to_owned();
+        request.producer.actor_id = 101;
+        request.producer.actor_login = "maintainer".to_owned();
+        assert!(
+            validate_first_slice_policy(
+                &config,
+                &request,
+                securefix::api::NativeScratchMode::Securefix,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn server_authority_and_client_request_identity_are_separate() {
+        let server = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "example-org/securefix-server".to_owned(),
+            instance_id: 404,
+            default_branch: "main".to_owned(),
+            config_path: "securefix-server.toml".to_owned(),
+            config_sha256: "a".repeat(64),
+            epoch: "b".repeat(40),
+            workflows: vec![securefix::api::NativeWorkflowAuthority {
+                role: securefix::instance_config::WorkflowRole::PolicyCheck,
+                path: ".github/workflows/policy-check.yml".to_owned(),
+                sha256: "c".repeat(64),
+                pins: vec![
+                    "owner/server/.github/actions/install-cli@".to_owned() + &"d".repeat(40),
+                ],
+            }],
+        };
+        assert!(securefix::api::require_native_authority_unchanged(&server, &server).is_ok());
+        let mut other_instance = server.clone();
+        other_instance.instance_id += 1;
+        assert!(
+            securefix::api::require_native_authority_unchanged(&server, &other_instance).is_err()
+        );
+        let mut changed_role_pin = server.clone();
+        changed_role_pin.workflows[0].pins[0].push('e');
+        assert!(
+            securefix::api::require_native_authority_unchanged(&server, &changed_role_pin).is_err()
+        );
+
+        let request = manifest();
+        let serialized = serde_json::to_value(request).unwrap();
+        assert!(serialized.get("client_workflow_epoch").is_some());
+        assert!(serialized.get("authority").is_none());
+        assert!(serialized.get("server_authority").is_some());
+    }
+
+    #[test]
+    fn request_server_locator_must_match_authenticated_instance_and_config_path() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let mut request = manifest();
+        assert!(
+            validate_request_server_locator(
+                &config,
+                "securefix-server.toml",
+                &request.server_authority
+            )
+            .is_ok()
+        );
+        request.server_authority.config_path = "another-config.toml".to_owned();
+        assert!(
+            validate_request_server_locator(
+                &config,
+                "securefix-server.toml",
+                &request.server_authority
+            )
+            .is_err()
+        );
+        request.server_authority.config_path = "securefix-server.toml".to_owned();
+        request.server_authority.instance_repository = "attacker/securefix-server".to_owned();
+        assert!(
+            validate_request_server_locator(
+                &config,
+                "securefix-server.toml",
+                &request.server_authority
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -872,11 +1461,48 @@ mod tests {
         let pull = serde_json::json!({
             "number":7,"state":"open",
             "base":{"repo":{"id":10,"full_name":"owner/project"},"ref":"main"},
-            "head":{"repo":{"id":10},"sha":request.pull_request.head_sha},
+            "head":{"repo":{"id":10},"ref":request.pull_request.head_branch,"sha":request.pull_request.head_sha},
             "user":{"id":12,"login":"maintainer"}
         });
         assert!(validate_current_pull_request_state(&repo, &pull, &request).is_ok());
         request.pull_request.head_sha = "e".repeat(40);
         assert!(validate_current_pull_request_state(&repo, &pull, &request).is_err());
+    }
+
+    #[test]
+    fn request_artifact_metadata_is_bound_to_selected_run_and_repository() {
+        let run = serde_json::json!({
+            "id":42,"run_attempt":2,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        let artifact = serde_json::json!({
+            "id":99,"name":REQUEST_ARTIFACT_NAME,"expired":false,
+            "size_in_bytes":123,"digest":format!("sha256:{}", "b".repeat(64)),
+            "workflow_run":{
+                "id":42,"run_attempt":2,"repository_id":10,
+                "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+        });
+        assert_eq!(
+            validate_request_artifact_metadata(&artifact, &run, 99, 42, 10).unwrap(),
+            (123, "b".repeat(64))
+        );
+
+        for (field, value) in [
+            ("id", serde_json::json!(43)),
+            ("run_attempt", serde_json::json!(1)),
+            ("repository_id", serde_json::json!(11)),
+            ("head_sha", serde_json::json!("c".repeat(40))),
+        ] {
+            let mut changed = artifact.clone();
+            changed["workflow_run"][field] = value;
+            assert!(
+                validate_request_artifact_metadata(&changed, &run, 99, 42, 10).is_err(),
+                "accepted changed workflow_run.{field}"
+            );
+        }
+
+        let mut uppercase_digest = artifact;
+        uppercase_digest["digest"] = format!("sha256:{}", "B".repeat(64)).into();
+        assert!(validate_request_artifact_metadata(&uppercase_digest, &run, 99, 42, 10).is_err());
     }
 }

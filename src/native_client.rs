@@ -17,6 +17,11 @@ pub enum Command {
         #[command(subcommand)]
         command: PolicyCheckCommand,
     },
+    #[command(about = "Capture one Securefix artifact for an exact pull request head")]
+    Securefix {
+        #[command(subcommand)]
+        command: SecurefixCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -24,9 +29,18 @@ pub enum PolicyCheckCommand {
     Capture {
         #[arg(long)]
         pull_request_number: u64,
-        /// Explicit path to this instance's protected-main TOML configuration.
+        #[arg(long, default_value = "native-policy-check/manifest.json")]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecurefixCommand {
+    Capture {
         #[arg(long)]
-        config_path: String,
+        pull_request_number: u64,
+        #[arg(long)]
+        artifact_name: String,
         #[arg(long, default_value = "native-policy-check/manifest.json")]
         output: PathBuf,
     },
@@ -40,7 +54,18 @@ pub struct RequestManifest {
     pub repository: RepositoryIdentity,
     pub pull_request: PullRequestIdentity,
     pub producer: ProducerIdentity,
-    pub authority: securefix::api::NativeAuthoritySnapshot,
+    #[serde(default)]
+    pub securefix_artifact: Option<SecurefixArtifactIdentity>,
+    pub client_workflow_epoch: String,
+    pub server_authority: securefix::api::NativeAuthoritySnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SecurefixArtifactIdentity {
+    pub id: u64,
+    pub name: String,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -55,6 +80,7 @@ pub struct RepositoryIdentity {
 pub struct PullRequestIdentity {
     pub number: u64,
     pub head_sha: String,
+    pub head_branch: String,
     pub head_repository_id: u64,
     pub base_ref: String,
     pub author_id: u64,
@@ -77,9 +103,36 @@ pub struct ProducerIdentity {
 impl RequestManifest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.protocol == PROTOCOL && self.operation == "policy_check",
-            "unsupported native request protocol or operation"
+            self.protocol == PROTOCOL,
+            "unsupported native request protocol"
         );
+        match self.operation.as_str() {
+            "policy_check" => ensure!(
+                self.securefix_artifact.is_none(),
+                "policy-check request unexpectedly names a Securefix artifact"
+            ),
+            "securefix" => {
+                let artifact = self
+                    .securefix_artifact
+                    .as_ref()
+                    .context("Securefix request lacks its source artifact identity")?;
+                ensure!(
+                    artifact.id > 0
+                        && crate::securefix_gate::artifact::valid_artifact_name_for_cli(
+                            &artifact.name
+                        )
+                        && (artifact.name.starts_with("securefix-")
+                            || artifact.name.starts_with("testing-securefix-"))
+                        && artifact.digest.len() == 71
+                        && artifact.digest.starts_with("sha256:")
+                        && artifact.digest[7..]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                    "invalid Securefix source artifact identity"
+                );
+            }
+            _ => anyhow::bail!("unsupported native request operation"),
+        }
         securefix::policy::validate_repository(&self.repository.full_name)?;
         ensure!(self.repository.id > 0, "invalid request repository ID");
         ensure!(
@@ -89,6 +142,7 @@ impl RequestManifest {
             "invalid pull request identity"
         );
         validate_sha(&self.pull_request.head_sha)?;
+        securefix::config::validate_branch(&self.pull_request.head_branch)?;
         securefix::config::validate_branch(&self.pull_request.base_ref)?;
         ensure!(
             valid_login(&self.pull_request.author_login),
@@ -108,11 +162,8 @@ impl RequestManifest {
         validate_sha(&self.producer.source_sha)?;
         validate_sha(&self.producer.workflow_sha)?;
         validate_workflow_path(&self.producer.workflow_path)?;
-        securefix::api::validate_native_instance_config_path(&self.authority.config_path)?;
-        validate_digest(&self.authority.config_sha256)?;
-        validate_sha(&self.authority.config_epoch)?;
-        validate_digest(&self.authority.workflow_sha256)?;
-        validate_sha(&self.authority.workflow_epoch)?;
+        validate_sha(&self.client_workflow_epoch)?;
+        securefix::api::validate_native_authority_snapshot(&self.server_authority)?;
         ensure!(
             self.producer.actor_id > 0 && valid_login(&self.producer.actor_login),
             "invalid request producer actor"
@@ -126,16 +177,46 @@ pub fn run(command: Command) -> Result<()> {
         Command::PolicyCheck { command } => match command {
             PolicyCheckCommand::Capture {
                 pull_request_number,
-                config_path,
                 output,
-            } => capture_policy_check(pull_request_number, &config_path, &output),
+            } => capture_policy_check(pull_request_number, &output),
+        },
+        Command::Securefix { command } => match command {
+            SecurefixCommand::Capture {
+                pull_request_number,
+                artifact_name,
+                output,
+            } => capture_securefix(pull_request_number, &artifact_name, &output),
         },
     }
 }
 
-fn capture_policy_check(
+fn capture_policy_check(pull_request_number: u64, output: &std::path::Path) -> Result<()> {
+    capture_request(pull_request_number, "policy_check", None, output)
+}
+
+fn capture_securefix(
     pull_request_number: u64,
-    config_path: &str,
+    artifact_name: &str,
+    output: &std::path::Path,
+) -> Result<()> {
+    ensure!(
+        crate::securefix_gate::artifact::valid_artifact_name_for_cli(artifact_name)
+            && (artifact_name.starts_with("securefix-")
+                || artifact_name.starts_with("testing-securefix-")),
+        "invalid Securefix source artifact name"
+    );
+    capture_request(
+        pull_request_number,
+        "securefix",
+        Some(artifact_name),
+        output,
+    )
+}
+
+fn capture_request(
+    pull_request_number: u64,
+    operation: &str,
+    artifact_name: Option<&str>,
     output: &std::path::Path,
 ) -> Result<()> {
     ensure!(pull_request_number > 0, "invalid pull request number");
@@ -195,6 +276,19 @@ fn capture_policy_check(
         .context("request workflow actor login is missing")?
         .to_owned();
 
+    let securefix_artifact = match artifact_name {
+        Some(name) => Some(capture_artifact_identity(
+            &api,
+            &repository_name,
+            run_id,
+            run_attempt,
+            repository_id,
+            &source_sha,
+            name,
+        )?),
+        None => None,
+    };
+
     let pull_request: Value = api.get(&format!(
         "/repos/{repository_name}/pulls/{pull_request_number}"
     ))?;
@@ -212,6 +306,10 @@ fn capture_policy_check(
     let head_sha = pull_request["head"]["sha"]
         .as_str()
         .context("pull request head SHA is missing")?
+        .to_owned();
+    let head_branch = pull_request["head"]["ref"]
+        .as_str()
+        .context("pull request head branch is missing")?
         .to_owned();
     let head_repository_id = pull_request["head"]["repo"]["id"]
         .as_u64()
@@ -232,19 +330,24 @@ fn capture_policy_check(
     let default_branch = repository["default_branch"]
         .as_str()
         .context("request repository default branch is missing")?;
-    let authority = securefix::api::capture_native_authority_snapshot(
+    let client_workflow_epoch = securefix::api::capture_native_client_workflow_epoch(
         &api,
         &repository_name,
         repository_id,
         default_branch,
-        config_path,
         &workflow_path,
         &workflow_sha,
     )?;
+    let server_repository = std::env::var("SECUREFIX_SERVER_REPOSITORY")
+        .context("missing SECUREFIX_SERVER_REPOSITORY")?;
+    let server_config_path = std::env::var("SECUREFIX_INSTANCE_CONFIG_PATH")
+        .context("missing SECUREFIX_INSTANCE_CONFIG_PATH")?;
+    let (_, server_authority) =
+        api.capture_remote_native_server_authority(&server_repository, &server_config_path)?;
 
     let manifest = RequestManifest {
         protocol: PROTOCOL.to_owned(),
-        operation: "policy_check".to_owned(),
+        operation: operation.to_owned(),
         repository: RepositoryIdentity {
             id: repository_id,
             full_name: repository_name,
@@ -252,6 +355,7 @@ fn capture_policy_check(
         pull_request: PullRequestIdentity {
             number: pull_request_number,
             head_sha,
+            head_branch,
             head_repository_id,
             base_ref,
             author_id,
@@ -267,7 +371,9 @@ fn capture_policy_check(
             actor_id,
             actor_login,
         },
-        authority,
+        securefix_artifact,
+        client_workflow_epoch,
+        server_authority,
     };
     manifest.validate()?;
     let bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -287,15 +393,79 @@ fn capture_policy_check(
     Ok(())
 }
 
-fn validate_digest(value: &str) -> Result<()> {
+fn capture_artifact_identity(
+    api: &GitHub,
+    repository: &str,
+    run_id: u64,
+    run_attempt: u32,
+    repository_id: u64,
+    source_sha: &str,
+    name: &str,
+) -> Result<SecurefixArtifactIdentity> {
+    const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+    let list: Value = api.get(&format!(
+        "/repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100"
+    ))?;
+    let artifacts = list["artifacts"]
+        .as_array()
+        .context("source run artifact list is missing")?;
     ensure!(
-        value.len() == 64
-            && value
+        list["total_count"].as_u64() == Some(artifacts.len() as u64),
+        "source run artifact listing is incomplete"
+    );
+    let matches: Vec<_> = artifacts
+        .iter()
+        .filter(|artifact| artifact["name"] == name)
+        .collect();
+    ensure!(
+        matches.len() == 1,
+        "Securefix source artifact is missing or duplicated"
+    );
+    let id = matches[0]["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("Securefix source artifact ID is missing")?;
+    let artifact: Value = api.get(&format!("/repos/{repository}/actions/artifacts/{id}"))?;
+    let size = artifact["size_in_bytes"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= MAX_ARTIFACT_BYTES)
+        .context("Securefix source artifact size is invalid")?;
+    let digest = artifact["digest"]
+        .as_str()
+        .context("Securefix source artifact has no digest")?
+        .to_owned();
+    ensure!(
+        artifact["id"].as_u64() == Some(id)
+            && artifact["name"] == name
+            && artifact["expired"] == false
+            && artifact["workflow_run"]["id"].as_u64() == Some(run_id)
+            && artifact["workflow_run"]["run_attempt"].as_u64() == Some(u64::from(run_attempt))
+            && artifact["workflow_run"]["repository_id"].as_u64() == Some(repository_id)
+            && artifact["workflow_run"]["head_sha"].as_str() == Some(source_sha)
+            && digest.len() == 71
+            && digest.starts_with("sha256:")
+            && digest[7..]
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-        "invalid native authority digest"
+        "Securefix source artifact identity or run binding mismatch"
     );
-    Ok(())
+    let bytes = api.download(
+        &format!("/repos/{repository}/actions/artifacts/{id}/zip"),
+        MAX_ARTIFACT_BYTES as usize,
+    )?;
+    ensure!(
+        bytes.len() as u64 == size
+            && format!(
+                "sha256:{}",
+                securefix::hex_encode(sha2::Sha256::digest(&bytes))
+            ) == digest,
+        "Securefix source artifact bytes differ from GitHub metadata"
+    );
+    Ok(SecurefixArtifactIdentity {
+        id,
+        name: name.to_owned(),
+        digest,
+    })
 }
 
 fn parse_env<T: std::str::FromStr>(name: &str) -> Result<T> {
@@ -353,6 +523,7 @@ mod tests {
             pull_request: PullRequestIdentity {
                 number: 12,
                 head_sha: "a".repeat(40),
+                head_branch: "scratch".to_owned(),
                 head_repository_id: 1410312556,
                 base_ref: "main".to_owned(),
                 author_id: 4525500,
@@ -368,12 +539,21 @@ mod tests {
                 actor_id: 4525500,
                 actor_login: "civitaspo".to_owned(),
             },
-            authority: securefix::api::NativeAuthoritySnapshot {
-                config_path: "securefix-server.toml".to_owned(),
-                config_sha256: "d".repeat(64),
-                config_epoch: "e".repeat(40),
-                workflow_sha256: "f".repeat(64),
-                workflow_epoch: "1".repeat(40),
+            securefix_artifact: None,
+            client_workflow_epoch: "1".repeat(40),
+            server_authority: securefix::api::NativeAuthoritySnapshot {
+                instance_repository: "civitaspo/securefix-server".to_owned(),
+                instance_id: 1,
+                default_branch: "main".to_owned(),
+                config_path: "repo-settings/managed-files/securefix-server.toml".to_owned(),
+                config_sha256: "2".repeat(64),
+                epoch: "3".repeat(40),
+                workflows: vec![securefix::api::NativeWorkflowAuthority {
+                    role: securefix::instance_config::WorkflowRole::PolicyCheck,
+                    path: ".github/workflows/policy-check.yml".to_owned(),
+                    sha256: "4".repeat(64),
+                    pins: Vec::new(),
+                }],
             },
         }
     }
@@ -416,29 +596,26 @@ mod tests {
     }
 
     #[test]
-    fn authority_snapshot_rejects_config_changes_and_change_revert_epochs() {
-        let captured = securefix::api::NativeAuthoritySnapshot {
-            config_path: "securefix-server.toml".to_owned(),
-            config_sha256: "a".repeat(64),
-            config_epoch: "b".repeat(40),
-            workflow_sha256: "c".repeat(64),
-            workflow_epoch: "d".repeat(40),
-        };
-        assert!(securefix::api::require_native_authority_unchanged(&captured, &captured).is_ok());
+    fn client_manifest_carries_a_canonical_workflow_epoch() {
+        let mut value = manifest();
+        value.validate().unwrap();
+        value.client_workflow_epoch = "not-a-sha".to_owned();
+        assert!(value.validate().is_err());
+    }
 
-        let mut changed_config = captured.clone();
-        changed_config.config_sha256 = "e".repeat(64);
-        changed_config.config_epoch = "f".repeat(40);
-        assert!(
-            securefix::api::require_native_authority_unchanged(&captured, &changed_config).is_err()
-        );
-
-        let mut reverted_config = captured.clone();
-        reverted_config.config_epoch = "e".repeat(40);
-        assert_eq!(reverted_config.config_sha256, captured.config_sha256);
-        assert!(
-            securefix::api::require_native_authority_unchanged(&captured, &reverted_config)
-                .is_err()
-        );
+    #[test]
+    fn securefix_request_requires_a_canonical_source_artifact_identity() {
+        let mut request = manifest();
+        request.operation = "securefix".to_owned();
+        request.securefix_artifact = Some(SecurefixArtifactIdentity {
+            id: 42,
+            name: "testing-securefix-7-abcd".to_owned(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+        });
+        request.validate().unwrap();
+        request.securefix_artifact.as_mut().unwrap().digest = format!("sha256:{}", "A".repeat(64));
+        assert!(request.validate().is_err());
+        request.securefix_artifact = None;
+        assert!(request.validate().is_err());
     }
 }

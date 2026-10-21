@@ -45,7 +45,7 @@ These statuses track current design and implementation evidence. Local review an
 
 | Gate | Status | Remaining proof |
 | --- | --- | --- |
-| D01 | Open for generic published execution; direct candidate evidence is a separate scratch gate | A 2026-10-21 read-only event trace found successful PR-target runs with `run.head_sha` at the PR head, `pull_requests=[]`, and base/main reusable references. An issue-comment run listed `referenced_workflows` although the caller job was skipped. These facts block generic published workflow proof, not the first owner-selected direct-artifact probe. For that probe, bind the exact candidate SHA to its successful scratch producer run/attempt and immutable artifact ID/digest. For general execution, independently authenticate caller-definition revision and actual producer; canonical YAML fetched at a self-reported SHA, reference metadata, and job/step display names alone are insufficient. The mechanism remains unresolved; no OIDC or attestation mechanism is selected. [ADR 0013](adr/0013-native-request-producer-proof.md) records native GitHub attestations only as an unqualified candidate. |
+| D01 | Scratch-qualified for the single U05a `workflow_dispatch` path; open for generic published execution and other event types | The 2026-10-21 scratch proof verified a source-pinned reusable producer attestation, local bundle, and exact candidate run/artifact binding for one policy-check request. Earlier event traces still block treating run references or self-reported caller SHA as proof: PR-target runs had `pull_requests=[]`, and an issue-comment run listed a skipped reusable. The mechanism is qualified only for the captured scratch route; generic published Client acceptance and `pull_request_target`/`issue_comment` production wrappers remain open. See the evidence below and [ADR 0013](adr/0013-native-request-producer-proof.md). |
 | D02 | Partial disconnected parser; workflow-role syntax and fixture evidence only | The parser has independent consistency review and 17 focused tests, including a separate legacy-policy parity fixture. The required closed `[workflow_roles]` map now derives required operation roles from repository capabilities and validates path syntax and case-insensitive duplicates. Complete the strict schema, settle the authenticated protected-main snapshot reader/loading API, and prove operationally equivalent policy decisions. The parser does not authenticate files, source, pins, or deployment identity. Hosted qualification remains open. |
 | D03 | Open | Review the strict ordinary-role map, canonical thin-wrapper validator, closed required-CI inventory of known ordinary writers, package proof in W, and fresh identity check at each in-scope write. Do not claim a universal repository credential audit. |
 | D04 | Open | ADR 0012 proposes full blob-filtered history from exact `M` plus one first-parent raw path traversal, without a commit-count cap. Prove parity, shallow/incomplete rejection, provisional byte/time/output bounds, final-head recheck and hosted cost/availability. |
@@ -284,6 +284,44 @@ U02 exits only when an accepted ADR contains the field map, provenance acquisiti
 5. Capture the request artifact and producer evidence, PR/head before and after, expected policy check, rejection reason, independent readback and cleanup. A fixture or PR creation without the new Client-to-Server result is not success.
 
 **Deliverable:** one successful new Client → new Server `policy_check` result and one stale-head rejection, with exact source/artifact and state evidence. **Proceed:** the selected path and affected rejection work in the hosted scratch repository while production closure stays frozen. **Return:** fix only the affected implementation and disposable scratch wiring; unrelated D/U units remain open.
+
+**Hosted evidence (2026-10-21; narrow qualification).** Candidate Rust source was
+`961ffff5ab30be4a0197c64c9a4170515b787f5f`, built successfully by run
+[#39563689101](https://github.com/civitaspo/securefix-server/actions/runs/39563689101)
+as `candidate-runtime` artifact `12328813435` (4,549,853 bytes; SHA-256
+`3e8ff5b90550f70308f240fde77d058aeb37e700211db044a1e66874a7196ca6`). The
+attestation signer was the separate reusable-workflow revision
+`93f0c7b4c35e9946a899c2fdf5b09529894ac067` at
+`.github/workflows/request-producer-probe.yml`; it did not change the Rust
+source or require a rebuild. Scratch wrapper `policy-check.yml` was on
+`testing-securefix-server` main `0fbe835ef9b27f36f74a5bf27d9f3d6459de38f0`.
+
+Producer run
+[#39564989587](https://github.com/civitaspo/testing-securefix-server/actions/runs/39564989587)
+created `native-request-proof` artifact `12328924468` (7,459 bytes; SHA-256
+`037069a2d049e123c2540bf898ef1aaea8997a048b1861a6c9eb2eb452905bda`),
+containing the 746-byte manifest and 11,271-byte local attestation bundle. The
+manifest binds run/attempt `39564989587/1` and PR #365 head
+`744dee8dc68da2aa8a8fa4271e9f37b7bedfba76`. Consumer run
+[#39565253920](https://github.com/civitaspo/testing-securefix-server/actions/runs/39565253920)
+successfully verified and published check `securefix-native-request-policy-check`
+ID `119106008516` (GitHub Actions App 15368 (scratch `GITHUB_TOKEN`)) on that exact head.
+
+For the rejection, signed commit `d7d9ab8c538fd853dc7b29d6ae5a9d2fb3527ae0`
+advanced the same PR after capture. Replaying the same artifact in run
+[#39565408082](https://github.com/civitaspo/testing-securefix-server/actions/runs/39565408082)
+failed with `native request PR is closed, retargeted, or has a different head
+or identity`. Independent readback found no native check on the new head and
+exactly one successful check on the captured old head.
+
+An earlier producer run `39564186380` uploaded a manifest without its bundle
+because the workflow passed `bundle-path` as an action input instead of copying
+the action output. Consume run `39564377455` failed on the missing bundle. The
+workflow-only fix is the `93f0c7b` signer revision above. This qualification
+covers this `workflow_dispatch` fixture and stale-head fence only; full config
+and history behavior, generic release/source proof, Client signature policy,
+owner-review approval, and other event wrappers remain unverified.
+
 
 ## U05 — Reusable Server/Client implementations and release-range acceptance
 

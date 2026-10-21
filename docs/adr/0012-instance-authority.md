@@ -27,6 +27,28 @@ Use the terms from the development-loop guide:
   and `E`. `A = (K, D)` is always additionally bound to the exact PR head and
   the existing replay/expiry data.
 
+The native request keeps Server and Client identities separate. Its strict
+Client manifest carries the Client request repository and PR, producer
+run/source/workflow claims, `client_workflow_epoch`, and a capture-time Server
+authority snapshot. The Server repository and config path in that snapshot are
+untrusted locators: the receiver must match them exactly to its authenticated
+`GITHUB_REPOSITORY`, strict TOML instance, and explicit CLI config-path before
+using the snapshot. The capture routine reads the named public or authorized
+Server repository's protected default branch and constructs the snapshot; a
+Client cannot provide a policy object or select another config. The receiver
+reconstructs the snapshot and rejects a stale request before producer/artifact
+processing, then checks the exact configured role path and protected-branch
+workflow SHA from `GITHUB_WORKFLOW_REF` / `GITHUB_WORKFLOW_SHA`. `[repositories]`
+authorizes the independent Client request repository; `[acceptable_clients]`
+identifies the reusable Client producer. The Server recomputes the Client
+workflow epoch through a Client-scoped read token, separately from the Server
+`E`. Immediately before a write it rechecks both snapshots and the exact Client
+PR head. The Client read token and operation writer are independently verified
+as Server-App installations limited to the configured Client repository; the
+Server `GITHUB_TOKEN` reads only Server authority. Exact runtime build-artifact
+identity in hosted scratch remains unqualified. This slice does not yet define
+the final canonical `K`/`D` digest or generic release acceptance.
+
 The current config parser denies unknown fields. Add a required closed
 `[workflow_roles]` table before freezing schema version 1, or bump the schema
 version; do not silently default it. Its keys are the supported operation

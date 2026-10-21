@@ -25,7 +25,7 @@ pub struct InstanceConfig {
     pub acceptable_clients: AcceptableClients,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRole {
     Approve,
@@ -176,11 +176,6 @@ impl InstanceConfig {
                 && self.apps.client_id != self.apps.server_id,
             "invalid App identities"
         );
-        ensure!(
-            self.apps.policy_check_id == self.apps.server_id,
-            "required policy check App does not match the Server App"
-        );
-
         ensure!(
             !self.policy.trusted_committers.is_empty(),
             "no trusted committers"
@@ -925,6 +920,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_distinct_policy_check_and_server_apps() {
+        let source = changed(
+            &fixture_text(),
+            "policy_check_id = 502\n",
+            "policy_check_id = 702\n",
+        );
+        let config = InstanceConfig::parse(source.as_bytes()).unwrap();
+        assert_eq!(config.apps.server_id, 502);
+        assert_eq!(config.apps.status_check_id, 701);
+        assert_eq!(config.apps.policy_check_id, 702);
+    }
+
+    #[test]
     fn rejects_oversized_missing_unknown_or_unsupported_configuration() {
         let oversized = vec![b' '; MAX_CONFIG_BYTES + 1];
         assert!(InstanceConfig::parse(&oversized).is_err());
@@ -1042,11 +1050,6 @@ mod tests {
             duplicate_id,
             changed(&fixture_text(), "id = 202\n", "id = 101\n"),
             changed(&fixture_text(), "client_id = 501\n", "client_id = 502\n"),
-            changed(
-                &fixture_text(),
-                "policy_check_id = 502\n",
-                "policy_check_id = 701\n",
-            ),
             changed(
                 &fixture_text(),
                 "capabilities = [\"approve\", \"merge\", \"securefix\", \"release\", \"settings\"]",

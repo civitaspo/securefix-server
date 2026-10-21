@@ -550,6 +550,8 @@ fn release_pr(
                 branch: release_branch.clone(),
                 run_id,
                 source_sha: base_sha.clone(),
+                event_name: "workflow_dispatch".into(),
+                pull_request_context: None,
                 commit_message: format!("chore(release): prepare v{version}"),
                 create_pull_request: Some(create_pull_request),
                 additions,
@@ -577,7 +579,7 @@ fn release_pr(
             let applied = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
                 read_api: &api,
                 write_api: &api,
-                policy: &policy,
+                server_bot_id: policy.server_bot_id,
                 source,
                 plan: &plan,
                 fix: &fix,
@@ -712,6 +714,8 @@ fn release_pr(
                 branch: state.release_branch.clone(),
                 run_id,
                 source_sha: base_sha.clone(),
+                event_name: "workflow_dispatch".into(),
+                pull_request_context: None,
                 commit_message: format!("chore(release): refresh v{version}"),
                 create_pull_request: Some(
                     json!({
@@ -748,7 +752,7 @@ fn release_pr(
             let applied = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
                 read_api: &api,
                 write_api: &api,
-                policy: &policy,
+                server_bot_id: policy.server_bot_id,
                 source,
                 plan: &plan,
                 fix: &fix,
@@ -2184,7 +2188,7 @@ fn create_nativefix_positive_pr(
     let first = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
         read_api: api,
         write_api: api,
-        policy,
+        server_bot_id: policy.server_bot_id,
         source,
         plan: &plan,
         fix,
@@ -2240,7 +2244,7 @@ fn create_nativefix_positive_pr(
     let retry = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
         read_api: api,
         write_api: api,
-        policy,
+        server_bot_id: policy.server_bot_id,
         source,
         plan: &retry_plan,
         fix,
@@ -5707,6 +5711,8 @@ mod tests {
             branch: positive_branch.clone(),
             run_id,
             source_sha: candidate_sha.clone(),
+            event_name: "workflow_dispatch".into(),
+            pull_request_context: None,
             commit_message: "test: positive fixture".into(),
             create_pull_request: Some(options.to_string()),
             additions: BTreeMap::from([(positive_path.into(), positive_content.to_vec())]),
@@ -5735,7 +5741,7 @@ mod tests {
         let positive = crate::securefix_gate::apply_core(crate::securefix_gate::ApplyCore {
             read_api: &fixture.api,
             write_api: &fixture.api,
-            policy: &policy,
+            server_bot_id: policy.server_bot_id,
             source,
             plan: &plan,
             fix: &positive_fix,

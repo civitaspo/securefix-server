@@ -17,10 +17,25 @@ pub struct FixArtifact {
     pub branch: String,
     pub run_id: u64,
     pub source_sha: String,
+    pub event_name: String,
+    pub pull_request_context: Option<PullRequestArtifactContext>,
     pub commit_message: String,
     pub create_pull_request: Option<String>,
     pub additions: BTreeMap<String, Vec<u8>>,
     pub deletions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestArtifactContext {
+    pub number: u64,
+    pub head_sha: String,
+    pub head_branch: String,
+    pub head_repository_id: u64,
+    pub head_repository: String,
+    pub base_sha: String,
+    pub base_branch: String,
+    pub base_repository_id: u64,
+    pub base_repository: String,
 }
 
 pub fn parse(
@@ -121,6 +136,15 @@ pub fn parse(
             || metadata["context"]["payload"]["workflow_run"]["head_sha"] == source_sha,
         "artifact source SHA does not match validated workflow run"
     );
+    let event_name = metadata["context"]["eventName"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let pull_request_context = if event_name == "pull_request_target" {
+        Some(parse_pull_request_context(&metadata["context"]["payload"])?)
+    } else {
+        None
+    };
     let inputs = metadata["inputs"]
         .as_object()
         .context("artifact inputs missing")?;
@@ -209,10 +233,74 @@ pub fn parse(
         branch,
         run_id,
         source_sha: source_sha.to_owned(),
+        event_name,
+        pull_request_context,
         commit_message,
         create_pull_request,
         additions,
         deletions,
+    })
+}
+
+fn parse_pull_request_context(payload: &Value) -> Result<PullRequestArtifactContext> {
+    let repository = |value: &Value, label: &str| -> Result<(u64, String)> {
+        let id = value["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .with_context(|| format!("artifact pull request {label} repository ID is missing"))?;
+        let full_name = value["full_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .with_context(|| format!("artifact pull request {label} repository is missing"))?
+            .to_owned();
+        securefix::policy::validate_repository(&full_name)?;
+        Ok((id, full_name))
+    };
+
+    let number = payload["pull_request"]["number"]
+        .as_u64()
+        .filter(|number| *number > 0)
+        .or_else(|| payload["number"].as_u64().filter(|number| *number > 0))
+        .context("artifact pull request number is missing")?;
+    let head_sha = payload["pull_request"]["head"]["sha"]
+        .as_str()
+        .context("artifact pull request head SHA is missing")?
+        .to_owned();
+    securefix::policy::validate_sha(&head_sha)?;
+    let head_branch = payload["pull_request"]["head"]["ref"]
+        .as_str()
+        .context("artifact pull request head branch is missing")?
+        .to_owned();
+    securefix::config::validate_branch(&head_branch)?;
+    let (head_repository_id, head_repository) =
+        repository(&payload["pull_request"]["head"]["repo"], "head")?;
+    let base_sha = payload["pull_request"]["base"]["sha"]
+        .as_str()
+        .context("artifact pull request base SHA is missing")?
+        .to_owned();
+    securefix::policy::validate_sha(&base_sha)?;
+    let base_branch = payload["pull_request"]["base"]["ref"]
+        .as_str()
+        .context("artifact pull request base branch is missing")?
+        .to_owned();
+    securefix::config::validate_branch(&base_branch)?;
+    let (base_repository_id, base_repository) =
+        repository(&payload["pull_request"]["base"]["repo"], "base")?;
+    ensure!(
+        payload["repository"]["id"].as_u64() == Some(base_repository_id)
+            && payload["repository"]["full_name"].as_str() == Some(base_repository.as_str()),
+        "artifact pull request base differs from its event repository"
+    );
+    Ok(PullRequestArtifactContext {
+        number,
+        head_sha,
+        head_branch,
+        head_repository_id,
+        head_repository,
+        base_sha,
+        base_branch,
+        base_repository_id,
+        base_repository,
     })
 }
 
@@ -244,6 +332,53 @@ pub(crate) fn valid_artifact_name_for_cli(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn pull_request_target_context_keeps_source_base_and_pr_head_distinct() {
+        let payload = serde_json::json!({
+            "number": 7,
+            "repository": {"id": 10, "full_name": "owner/project"},
+            "pull_request": {
+                "head": {
+                    "sha": "d".repeat(40),
+                    "ref": "contrib/change",
+                    "repo": {"id": 10, "full_name": "owner/project"}
+                },
+                "base": {
+                    "sha": "a".repeat(40),
+                    "ref": "main",
+                    "repo": {"id": 10, "full_name": "owner/project"}
+                }
+            }
+        });
+        let context = parse_pull_request_context(&payload).unwrap();
+        assert_eq!(context.number, 7);
+        assert_eq!(context.head_sha, "d".repeat(40));
+        assert_eq!(context.base_sha, "a".repeat(40));
+        assert_eq!(context.head_branch, "contrib/change");
+        assert_eq!(context.base_branch, "main");
+    }
+
+    #[test]
+    fn pull_request_target_context_rejects_a_different_event_repository() {
+        let payload = serde_json::json!({
+            "number": 7,
+            "repository": {"id": 99, "full_name": "other/project"},
+            "pull_request": {
+                "head": {
+                    "sha": "d".repeat(40),
+                    "ref": "contrib/change",
+                    "repo": {"id": 10, "full_name": "owner/project"}
+                },
+                "base": {
+                    "sha": "a".repeat(40),
+                    "ref": "main",
+                    "repo": {"id": 10, "full_name": "owner/project"}
+                }
+            }
+        });
+        assert!(parse_pull_request_context(&payload).is_err());
+    }
 
     #[test]
     fn artifact_name_accepts_only_the_production_or_testing_prefix() {

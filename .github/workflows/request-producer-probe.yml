@@ -11,6 +11,14 @@ on:
         description: Owner-authored scratch pull request for this policy-check probe
         required: true
         type: string
+      server_repository:
+        description: Untrusted Server locator captured into the signed request and checked by the receiver
+        required: true
+        type: string
+      instance_config_path:
+        description: Server instance config path relative to its repository root
+        required: true
+        type: string
 
 permissions: {}
 
@@ -49,12 +57,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
           SECUREFIX_SOURCE_SHA: 96c2f3e9223f7f5f357660e59718558f3e2b283b
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
         run: |
           set -euo pipefail
           securefix new-client policy-check capture \
             --pull-request-number "$PULL_REQUEST_NUMBER" \
-            --config-path securefix-server.toml \
             --output native-policy-check/manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: manifest
