@@ -4,6 +4,9 @@ inputs:
   candidate-run-id:
     description: Successful source-bound candidate run whose CLI artifact may be reused
     required: false
+  candidate-source-sha:
+    description: Exact source SHA represented by the selected candidate artifact
+    required: false
 outputs:
   binary:
     description: Absolute path to the compiled CLI
@@ -16,13 +19,14 @@ runs:
   steps:
     - name: Reuse a verified main CI build when available
       id: reuse
-      if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      if: github.event_name != 'pull_request' && (github.event_name != 'pull_request_target' || (inputs.candidate-run-id != '' && inputs.candidate-source-sha != ''))
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         EVENT_NAME: ${{ github.event_name }}
         ACTION_PATH: ${{ github.action_path }}
         CANDIDATE_RUN_ID: ${{ inputs.candidate-run-id }}
+        CANDIDATE_SOURCE_SHA: ${{ inputs.candidate-source-sha }}
       run: bash "$ACTION_PATH/reuse-build.sh"
 
     - name: Install Rust toolchain

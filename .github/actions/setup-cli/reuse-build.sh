@@ -2,7 +2,9 @@
 set -euo pipefail
 
 root="$GITHUB_WORKSPACE"
-source_sha="$(git -C "$root" rev-parse HEAD)"
+checkout_sha="$(git -C "$root" rev-parse HEAD)"
+source_sha="${CANDIDATE_SOURCE_SHA:-$checkout_sha}"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Candidate source SHA is invalid."; exit 1; }
 artifact_name="securefix-cli-ubuntu-24.04-x64-rust-1.99.0-$source_sha"
 
 # The artifact is only built on this exact runner image/architecture and with
@@ -117,7 +119,14 @@ if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != pull_request_target && -
   fi
 fi
 
-if [[ "$EVENT_NAME" == workflow_dispatch && "${CANDIDATE_RUN_ID:-}" =~ ^[1-9][0-9]*$ && -n "${GH_TOKEN:-}" ]]; then
+candidate_event=false
+if [[ "$EVENT_NAME" == workflow_dispatch ]] || {
+  [[ "$EVENT_NAME" == pull_request_target && "${CANDIDATE_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
+}; then
+  candidate_event=true
+fi
+
+if [[ "$candidate_event" == true && "${CANDIDATE_RUN_ID:-}" =~ ^[1-9][0-9]*$ && -n "${GH_TOKEN:-}" ]]; then
   candidate_run_id="$CANDIDATE_RUN_ID"
   if candidate_run="$(gh api "repos/civitaspo/securefix-server/actions/runs/$candidate_run_id" 2>/dev/null)"; then
     candidate_branch="$(jq -r '.head_branch // empty' <<<"$candidate_run")"
