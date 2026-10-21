@@ -1,0 +1,50 @@
+name: Native request producer capture probe
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  capture:
+    name: request-producer-proof
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Create fixed sentinel manifest
+        shell: bash
+        run: |
+          set -eu
+          proof_dir="$RUNNER_TEMP/native-request-proof"
+          mkdir -m 700 "$proof_dir"
+          printf '%s\n' '{"schema":"securefix-native-producer-probe/v1","nonce":"fixed-sentinel"}' > "$proof_dir/manifest.json"
+
+      - name: Attest fixed sentinel
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/native-request-proof/manifest.json
+          create-storage-record: false
+          show-summary: false
+
+      - name: Copy bounded local bundle beside manifest
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -eu
+          test -s "$BUNDLE_PATH"
+          bundle_bytes="$(wc -c < "$BUNDLE_PATH")"
+          test "$bundle_bytes" -le 1048576
+          cp "$BUNDLE_PATH" "$RUNNER_TEMP/native-request-proof/bundle.json"
+
+      - name: Upload this run's proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-request-proof
+          path: ${{ runner.temp }}/native-request-proof/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
