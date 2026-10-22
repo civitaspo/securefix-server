@@ -4,7 +4,7 @@
 //! mutable release or chooses a trust identity; callers must supply those from
 //! authenticated deployment or fixed source configuration.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     fs::{self, OpenOptions},
@@ -19,6 +19,8 @@ const OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const MAX_BUNDLE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SUBJECT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERIFIER_OUTPUT_BYTES: u64 = 1024 * 1024;
+const MAX_VERIFIER_ERROR_BYTES: u64 = 8 * 1024;
+const MAX_VERIFIER_ERROR_SUMMARY_CHARS: usize = 1024;
 const MAX_VERIFIER_TIME: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy)]
@@ -73,10 +75,15 @@ pub fn verify_with_gh(subject: &Path, bundle: &Path, request: VerifyRequest<'_>)
     let signer = format!("{}/{}", request.signer_repository, request.signer_workflow);
     let isolation = tempfile::tempdir()?;
     let output_path = isolation.path().join("verifier-output.json");
+    let error_path = isolation.path().join("verifier-error.txt");
     let output_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&output_path)?;
+    let error_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&error_path)?;
     let mut command = Command::new("gh");
     command
         .arg("attestation")
@@ -105,7 +112,7 @@ pub fn verify_with_gh(subject: &Path, bundle: &Path, request: VerifyRequest<'_>)
         .env("XDG_CACHE_HOME", isolation.path().join("cache"))
         .stdin(Stdio::null())
         .stdout(output_file)
-        .stderr(Stdio::null())
+        .stderr(error_file)
         .spawn()
         .context("start GitHub attestation verifier")?;
     let deadline = Instant::now() + MAX_VERIFIER_TIME;
@@ -113,20 +120,51 @@ pub fn verify_with_gh(subject: &Path, bundle: &Path, request: VerifyRequest<'_>)
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if fs::metadata(&output_path)?.len() > MAX_VERIFIER_OUTPUT_BYTES
-            || Instant::now() >= deadline
-        {
+        let output_size = fs::metadata(&output_path)?.len();
+        let error_size = fs::metadata(&error_path)?.len();
+        if output_size > MAX_VERIFIER_OUTPUT_BYTES || error_size > MAX_VERIFIER_ERROR_BYTES {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = fs::remove_file(&output_path);
-            anyhow::bail!("GitHub attestation verification exceeded its bounds");
+            bail!("GitHub attestation verifier output exceeded its bounds");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("GitHub attestation verification exceeded its time bound");
         }
         std::thread::sleep(Duration::from_millis(25));
     };
     let output = read_bounded(&output_path, MAX_VERIFIER_OUTPUT_BYTES as usize)?;
+    let error = read_bounded(&error_path, MAX_VERIFIER_ERROR_BYTES as usize)?;
     let _ = fs::remove_file(&output_path);
-    ensure!(status.success(), "GitHub attestation verification failed");
+    let _ = fs::remove_file(&error_path);
+    if !status.success() {
+        let summary = verifier_error_summary(&error);
+        if summary.is_empty() {
+            bail!("GitHub attestation verification failed");
+        }
+        bail!("GitHub attestation verification failed: {summary}");
+    }
     serde_json::from_slice(&output).context("parse GitHub attestation verifier result")
+}
+
+fn verifier_error_summary(bytes: &[u8]) -> String {
+    let safe = String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    safe.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_VERIFIER_ERROR_SUMMARY_CHARS)
+        .collect()
 }
 
 /// Serialize the inline public attestation bundles into the JSONL format
@@ -193,6 +231,18 @@ mod tests {
         ] {
             assert!(public_bundles(&invalid, 7).is_err());
         }
+    }
+
+    #[test]
+    fn verifier_error_summary_is_bounded_and_has_no_control_characters() {
+        assert_eq!(
+            verifier_error_summary(b"failed\n\x1b[31mrequest\x1b[0m"),
+            "failed [31mrequest [0m"
+        );
+        assert_eq!(
+            verifier_error_summary(&vec![b'a'; MAX_VERIFIER_ERROR_SUMMARY_CHARS + 1]).len(),
+            MAX_VERIFIER_ERROR_SUMMARY_CHARS
+        );
     }
 
     #[test]

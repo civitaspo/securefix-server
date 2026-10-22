@@ -109,7 +109,8 @@ only `contents:write` to the selected destination repository. When the exact
 package is already published as an immutable release and its recorded producer
 and publisher evidence match, the workflow skips token creation. The host
 rechecks the source, asset bytes, release state, and recovery evidence before
-writing.
+writing. An owner may set `preflight_only` to run the same read-only
+qualification while skipping App-token creation and every release write step.
 
 This publisher implementation has local contract tests but is not yet
 scratch-qualified. Its presence does not qualify a release, wire a package
