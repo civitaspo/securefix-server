@@ -15,6 +15,14 @@ if [[ "$CHANNEL" == scratch ]]; then
     :
   elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-policy-check.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
     :
+  elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-approve.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
+    :
+  elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-merge.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
+    :
+  elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-securefix.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
+    :
+  elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
+    :
   else
     echo 'scratch package loading is restricted to an exact owner test host or approved immutable test workflow' >&2
     exit 1

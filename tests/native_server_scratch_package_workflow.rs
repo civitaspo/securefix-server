@@ -88,7 +88,7 @@ fn scratch_server_policy_receiver_admits_only_its_exact_label_context_before_net
         (
             SCRATCH,
             "1410312556",
-            "civitaspo/testing-securefix-server/.github/workflows/server-approve.yml@refs/heads/main",
+            "civitaspo/testing-securefix-server/.github/workflows/server-policy-check.yml@refs/heads/release",
             "label",
             "1",
         ),
@@ -185,5 +185,60 @@ fn server_policy_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow()
             step["env"]["CLI_BINARY"],
             "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
         );
+    }
+}
+
+#[test]
+fn scratch_server_role_receivers_admit_only_their_exact_label_context_before_network() {
+    for role in ["approve", "merge", "securefix", "release"] {
+        let caller = format!("{SCRATCH}/.github/workflows/server-{role}.yml@refs/heads/main");
+        let (accepted, marker, _temp) = run_loader(SCRATCH, "1410312556", &caller, "label", "1");
+        assert!(
+            marker.exists(),
+            "the exact {role} tuple should pass caller admission: {}",
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&accepted.stderr)
+                .contains("scratch package loading is restricted")
+        );
+
+        for (repository, id, workflow_ref, event, attempt) in [
+            (
+                "civitaspo/other",
+                "1410312556",
+                caller.as_str(),
+                "label",
+                "1",
+            ),
+            (SCRATCH, "1250079425", caller.as_str(), "label", "1"),
+            (
+                SCRATCH,
+                "1410312556",
+                "civitaspo/testing-securefix-server/.github/workflows/server-other.yml@refs/heads/main",
+                "label",
+                "1",
+            ),
+            (
+                SCRATCH,
+                "1410312556",
+                caller.as_str(),
+                "workflow_dispatch",
+                "1",
+            ),
+            (SCRATCH, "1410312556", caller.as_str(), "label", "2"),
+        ] {
+            let (rejected, marker, _temp) =
+                run_loader(repository, id, workflow_ref, event, attempt);
+            assert!(!rejected.status.success());
+            assert!(
+                !marker.exists(),
+                "altered {role} context unexpectedly reached curl"
+            );
+            assert!(
+                String::from_utf8_lossy(&rejected.stderr)
+                    .contains("scratch package loading is restricted")
+            );
+        }
     }
 }
