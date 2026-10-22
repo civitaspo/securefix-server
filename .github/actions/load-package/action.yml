@@ -20,7 +20,7 @@ inputs:
     description: Configured source repository default branch
     required: true
   owner-id:
-    description: Configured repository owner ID used to qualify a scratch prerelease
+    description: Trusted User actor ID declared by the immutable caller for owner-dispatched package runs
     required: true
   channel:
     description: stable for normal consumers or scratch for an explicit prerelease probe

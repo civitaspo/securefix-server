@@ -39,8 +39,7 @@ Approval uses the machine-user PAT only after validation and explicitly sends th
 The machine user's identity must be `civitaspo-bot`, and it cannot approve its own PR.
 Only a non-author approval for the current head counts; a reviewer's later dismissal or change request supersedes an earlier approval.
 
-The separate `policy-check.yml` client wrapper calls `reusable-policy-check.yml` on PR-target events and default-branch pushes, granting `contents: read`, `attestations: read`, `actions: read`, and `pull-requests: read`.
-The server workflow handles its own PR-target events and Client App request labels; default-branch push requests are supported only for callers. Server-local pushes do not invoke that caller-only capture path.
+The separate `policy-check.yml` Client wrapper calls `reusable-policy-check.yml` on `pull_request_target` events. That reusable captures and attests a native policy-check request, then dispatches its exact label to the configured Server instance. The caller grants `actions: read`, `contents: read`, `pull-requests: read`, `attestations: write`, and `id-token: write`; the Client App token is scoped to the Server repository and only receives `issues: write`.
 The Server App alone publishes the stable required `securefix-policy-check` result for that SHA; its check metadata binds the full active control identity, and merge validation requires that identity for the same head.
 It verifies source signatures, sensitive-path owner authorization, and current-head approval.
 Approval and merge authorization can refresh that check after an owner command.
@@ -55,6 +54,7 @@ Before every merge attempt it rechecks the exact head, comment, timeline, signat
 `securefix-policy-check` must come from the Server App with a completed success.
 Duplicate matching policy check runs, pending checks, and missing approvals cannot pass.
 GitHub's GraphQL review decision must also be `APPROVED`.
+Immediately before the merge request, the processor rereads the configured required checks, the authority-bound policy result, the latest exact-head approval marker and review ID, and GraphQL's review decision; it compares them with the accepted merge fence.
 
 The contents-write token is created after readiness succeeds and is scoped to the target repository.
 The Merge API receives the accepted SHA as its optimistic precondition.

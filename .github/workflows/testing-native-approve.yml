@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       package_publication_json:
-        description: Exact JSON publication record from testing-publish-native-package
+        description: Exact 9-field package publication JSON accepted by the qualified pre23 host (source_sha, source_branch, tag, release_id, asset_id, asset_sha256, asset_size, producer_run_id, producer_run_attempt).
         required: true
         type: string
 
@@ -56,9 +56,9 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a # v0.2.45-pre.12
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
+          action-sha: 6be9fb42e14770a9162301787e158f7db3ab918a
           source-repository: ${{ steps.package-config.outputs.source-repository }}
           source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
           destination-repository: ${{ steps.package-config.outputs.destination-repository }}
@@ -66,14 +66,15 @@ jobs:
           source-default-branch: ${{ steps.package-config.outputs.source-default-branch }}
           owner-id: ${{ steps.package-config.outputs.owner-id }}
           channel: scratch
-          publication-source-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          publication-source-branch: main
-          publication-tag: v0.2.45-pre.12
-          publication-release-id: '420243090'
-          publication-asset-id: '664424003'
-          publication-asset-sha256: a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083
-          publication-asset-size: '10893768'
-          publication-producer-run-id: '39710467717'
+          manifest-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
+          publication-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
+          publication-source-branch: integration/native-package-pre23
+          publication-tag: v0.2.45-pre.23
+          publication-release-id: '420735040'
+          publication-asset-id: '665912019'
+          publication-asset-sha256: fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936
+          publication-asset-size: '11767224'
+          publication-producer-run-id: '39783133806'
           publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Validate the owner-selected request without approval credentials
@@ -129,9 +130,9 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a # v0.2.45-pre.12
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
+          action-sha: 6be9fb42e14770a9162301787e158f7db3ab918a
           source-repository: ${{ steps.package-config.outputs.source-repository }}
           source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
           destination-repository: ${{ steps.package-config.outputs.destination-repository }}
@@ -139,14 +140,15 @@ jobs:
           source-default-branch: ${{ steps.package-config.outputs.source-default-branch }}
           owner-id: ${{ steps.package-config.outputs.owner-id }}
           channel: scratch
-          publication-source-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          publication-source-branch: main
-          publication-tag: v0.2.45-pre.12
-          publication-release-id: '420243090'
-          publication-asset-id: '664424003'
-          publication-asset-sha256: a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083
-          publication-asset-size: '10893768'
-          publication-producer-run-id: '39710467717'
+          manifest-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
+          publication-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
+          publication-source-branch: integration/native-package-pre23
+          publication-tag: v0.2.45-pre.23
+          publication-release-id: '420735040'
+          publication-asset-id: '665912019'
+          publication-asset-sha256: fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936
+          publication-asset-size: '11767224'
+          publication-producer-run-id: '39783133806'
           publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Apply the current-head approval with the trusted Bot credential

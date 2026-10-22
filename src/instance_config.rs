@@ -530,6 +530,11 @@ mod tests {
 
     #[test]
     fn release_request_label_prefix_is_explicit_bounded_and_namespaced() {
+        rejects(&changed(
+            &fixture_text(),
+            "release_request_label_prefix = \"\"\n",
+            "",
+        ));
         let testing = changed(
             &fixture_text(),
             "release_request_label_prefix = \"\"",

@@ -65,6 +65,7 @@ jobs:
           set -euo pipefail
           [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
           case "$OPERATION" in
+            policy_check) command=(new-client policy-check capture) ;;
             approval) command=(new-client approve capture) ;;
             merge) command=(new-client merge capture) ;;
             *) echo 'unsupported Client request operation' >&2; exit 1 ;;

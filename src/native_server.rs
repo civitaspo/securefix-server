@@ -818,25 +818,30 @@ fn verify_request_with_deployment(
                 | securefix::api::NativeScratchMode::Merge
                 | securefix::api::NativeScratchMode::Securefix
         ) {
-        Some(if scratch {
-            native_scratch_writer(
-                &config,
-                &config_bytes,
-                instance_config_path,
-                &manifest,
-                &manifest_bytes,
-                mode,
-                target_policy_control_identity.as_deref(),
-            )?
+        if !scratch && mode == securefix::api::NativeScratchMode::Merge {
+            None
         } else {
-            native_instance_writer(
-                &captured,
-                instance_config_path,
-                &manifest,
-                &manifest_bytes,
-                mode,
-            )?
-        })
+            Some(if scratch {
+                native_scratch_writer(
+                    &config,
+                    &config_bytes,
+                    instance_config_path,
+                    &manifest,
+                    &manifest_bytes,
+                    mode,
+                    target_policy_control_identity.as_deref(),
+                )?
+            } else {
+                native_instance_writer(
+                    &captured,
+                    instance_config_path,
+                    &manifest,
+                    &manifest_bytes,
+                    mode,
+                    None,
+                )?
+            })
+        }
     } else {
         None
     };
@@ -860,6 +865,7 @@ fn native_instance_writer(
     manifest: &RequestManifest,
     manifest_bytes: &[u8],
     mode: securefix::api::NativeScratchMode,
+    merge_fence: Option<&securefix::api::NativeInstanceMergeFence>,
 ) -> Result<securefix::api::GitHub> {
     let instance_mode = match mode {
         securefix::api::NativeScratchMode::PolicyCheck => {
@@ -899,6 +905,7 @@ fn native_instance_writer(
         producer_workflow_path: &manifest.producer.workflow_path,
         producer_workflow_sha: &manifest.producer.workflow_sha,
         client_workflow_epoch: &manifest.client_workflow_epoch,
+        merge_fence,
     };
     securefix::api::GitHub::native_instance_from_env(
         "SECUREFIX_CLIENT_TOKEN",
@@ -920,6 +927,11 @@ struct ScratchPackagePublicationInput {
     asset_size: u64,
     producer_run_id: u64,
     producer_run_attempt: u64,
+    publisher_workflow: String,
+    publisher_branch: String,
+    publisher_sha: String,
+    publisher_run_id: u64,
+    publisher_run_attempt: u64,
 }
 
 fn scratch_package_publication(
@@ -942,6 +954,11 @@ fn scratch_package_publication(
         asset_size: input.asset_size,
         producer_run_id: input.producer_run_id,
         producer_run_attempt: input.producer_run_attempt,
+        publisher_workflow: input.publisher_workflow,
+        publisher_branch: input.publisher_branch,
+        publisher_sha: input.publisher_sha,
+        publisher_run_id: input.publisher_run_id,
+        publisher_run_attempt: input.publisher_run_attempt,
     })
 }
 
@@ -1751,6 +1768,7 @@ fn apply_securefix_mode(
             manifest,
             &verified.manifest_bytes,
             securefix::api::NativeScratchMode::Securefix,
+            None,
         )?
     };
     let server_run = std::env::var("GITHUB_RUN_ID").unwrap_or_default();
@@ -2060,13 +2078,25 @@ fn apply_native_merge_from_runs(
             &approval.manifest,
         )?;
     }
-    validate_native_merge_readiness(&merge, &approval)?;
+    let merge_fence = validate_native_merge_readiness(&merge, &approval)?;
 
     if apply {
-        let writer = merge
-            .writer
-            .as_ref()
-            .context("native merge writer was not captured before apply")?;
+        let writer = if scratch {
+            merge
+                .writer
+                .as_ref()
+                .context("native scratch merge writer was not captured before apply")?
+                .clone()
+        } else {
+            native_instance_writer(
+                &merge.instance_authority,
+                &merge.instance_config_path,
+                &merge.manifest,
+                &merge.manifest_bytes,
+                securefix::api::NativeScratchMode::Merge,
+                merge_fence.as_ref(),
+            )?
+        };
         let sha = writer.merge_native_pull_request()?;
         println!("merge_commit_sha={sha}");
     }
@@ -2422,7 +2452,7 @@ fn validate_native_merge_pair(merge: &RequestManifest, approval: &RequestManifes
 fn validate_native_merge_readiness(
     merge: &VerifiedRequest,
     approval: &VerifiedRequest,
-) -> Result<()> {
+) -> Result<Option<securefix::api::NativeInstanceMergeFence>> {
     validate_native_merge_pair(&merge.manifest, &approval.manifest)?;
     let manifest = &merge.manifest;
     let api = &merge.client_api;
@@ -2452,6 +2482,22 @@ fn validate_native_merge_readiness(
             None
         };
 
+    let Some(expected_policy_id) = expected_policy_id else {
+        let approval_digest = securefix::hex_encode(Sha256::digest(&approval.manifest_bytes));
+        let readiness = securefix::api::NativeInstanceMergeReadiness {
+            repository: &manifest.repository.full_name,
+            repository_id: manifest.repository.id,
+            pull_number: manifest.pull_request.number,
+            head_sha: &manifest.pull_request.head_sha,
+            authority: &merge.instance_authority.authority,
+            approval_request_sha256: &approval_digest,
+            approval_producer_run_id: approval.manifest.producer.run_id,
+            approval_producer_run_attempt: approval.manifest.producer.run_attempt,
+        };
+        return securefix::api::capture_native_instance_merge_fence(api, &merge.config, &readiness)
+            .map(Some);
+    };
+
     let mut checks = Vec::new();
     for page in 1..=100 {
         let response: Value = api.get_uncached(&format!(
@@ -2471,40 +2517,20 @@ fn validate_native_merge_readiness(
             "native merge check run pagination exceeded limit"
         );
     }
-    let checks_ok = if let Some(expected_policy_id) = expected_policy_id.as_deref() {
-        native_merge_checks_ready(
-            &checks,
-            merge.config.apps.status_check_id,
-            merge.config.apps.policy_check_id,
-            expected_policy_id,
-        )?
-    } else {
-        native_instance_merge_checks_ready(
-            &checks,
-            merge.config.apps.status_check_id,
-            merge.config.apps.policy_check_id,
-            &manifest.pull_request.head_sha,
-            &merge.instance_authority.authority,
-        )?
-    };
+    let checks_ok = native_merge_checks_ready(
+        &checks,
+        merge.config.apps.status_check_id,
+        merge.config.apps.policy_check_id,
+        &expected_policy_id,
+    )?;
 
     let reviewer = &merge.config.identities.approval_reviewer;
     let approval_digest = securefix::hex_encode(Sha256::digest(&approval.manifest_bytes));
-    let expected_marker = if approval.target_policy_control_identity.is_some() {
-        securefix::api::native_approval_body(
-            &approval.manifest.server_authority,
-            &approval.manifest.pull_request.head_sha,
-            &approval_digest,
-        )?
-    } else {
-        securefix::api::native_instance_approval_body(
-            &approval.manifest.server_authority,
-            &approval.manifest.pull_request.head_sha,
-            &approval_digest,
-            approval.manifest.producer.run_id,
-            approval.manifest.producer.run_attempt,
-        )?
-    }["body"]
+    let expected_marker = securefix::api::native_approval_body(
+        &approval.manifest.server_authority,
+        &approval.manifest.pull_request.head_sha,
+        &approval_digest,
+    )?["body"]
         .as_str()
         .context("native approval body has no marker")?
         .to_owned();
@@ -2533,40 +2559,7 @@ fn validate_native_merge_readiness(
             && decision["repository"]["pullRequest"]["reviewDecision"] == "APPROVED",
         "native merge requires current required checks and the exact native approval marker"
     );
-    Ok(())
-}
-
-fn native_instance_merge_checks_ready(
-    checks: &[Value],
-    status_app_id: u64,
-    policy_app_id: u64,
-    expected_head: &str,
-    authority: &securefix::api::NativeAuthoritySnapshot,
-) -> Result<bool> {
-    let ci_ok = native_latest_check(checks, "status-check", status_app_id).is_some_and(|check| {
-        check["status"] == "completed"
-            && (check["conclusion"] == "success" || check["conclusion"] == "skipped")
-    });
-    let policy_check = native_latest_check(
-        checks,
-        securefix::api::NATIVE_POLICY_CHECK_NAME,
-        policy_app_id,
-    );
-    let policy_ok = if let Some(check) = policy_check {
-        let identity = securefix::api::parse_native_instance_policy_check_external_id(
-            check["external_id"]
-                .as_str()
-                .context("native instance policy check has no external identity")?,
-        )?;
-        check["head_sha"].as_str() == Some(expected_head)
-            && identity.head_sha == expected_head
-            && identity.authority_sha256 == securefix::api::native_authority_sha256(authority)?
-            && check["status"] == "completed"
-            && check["conclusion"] == "success"
-    } else {
-        false
-    };
-    Ok(ci_ok && policy_ok)
+    Ok(None)
 }
 
 fn native_latest_check<'a>(checks: &'a [Value], name: &str, app_id: u64) -> Option<&'a Value> {
@@ -3270,61 +3263,6 @@ mod tests {
     }
 
     #[test]
-    fn instance_merge_requires_current_head_and_authority_bound_policy_check() {
-        let authority = securefix::api::NativeAuthoritySnapshot {
-            instance_repository: "owner/server".to_owned(),
-            instance_id: 9,
-            default_branch: "main".to_owned(),
-            config_path: "securefix-server.toml".to_owned(),
-            config_sha256: "a".repeat(64),
-            epoch: "b".repeat(40),
-            workflows: vec![],
-        };
-        let head = "c".repeat(40);
-        let request_sha = "d".repeat(64);
-        let external_id = securefix::api::native_instance_policy_check_external_id(
-            &authority,
-            &head,
-            &request_sha,
-        )
-        .unwrap();
-        let checks = vec![
-            serde_json::json!({
-                "id": 1,
-                "name": "status-check",
-                "app": {"id": 10},
-                "status": "completed",
-                "conclusion": "success"
-            }),
-            serde_json::json!({
-                "id": 2,
-                "name": securefix::api::NATIVE_POLICY_CHECK_NAME,
-                "app": {"id": 11},
-                "head_sha": head,
-                "external_id": external_id,
-                "status": "completed",
-                "conclusion": "success"
-            }),
-        ];
-        assert!(native_instance_merge_checks_ready(&checks, 10, 11, &head, &authority).unwrap());
-        assert!(
-            !native_instance_merge_checks_ready(&checks, 10, 11, &"e".repeat(40), &authority)
-                .unwrap()
-        );
-        let mut changed = authority.clone();
-        changed.config_sha256 = "f".repeat(64);
-        assert!(!native_instance_merge_checks_ready(&checks, 10, 11, &head, &changed).unwrap());
-        let wrong_app = vec![checks[0].clone(), {
-            let mut check = checks[1].clone();
-            check["app"]["id"] = serde_json::json!(99);
-            check
-        }];
-        assert!(
-            !native_instance_merge_checks_ready(&wrong_app, 10, 11, &head, &authority).unwrap()
-        );
-    }
-
-    #[test]
     fn policy_check_run_locators_must_match_the_attested_request() {
         let request = manifest();
         assert!(
@@ -3420,19 +3358,40 @@ mod tests {
     #[test]
     fn scratch_package_publication_json_is_bounded_and_strict() {
         let json = format!(
-            r#"{{"source_sha":"{}","source_branch":"main","tag":"v0.2.45-pre.23","release_id":420243090,"asset_id":664424003,"asset_sha256":"{}","asset_size":10893768,"producer_run_id":39710467717,"producer_run_attempt":1}}"#,
-            "a".repeat(40),
-            "b".repeat(64),
+            r#"{{"source_sha":"{}","source_branch":"integration/native-package-pre23","tag":"v0.2.45-pre.23","release_id":420735040,"asset_id":665912019,"asset_sha256":"{}","asset_size":11767224,"producer_run_id":39783133806,"producer_run_attempt":1,"publisher_workflow":".github/workflows/testing-publish-native-package.yml","publisher_branch":"main","publisher_sha":"{}","publisher_run_id":39783817011,"publisher_run_attempt":1}}"#,
+            "3b88bcd0e228791e355aec238d5c7e95027b3f6f",
+            "fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936",
+            "6be9fb42e14770a9162301787e158f7db3ab918a",
         );
         let record = parse_scratch_package_publication_input(&json).unwrap();
-        assert_eq!(record.source_sha, "a".repeat(40));
-        assert_eq!(record.producer_run_id, 39710467717);
+        assert_eq!(
+            record.source_sha,
+            "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
+        );
+        assert_eq!(record.producer_run_id, 39783133806);
+        assert_eq!(
+            record.publisher_workflow,
+            ".github/workflows/testing-publish-native-package.yml"
+        );
+        assert_eq!(record.publisher_branch, "main");
+        assert_eq!(
+            record.publisher_sha,
+            "6be9fb42e14770a9162301787e158f7db3ab918a"
+        );
+        assert_eq!(record.publisher_run_id, 39783817011);
+        assert_eq!(record.publisher_run_attempt, 1);
         assert!(parse_scratch_package_publication_input(&format!("{json} ")).is_ok());
         assert!(
             parse_scratch_package_publication_input(&json.replace(
-                "\"release_id\":420243090,",
-                "\"release_id\":420243090,\"extra\":true,"
+                "\"release_id\":420735040,",
+                "\"release_id\":420735040,\"extra\":true,",
             ))
+            .is_err()
+        );
+        assert!(
+            parse_scratch_package_publication_input(
+                &json.replace(",\"publisher_run_attempt\":1", "")
+            )
             .is_err()
         );
         assert!(parse_scratch_package_publication_input(&" ".repeat(4097)).is_err());

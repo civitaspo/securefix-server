@@ -35,7 +35,17 @@ workflows:
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    '.github/workflows/native-package-build.yml':
+        - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
+        - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/policy-check.yml':
+        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
+        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    '.github/workflows/publish-native-package.yml':
+        - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
@@ -65,10 +75,7 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
     '.github/workflows/reusable-merge-request.yml': []
-    '.github/workflows/reusable-policy-check.yml':
-        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
-        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    '.github/workflows/reusable-policy-check.yml': []
     '.github/workflows/reusable-release-pr-sync.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -141,7 +148,7 @@ workflows:
     '.github/workflows/testing-native-approve.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
+        - 'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a'
     '.github/workflows/testing-native-merge.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
@@ -152,7 +159,9 @@ workflows:
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-    '.github/workflows/testing-native-policy-check-authority.yml': []
+    '.github/workflows/testing-native-policy-check-authority.yml':
+        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
+        - 'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a'
     '.github/workflows/testing-native-release-assets-publish.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
@@ -267,9 +276,9 @@ dependencies:
         commit: 'sha1-ea165f8d65b6e75b540449e92b4886f43607fa02'
         owner_id: 44036562
         repo_id: 192625955
-    'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef':
+    'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a':
         ref: 'main'
-        commit: 'sha1-c6aa3110bb31d5ca5bae452d291870066f0147ef'
+        commit: 'sha1-6be9fb42e14770a9162301787e158f7db3ab918a'
         owner_id: 4525500
         repo_id: 1250079425
     'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460':

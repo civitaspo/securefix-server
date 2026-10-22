@@ -144,10 +144,15 @@ pub struct NativeClientPackageSnapshot {
     pub asset_name: String,
     pub asset_size: u64,
     pub asset_sha256: String,
-    pub publisher_workflow: String,
-    pub publisher_branch: String,
-    pub publisher_run_id: u64,
-    pub publisher_run_attempt: u64,
+    pub package_publisher_workflow: String,
+    pub package_publisher_branch: String,
+    pub package_publisher_sha: String,
+    pub package_publisher_run_id: u64,
+    pub package_publisher_run_attempt: u64,
+    pub package_producer_workflow: String,
+    pub package_producer_branch: String,
+    pub package_producer_run_id: u64,
+    pub package_producer_run_attempt: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3495,18 +3500,30 @@ fn validate_native_client_package_snapshot_values(
             && package.asset_id > 0
             && !package.asset_name.is_empty()
             && package.asset_size > 0
-            && package.publisher_run_id > 0
-            && package.publisher_run_attempt > 0,
+            && package.package_producer_run_id > 0
+            && package.package_producer_run_attempt > 0
+            && package.package_publisher_run_id > 0
+            && package.package_publisher_run_attempt > 0,
         "accepted Client package snapshot contains an invalid release identity"
     );
     ensure!(
-        package.publisher_workflow.starts_with(".github/workflows/")
-            && package.publisher_workflow.ends_with(".yml")
-            && !package.publisher_workflow.contains("..")
-            && package.publisher_branch.len() <= 255
-            && crate::config::validate_branch(&package.publisher_branch).is_ok(),
+        package
+            .package_producer_workflow
+            .starts_with(".github/workflows/")
+            && package.package_producer_workflow.ends_with(".yml")
+            && !package.package_producer_workflow.contains("..")
+            && package.package_producer_branch.len() <= 255
+            && crate::config::validate_branch(&package.package_producer_branch).is_ok()
+            && package
+                .package_publisher_workflow
+                .starts_with(".github/workflows/")
+            && package.package_publisher_workflow.ends_with(".yml")
+            && !package.package_publisher_workflow.contains("..")
+            && package.package_publisher_branch.len() <= 255
+            && crate::config::validate_branch(&package.package_publisher_branch).is_ok(),
         "accepted Client package snapshot contains an invalid publisher identity"
     );
+    CommitSha::parse(&package.package_publisher_sha)?;
     validate_sha256_digest(&package.asset_sha256)
 }
 
@@ -3514,7 +3531,15 @@ fn native_client_package_snapshot(
     package: &securefix::package::VerifiedNativeClientPackage,
 ) -> Result<NativeClientPackageSnapshot> {
     let release = package.package.release();
-    let (publisher_run_id, publisher_run_attempt) = package.package.publisher_run();
+    let producer_run = package.package.producer_run();
+    ensure!(
+        producer_run
+            == (
+                package.package_producer_run_id,
+                package.package_producer_run_attempt
+            ),
+        "verified package producer run differs from its explicit identity"
+    );
     let snapshot = NativeClientPackageSnapshot {
         distributor_repository: release.publisher.repository.clone(),
         distributor_id: release.publisher.repository_id,
@@ -3530,10 +3555,15 @@ fn native_client_package_snapshot(
         asset_name: release.asset.name.clone(),
         asset_size: release.asset.size,
         asset_sha256: release.asset.sha256.clone(),
-        publisher_workflow: package.package_publisher_workflow.clone(),
-        publisher_branch: package.package_publisher_branch.clone(),
-        publisher_run_id,
-        publisher_run_attempt,
+        package_publisher_workflow: package.package_publisher_workflow.clone(),
+        package_publisher_branch: package.package_publisher_branch.clone(),
+        package_publisher_sha: package.package_publisher_sha.clone(),
+        package_publisher_run_id: package.package_publisher_run_id,
+        package_publisher_run_attempt: package.package_publisher_run_attempt,
+        package_producer_workflow: package.package_producer_workflow.clone(),
+        package_producer_branch: package.package_producer_branch.clone(),
+        package_producer_run_id: package.package_producer_run_id,
+        package_producer_run_attempt: package.package_producer_run_attempt,
     };
     validate_native_client_package_snapshot_values(&snapshot)?;
     Ok(snapshot)
@@ -8272,5 +8302,48 @@ mod tests {
             .unwrap();
         assert!(ensure_published_immutable_release(&published, 42, &tag).is_err());
         api.finish();
+    }
+
+    #[test]
+    fn native_client_snapshot_keeps_package_producer_and_publisher_separate() {
+        let snapshot = NativeClientPackageSnapshot {
+            distributor_repository: "civitaspo/securefix-server".into(),
+            distributor_id: 1_250_079_425,
+            implementation_sha: "1".repeat(40),
+            implementation_version: "1.0.0".into(),
+            loader_action_sha: "2".repeat(40),
+            binary_source_sha: "3".repeat(40),
+            binary_version: "1.0.0".into(),
+            protocol: "securefix-native-request/v1".into(),
+            release_tag: "v1.0.0".into(),
+            release_id: 100,
+            asset_id: 101,
+            asset_name: "securefix-linux-x86_64".into(),
+            asset_size: 1024,
+            asset_sha256: "a".repeat(64),
+            package_publisher_workflow: ".github/workflows/publish-native-package.yml".into(),
+            package_publisher_branch: "main".into(),
+            package_publisher_sha: "4".repeat(40),
+            package_publisher_run_id: 202,
+            package_publisher_run_attempt: 1,
+            package_producer_workflow: ".github/workflows/native-package-build.yml".into(),
+            package_producer_branch: "main".into(),
+            package_producer_run_id: 201,
+            package_producer_run_attempt: 1,
+        };
+
+        validate_native_client_package_snapshot_values(&snapshot).unwrap();
+        assert_ne!(
+            snapshot.package_producer_run_id,
+            snapshot.package_publisher_run_id
+        );
+        assert_ne!(
+            snapshot.package_producer_workflow,
+            snapshot.package_publisher_workflow
+        );
+
+        let mut missing_publisher = snapshot;
+        missing_publisher.package_publisher_run_attempt = 0;
+        assert!(validate_native_client_package_snapshot_values(&missing_publisher).is_err());
     }
 }

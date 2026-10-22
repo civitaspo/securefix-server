@@ -152,6 +152,40 @@ pub struct NativeInstanceWriteTarget<'a> {
     pub producer_workflow_path: &'a str,
     pub producer_workflow_sha: &'a str,
     pub client_workflow_epoch: &'a str,
+    pub merge_fence: Option<&'a NativeInstanceMergeFence>,
+}
+
+/// The exact reviewer approval and successful required-check state accepted
+/// for one native instance merge. The writer checks this again immediately
+/// before the Merge API request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeInstanceMergeFence {
+    repository: String,
+    repository_id: u64,
+    pull_number: u64,
+    head_sha: String,
+    authority_sha256: String,
+    approval_review_id: u64,
+    approval_request_sha256: String,
+    approval_producer_run_id: u64,
+    approval_producer_run_attempt: u32,
+    reviewer_id: u64,
+    reviewer_login: String,
+    status_app_id: u64,
+    policy_app_id: u64,
+}
+
+/// Accepted merge inputs used to capture and later revalidate the same
+/// required-check and owner-review state.
+pub struct NativeInstanceMergeReadiness<'a> {
+    pub repository: &'a str,
+    pub repository_id: u64,
+    pub pull_number: u64,
+    pub head_sha: &'a str,
+    pub authority: &'a NativeAuthoritySnapshot,
+    pub approval_request_sha256: &'a str,
+    pub approval_producer_run_id: u64,
+    pub approval_producer_run_attempt: u32,
 }
 
 /// One release asset admitted by an already validated immutable release plan.
@@ -191,6 +225,74 @@ pub struct NativeReleaseWriteTarget<'a> {
     pub assets: &'a [NativeReleaseAsset],
     /// Native binaries selected by the release plan, keyed to configured targets.
     pub native_assets: &'a [NativeReleaseAsset],
+    pub release_id: Option<u64>,
+}
+
+/// A package release publication has a single verified executable and a
+/// separate protected publisher host. The scratch channel is available only
+/// to the explicit owner-selected test path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageReleaseChannel {
+    Stable,
+    Scratch,
+}
+
+/// Read-only result of checking the tag before a package writer is issued.
+/// Existing releases are recoverable only when their complete recorded source,
+/// producer, publisher authority, and bytes match this exact candidate.
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PackageReleasePreflightState {
+    Create,
+    ResumeDraft {
+        release_id: u64,
+        asset_uploaded: bool,
+    },
+    AlreadyPublished {
+        release_id: u64,
+        asset_id: u64,
+        publisher_run_id: u64,
+        publisher_run_attempt: u64,
+    },
+}
+
+pub struct PackageReleaseWriteTarget<'a> {
+    pub channel: PackageReleaseChannel,
+    pub source_repository: &'a str,
+    pub source_repository_id: u64,
+    pub source_owner_id: u64,
+    pub source_branch: &'a str,
+    pub source_default_branch: &'a str,
+    pub source_sha: &'a str,
+    pub source_manifest_sha256: &'a str,
+    pub destination_repository: &'a str,
+    pub destination_repository_id: u64,
+    pub destination_default_branch: &'a str,
+    /// Exact protected destination default-branch head observed by the writer.
+    /// For stable releases this can be newer than the producer's source SHA.
+    pub destination_branch_sha: &'a str,
+    /// Exact commit selected by the release tag. Stable releases bind this to
+    /// the producer source SHA; scratch releases bind it to the destination
+    /// branch head captured for the test publication.
+    pub destination_target_sha: &'a str,
+    pub version: &'a str,
+    pub tag: &'a str,
+    pub asset_name: &'a str,
+    pub asset_size: u64,
+    pub asset_sha256: &'a str,
+    pub max_asset_bytes: u64,
+    pub producer_workflow: &'a str,
+    pub producer_run_id: u64,
+    pub producer_run_attempt: u64,
+    pub producer_artifact_id: u64,
+    pub producer_artifact_size: u64,
+    pub producer_artifact_sha256: &'a str,
+    pub publisher_workflow: &'a str,
+    pub publisher_sha: &'a str,
+    pub publisher_branch: &'a str,
+    pub publisher_run_id: u64,
+    pub publisher_run_attempt: u64,
+    pub owner_id: u64,
     pub release_id: Option<u64>,
 }
 
@@ -270,6 +372,7 @@ enum WriteContext {
         max_asset_bytes: u64,
         release_id: Option<u64>,
     },
+    PackageRelease(Box<PackageReleaseWrite>),
     NativeScratch(Box<NativeScratchWrite>),
     NativeInstance(Box<NativeInstanceWrite>),
     NativeRelease(Box<NativeReleaseWrite>),
@@ -330,6 +433,7 @@ struct NativeInstanceWrite {
     producer_workflow_path: String,
     producer_workflow_sha: String,
     client_workflow_epoch: String,
+    merge_fence: Option<NativeInstanceMergeFence>,
 }
 
 #[derive(Clone)]
@@ -357,6 +461,44 @@ struct NativeReleaseWrite {
     client_package: NativeClientPackageIdentity,
     assets: Vec<NativeReleaseAsset>,
     native_assets: Vec<NativeReleaseAsset>,
+    release_id: Option<u64>,
+}
+
+#[derive(Clone)]
+struct PackageReleaseWrite {
+    channel: PackageReleaseChannel,
+    source_repository: String,
+    source_repository_id: u64,
+    source_owner_id: u64,
+    source_branch: String,
+    source_default_branch: String,
+    source_sha: String,
+    source_manifest_sha256: String,
+    destination_repository: String,
+    destination_repository_id: u64,
+    destination_default_branch: String,
+    destination_branch_sha: String,
+    destination_target_sha: String,
+    version: String,
+    tag: String,
+    asset_name: String,
+    asset_size: u64,
+    asset_sha256: String,
+    max_asset_bytes: u64,
+    producer_workflow: String,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
+    producer_artifact_id: u64,
+    producer_artifact_size: u64,
+    producer_artifact_sha256: String,
+    publisher_workflow: String,
+    publisher_sha: String,
+    publisher_branch: String,
+    publisher_run_id: u64,
+    publisher_run_attempt: u64,
+    owner_id: u64,
+    preflight_state: PackageReleasePreflightState,
+    recovery_body_updated: bool,
     release_id: Option<u64>,
 }
 
@@ -406,8 +548,13 @@ struct NativeClientPackageIdentity {
     asset_sha256: String,
     publisher_workflow: String,
     publisher_branch: String,
+    publisher_sha: String,
     publisher_run_id: u64,
     publisher_run_attempt: u64,
+    producer_workflow: String,
+    producer_branch: String,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
 }
 
 #[derive(Debug)]
@@ -676,6 +823,654 @@ impl GitHub {
         Ok(())
     }
 
+    /// Create a source-bound package release writer. The binary remains data:
+    /// this context only verifies, uploads, and publishes its exact bytes.
+    pub fn package_release_from_env(
+        read_name: &str,
+        write_name: &str,
+        target: &PackageReleaseWriteTarget<'_>,
+    ) -> Result<Self> {
+        let preflight_state = Self::package_release_preflight_from_env(read_name, target)?;
+        ensure!(
+            !matches!(
+                preflight_state,
+                PackageReleasePreflightState::AlreadyPublished { .. }
+            ),
+            "an already-published package release cannot be rewritten"
+        );
+
+        let read_token =
+            std::env::var(read_name).with_context(|| format!("missing {read_name}"))?;
+        ensure!(!read_token.is_empty(), "{read_name} is empty");
+        let write_token =
+            std::env::var(write_name).with_context(|| format!("missing {write_name}"))?;
+        ensure!(!write_token.is_empty(), "{write_name} is empty");
+        ensure!(
+            read_token != write_token,
+            "package read and write tokens must be separate credentials"
+        );
+        let mut api = Self::new("https://api.github.com", read_token)?;
+        let write_reader = Self::new("https://api.github.com", write_token.clone())?;
+        require_single_repository_installation(
+            &write_reader,
+            target.destination_repository_id,
+            target.destination_repository,
+        )?;
+        let source_repository: Value =
+            api.get_uncached(&format!("/repos/{}", target.source_repository))?;
+        ensure!(
+            source_repository["id"].as_u64() == Some(target.source_repository_id)
+                && source_repository["full_name"] == target.source_repository
+                && source_repository["owner"]["id"].as_u64() == Some(target.source_owner_id)
+                && source_repository["default_branch"] == target.source_default_branch,
+            "package source repository identity differs from the protected policy"
+        );
+        let destination_repository: Value =
+            write_reader.get_uncached(&format!("/repos/{}", target.destination_repository))?;
+        ensure!(
+            destination_repository["id"].as_u64() == Some(target.destination_repository_id)
+                && destination_repository["full_name"] == target.destination_repository
+                && destination_repository["owner"]["id"].as_u64() == Some(target.source_owner_id)
+                && destination_repository["default_branch"] == target.destination_default_branch,
+            "package release destination differs from the configured repository"
+        );
+        ensure!(
+            write_reader.branch_head(
+                target.destination_repository,
+                target.destination_default_branch
+            )? == target.destination_branch_sha,
+            "package release destination branch head moved before publication"
+        );
+        api.write_token = Some(write_token);
+        api.writes = WriteContext::PackageRelease(Box::new(PackageReleaseWrite {
+            channel: target.channel,
+            source_repository: target.source_repository.to_owned(),
+            source_repository_id: target.source_repository_id,
+            source_owner_id: target.source_owner_id,
+            source_branch: target.source_branch.to_owned(),
+            source_default_branch: target.source_default_branch.to_owned(),
+            source_sha: target.source_sha.to_owned(),
+            source_manifest_sha256: target.source_manifest_sha256.to_owned(),
+            destination_repository: target.destination_repository.to_owned(),
+            destination_repository_id: target.destination_repository_id,
+            destination_default_branch: target.destination_default_branch.to_owned(),
+            destination_branch_sha: target.destination_branch_sha.to_owned(),
+            destination_target_sha: target.destination_target_sha.to_owned(),
+            version: target.version.to_owned(),
+            tag: target.tag.to_owned(),
+            asset_name: target.asset_name.to_owned(),
+            asset_size: target.asset_size,
+            asset_sha256: target.asset_sha256.to_owned(),
+            max_asset_bytes: target.max_asset_bytes,
+            producer_workflow: target.producer_workflow.to_owned(),
+            producer_run_id: target.producer_run_id,
+            producer_run_attempt: target.producer_run_attempt,
+            producer_artifact_id: target.producer_artifact_id,
+            producer_artifact_size: target.producer_artifact_size,
+            producer_artifact_sha256: target.producer_artifact_sha256.to_owned(),
+            publisher_workflow: target.publisher_workflow.to_owned(),
+            publisher_sha: target.publisher_sha.to_owned(),
+            publisher_branch: target.publisher_branch.to_owned(),
+            publisher_run_id: target.publisher_run_id,
+            publisher_run_attempt: target.publisher_run_attempt,
+            owner_id: target.owner_id,
+            preflight_state,
+            recovery_body_updated: false,
+            release_id: target.release_id,
+        }));
+        api.require_package_release_current()?;
+        Ok(api)
+    }
+
+    /// Run all read-only source, publisher, destination, and tag checks using
+    /// the job's read token. Call this before minting the scoped App writer.
+    pub fn package_release_preflight_from_env(
+        read_name: &str,
+        target: &PackageReleaseWriteTarget<'_>,
+    ) -> Result<PackageReleasePreflightState> {
+        validate_package_release_write_target(target)?;
+        validate_package_release_publisher_environment(target)?;
+        let read_token =
+            std::env::var(read_name).with_context(|| format!("missing {read_name}"))?;
+        ensure!(!read_token.is_empty(), "{read_name} is empty");
+        let api = Self::new("https://api.github.com", read_token)?;
+
+        let source: Value = api.get_uncached(&format!("/repos/{}", target.source_repository))?;
+        ensure!(
+            source["id"].as_u64() == Some(target.source_repository_id)
+                && source["full_name"] == target.source_repository
+                && source["owner"]["id"].as_u64() == Some(target.source_owner_id)
+                && source["default_branch"] == target.source_default_branch,
+            "package source repository identity differs from the protected publisher"
+        );
+        ensure!(
+            current_branch_sha(&api, target.source_repository, target.source_default_branch)?
+                == target.publisher_sha,
+            "protected package publisher branch moved before token issuance"
+        );
+        match target.channel {
+            PackageReleaseChannel::Stable => {
+                let comparison: Value = api.get_uncached(&format!(
+                    "/repos/{}/compare/{}...{}",
+                    target.source_repository, target.source_sha, target.publisher_sha
+                ))?;
+                crate::package::validate_package_source_ancestor_comparison(
+                    &comparison,
+                    target.source_sha,
+                    target.publisher_sha,
+                )?;
+            }
+            PackageReleaseChannel::Scratch => ensure!(
+                current_branch_sha(&api, target.source_repository, target.source_branch)?
+                    == target.source_sha,
+                "scratch package source branch moved before token issuance"
+            ),
+        }
+        let source_commit: Value = api.get_uncached(&format!(
+            "/repos/{}/commits/{}",
+            target.source_repository, target.source_sha
+        ))?;
+        ensure!(
+            source_commit["sha"] == target.source_sha
+                && source_commit["commit"]["verification"]["verified"] == true
+                && source_commit["commit"]["verification"]["reason"] == "valid",
+            "package source commit is not GitHub-verified"
+        );
+
+        let publisher: Value = api.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            target.source_repository, target.publisher_run_id, target.publisher_run_attempt
+        ))?;
+        validate_package_release_publisher_run_for_target(target, &publisher)?;
+
+        let destination: Value =
+            api.get_uncached(&format!("/repos/{}", target.destination_repository))?;
+        ensure!(
+            destination["id"].as_u64() == Some(target.destination_repository_id)
+                && destination["full_name"] == target.destination_repository
+                && destination["owner"]["id"].as_u64() == Some(target.source_owner_id)
+                && destination["default_branch"] == target.destination_default_branch,
+            "package release destination differs from the protected publisher declaration"
+        );
+        ensure!(
+            current_branch_sha(
+                &api,
+                target.destination_repository,
+                target.destination_default_branch
+            )? == target.destination_branch_sha,
+            "package release destination branch head moved before token issuance"
+        );
+
+        let releases: Vec<Value> = api.paginate_uncached(&format!(
+            "/repos/{}/releases",
+            target.destination_repository
+        ))?;
+        let matching: Vec<_> = releases
+            .iter()
+            .filter(|release| release["tag_name"] == target.tag)
+            .collect();
+        ensure!(matching.len() <= 1, "package release tag is duplicated");
+        let refs: Vec<Value> = api.get_uncached(&format!(
+            "/repos/{}/git/matching-refs/tags/{}",
+            target.destination_repository,
+            encode_path_segment(target.tag)
+        ))?;
+        let tag_exists = refs
+            .iter()
+            .any(|reference| reference["ref"] == format!("refs/tags/{}", target.tag));
+        let Some(release) = matching.first().copied() else {
+            ensure!(
+                !tag_exists,
+                "package release tag already exists without a matching release"
+            );
+            return Ok(PackageReleasePreflightState::Create);
+        };
+
+        let release_id = release["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .context("existing package release ID is invalid")?;
+        let record = parse_package_release_record(release)?;
+        validate_package_release_record_for_target(target, &record)?;
+        let prior_publisher: Value = api.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            target.source_repository, record.publisher_run_id, record.publisher_run_attempt
+        ))?;
+        let draft = release["draft"] == true;
+        validate_package_release_prior_publisher_run(target, &record, &prior_publisher, draft)?;
+
+        ensure!(
+            tag_exists,
+            "existing package release has no matching tag ref"
+        );
+        ensure!(
+            current_tag_commit(&api, target.destination_repository, target.tag)?
+                == target.destination_target_sha,
+            "existing package release tag does not target the exact source commit"
+        );
+
+        if draft {
+            validate_package_release_recoverable_draft(target, release, release_id)?;
+            let asset_uploaded =
+                validate_package_release_recovery_asset(target, &api, release, false)?;
+            Ok(PackageReleasePreflightState::ResumeDraft {
+                release_id,
+                asset_uploaded,
+            })
+        } else {
+            validate_package_release_recoverable_published(target, release, release_id)?;
+            ensure!(
+                prior_publisher["conclusion"] == "success",
+                "immutable package release was not published by a successful recorded publisher run"
+            );
+            let asset_id = release["assets"][0]["id"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .context("published package asset ID is invalid")?;
+            let asset_uploaded =
+                validate_package_release_recovery_asset(target, &api, release, true)?;
+            ensure!(asset_uploaded, "published package release asset is missing");
+            Ok(PackageReleasePreflightState::AlreadyPublished {
+                release_id,
+                asset_id,
+                publisher_run_id: record.publisher_run_id,
+                publisher_run_attempt: record.publisher_run_attempt,
+            })
+        }
+    }
+
+    /// Bind a release ID returned by the exact draft lookup/create call.
+    pub fn package_release_select(&mut self, release_id: u64) -> Result<bool> {
+        ensure!(release_id > 0, "package release ID is invalid");
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        ensure!(
+            write.release_id.is_none(),
+            "package release identity has already been selected"
+        );
+        let writer_token = self
+            .write_token
+            .as_deref()
+            .context("package writer token is missing")?;
+        let writer_reader = Self::new("https://api.github.com", writer_token.to_owned())?;
+        let release: Value = writer_reader.get_uncached(&format!(
+            "/repos/{}/releases/{release_id}",
+            write.destination_repository
+        ))?;
+        let asset_uploaded = release["assets"]
+            .as_array()
+            .is_some_and(|assets| !assets.is_empty());
+        let recovering = matches!(
+            write.preflight_state,
+            PackageReleasePreflightState::ResumeDraft {
+                release_id: expected,
+                ..
+            } if expected == release_id
+        );
+        if recovering {
+            validate_package_release_draft_recovery_record(write, &release, release_id)?;
+            validate_package_release_recovery_asset_for_write(
+                write,
+                &writer_reader,
+                &release,
+                false,
+            )?;
+        } else {
+            validate_package_release_draft(write, &release, release_id, false)?;
+        }
+        let WriteContext::PackageRelease(write) = &mut self.writes else {
+            unreachable!("package release writer context changed during selection");
+        };
+        write.release_id = Some(release_id);
+        self.require_package_release_current()?;
+        if recovering {
+            let (destination_repository, body) = {
+                let WriteContext::PackageRelease(write) = &self.writes else {
+                    unreachable!("package release writer context changed during recovery");
+                };
+                (
+                    write.destination_repository.clone(),
+                    package_release_record_body(write)?,
+                )
+            };
+            let path = format!("/repos/{destination_repository}/releases/{release_id}");
+            let _: Value = self.patch(&path, &serde_json::json!({"body": body}))?;
+            let WriteContext::PackageRelease(write) = &mut self.writes else {
+                unreachable!("package release writer context changed after recovery");
+            };
+            write.recovery_body_updated = true;
+            let rebound: Value = writer_reader.get_uncached(&path)?;
+            let WriteContext::PackageRelease(write) = &self.writes else {
+                unreachable!("package release writer context changed after recovery");
+            };
+            validate_package_release_draft(write, &rebound, release_id, false)?;
+            self.require_package_release_current()?;
+        }
+        Ok(asset_uploaded)
+    }
+
+    pub fn package_release_create_draft(&self) -> Result<u64> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        ensure!(
+            write.release_id.is_none(),
+            "package release draft already exists"
+        );
+        self.require_package_release_current()?;
+        if let PackageReleasePreflightState::ResumeDraft { release_id, .. } = write.preflight_state
+        {
+            return Ok(release_id);
+        }
+        let target_commitish = if write.channel == PackageReleaseChannel::Scratch {
+            write.destination_default_branch.as_str()
+        } else {
+            write.source_sha.as_str()
+        };
+        let path = format!("/repos/{}/releases", write.destination_repository);
+        let value: Value = self.post(
+            &path,
+            &serde_json::json!({
+                "tag_name": write.tag,
+                "name": write.tag,
+                "target_commitish": target_commitish,
+                "draft": true,
+                "prerelease": write.channel == PackageReleaseChannel::Scratch,
+                "generate_release_notes": false,
+                "body": package_release_record_body(write)?,
+            }),
+        )?;
+        let release_id = value["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .context("created package draft has no release ID")?;
+        Ok(release_id)
+    }
+
+    /// Return the one upload URL accepted for the selected package draft. Keep
+    /// URL construction beside the validator so the publisher caller cannot
+    /// drift from the API writer's exact target contract.
+    pub fn package_release_asset_upload_endpoint(&self) -> Result<String> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        let release_id = write
+            .release_id
+            .context("package release draft identity is missing")?;
+        let url = format!(
+            "https://uploads.github.com/repos/{}/releases/{release_id}/assets?name={}",
+            write.destination_repository, write.asset_name
+        );
+        package_release_upload_url(write, &url)?;
+        Ok(url)
+    }
+
+    pub fn package_release_publish_draft(&self) -> Result<Value> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        let release_id = write.release_id.context("package release ID is missing")?;
+        let path = format!(
+            "/repos/{}/releases/{release_id}",
+            write.destination_repository
+        );
+        self.patch(&path, &serde_json::json!({"draft": false}))
+    }
+
+    /// Confirm that GitHub published the exact immutable package release and
+    /// that its only asset still has the producer-verified bytes.
+    pub fn package_release_verify_published(&self) -> Result<Value> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        let release_id = write.release_id.context("package release ID is missing")?;
+        let writer_reader = self.package_writer_reader()?;
+        let release: Value = writer_reader.get_uncached(&format!(
+            "/repos/{}/releases/{release_id}",
+            write.destination_repository
+        ))?;
+        validate_package_release_published(write, &release, release_id)?;
+        ensure!(
+            current_tag_commit(&writer_reader, &write.destination_repository, &write.tag)?
+                == write.destination_target_sha,
+            "published package tag no longer targets the exact source commit"
+        );
+        Ok(release)
+    }
+
+    fn package_writer_reader(&self) -> Result<Self> {
+        let token = self
+            .write_token
+            .as_deref()
+            .context("package writer token is missing")?;
+        Self::new("https://api.github.com", token.to_owned())
+    }
+
+    fn require_package_release_current(&self) -> Result<()> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        let target = package_release_write_target(write);
+        validate_package_release_write_target(&target)?;
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(write.source_repository.as_str())
+                && std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("workflow_dispatch")
+                && parse_positive_env("GITHUB_RUN_ID")? == write.publisher_run_id
+                && parse_positive_env("GITHUB_RUN_ATTEMPT")? == write.publisher_run_attempt
+                && std::env::var("GITHUB_SHA").as_deref() == Ok(write.publisher_sha.as_str())
+                && std::env::var("GITHUB_WORKFLOW_SHA").as_deref()
+                    == Ok(write.publisher_sha.as_str())
+                && std::env::var("GITHUB_REF").as_deref()
+                    == Ok(format!("refs/heads/{}", write.publisher_branch).as_str()),
+            "package publisher execution identity changed"
+        );
+        let expected_workflow_ref = format!(
+            "{}/{}@refs/heads/{}",
+            write.source_repository, write.publisher_workflow, write.publisher_branch
+        );
+        ensure!(
+            std::env::var("GITHUB_WORKFLOW_REF").as_deref() == Ok(expected_workflow_ref.as_str()),
+            "package publisher workflow path changed"
+        );
+
+        let source: Value = self.get_uncached(&format!("/repos/{}", write.source_repository))?;
+        ensure!(
+            source["id"].as_u64() == Some(write.source_repository_id)
+                && source["full_name"] == write.source_repository
+                && source["owner"]["id"].as_u64() == Some(write.source_owner_id)
+                && source["default_branch"] == write.source_default_branch,
+            "package source repository identity changed"
+        );
+        let publisher_branch_head =
+            current_branch_sha(self, &write.source_repository, &write.source_default_branch)?;
+        ensure!(
+            publisher_branch_head == write.publisher_sha,
+            "protected package publisher branch moved during publication"
+        );
+        match write.channel {
+            PackageReleaseChannel::Stable => {
+                let comparison: Value = self.get_uncached(&format!(
+                    "/repos/{}/compare/{}...{}",
+                    write.source_repository, write.source_sha, write.publisher_sha
+                ))?;
+                crate::package::validate_package_source_ancestor_comparison(
+                    &comparison,
+                    &write.source_sha,
+                    &write.publisher_sha,
+                )?;
+            }
+            PackageReleaseChannel::Scratch => ensure!(
+                current_branch_sha(self, &write.source_repository, &write.source_branch)?
+                    == write.source_sha,
+                "scratch package source branch moved during publication"
+            ),
+        }
+        let commit: Value = self.get_uncached(&format!(
+            "/repos/{}/commits/{}",
+            write.source_repository, write.source_sha
+        ))?;
+        ensure!(
+            commit["sha"] == write.source_sha
+                && commit["commit"]["verification"]["verified"] == true
+                && commit["commit"]["verification"]["reason"] == "valid",
+            "package source commit is not GitHub-verified"
+        );
+        let manifest = self.content_uncached(
+            &write.source_repository,
+            ".github/actions/load-package/package.json",
+            &write.source_sha,
+        )?;
+        ensure!(
+            manifest.len() <= 16 * 1024
+                && crate::hex_encode(sha2::Sha256::digest(&manifest))
+                    == write.source_manifest_sha256,
+            "package source manifest changed during publication"
+        );
+        let cargo_manifest =
+            self.content_uncached(&write.source_repository, "Cargo.toml", &write.source_sha)?;
+        crate::package::validate_native_package_release_source(
+            &cargo_manifest,
+            &manifest,
+            &crate::package::NativePackageReleaseSourceBinding {
+                source_sha: &write.source_sha,
+                version: &write.version,
+                producer_workflow: &write.producer_workflow,
+                publisher_workflow: &write.publisher_workflow,
+                asset_name: &write.asset_name,
+                max_asset_bytes: write.max_asset_bytes,
+                stable: write.channel == PackageReleaseChannel::Stable,
+            },
+        )?;
+        let producer: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            write.source_repository, write.producer_run_id, write.producer_run_attempt
+        ))?;
+        validate_package_release_producer_run(write, &producer)?;
+        let artifacts: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/artifacts?per_page=100",
+            write.source_repository, write.producer_run_id
+        ))?;
+        validate_package_release_artifact(write, &artifacts)?;
+
+        let publisher: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            write.source_repository, write.publisher_run_id, write.publisher_run_attempt
+        ))?;
+        validate_package_release_publisher_run(write, &publisher)?;
+
+        let writer_reader = self.package_writer_reader()?;
+        require_single_repository_installation(
+            &writer_reader,
+            write.destination_repository_id,
+            &write.destination_repository,
+        )?;
+        let destination: Value =
+            writer_reader.get_uncached(&format!("/repos/{}", write.destination_repository))?;
+        ensure!(
+            destination["id"].as_u64() == Some(write.destination_repository_id)
+                && destination["full_name"] == write.destination_repository
+                && destination["owner"]["id"].as_u64() == Some(write.source_owner_id)
+                && destination["default_branch"] == write.destination_default_branch,
+            "package release destination identity changed"
+        );
+        ensure!(
+            current_branch_sha(
+                &writer_reader,
+                &write.destination_repository,
+                &write.destination_default_branch
+            )? == write.destination_branch_sha,
+            "package release destination branch head moved"
+        );
+        let releases: Vec<Value> = writer_reader
+            .paginate_uncached(&format!("/repos/{}/releases", write.destination_repository))?;
+        let matching: Vec<_> = releases
+            .iter()
+            .filter(|release| release["tag_name"] == write.tag)
+            .collect();
+        ensure!(matching.len() <= 1, "package release tag is duplicated");
+        let refs: Vec<Value> = writer_reader.get_uncached(&format!(
+            "/repos/{}/git/matching-refs/tags/{}",
+            write.destination_repository,
+            encode_path_segment(&write.tag)
+        ))?;
+        let tag_exists = refs
+            .iter()
+            .any(|reference| reference["ref"] == format!("refs/tags/{}", write.tag));
+        if let Some(release_id) = write.release_id {
+            let release: Value = writer_reader.get_uncached(&format!(
+                "/repos/{}/releases/{release_id}",
+                write.destination_repository
+            ))?;
+            let recovering_old_record = matches!(
+                write.preflight_state,
+                PackageReleasePreflightState::ResumeDraft {
+                    release_id: expected,
+                    ..
+                } if expected == release_id
+            ) && !write.recovery_body_updated;
+            if recovering_old_record {
+                validate_package_release_draft_recovery_record(write, &release, release_id)?;
+                validate_package_release_recovery_asset_for_write(
+                    write,
+                    &writer_reader,
+                    &release,
+                    false,
+                )?;
+            } else {
+                let require_asset = release["assets"]
+                    .as_array()
+                    .is_some_and(|assets| !assets.is_empty());
+                validate_package_release_draft(write, &release, release_id, require_asset)?;
+            }
+            ensure!(
+                matching.len() == 1 && matching[0]["id"].as_u64() == Some(release_id) && tag_exists,
+                "selected package draft or tag is no longer unique"
+            );
+            let tag_commit =
+                current_tag_commit(&writer_reader, &write.destination_repository, &write.tag)?;
+            ensure!(
+                tag_commit == write.destination_target_sha,
+                "package release tag no longer targets the exact source commit"
+            );
+        } else {
+            match write.preflight_state {
+                PackageReleasePreflightState::Create => ensure!(
+                    matching.is_empty() && !tag_exists,
+                    "package release tag already exists without an authorized recovery"
+                ),
+                PackageReleasePreflightState::ResumeDraft { release_id, .. } => {
+                    ensure!(
+                        matching.len() == 1
+                            && matching[0]["id"].as_u64() == Some(release_id)
+                            && tag_exists,
+                        "recoverable package draft or tag is no longer unique"
+                    );
+                    let release = matching[0];
+                    validate_package_release_draft_recovery_record(write, release, release_id)?;
+                    validate_package_release_recovery_asset_for_write(
+                        write,
+                        &writer_reader,
+                        release,
+                        false,
+                    )?;
+                    ensure!(
+                        current_tag_commit(
+                            &writer_reader,
+                            &write.destination_repository,
+                            &write.tag
+                        )? == write.destination_target_sha,
+                        "recoverable package tag no longer targets the exact source commit"
+                    );
+                }
+                PackageReleasePreflightState::AlreadyPublished { .. } => {
+                    bail!("an already-published package release cannot be rewritten")
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create an ordinary instance-bound request writer. This context is
     /// separate from the owner-only scratch writer and the legacy runtime
     /// writer. The supplied instance must have been captured from protected
@@ -699,6 +1494,7 @@ impl GitHub {
                     == crate::hex_encode(sha2::Sha256::digest(&instance.config_bytes)),
             "native Server instance snapshot does not match its protected configuration"
         );
+        validate_native_instance_merge_fence_target(&config, &instance.authority, target)?;
         ensure!(
             std::env::var("GITHUB_REPOSITORY").as_deref()
                 == Ok(config.instance.repository.as_str()),
@@ -796,8 +1592,11 @@ impl GitHub {
             producer_workflow_path: target.producer_workflow_path.to_owned(),
             producer_workflow_sha: target.producer_workflow_sha.to_owned(),
             client_workflow_epoch: target.client_workflow_epoch.to_owned(),
+            merge_fence: target.merge_fence.cloned(),
         }));
-        api.require_native_instance_current()?;
+        if target.mode != NativeInstanceMode::Merge {
+            api.require_native_instance_current()?;
+        }
         Ok(api)
     }
 
@@ -1452,6 +2251,24 @@ impl GitHub {
                 "native release draft already has a selected identity"
             );
         }
+        if let WriteContext::PackageRelease(write) = &self.writes {
+            let valid_create = *method == Method::POST
+                && path == format!("/repos/{}/releases", write.destination_repository);
+            let valid_publish = *method == Method::PATCH
+                && write.release_id.is_some_and(|id| {
+                    path == format!("/repos/{}/releases/{id}", write.destination_repository)
+                });
+            let valid_asset =
+                *method == Method::POST && package_release_upload_path(write, path).is_ok();
+            ensure!(
+                valid_create || valid_publish || valid_asset,
+                "package writer target is outside its exact release lifecycle"
+            );
+            ensure!(
+                !valid_create || write.release_id.is_none(),
+                "package release draft already has a selected identity"
+            );
+        }
         let isolated = matches!(
             &self.writes,
             WriteContext::Scratch { .. } | WriteContext::PackageScratch { .. }
@@ -1589,6 +2406,16 @@ impl GitHub {
                     || (method == Method::PATCH
                         && write.release_id.is_some_and(|id| {
                             path == format!("/repos/{}/releases/{id}", write.target_repository)
+                        })) =>
+            {
+                self.write_token.as_deref().unwrap_or(&self.token)
+            }
+            WriteContext::PackageRelease(write)
+                if (method == Method::POST
+                    && path == format!("/repos/{}/releases", write.destination_repository))
+                    || (method == Method::PATCH
+                        && write.release_id.is_some_and(|id| {
+                            path == format!("/repos/{}/releases/{id}", write.destination_repository)
                         })) =>
             {
                 self.write_token.as_deref().unwrap_or(&self.token)
@@ -1789,6 +2616,43 @@ impl GitHub {
                 self.validate_native_release_asset_inventory(write, true)?;
             }
         }
+        if let WriteContext::PackageRelease(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            validate_package_release_write_body(
+                write,
+                &method,
+                path,
+                body.context("package release write body is missing")?,
+            )?;
+            if method == Method::PATCH {
+                let release_id = write.release_id.context("package release ID is missing")?;
+                let release: Value = self.get_uncached(&format!(
+                    "/repos/{}/releases/{release_id}",
+                    write.destination_repository
+                ))?;
+                let rebound_body = serde_json::json!({
+                    "body": package_release_record_body(write)?
+                });
+                let rebinding_old_record = matches!(
+                    write.preflight_state,
+                    PackageReleasePreflightState::ResumeDraft {
+                        release_id: expected,
+                        ..
+                    } if expected == release_id
+                ) && !write.recovery_body_updated
+                    && body == Some(&rebound_body);
+                if rebinding_old_record {
+                    validate_package_release_draft_recovery_record(write, &release, release_id)?;
+                    validate_package_release_recovery_asset_for_write(
+                        write, self, &release, false,
+                    )?;
+                } else {
+                    validate_package_release_draft(write, &release, release_id, true)?;
+                }
+            }
+        }
         let read_only_graphql = path == "/graphql"
             && method == Method::POST
             && body
@@ -1808,9 +2672,36 @@ impl GitHub {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
-            .send()
-            .with_context(|| format!("GitHub {method} {path}"))?;
+        let response = if let WriteContext::NativeInstance(write) = &self.writes
+            && method == Method::PUT
+            && write.mode == NativeInstanceMode::Merge
+        {
+            let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes)?;
+            let fence = write
+                .merge_fence
+                .as_ref()
+                .context("native instance merge is missing its accepted readiness fence")?;
+            let readiness = NativeInstanceMergeReadiness {
+                repository: &write.target_repository,
+                repository_id: write.target_id,
+                pull_number: write.pull_number,
+                head_sha: &write.head_sha,
+                authority: &write.server_authority,
+                approval_request_sha256: &fence.approval_request_sha256,
+                approval_producer_run_id: fence.approval_producer_run_id,
+                approval_producer_run_attempt: fence.approval_producer_run_attempt,
+            };
+            let current = capture_native_instance_merge_fence(self, &config, &readiness);
+            send_after_native_instance_merge_fence(fence, current, || {
+                request
+                    .send()
+                    .with_context(|| format!("GitHub {method} {path}"))
+            })?
+        } else {
+            request
+                .send()
+                .with_context(|| format!("GitHub {method} {path}"))?
+        };
         let status = response.status();
         if !status.is_success() {
             return Err(ApiError {
@@ -1856,6 +2747,9 @@ impl GitHub {
             }
             WriteContext::NativeRelease(_) => {
                 return self.require_native_release_current();
+            }
+            WriteContext::PackageRelease(_) => {
+                return self.require_package_release_current();
             }
             WriteContext::Production {
                 revision,
@@ -2092,8 +2986,10 @@ impl GitHub {
             producer_workflow_path: &write.producer_workflow_path,
             producer_workflow_sha: &write.producer_workflow_sha,
             client_workflow_epoch: &write.client_workflow_epoch,
+            merge_fence: write.merge_fence.as_ref(),
         };
         validate_native_instance_write_target(&config, &target)?;
+        validate_native_instance_merge_fence_target(&config, &write.server_authority, &target)?;
         ensure!(
             config.instance.repository == write.instance_repository
                 && config.instance.id == write.instance_id
@@ -2469,12 +3365,17 @@ impl GitHub {
             "/repos/{}/actions/runs/{}/attempts/{}",
             package.distributor_repository, package.publisher_run_id, package.publisher_run_attempt
         ))?;
+        let producer_run: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            package.distributor_repository, package.producer_run_id, package.producer_run_attempt
+        ))?;
         validate_native_client_package_remote_identity(
             package,
             &repository,
             &release,
             &tag_ref,
             &publisher_run,
+            &producer_run,
         )
     }
 
@@ -3015,6 +3916,32 @@ impl GitHub {
                     && release["draft"] == true,
                 "native release asset target is not the selected draft"
             );
+        } else if let WriteContext::PackageRelease(write) = &self.writes {
+            let api_path = package_release_upload_url(write, path)?;
+            ensure!(
+                bytes.len() as u64 == write.asset_size
+                    && crate::hex_encode(sha2::Sha256::digest(&bytes)) == write.asset_sha256
+                    && content_type == "application/octet-stream",
+                "package upload bytes differ from the exact verified asset"
+            );
+            let release_id = write
+                .release_id
+                .context("package release draft identity was not selected")?;
+            self.require_write_target(&Method::POST, &api_path)?;
+            self.require_current_revision()?;
+            let writer_reader = self.package_writer_reader()?;
+            let release: Value = writer_reader.get_uncached(&format!(
+                "/repos/{}/releases/{release_id}",
+                write.destination_repository
+            ))?;
+            validate_package_release_draft(write, &release, release_id, false)?;
+            let assets = release["assets"]
+                .as_array()
+                .context("package release draft asset list is missing")?;
+            ensure!(
+                assets.is_empty(),
+                "package release draft already has an asset"
+            );
         } else {
             ensure!(
                 !matches!(
@@ -3033,7 +3960,10 @@ impl GitHub {
                 && url.password().is_none(),
             "invalid upload endpoint"
         );
-        let upload_token = if matches!(self.writes, WriteContext::NativeRelease(_)) {
+        let upload_token = if matches!(
+            self.writes,
+            WriteContext::NativeRelease(_) | WriteContext::PackageRelease(_)
+        ) {
             self.write_token
                 .as_deref()
                 .context("native release write token is missing")?
@@ -4093,6 +5023,58 @@ fn validate_native_client_label_body(
     Ok(())
 }
 
+fn validate_native_instance_merge_fence_target(
+    config: &crate::instance_config::InstanceConfig,
+    authority: &NativeAuthoritySnapshot,
+    target: &NativeInstanceWriteTarget<'_>,
+) -> Result<()> {
+    let fence = match (target.mode, target.merge_fence) {
+        (NativeInstanceMode::Merge, Some(fence)) => fence,
+        (NativeInstanceMode::Merge, None) => {
+            anyhow::bail!("native instance merge requires a validated readiness fence")
+        }
+        (_, None) => return Ok(()),
+        (_, Some(_)) => anyhow::bail!("native merge readiness fence is only valid for merges"),
+    };
+    let expected_authority_sha256 = native_authority_sha256(authority)?;
+    validate_sha256(
+        &fence.approval_request_sha256,
+        "native approval request digest",
+    )?;
+    ensure!(
+        fence.repository == target.repository
+            && fence.repository_id == target.repository_id
+            && fence.pull_number == target.pull_number
+            && fence.head_sha == target.head_sha
+            && fence.authority_sha256 == expected_authority_sha256
+            && fence.approval_review_id > 0
+            && fence.approval_producer_run_id > 0
+            && fence.approval_producer_run_attempt > 0
+            && fence.reviewer_id == config.identities.approval_reviewer.id
+            && fence.reviewer_login == config.identities.approval_reviewer.login
+            && fence.status_app_id == config.apps.status_check_id
+            && fence.policy_app_id == config.apps.policy_check_id,
+        "native merge readiness fence differs from the request or protected instance"
+    );
+    let marker = native_instance_approval_body(
+        authority,
+        target.head_sha,
+        &fence.approval_request_sha256,
+        fence.approval_producer_run_id,
+        fence.approval_producer_run_attempt,
+    )?;
+    ensure!(
+        parse_native_instance_approval_marker(
+            marker["body"]
+                .as_str()
+                .context("native instance approval marker has no body")?
+        )
+        .is_ok(),
+        "native merge readiness fence contains an invalid approval marker"
+    );
+    Ok(())
+}
+
 fn validate_native_instance_write_target(
     config: &crate::instance_config::InstanceConfig,
     target: &NativeInstanceWriteTarget<'_>,
@@ -4331,6 +5313,9 @@ fn validate_native_client_package_snapshot(
     crate::policy::validate_sha(&package.binary_source_sha)?;
     validate_native_release_workflow_path(&package.publisher_workflow)?;
     crate::config::validate_branch(&package.publisher_branch)?;
+    crate::policy::validate_sha(&package.publisher_sha)?;
+    validate_native_release_workflow_path(&package.producer_workflow)?;
+    crate::config::validate_branch(&package.producer_branch)?;
     let implementation_version = semver::Version::parse(&package.implementation_version)?;
     let binary_version = semver::Version::parse(&package.binary_version)?;
     ensure!(
@@ -4350,7 +5335,10 @@ fn validate_native_client_package_snapshot(
             && package.asset_id > 0
             && package.asset_size > 0
             && package.publisher_run_id > 0
-            && package.publisher_run_attempt > 0,
+            && package.publisher_run_attempt == 1
+            && package.producer_run_id > 0
+            && package.producer_run_attempt == 1
+            && package.producer_branch == package.publisher_branch,
         "saved Client package admission is invalid for the current instance policy"
     );
     validate_sha256(&package.asset_sha256, "Client package asset digest")
@@ -4416,6 +5404,7 @@ fn validate_native_client_package_remote_identity(
     release: &Value,
     tag_ref: &Value,
     publisher_run: &Value,
+    producer_run: &Value,
 ) -> Result<()> {
     let assets = release["assets"]
         .as_array()
@@ -4456,10 +5445,24 @@ fn validate_native_client_package_remote_identity(
             && publisher_run["path"] == package.publisher_workflow
             && publisher_run["event"] == "workflow_dispatch"
             && publisher_run["head_branch"] == package.publisher_branch
-            && publisher_run["head_sha"] == package.binary_source_sha
+            && publisher_run["head_sha"] == package.publisher_sha
             && publisher_run["status"] == "completed"
             && publisher_run["conclusion"] == "success",
         "accepted Client package publisher run or attempt changed"
+    );
+    ensure!(
+        producer_run["id"].as_u64() == Some(package.producer_run_id)
+            && producer_run["run_attempt"].as_u64() == Some(package.producer_run_attempt)
+            && producer_run["repository"]["id"].as_u64() == Some(package.distributor_id)
+            && producer_run["repository"]["full_name"] == package.distributor_repository
+            && producer_run["head_repository"]["id"].as_u64() == Some(package.distributor_id)
+            && producer_run["path"] == package.producer_workflow
+            && producer_run["event"] == "workflow_dispatch"
+            && producer_run["head_branch"] == package.producer_branch
+            && producer_run["head_sha"] == package.binary_source_sha
+            && producer_run["status"] == "completed"
+            && producer_run["conclusion"] == "success",
+        "accepted Client package producer run or attempt changed"
     );
     Ok(())
 }
@@ -4555,9 +5558,13 @@ fn native_client_package_identity(
     client: &crate::package::VerifiedNativeClientPackage,
 ) -> Result<NativeClientPackageIdentity> {
     let release = client.package.release();
-    let (publisher_run_id, publisher_run_attempt) = client.package.publisher_run();
+    let publisher_run_id = client.package_publisher_run_id;
+    let publisher_run_attempt = client.package_publisher_run_attempt;
     validate_native_release_workflow_path(&client.package_publisher_workflow)?;
     crate::config::validate_branch(&client.package_publisher_branch)?;
+    crate::policy::validate_sha(&client.package_publisher_sha)?;
+    validate_native_release_workflow_path(&client.package_producer_workflow)?;
+    crate::config::validate_branch(&client.package_producer_branch)?;
     crate::policy::validate_sha(&client.implementation_sha)?;
     crate::policy::validate_sha(&client.loader_action_sha)?;
     crate::policy::validate_sha(&client.binary_source_sha)?;
@@ -4581,7 +5588,10 @@ fn native_client_package_identity(
             && release.asset.id > 0
             && release.asset.size > 0
             && publisher_run_id > 0
-            && publisher_run_attempt > 0,
+            && publisher_run_attempt == 1
+            && client.package_producer_run_id > 0
+            && client.package_producer_run_attempt == 1
+            && client.package_producer_branch == client.package_publisher_branch,
         "verified Client package does not match its accepted implementation and publisher"
     );
     validate_sha256(&release.asset.sha256, "Client package asset digest")?;
@@ -4602,8 +5612,13 @@ fn native_client_package_identity(
         asset_sha256: release.asset.sha256.clone(),
         publisher_workflow: client.package_publisher_workflow.clone(),
         publisher_branch: client.package_publisher_branch.clone(),
+        publisher_sha: client.package_publisher_sha.clone(),
         publisher_run_id,
         publisher_run_attempt,
+        producer_workflow: client.package_producer_workflow.clone(),
+        producer_branch: client.package_producer_branch.clone(),
+        producer_run_id: client.package_producer_run_id,
+        producer_run_attempt: client.package_producer_run_attempt,
     })
 }
 
@@ -4934,6 +5949,232 @@ pub fn native_target_policy_control_identity(
     native_current_control_identity(api, repository, default_branch)
 }
 
+/// Validate the exact required checks and configured review for an ordinary
+/// instance merge, then capture the identity that the merge writer must
+/// revalidate immediately before its Merge API call.
+pub fn capture_native_instance_merge_fence(
+    api: &GitHub,
+    config: &crate::instance_config::InstanceConfig,
+    readiness: &NativeInstanceMergeReadiness<'_>,
+) -> Result<NativeInstanceMergeFence> {
+    let repository = readiness.repository;
+    let repository_id = readiness.repository_id;
+    let pull_number = readiness.pull_number;
+    let head_sha = readiness.head_sha;
+    let authority = readiness.authority;
+    let approval_request_sha256 = readiness.approval_request_sha256;
+    let approval_producer_run_id = readiness.approval_producer_run_id;
+    let approval_producer_run_attempt = readiness.approval_producer_run_attempt;
+    crate::policy::validate_repository(repository)?;
+    crate::policy::validate_sha(head_sha)?;
+    validate_sha256(approval_request_sha256, "native approval request digest")?;
+    validate_native_authority_snapshot(authority)?;
+    ensure!(
+        repository_id > 0
+            && pull_number > 0
+            && approval_producer_run_id > 0
+            && approval_producer_run_attempt > 0
+            && authority.instance_repository == config.instance.repository
+            && authority.instance_id == config.instance.id
+            && authority.default_branch == config.instance.default_branch,
+        "native merge readiness identity is invalid"
+    );
+    config
+        .repositories
+        .iter()
+        .find(|target| target.repository == repository && target.id == repository_id)
+        .context("native merge target is not configured")?
+        .policy()
+        .require(crate::policy::Capability::Merge)
+        .context("native merge target lacks its configured capability")?;
+
+    let approval_body = native_instance_approval_body(
+        authority,
+        head_sha,
+        approval_request_sha256,
+        approval_producer_run_id,
+        approval_producer_run_attempt,
+    )?;
+    let expected_marker = approval_body["body"]
+        .as_str()
+        .context("native approval marker has no body")?;
+    let mut checks = Vec::new();
+    for page in 1..=100 {
+        let response: Value = api.get_uncached(&format!(
+            "/repos/{repository}/commits/{head_sha}/check-runs?per_page=100&page={page}&filter=latest"
+        ))?;
+        let batch = response["check_runs"]
+            .as_array()
+            .context("native merge check runs are malformed")?;
+        let done = batch.len() < 100;
+        checks.extend(batch.iter().cloned());
+        if done {
+            break;
+        }
+        ensure!(
+            page < 100,
+            "native merge check run pagination exceeded limit"
+        );
+    }
+    ensure!(
+        native_instance_merge_checks_ready(
+            &checks,
+            config.apps.status_check_id,
+            config.apps.policy_check_id,
+            head_sha,
+            authority,
+        )?,
+        "native merge required checks are not successful for the accepted head and authority"
+    );
+
+    let reviewer = &config.identities.approval_reviewer;
+    let reviews =
+        api.paginate_uncached(&format!("/repos/{repository}/pulls/{pull_number}/reviews"))?;
+    let approval_review_id = native_instance_approval_review_id(
+        &reviews,
+        reviewer.id,
+        &reviewer.login,
+        head_sha,
+        expected_marker,
+    )?;
+    let decision = api.graphql(
+        "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}",
+        serde_json::json!({
+            "owner": repository.split('/').next().unwrap_or_default(),
+            "name": repository.split('/').nth(1).unwrap_or_default(),
+            "number": pull_number
+        }),
+    )?;
+    ensure!(
+        decision["repository"]["pullRequest"]["reviewDecision"] == "APPROVED",
+        "native merge requires an approved current review decision"
+    );
+
+    Ok(NativeInstanceMergeFence {
+        repository: repository.to_owned(),
+        repository_id,
+        pull_number,
+        head_sha: head_sha.to_owned(),
+        authority_sha256: native_authority_sha256(authority)?,
+        approval_review_id,
+        approval_request_sha256: approval_request_sha256.to_owned(),
+        approval_producer_run_id,
+        approval_producer_run_attempt,
+        reviewer_id: reviewer.id,
+        reviewer_login: reviewer.login.clone(),
+        status_app_id: config.apps.status_check_id,
+        policy_app_id: config.apps.policy_check_id,
+    })
+}
+
+fn send_after_native_instance_merge_fence<T>(
+    accepted: &NativeInstanceMergeFence,
+    current: Result<NativeInstanceMergeFence>,
+    send: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let current = current?;
+    ensure!(
+        current == *accepted,
+        "native merge required checks or accepted approval changed before write"
+    );
+    send()
+}
+
+fn native_instance_merge_checks_ready(
+    checks: &[Value],
+    status_app_id: u64,
+    policy_app_id: u64,
+    expected_head: &str,
+    authority: &NativeAuthoritySnapshot,
+) -> Result<bool> {
+    let ci_ok = native_latest_check(checks, "status-check", status_app_id).is_some_and(|check| {
+        check["status"] == "completed"
+            && (check["conclusion"] == "success" || check["conclusion"] == "skipped")
+    });
+    let policy_checks: Vec<_> = checks
+        .iter()
+        .filter(|check| {
+            check["name"] == NATIVE_POLICY_CHECK_NAME
+                && check["app"]["id"].as_u64() == Some(policy_app_id)
+        })
+        .collect();
+    ensure!(
+        policy_checks.len() <= 1,
+        "duplicate Securefix policy checks for the native merge head"
+    );
+    let policy_ok = if let Some(check) = policy_checks.first() {
+        let identity = parse_native_instance_policy_check_external_id(
+            check["external_id"]
+                .as_str()
+                .context("native instance policy check has no external identity")?,
+        )?;
+        check["head_sha"].as_str() == Some(expected_head)
+            && identity.head_sha == expected_head
+            && identity.authority_sha256 == native_authority_sha256(authority)?
+            && check["status"] == "completed"
+            && check["conclusion"] == "success"
+    } else {
+        false
+    };
+    Ok(ci_ok && policy_ok)
+}
+
+fn native_latest_check<'a>(checks: &'a [Value], name: &str, app_id: u64) -> Option<&'a Value> {
+    checks
+        .iter()
+        .filter(|check| check["name"] == name && check["app"]["id"].as_u64() == Some(app_id))
+        .max_by_key(|check| check["id"].as_u64().unwrap_or_default())
+}
+
+fn native_instance_approval_review_id(
+    reviews: &[Value],
+    reviewer_id: u64,
+    reviewer_login: &str,
+    expected_head: &str,
+    expected_marker: &str,
+) -> Result<u64> {
+    let decisions = reviews
+        .iter()
+        .filter(|review| {
+            matches!(
+                review["state"].as_str(),
+                Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
+            ) && review["user"]["id"].as_u64() == Some(reviewer_id)
+                && review["user"]["login"].as_str() == Some(reviewer_login)
+                && review["user"]["type"] == "User"
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        decisions
+            .iter()
+            .all(|review| native_instance_review_order(review).is_some()),
+        "configured reviewer has a malformed review timestamp or ID"
+    );
+    let latest = decisions
+        .into_iter()
+        .max_by_key(|review| native_instance_review_order(review));
+    let review = latest.context("configured reviewer has no approval marker review")?;
+    ensure!(
+        review["state"] == "APPROVED"
+            && review["commit_id"].as_str() == Some(expected_head)
+            && review["body"].as_str() == Some(expected_marker),
+        "latest configured reviewer decision is not the accepted approval on the exact head"
+    );
+    review["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("accepted approval review ID is invalid")
+}
+
+fn native_instance_review_order(
+    review: &Value,
+) -> Option<(chrono::DateTime<chrono::FixedOffset>, u64)> {
+    let submitted_at =
+        chrono::DateTime::parse_from_rfc3339(review["submitted_at"].as_str()?).ok()?;
+    let id = review["id"].as_u64().filter(|id| *id > 0)?;
+    Some((submitted_at, id))
+}
+
 pub fn validate_native_server_execution_workflow(
     snapshot: &NativeAuthoritySnapshot,
     mode: NativeScratchMode,
@@ -5009,6 +6250,767 @@ fn validate_package_scratch_tag(tag: &str) -> Result<()> {
         "scratch package tag must be a canonical prerelease"
     );
     Ok(())
+}
+
+fn parse_positive_env(name: &str) -> Result<u64> {
+    let value = std::env::var(name).with_context(|| format!("missing {name}"))?;
+    let parsed = value
+        .parse::<u64>()
+        .with_context(|| format!("invalid {name}"))?;
+    ensure!(parsed > 0 && parsed.to_string() == value, "invalid {name}");
+    Ok(parsed)
+}
+
+fn validate_package_release_publisher_environment(
+    target: &PackageReleaseWriteTarget<'_>,
+) -> Result<()> {
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(target.source_repository)
+            && std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("workflow_dispatch")
+            && parse_positive_env("GITHUB_RUN_ID")? == target.publisher_run_id
+            && parse_positive_env("GITHUB_RUN_ATTEMPT")? == target.publisher_run_attempt
+            && target.publisher_run_attempt == 1
+            && parse_positive_env("GITHUB_ACTOR_ID")? == target.owner_id,
+        "package publisher must be the exact owner-dispatched first attempt"
+    );
+    let workflow_sha =
+        std::env::var("GITHUB_WORKFLOW_SHA").context("missing package publisher workflow SHA")?;
+    let github_sha = std::env::var("GITHUB_SHA").context("missing package publisher SHA")?;
+    crate::policy::validate_sha(&workflow_sha)?;
+    ensure!(
+        workflow_sha == target.publisher_sha && github_sha == target.publisher_sha,
+        "package publisher host SHA differs from the selected workflow revision"
+    );
+    ensure!(
+        std::env::var("GITHUB_REF").as_deref()
+            == Ok(format!("refs/heads/{}", target.publisher_branch).as_str()),
+        "package publisher must run from the protected publisher branch"
+    );
+    let expected_workflow_ref = format!(
+        "{}/{publisher_workflow}@refs/heads/{publisher_branch}",
+        target.source_repository,
+        publisher_workflow = target.publisher_workflow,
+        publisher_branch = target.publisher_branch,
+    );
+    ensure!(
+        std::env::var("GITHUB_WORKFLOW_REF").as_deref() == Ok(expected_workflow_ref.as_str()),
+        "package publisher workflow ref differs from the source manifest"
+    );
+    Ok(())
+}
+
+fn package_release_write_target<'a>(
+    write: &'a PackageReleaseWrite,
+) -> PackageReleaseWriteTarget<'a> {
+    PackageReleaseWriteTarget {
+        channel: write.channel,
+        source_repository: &write.source_repository,
+        source_repository_id: write.source_repository_id,
+        source_owner_id: write.source_owner_id,
+        source_branch: &write.source_branch,
+        source_default_branch: &write.source_default_branch,
+        source_sha: &write.source_sha,
+        source_manifest_sha256: &write.source_manifest_sha256,
+        destination_repository: &write.destination_repository,
+        destination_repository_id: write.destination_repository_id,
+        destination_default_branch: &write.destination_default_branch,
+        destination_branch_sha: &write.destination_branch_sha,
+        destination_target_sha: &write.destination_target_sha,
+        version: &write.version,
+        tag: &write.tag,
+        asset_name: &write.asset_name,
+        asset_size: write.asset_size,
+        asset_sha256: &write.asset_sha256,
+        max_asset_bytes: write.max_asset_bytes,
+        producer_workflow: &write.producer_workflow,
+        producer_run_id: write.producer_run_id,
+        producer_run_attempt: write.producer_run_attempt,
+        producer_artifact_id: write.producer_artifact_id,
+        producer_artifact_size: write.producer_artifact_size,
+        producer_artifact_sha256: &write.producer_artifact_sha256,
+        publisher_workflow: &write.publisher_workflow,
+        publisher_sha: &write.publisher_sha,
+        publisher_branch: &write.publisher_branch,
+        publisher_run_id: write.publisher_run_id,
+        publisher_run_attempt: write.publisher_run_attempt,
+        owner_id: write.owner_id,
+        release_id: write.release_id,
+    }
+}
+
+fn current_branch_sha(api: &GitHub, repository: &str, branch: &str) -> Result<String> {
+    let commit: Value = api.get_uncached(&format!(
+        "/repos/{repository}/commits/{}",
+        encode_path_segment(branch)
+    ))?;
+    let sha = commit["sha"]
+        .as_str()
+        .context("package branch commit SHA is missing")?;
+    crate::policy::validate_sha(sha)?;
+    Ok(sha.to_owned())
+}
+
+fn current_tag_commit(api: &GitHub, repository: &str, tag: &str) -> Result<String> {
+    let refs: Vec<Value> = api.get_uncached(&format!(
+        "/repos/{repository}/git/matching-refs/tags/{}",
+        encode_path_segment(tag)
+    ))?;
+    let exact: Vec<_> = refs
+        .iter()
+        .filter(|reference| reference["ref"] == format!("refs/tags/{tag}"))
+        .collect();
+    ensure!(
+        exact.len() == 1,
+        "package release tag ref is missing or duplicated"
+    );
+    let object_sha = exact[0]["object"]["sha"]
+        .as_str()
+        .context("package release tag object SHA is missing")?;
+    crate::policy::validate_sha(object_sha)?;
+    match exact[0]["object"]["type"].as_str() {
+        Some("commit") => Ok(object_sha.to_owned()),
+        Some("tag") => {
+            let object: Value =
+                api.get_uncached(&format!("/repos/{repository}/git/tags/{object_sha}"))?;
+            ensure!(
+                object["sha"] == object_sha && object["object"]["type"] == "commit",
+                "package release annotated tag does not directly target a commit"
+            );
+            let commit_sha = object["object"]["sha"]
+                .as_str()
+                .context("package release annotated tag commit SHA is missing")?;
+            crate::policy::validate_sha(commit_sha)?;
+            Ok(commit_sha.to_owned())
+        }
+        _ => anyhow::bail!("package release tag has an unsupported object type"),
+    }
+}
+
+fn validate_package_release_producer_run(write: &PackageReleaseWrite, run: &Value) -> Result<()> {
+    let expected_path = format!(
+        "{}@refs/heads/{}",
+        write.producer_workflow, write.source_branch
+    );
+    ensure!(
+        run["id"].as_u64() == Some(write.producer_run_id)
+            && run["run_attempt"].as_u64() == Some(write.producer_run_attempt)
+            && run["status"] == "completed"
+            && run["conclusion"] == "success"
+            && run["event"] == "workflow_dispatch"
+            && run["head_sha"] == write.source_sha
+            && run["head_branch"] == write.source_branch
+            && run["repository"]["id"].as_u64() == Some(write.source_repository_id)
+            && run["repository"]["full_name"] == write.source_repository
+            && run["head_repository"]["id"].as_u64() == Some(write.source_repository_id)
+            && run["head_repository"]["full_name"] == write.source_repository
+            && matches!(run["path"].as_str(), Some(path) if path == write.producer_workflow || path == expected_path)
+            && run["actor"]["id"].as_u64() == Some(write.owner_id)
+            && run["actor"]["type"] == "User"
+            && run["triggering_actor"]["id"].as_u64() == Some(write.owner_id)
+            && run["triggering_actor"]["type"] == "User",
+        "package producer run is not the successful exact owner-dispatched source run"
+    );
+    Ok(())
+}
+
+fn validate_package_release_artifact(write: &PackageReleaseWrite, response: &Value) -> Result<()> {
+    const ARTIFACT_NAME: &str = "native-package-attested";
+    let artifacts = response["artifacts"]
+        .as_array()
+        .context("package producer artifact list is missing")?;
+    ensure!(
+        response["total_count"].as_u64() == Some(artifacts.len() as u64) && artifacts.len() < 100,
+        "package producer artifact list is incomplete"
+    );
+    let matching: Vec<_> = artifacts
+        .iter()
+        .filter(|artifact| artifact["name"] == ARTIFACT_NAME)
+        .collect();
+    ensure!(
+        matching.len() == 1,
+        "package producer artifact is missing or duplicated"
+    );
+    let artifact = matching[0];
+    let digest = artifact["digest"]
+        .as_str()
+        .context("package producer artifact digest is missing")?;
+    let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
+    ensure!(
+        artifact["id"].as_u64() == Some(write.producer_artifact_id)
+            && artifact["expired"] == false
+            && artifact["size_in_bytes"].as_u64() == Some(write.producer_artifact_size)
+            && artifact["workflow_run"]["id"].as_u64() == Some(write.producer_run_id)
+            && artifact["workflow_run"]["head_sha"] == write.source_sha
+            && artifact["workflow_run"]["head_branch"] == write.source_branch
+            && artifact["workflow_run"]["repository_id"].as_u64()
+                == Some(write.source_repository_id)
+            && artifact["workflow_run"]["head_repository_id"].as_u64()
+                == Some(write.source_repository_id)
+            && digest == write.producer_artifact_sha256,
+        "package producer artifact differs from its exact source run, digest, or bounds"
+    );
+    Ok(())
+}
+
+fn validate_package_release_publisher_run(write: &PackageReleaseWrite, run: &Value) -> Result<()> {
+    validate_package_release_publisher_run_for_target(&package_release_write_target(write), run)
+}
+
+fn validate_package_release_publisher_run_for_target(
+    target: &PackageReleaseWriteTarget<'_>,
+    run: &Value,
+) -> Result<()> {
+    let expected_path = format!(
+        "{}@refs/heads/{}",
+        target.publisher_workflow, target.publisher_branch
+    );
+    ensure!(
+        run["id"].as_u64() == Some(target.publisher_run_id)
+            && run["run_attempt"].as_u64() == Some(target.publisher_run_attempt)
+            && run["status"] == "in_progress"
+            && run["event"] == "workflow_dispatch"
+            && run["head_sha"] == target.publisher_sha
+            && run["head_branch"] == target.publisher_branch
+            && run["repository"]["id"].as_u64() == Some(target.source_repository_id)
+            && run["repository"]["full_name"] == target.source_repository
+            && run["head_repository"]["id"].as_u64() == Some(target.source_repository_id)
+            && run["head_repository"]["full_name"] == target.source_repository
+            && matches!(run["path"].as_str(), Some(path) if path == target.publisher_workflow || path == expected_path)
+            && run["actor"]["id"].as_u64() == Some(target.owner_id)
+            && run["actor"]["type"] == "User"
+            && run["triggering_actor"]["id"].as_u64() == Some(target.owner_id)
+            && run["triggering_actor"]["type"] == "User",
+        "package publisher run is not the current owner-dispatched protected-source execution"
+    );
+    Ok(())
+}
+
+fn validate_package_release_write_target(target: &PackageReleaseWriteTarget<'_>) -> Result<()> {
+    crate::policy::validate_repository(target.source_repository)?;
+    crate::policy::validate_repository(target.destination_repository)?;
+    crate::config::validate_branch(target.source_branch)?;
+    crate::config::validate_branch(target.source_default_branch)?;
+    crate::config::validate_branch(target.destination_default_branch)?;
+    crate::config::validate_branch(target.publisher_branch)?;
+    crate::policy::validate_sha(target.source_sha)?;
+    crate::policy::validate_sha(target.destination_branch_sha)?;
+    crate::policy::validate_sha(target.publisher_sha)?;
+    crate::policy::validate_sha(target.destination_target_sha)?;
+    validate_sha256(
+        target.source_manifest_sha256,
+        "package source manifest digest",
+    )?;
+    validate_sha256(target.asset_sha256, "package asset digest")?;
+    validate_sha256(target.producer_artifact_sha256, "producer artifact digest")?;
+    validate_package_asset_name(target.asset_name)?;
+    validate_native_release_workflow_path(target.producer_workflow)?;
+    validate_native_release_workflow_path(target.publisher_workflow)?;
+    ensure!(
+        target.producer_workflow == crate::package::NATIVE_PACKAGE_PRODUCER_WORKFLOW
+            && target.publisher_workflow == crate::package::NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
+        "package release does not use the fixed package workflows"
+    );
+    let version = semver::Version::parse(target.version).context("package version is invalid")?;
+    ensure!(
+        version.build.is_empty() && version.to_string() == target.version,
+        "package version is not canonical SemVer"
+    );
+    ensure!(
+        target.tag == format!("v{version}")
+            && target.asset_name == "securefix-linux-x86_64"
+            && target.source_repository_id > 0
+            && target.source_owner_id > 0
+            && target.destination_repository_id > 0
+            && target.owner_id > 0
+            && target.producer_run_id > 0
+            && target.producer_run_attempt == 1
+            && target.producer_artifact_id > 0
+            && target.producer_artifact_size > 0
+            && target.producer_artifact_size <= 160 * 1024 * 1024
+            && target.publisher_run_id > 0
+            && target.publisher_run_attempt == 1,
+        "package release identity is incomplete or inconsistent"
+    );
+    ensure!(
+        target.asset_size > 0
+            && target.max_asset_bytes > 0
+            && target.max_asset_bytes <= MAX_PACKAGE_SCRATCH_ASSET_BYTES
+            && target.asset_size <= target.max_asset_bytes,
+        "package asset is outside its source manifest size bound"
+    );
+    ensure!(
+        match target.channel {
+            PackageReleaseChannel::Stable => {
+                version.pre.is_empty()
+                    && target.source_repository == target.destination_repository
+                    && target.source_repository_id == target.destination_repository_id
+                    && target.source_branch == target.source_default_branch
+                    && target.destination_default_branch == target.source_default_branch
+                    && target.destination_branch_sha == target.publisher_sha
+                    && target.destination_target_sha == target.source_sha
+                    && target.publisher_branch == target.source_default_branch
+            }
+            PackageReleaseChannel::Scratch => {
+                !version.pre.is_empty()
+                    && target.source_repository != target.destination_repository
+                    && target.source_repository_id != target.destination_repository_id
+                    && !target.source_branch.is_empty()
+                    && target.destination_branch_sha == target.destination_target_sha
+                    && target.publisher_branch == target.source_default_branch
+            }
+        },
+        "package release channel does not match its source and destination"
+    );
+    if let Some(release_id) = target.release_id {
+        ensure!(release_id > 0, "package release ID is invalid");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PackageReleaseRecord {
+    schema_version: u8,
+    source_sha: String,
+    source_manifest_sha256: String,
+    producer_workflow: String,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
+    publisher_workflow: String,
+    publisher_sha: String,
+    publisher_run_id: u64,
+    publisher_run_attempt: u64,
+    tag: String,
+    asset_name: String,
+    asset_size: u64,
+    asset_sha256: String,
+}
+
+fn package_release_record(write: &PackageReleaseWrite) -> PackageReleaseRecord {
+    PackageReleaseRecord {
+        schema_version: 1,
+        source_sha: write.source_sha.clone(),
+        source_manifest_sha256: write.source_manifest_sha256.clone(),
+        producer_workflow: write.producer_workflow.clone(),
+        producer_run_id: write.producer_run_id,
+        producer_run_attempt: write.producer_run_attempt,
+        publisher_workflow: write.publisher_workflow.clone(),
+        publisher_sha: write.publisher_sha.clone(),
+        publisher_run_id: write.publisher_run_id,
+        publisher_run_attempt: write.publisher_run_attempt,
+        tag: write.tag.clone(),
+        asset_name: write.asset_name.clone(),
+        asset_size: write.asset_size,
+        asset_sha256: write.asset_sha256.clone(),
+    }
+}
+
+fn package_release_record_body(write: &PackageReleaseWrite) -> Result<String> {
+    Ok(serde_json::to_string(&package_release_record(write))?)
+}
+
+fn validate_package_release_record(write: &PackageReleaseWrite, release: &Value) -> Result<()> {
+    let body = release["body"]
+        .as_str()
+        .context("package release is missing its source/publication record")?;
+    ensure!(
+        body == package_release_record_body(write)?,
+        "package release record differs from the verified source and publisher run"
+    );
+    Ok(())
+}
+
+fn parse_package_release_record(release: &Value) -> Result<PackageReleaseRecord> {
+    let body = release["body"]
+        .as_str()
+        .context("package release is missing its source/publication record")?;
+    let record: PackageReleaseRecord =
+        serde_json::from_str(body).context("package release record is invalid JSON")?;
+    ensure!(
+        serde_json::to_string(&record)? == body,
+        "package release record is not canonical JSON"
+    );
+    Ok(record)
+}
+
+fn validate_package_release_record_for_target(
+    target: &PackageReleaseWriteTarget<'_>,
+    record: &PackageReleaseRecord,
+) -> Result<()> {
+    ensure!(
+        record.schema_version == 1
+            && record.source_sha == target.source_sha
+            && record.source_manifest_sha256 == target.source_manifest_sha256
+            && record.producer_workflow == target.producer_workflow
+            && record.producer_run_id == target.producer_run_id
+            && record.producer_run_attempt == target.producer_run_attempt
+            && record.publisher_workflow == target.publisher_workflow
+            && record.publisher_sha == target.publisher_sha
+            && record.publisher_run_id > 0
+            && record.publisher_run_attempt == 1
+            && record.tag == target.tag
+            && record.asset_name == target.asset_name
+            && record.asset_size == target.asset_size
+            && record.asset_sha256 == target.asset_sha256,
+        "existing package release record differs from the exact source, producer, publisher authority, or asset"
+    );
+    Ok(())
+}
+
+fn validate_package_release_prior_publisher_run(
+    target: &PackageReleaseWriteTarget<'_>,
+    record: &PackageReleaseRecord,
+    run: &Value,
+    draft: bool,
+) -> Result<()> {
+    let expected_path = format!(
+        "{}@refs/heads/{}",
+        target.publisher_workflow, target.publisher_branch
+    );
+    ensure!(
+        run["id"].as_u64() == Some(record.publisher_run_id)
+            && run["run_attempt"].as_u64() == Some(record.publisher_run_attempt)
+            && run["status"] == "completed"
+            && run["event"] == "workflow_dispatch"
+            && run["head_sha"] == target.publisher_sha
+            && run["head_branch"] == target.publisher_branch
+            && run["repository"]["id"].as_u64() == Some(target.source_repository_id)
+            && run["repository"]["full_name"] == target.source_repository
+            && run["head_repository"]["id"].as_u64() == Some(target.source_repository_id)
+            && run["head_repository"]["full_name"] == target.source_repository
+            && matches!(run["path"].as_str(), Some(path) if path == target.publisher_workflow || path == expected_path)
+            && run["actor"]["id"].as_u64() == Some(target.owner_id)
+            && run["actor"]["type"] == "User"
+            && run["triggering_actor"]["id"].as_u64() == Some(target.owner_id)
+            && run["triggering_actor"]["type"] == "User",
+        "recorded package publisher run is not a terminal owner-dispatched protected-source execution"
+    );
+    ensure!(
+        if draft {
+            run["conclusion"] != "success"
+        } else {
+            run["conclusion"] == "success"
+        },
+        "package release state does not match the recorded publisher run conclusion"
+    );
+    Ok(())
+}
+
+fn validate_package_release_recoverable_draft(
+    target: &PackageReleaseWriteTarget<'_>,
+    release: &Value,
+    release_id: u64,
+) -> Result<()> {
+    let prerelease = target.channel == PackageReleaseChannel::Scratch;
+    let commitish = if prerelease {
+        target.destination_default_branch
+    } else {
+        target.source_sha
+    };
+    ensure!(
+        release["id"].as_u64() == Some(release_id)
+            && release["tag_name"] == target.tag
+            && release["name"] == target.tag
+            && release["target_commitish"] == commitish
+            && release["draft"] == true
+            && release["prerelease"] == prerelease
+            && release["immutable"] != true,
+        "existing package release is not the exact recoverable draft"
+    );
+    let record = parse_package_release_record(release)?;
+    validate_package_release_record_for_target(target, &record)
+}
+
+fn validate_package_release_recoverable_published(
+    target: &PackageReleaseWriteTarget<'_>,
+    release: &Value,
+    release_id: u64,
+) -> Result<()> {
+    let prerelease = target.channel == PackageReleaseChannel::Scratch;
+    let commitish = if prerelease {
+        target.destination_default_branch
+    } else {
+        target.source_sha
+    };
+    ensure!(
+        release["id"].as_u64() == Some(release_id)
+            && release["tag_name"] == target.tag
+            && release["name"] == target.tag
+            && release["target_commitish"] == commitish
+            && release["draft"] == false
+            && release["prerelease"] == prerelease
+            && release["immutable"] == true,
+        "existing package release is not the exact immutable publication"
+    );
+    let record = parse_package_release_record(release)?;
+    validate_package_release_record_for_target(target, &record)
+}
+
+fn validate_package_release_recovery_asset(
+    target: &PackageReleaseWriteTarget<'_>,
+    api: &GitHub,
+    release: &Value,
+    required: bool,
+) -> Result<bool> {
+    let Some(asset_id) = package_release_recovery_asset_id(target, release, required)? else {
+        return Ok(false);
+    };
+    let expected_size = usize::try_from(target.asset_size)
+        .context("existing package asset size exceeds this platform")?;
+    let bytes = api.download(
+        &format!(
+            "/repos/{}/releases/assets/{asset_id}",
+            target.destination_repository
+        ),
+        expected_size,
+    )?;
+    ensure!(
+        bytes.len() == expected_size
+            && crate::hex_encode(sha2::Sha256::digest(&bytes)) == target.asset_sha256,
+        "existing package release asset bytes differ from the exact verified artifact"
+    );
+    Ok(true)
+}
+
+fn package_release_recovery_asset_id(
+    target: &PackageReleaseWriteTarget<'_>,
+    release: &Value,
+    required: bool,
+) -> Result<Option<u64>> {
+    let assets = release["assets"]
+        .as_array()
+        .context("existing package release asset list is missing")?;
+    ensure!(
+        assets.len() <= 1,
+        "existing package release has unexpected assets"
+    );
+    if assets.is_empty() {
+        ensure!(
+            !required,
+            "existing published package release is missing its asset"
+        );
+        return Ok(None);
+    }
+    let asset = &assets[0];
+    let asset_id = asset["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("existing package release asset ID is invalid")?;
+    ensure!(
+        asset["name"] == target.asset_name
+            && asset["size"].as_u64() == Some(target.asset_size)
+            && asset["digest"] == format!("sha256:{}", target.asset_sha256)
+            && asset["state"] == "uploaded",
+        "existing package release asset differs from the exact verified bytes"
+    );
+    Ok(Some(asset_id))
+}
+
+fn validate_package_release_draft_recovery_record(
+    write: &PackageReleaseWrite,
+    release: &Value,
+    release_id: u64,
+) -> Result<()> {
+    validate_package_release_recoverable_draft(
+        &package_release_write_target(write),
+        release,
+        release_id,
+    )
+}
+
+fn validate_package_release_recovery_asset_for_write(
+    write: &PackageReleaseWrite,
+    api: &GitHub,
+    release: &Value,
+    required: bool,
+) -> Result<bool> {
+    validate_package_release_recovery_asset(
+        &package_release_write_target(write),
+        api,
+        release,
+        required,
+    )
+}
+
+fn validate_package_release_published(
+    write: &PackageReleaseWrite,
+    release: &Value,
+    release_id: u64,
+) -> Result<()> {
+    let prerelease = write.channel == PackageReleaseChannel::Scratch;
+    let target = if prerelease {
+        write.destination_default_branch.as_str()
+    } else {
+        write.source_sha.as_str()
+    };
+    ensure!(
+        release["id"].as_u64() == Some(release_id)
+            && release["tag_name"] == write.tag
+            && release["name"] == write.tag
+            && release["target_commitish"] == target
+            && release["draft"] == false
+            && release["prerelease"] == prerelease
+            && release["immutable"] == true,
+        "package release is not the exact immutable published release"
+    );
+    validate_package_release_record(write, release)?;
+    validate_package_release_asset(write, release, true)
+}
+
+fn validate_package_release_draft(
+    write: &PackageReleaseWrite,
+    release: &Value,
+    release_id: u64,
+    require_asset: bool,
+) -> Result<()> {
+    let prerelease = write.channel == PackageReleaseChannel::Scratch;
+    let target = if prerelease {
+        write.destination_default_branch.as_str()
+    } else {
+        write.source_sha.as_str()
+    };
+    ensure!(
+        release["id"].as_u64() == Some(release_id)
+            && release["tag_name"] == write.tag
+            && release["name"] == write.tag
+            && release["target_commitish"] == target
+            && release["draft"] == true
+            && release["prerelease"] == prerelease
+            && release["immutable"] != true,
+        "package release is not the selected exact draft"
+    );
+    validate_package_release_record(write, release)?;
+    validate_package_release_asset(write, release, require_asset)
+}
+
+fn validate_package_release_asset(
+    write: &PackageReleaseWrite,
+    release: &Value,
+    required: bool,
+) -> Result<()> {
+    let assets = release["assets"]
+        .as_array()
+        .context("package draft asset list is missing")?;
+    ensure!(assets.len() <= 1, "package draft has unexpected assets");
+    if required {
+        ensure!(
+            assets.len() == 1,
+            "package draft is missing its exact asset"
+        );
+    }
+    if let Some(asset) = assets.first() {
+        ensure!(
+            asset["name"] == write.asset_name
+                && asset["size"].as_u64() == Some(write.asset_size)
+                && asset["digest"] == format!("sha256:{}", write.asset_sha256)
+                && asset["state"] == "uploaded",
+            "package draft contains different bytes"
+        );
+    }
+    Ok(())
+}
+
+fn package_release_upload_url(write: &PackageReleaseWrite, url: &str) -> Result<String> {
+    let release_id = write
+        .release_id
+        .context("package release draft identity is missing")?;
+    let expected_url = format!(
+        "https://uploads.github.com/repos/{}/releases/{release_id}/assets?name={}",
+        write.destination_repository, write.asset_name
+    );
+    ensure!(
+        url == expected_url,
+        "package upload differs from the selected release asset"
+    );
+    let parsed = reqwest::Url::parse(url)?;
+    ensure!(
+        parsed.scheme() == "https"
+            && parsed.host_str() == Some("uploads.github.com")
+            && parsed.username().is_empty()
+            && parsed.password().is_none(),
+        "package upload endpoint is invalid"
+    );
+    package_release_upload_path(
+        write,
+        &format!(
+            "/repos/{}/releases/{release_id}/assets?name={}",
+            write.destination_repository, write.asset_name
+        ),
+    )
+}
+
+fn package_release_upload_path(write: &PackageReleaseWrite, path: &str) -> Result<String> {
+    let release_id = write
+        .release_id
+        .context("package release draft identity is missing")?;
+    let expected_path = format!(
+        "/repos/{}/releases/{release_id}/assets?name={}",
+        write.destination_repository, write.asset_name
+    );
+    ensure!(
+        path == expected_path,
+        "package upload path differs from the exact release asset"
+    );
+    Ok(expected_path)
+}
+
+fn validate_package_release_write_body(
+    write: &PackageReleaseWrite,
+    method: &Method,
+    path: &str,
+    body: &Value,
+) -> Result<()> {
+    if *method == Method::POST
+        && path == format!("/repos/{}/releases", write.destination_repository)
+    {
+        ensure!(
+            write.release_id.is_none(),
+            "package release draft already has a selected identity"
+        );
+        let target = if write.channel == PackageReleaseChannel::Scratch {
+            write.destination_default_branch.as_str()
+        } else {
+            write.source_sha.as_str()
+        };
+        ensure!(
+            body == &serde_json::json!({
+                "tag_name": write.tag,
+                "name": write.tag,
+                "target_commitish": target,
+                "draft": true,
+                "prerelease": write.channel == PackageReleaseChannel::Scratch,
+                "generate_release_notes": false,
+                "body": package_release_record_body(write)?,
+            }),
+            "package release create body differs from the exact verified package"
+        );
+        return Ok(());
+    }
+    if *method == Method::PATCH
+        && write.release_id.is_some_and(|id| {
+            path == format!("/repos/{}/releases/{id}", write.destination_repository)
+        })
+    {
+        let publish_body = serde_json::json!({"draft": false});
+        let rebind_body = serde_json::json!({
+            "body": package_release_record_body(write)?
+        });
+        let recoverable_rebind = matches!(
+            write.preflight_state,
+            PackageReleasePreflightState::ResumeDraft { release_id, .. }
+                if Some(release_id) == write.release_id
+        ) && !write.recovery_body_updated
+            && body == &rebind_body;
+        ensure!(
+            body == &publish_body || recoverable_rebind,
+            "package release patch may only rebind an exact recoverable draft or publish it"
+        );
+        return Ok(());
+    }
+    if *method == Method::POST && package_release_upload_path(write, path).is_ok() {
+        return Ok(());
+    }
+    bail!("package release write is outside the exact draft, asset, and publish lifecycle")
 }
 
 fn validate_package_asset_name(name: &str) -> Result<()> {
@@ -5946,8 +7948,189 @@ mod tests {
             producer_workflow_path: ".github/workflows/request-producer.yml".into(),
             producer_workflow_sha: "e".repeat(40),
             client_workflow_epoch: "f".repeat(40),
+            merge_fence: None,
         }));
         api
+    }
+
+    fn native_instance_merge_checks_fixture(
+        head_sha: &str,
+        checks: Vec<Value>,
+    ) -> crate::fixtures::Fixture {
+        use crate::fixtures::{Fixture, Route};
+
+        let check_path = format!(
+            "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=latest"
+        );
+        Fixture::new(vec![Route::get(
+            check_path,
+            serde_json::json!({"check_runs":checks}),
+        )])
+    }
+
+    #[test]
+    fn native_instance_merge_fence_rejects_changed_checks_and_latest_review() {
+        use crate::fixtures::{Fixture, Route};
+
+        let config_bytes = include_bytes!("../tests/fixtures/instance-config.toml");
+        let instance = instance_authority_fixture(config_bytes);
+        let head_sha = "b".repeat(40);
+        let approval_request_sha256 = "d".repeat(64);
+        let approval_producer_run_id = 123;
+        let approval_producer_run_attempt = 2;
+        let marker = native_instance_approval_body(
+            &instance.authority,
+            &head_sha,
+            &approval_request_sha256,
+            approval_producer_run_id,
+            approval_producer_run_attempt,
+        )
+        .unwrap()["body"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let policy_external_id = native_instance_policy_check_external_id(
+            &instance.authority,
+            &head_sha,
+            &"e".repeat(64),
+        )
+        .unwrap();
+        let checks = |status_conclusion: &str| {
+            vec![
+                serde_json::json!({
+                    "id": 1,
+                    "name": "status-check",
+                    "app": {"id": instance.config.apps.status_check_id},
+                    "status": "completed",
+                    "conclusion": status_conclusion
+                }),
+                serde_json::json!({
+                    "id": 2,
+                    "name": NATIVE_POLICY_CHECK_NAME,
+                    "app": {"id": instance.config.apps.policy_check_id},
+                    "head_sha": head_sha,
+                    "external_id": policy_external_id,
+                    "status": "completed",
+                    "conclusion": "success"
+                }),
+            ]
+        };
+        let approved_review = serde_json::json!({
+            "id": 42,
+            "state": "APPROVED",
+            "commit_id": head_sha,
+            "body": marker,
+            "submitted_at": "2026-10-23T01:00:00Z",
+            "user": {
+                "id": instance.config.identities.approval_reviewer.id,
+                "login": instance.config.identities.approval_reviewer.login,
+                "type": "User"
+            }
+        });
+        let capture = |api: &GitHub| {
+            let readiness = NativeInstanceMergeReadiness {
+                repository: "example-org/project",
+                repository_id: 987_654,
+                pull_number: 4,
+                head_sha: &head_sha,
+                authority: &instance.authority,
+                approval_request_sha256: &approval_request_sha256,
+                approval_producer_run_id,
+                approval_producer_run_attempt,
+            };
+            capture_native_instance_merge_fence(api, &instance.config, &readiness)
+        };
+
+        let successful_readiness_fixture = || {
+            Fixture::new(vec![
+                Route::get(
+                    format!(
+                        "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=latest"
+                    ),
+                    serde_json::json!({"check_runs":checks("success")}),
+                ),
+                Route::get(
+                    "/repos/example-org/project/pulls/4/reviews?per_page=100&page=1",
+                    serde_json::json!([approved_review.clone()]),
+                ),
+                Route::request(
+                    "POST",
+                    "/graphql",
+                    200,
+                    serde_json::json!({
+                        "data": {"repository": {"pullRequest": {"reviewDecision": "APPROVED"}}}
+                    }),
+                ),
+            ])
+        };
+        let accepted_fixture = successful_readiness_fixture();
+        let accepted = capture(&accepted_fixture.api).unwrap();
+        assert_eq!(accepted.approval_review_id, 42);
+        let current_fixture = successful_readiness_fixture();
+        let current = capture(&current_fixture.api).unwrap();
+        let mut successful_merge_puts = 0;
+        send_after_native_instance_merge_fence(&accepted, Ok(current), || {
+            successful_merge_puts += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(successful_merge_puts, 1);
+        accepted_fixture.finish();
+        current_fixture.finish();
+
+        let changed_check = checks("failure");
+        let changed_check_fixture = native_instance_merge_checks_fixture(&head_sha, changed_check);
+        let mut changed_check_merge_puts = 0;
+        let changed_check_result = send_after_native_instance_merge_fence(
+            &accepted,
+            capture(&changed_check_fixture.api),
+            || {
+                changed_check_merge_puts += 1;
+                Ok(())
+            },
+        );
+        assert!(
+            changed_check_result
+                .unwrap_err()
+                .to_string()
+                .contains("native merge required checks")
+        );
+        assert_eq!(changed_check_merge_puts, 0);
+        changed_check_fixture.finish();
+
+        let mut latest_review = approved_review.clone();
+        latest_review["id"] = serde_json::json!(43);
+        latest_review["state"] = serde_json::json!("CHANGES_REQUESTED");
+        latest_review["submitted_at"] = serde_json::json!("2026-10-23T01:01:00Z");
+        let changed_review_fixture = Fixture::new(vec![
+            Route::get(
+                format!(
+                    "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=latest"
+                ),
+                serde_json::json!({"check_runs":checks("success")}),
+            ),
+            Route::get(
+                "/repos/example-org/project/pulls/4/reviews?per_page=100&page=1",
+                serde_json::json!([approved_review.clone(), latest_review]),
+            ),
+        ]);
+        let mut changed_review_merge_puts = 0;
+        let changed_review_result = send_after_native_instance_merge_fence(
+            &accepted,
+            capture(&changed_review_fixture.api),
+            || {
+                changed_review_merge_puts += 1;
+                Ok(())
+            },
+        );
+        assert!(
+            changed_review_result
+                .unwrap_err()
+                .to_string()
+                .contains("latest configured reviewer decision")
+        );
+        assert_eq!(changed_review_merge_puts, 0);
+        changed_review_fixture.finish();
     }
 
     #[test]
@@ -6358,6 +8541,7 @@ mod tests {
             producer_workflow_path: ".github/workflows/request-producer.yml",
             producer_workflow_sha: &"e".repeat(40),
             client_workflow_epoch: &"f".repeat(40),
+            merge_fence: None,
         };
         assert!(validate_native_instance_write_target(&config, &base).is_ok());
 
@@ -7608,6 +9792,18 @@ mod tests {
             "path":package.publisher_workflow,
             "event":"workflow_dispatch",
             "head_branch":package.publisher_branch,
+            "head_sha":package.publisher_sha,
+            "status":"completed",
+            "conclusion":"success"
+        });
+        let producer_run = serde_json::json!({
+            "id":package.producer_run_id,
+            "run_attempt":package.producer_run_attempt,
+            "repository":{"id":package.distributor_id,"full_name":package.distributor_repository},
+            "head_repository":{"id":package.distributor_id},
+            "path":package.producer_workflow,
+            "event":"workflow_dispatch",
+            "head_branch":package.producer_branch,
             "head_sha":package.binary_source_sha,
             "status":"completed",
             "conclusion":"success"
@@ -7618,7 +9814,8 @@ mod tests {
                 &repository,
                 &release,
                 &tag_ref,
-                &publisher_run
+                &publisher_run,
+                &producer_run,
             )
             .is_ok()
         );
@@ -7630,7 +9827,8 @@ mod tests {
                 &repository,
                 &release,
                 &tag_ref,
-                &wrong_package_run
+                &wrong_package_run,
+                &producer_run,
             )
             .is_err()
         );
@@ -7656,6 +9854,10 @@ mod tests {
         let run_path = format!(
             "/repos/{}/actions/runs/{}/attempts/{}",
             package.distributor_repository, package.publisher_run_id, package.publisher_run_attempt
+        );
+        let producer_run_path = format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            package.distributor_repository, package.producer_run_id, package.producer_run_attempt
         );
         let fixture = Fixture::new(vec![
             Route::get(
@@ -7704,6 +9906,22 @@ mod tests {
                     "path":package.publisher_workflow,
                     "event":"workflow_dispatch",
                     "head_branch":package.publisher_branch,
+                    "head_sha":package.publisher_sha,
+                    "status":"completed",
+                    "conclusion":"success"
+                }),
+            )
+            .with_request_header(authorization.0, authorization.1),
+            Route::get(
+                producer_run_path,
+                serde_json::json!({
+                    "id":package.producer_run_id,
+                    "run_attempt":package.producer_run_attempt,
+                    "repository":{"id":package.distributor_id,"full_name":package.distributor_repository},
+                    "head_repository":{"id":package.distributor_id},
+                    "path":package.producer_workflow,
+                    "event":"workflow_dispatch",
+                    "head_branch":package.producer_branch,
                     "head_sha":package.binary_source_sha,
                     "status":"completed",
                     "conclusion":"success"
@@ -8545,6 +10763,385 @@ mod tests {
         for name in ["", "../securefix", "securefix/linux", "securefix?name"] {
             assert!(validate_package_asset_name(name).is_err(), "{name}");
         }
+    }
+
+    fn package_release_target_fixture(
+        channel: PackageReleaseChannel,
+    ) -> PackageReleaseWriteTarget<'static> {
+        const SOURCE_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const PUBLISHER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const SHA256: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        PackageReleaseWriteTarget {
+            channel,
+            source_repository: "civitaspo/securefix-server",
+            source_repository_id: 1250079425,
+            source_owner_id: 4525500,
+            source_branch: if channel == PackageReleaseChannel::Stable {
+                "main"
+            } else {
+                "feature/native-package"
+            },
+            source_default_branch: "main",
+            source_sha: SOURCE_SHA,
+            source_manifest_sha256: SHA256,
+            destination_repository: if channel == PackageReleaseChannel::Stable {
+                "civitaspo/securefix-server"
+            } else {
+                "civitaspo/testing-securefix-server"
+            },
+            destination_repository_id: if channel == PackageReleaseChannel::Stable {
+                1250079425
+            } else {
+                1410312556
+            },
+            destination_default_branch: "main",
+            destination_branch_sha: PUBLISHER_SHA,
+            destination_target_sha: if channel == PackageReleaseChannel::Stable {
+                SOURCE_SHA
+            } else {
+                PUBLISHER_SHA
+            },
+            version: if channel == PackageReleaseChannel::Stable {
+                "1.2.3"
+            } else {
+                "1.2.3-pre.4"
+            },
+            tag: if channel == PackageReleaseChannel::Stable {
+                "v1.2.3"
+            } else {
+                "v1.2.3-pre.4"
+            },
+            asset_name: "securefix-linux-x86_64",
+            asset_size: 1024,
+            asset_sha256: SHA256,
+            max_asset_bytes: 4096,
+            producer_workflow: ".github/workflows/native-package-build.yml",
+            producer_run_id: 100,
+            producer_run_attempt: 1,
+            producer_artifact_id: 101,
+            producer_artifact_size: 2048,
+            producer_artifact_sha256: SHA256,
+            publisher_workflow: ".github/workflows/publish-native-package.yml",
+            publisher_sha: PUBLISHER_SHA,
+            publisher_branch: "main",
+            publisher_run_id: 102,
+            publisher_run_attempt: 1,
+            owner_id: 4525500,
+            release_id: None,
+        }
+    }
+
+    #[test]
+    fn package_release_writer_target_is_bound_to_channel_and_source_identity() {
+        let stable = package_release_target_fixture(PackageReleaseChannel::Stable);
+        validate_package_release_write_target(&stable).unwrap();
+
+        let scratch = package_release_target_fixture(PackageReleaseChannel::Scratch);
+        validate_package_release_write_target(&scratch).unwrap();
+
+        let mut invalid_stable = package_release_target_fixture(PackageReleaseChannel::Stable);
+        invalid_stable.version = "1.2.3-pre.4";
+        invalid_stable.tag = "v1.2.3-pre.4";
+        assert!(validate_package_release_write_target(&invalid_stable).is_err());
+
+        let mut invalid_scratch = package_release_target_fixture(PackageReleaseChannel::Scratch);
+        invalid_scratch.destination_repository = "civitaspo/securefix-server";
+        invalid_scratch.destination_repository_id = invalid_scratch.source_repository_id;
+        assert!(validate_package_release_write_target(&invalid_scratch).is_err());
+
+        let mut invalid_digest = package_release_target_fixture(PackageReleaseChannel::Stable);
+        invalid_digest.source_manifest_sha256 = "not-a-digest";
+        assert!(validate_package_release_write_target(&invalid_digest).is_err());
+    }
+
+    fn package_release_write_fixture() -> PackageReleaseWrite {
+        let target = package_release_target_fixture(PackageReleaseChannel::Stable);
+        PackageReleaseWrite {
+            channel: target.channel,
+            source_repository: target.source_repository.to_owned(),
+            source_repository_id: target.source_repository_id,
+            source_owner_id: target.source_owner_id,
+            source_branch: target.source_branch.to_owned(),
+            source_default_branch: target.source_default_branch.to_owned(),
+            source_sha: target.source_sha.to_owned(),
+            source_manifest_sha256: target.source_manifest_sha256.to_owned(),
+            destination_repository: target.destination_repository.to_owned(),
+            destination_repository_id: target.destination_repository_id,
+            destination_default_branch: target.destination_default_branch.to_owned(),
+            destination_branch_sha: target.destination_branch_sha.to_owned(),
+            destination_target_sha: target.destination_target_sha.to_owned(),
+            version: target.version.to_owned(),
+            tag: target.tag.to_owned(),
+            asset_name: target.asset_name.to_owned(),
+            asset_size: target.asset_size,
+            asset_sha256: target.asset_sha256.to_owned(),
+            max_asset_bytes: target.max_asset_bytes,
+            producer_workflow: target.producer_workflow.to_owned(),
+            producer_run_id: target.producer_run_id,
+            producer_run_attempt: target.producer_run_attempt,
+            producer_artifact_id: target.producer_artifact_id,
+            producer_artifact_size: target.producer_artifact_size,
+            producer_artifact_sha256: target.producer_artifact_sha256.to_owned(),
+            publisher_workflow: target.publisher_workflow.to_owned(),
+            publisher_sha: target.publisher_sha.to_owned(),
+            publisher_branch: target.publisher_branch.to_owned(),
+            publisher_run_id: target.publisher_run_id,
+            publisher_run_attempt: target.publisher_run_attempt,
+            owner_id: target.owner_id,
+            preflight_state: PackageReleasePreflightState::Create,
+            recovery_body_updated: false,
+            release_id: Some(103),
+        }
+    }
+
+    #[test]
+    fn package_release_publisher_endpoint_uses_the_exact_validated_release_path() {
+        let write = package_release_write_fixture();
+        let expected_url = "https://uploads.github.com/repos/civitaspo/securefix-server/releases/103/assets?name=securefix-linux-x86_64";
+        let expected_path =
+            "/repos/civitaspo/securefix-server/releases/103/assets?name=securefix-linux-x86_64";
+        let mut api = GitHub::new("https://api.github.com", "test-token".to_owned()).unwrap();
+        api.writes = WriteContext::PackageRelease(Box::new(write.clone()));
+        let endpoint = api.package_release_asset_upload_endpoint().unwrap();
+        assert_eq!(endpoint, expected_url);
+        assert_eq!(
+            package_release_upload_url(&write, &endpoint).unwrap(),
+            expected_path
+        );
+        assert!(package_release_upload_url(
+            &write,
+            "https://uploads.github.com/repos/civitaspo/securefix-server/103/assets?name=securefix-linux-x86_64"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn package_release_run_checks_keep_producer_and_publisher_identities_separate() {
+        use serde_json::json;
+
+        let write = package_release_write_fixture();
+        let producer = json!({
+            "id": 100,
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "success",
+            "event": "workflow_dispatch",
+            "head_sha": write.source_sha,
+            "head_branch": write.source_branch,
+            "repository": {"id": write.source_repository_id, "full_name": write.source_repository},
+            "head_repository": {"id": write.source_repository_id, "full_name": write.source_repository},
+            "path": format!("{}@refs/heads/{}", write.producer_workflow, write.source_branch),
+            "actor": {"id": write.owner_id, "type": "User"},
+            "triggering_actor": {"id": write.owner_id, "type": "User"}
+        });
+        validate_package_release_producer_run(&write, &producer).unwrap();
+
+        let publisher = json!({
+            "id": 102,
+            "run_attempt": 1,
+            "status": "in_progress",
+            "event": "workflow_dispatch",
+            "head_sha": write.publisher_sha,
+            "head_branch": write.publisher_branch,
+            "repository": {"id": write.source_repository_id, "full_name": write.source_repository},
+            "head_repository": {"id": write.source_repository_id, "full_name": write.source_repository},
+            "path": format!("{}@refs/heads/{}", write.publisher_workflow, write.publisher_branch),
+            "actor": {"id": write.owner_id, "type": "User"},
+            "triggering_actor": {"id": write.owner_id, "type": "User"}
+        });
+        validate_package_release_publisher_run(&write, &publisher).unwrap();
+
+        let mut stale_publisher = publisher.clone();
+        stale_publisher["head_sha"] = write.source_sha.clone().into();
+        assert!(validate_package_release_publisher_run(&write, &stale_publisher).is_err());
+        let mut untrusted_producer = producer;
+        untrusted_producer["triggering_actor"]["id"] = json!(write.owner_id + 1);
+        assert!(validate_package_release_producer_run(&write, &untrusted_producer).is_err());
+    }
+
+    #[test]
+    fn package_release_body_and_asset_are_bound_to_verified_publication() {
+        use serde_json::json;
+
+        let write = package_release_write_fixture();
+        let body = package_release_record_body(&write).unwrap();
+        let expected_body = format!(
+            "{{\"schema_version\":1,\"source_sha\":\"{}\",\"source_manifest_sha256\":\"{}\",\"producer_workflow\":\".github/workflows/native-package-build.yml\",\"producer_run_id\":100,\"producer_run_attempt\":1,\"publisher_workflow\":\".github/workflows/publish-native-package.yml\",\"publisher_sha\":\"{}\",\"publisher_run_id\":102,\"publisher_run_attempt\":1,\"tag\":\"v1.2.3\",\"asset_name\":\"securefix-linux-x86_64\",\"asset_size\":1024,\"asset_sha256\":\"{}\"}}",
+            write.source_sha, write.source_manifest_sha256, write.publisher_sha, write.asset_sha256
+        );
+        assert_eq!(body, expected_body);
+        let draft = json!({
+            "id": 103,
+            "tag_name": "v1.2.3",
+            "name": "v1.2.3",
+            "target_commitish": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "draft": true,
+            "prerelease": false,
+            "immutable": false,
+            "body": body,
+            "assets": [{
+                "name": "securefix-linux-x86_64",
+                "size": 1024,
+                "digest": format!("sha256:{}", "c".repeat(64)),
+                "state": "uploaded"
+            }]
+        });
+        validate_package_release_draft(&write, &draft, 103, true).unwrap();
+
+        let mut published = draft.clone();
+        published["draft"] = json!(false);
+        published["immutable"] = json!(true);
+        published["assets"][0]["id"] = json!(109);
+        validate_package_release_published(&write, &published, 103).unwrap();
+
+        let mut changed_published_name = published.clone();
+        changed_published_name["name"] = json!("different");
+        assert!(validate_package_release_published(&write, &changed_published_name, 103).is_err());
+        let mut changed_published_target = published.clone();
+        changed_published_target["target_commitish"] = json!("main");
+        assert!(
+            validate_package_release_published(&write, &changed_published_target, 103).is_err()
+        );
+        let mut changed_published_channel = published;
+        changed_published_channel["prerelease"] = json!(true);
+        assert!(
+            validate_package_release_published(&write, &changed_published_channel, 103).is_err()
+        );
+
+        let mut changed_record = draft.clone();
+        changed_record["body"] = body
+            .replace("\"publisher_run_id\":102", "\"publisher_run_id\":999")
+            .into();
+        assert!(validate_package_release_draft(&write, &changed_record, 103, true).is_err());
+
+        let mut changed_asset = draft;
+        changed_asset["assets"][0]["size"] = json!(1025);
+        assert!(validate_package_release_draft(&write, &changed_asset, 103, true).is_err());
+    }
+
+    #[test]
+    fn package_release_recovery_requires_the_exact_terminal_publisher_and_asset() {
+        use serde_json::json;
+
+        let write = package_release_write_fixture();
+        let target = package_release_target_fixture(PackageReleaseChannel::Stable);
+        let mut prior_record = package_release_record(&write);
+        prior_record.publisher_run_id = 101;
+        let release_body = serde_json::to_string(&prior_record).unwrap();
+        let draft = json!({
+            "id": 103,
+            "tag_name": target.tag,
+            "name": target.tag,
+            "target_commitish": target.source_sha,
+            "draft": true,
+            "prerelease": false,
+            "immutable": false,
+            "body": release_body,
+            "assets": []
+        });
+        validate_package_release_recoverable_draft(&target, &draft, 103).unwrap();
+
+        let publisher = json!({
+            "id": 101,
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "failure",
+            "event": "workflow_dispatch",
+            "head_sha": target.publisher_sha,
+            "head_branch": target.publisher_branch,
+            "repository": {"id": target.source_repository_id, "full_name": target.source_repository},
+            "head_repository": {"id": target.source_repository_id, "full_name": target.source_repository},
+            "path": format!("{}@refs/heads/{}", target.publisher_workflow, target.publisher_branch),
+            "actor": {"id": target.owner_id, "type": "User"},
+            "triggering_actor": {"id": target.owner_id, "type": "User"}
+        });
+        validate_package_release_prior_publisher_run(&target, &prior_record, &publisher, true)
+            .unwrap();
+
+        let mut active = publisher.clone();
+        active["status"] = json!("in_progress");
+        active["conclusion"] = json!(null);
+        assert!(
+            validate_package_release_prior_publisher_run(&target, &prior_record, &active, true)
+                .is_err()
+        );
+        let mut successful_draft_publisher = publisher.clone();
+        successful_draft_publisher["conclusion"] = json!("success");
+        assert!(
+            validate_package_release_prior_publisher_run(
+                &target,
+                &prior_record,
+                &successful_draft_publisher,
+                true
+            )
+            .is_err()
+        );
+        let mut wrong_owner = publisher.clone();
+        wrong_owner["triggering_actor"]["id"] = json!(target.owner_id + 1);
+        assert!(
+            validate_package_release_prior_publisher_run(
+                &target,
+                &prior_record,
+                &wrong_owner,
+                true
+            )
+            .is_err()
+        );
+
+        let no_assets = package_release_recovery_asset_id(&target, &draft, false).unwrap();
+        assert_eq!(no_assets, None);
+        assert!(package_release_recovery_asset_id(&target, &draft, true).is_err());
+
+        let exact_asset = json!({
+            "id": 109,
+            "name": target.asset_name,
+            "size": target.asset_size,
+            "digest": format!("sha256:{}", target.asset_sha256),
+            "state": "uploaded"
+        });
+        let mut uploaded_draft = draft.clone();
+        uploaded_draft["assets"] = json!([exact_asset]);
+        assert_eq!(
+            package_release_recovery_asset_id(&target, &uploaded_draft, false).unwrap(),
+            Some(109)
+        );
+        let mut extra_asset = uploaded_draft.clone();
+        extra_asset["assets"] = json!([exact_asset.clone(), exact_asset.clone()]);
+        assert!(package_release_recovery_asset_id(&target, &extra_asset, false).is_err());
+        let mut changed_asset = uploaded_draft.clone();
+        changed_asset["assets"][0]["digest"] = json!(format!("sha256:{}", "d".repeat(64)));
+        assert!(package_release_recovery_asset_id(&target, &changed_asset, false).is_err());
+
+        let mut published = uploaded_draft;
+        published["draft"] = json!(false);
+        published["immutable"] = json!(true);
+        validate_package_release_recoverable_published(&target, &published, 103).unwrap();
+        let mut successful_publisher = publisher.clone();
+        successful_publisher["conclusion"] = json!("success");
+        validate_package_release_prior_publisher_run(
+            &target,
+            &prior_record,
+            &successful_publisher,
+            false,
+        )
+        .unwrap();
+        let mut failed_publisher = successful_publisher;
+        failed_publisher["conclusion"] = json!("failure");
+        assert!(
+            validate_package_release_prior_publisher_run(
+                &target,
+                &prior_record,
+                &failed_publisher,
+                false
+            )
+            .is_err()
+        );
+        let mut mutable_published = published;
+        mutable_published["immutable"] = json!(false);
+        assert!(
+            validate_package_release_recoverable_published(&target, &mutable_published, 103)
+                .is_err()
+        );
     }
 
     #[test]

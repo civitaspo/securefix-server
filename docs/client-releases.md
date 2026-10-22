@@ -74,6 +74,35 @@ The `herdr-linear-agent` package uses four native targets: `aarch64-apple-darwin
 
 For `terraform-provider`, the server builds 13 ZIP assets using Go 1.26.5 and fixed Go build flags/targets. Each ZIP contains exactly `CHANGELOG.md`, `LICENSE`, `README.md`, and `${project}_v${version}` (with `.exe` on Windows); this matches the existing Sigma provider archive contract. Asset names are `${project}_${version}_${os}_${arch}.zip`, and the manifest is `${project}_${version}_manifest.json`. The server generates `${project}_${version}_SHA256SUMS` for all ZIPs and the manifest and its detached `.sig`. These names and archive contents are part of the Terraform Registry compatibility contract.
 
+## Securefix CLI package publication
+
+The Server's own `securefix-linux-x86_64` package has a separate producer and
+publisher. The owner-dispatched `native-package-build.yml` runs on the selected
+source commit with no publication credential. It tests and builds the CLI,
+uploads only the raw executable, and attests that exact file. The protected-main
+`publish-native-package.yml` builds its Rust publisher host from the workflow
+revision; the publisher treats the producer artifact as data and never executes
+it with a write token.
+
+Dispatch the publisher with the exact producer run ID and `channel`. The
+source-bound schema-v2 loader manifest fixes the producer workflow, publisher
+workflow, package version, size limit, and asset name. Rust validates the source
+manifest against `Cargo.toml`, the producer run and attempt, the exact artifact
+and attestation, and the actual owner-dispatched publisher run. The release
+body records the source-manifest digest, source revision, producer and publisher
+run identities, tag, and exact asset name, size, and digest. The publisher
+rechecks the protected destination branch before each write, uploads the single
+`securefix-linux-x86_64` asset to a draft, publishes it, then rereads the release
+and asset and requires immutable state and matching bytes and digests.
+
+`stable` targets the Server repository and uses a canonical stable SemVer tag.
+`scratch` targets only the repository fixed in the protected publisher workflow
+and uses a prerelease tag. Neither destination is accepted from dispatch input.
+The scratch token is scoped to the test repository; the stable token is scoped
+to the Server repository. The build and attestation jobs receive no release
+write token, and the publisher does not inspect repository settings or request
+Administration permission.
+
 ## Client wrappers
 
 Pin each reusable to a full commit SHA and give its caller the minimum `permissions` shown here:
