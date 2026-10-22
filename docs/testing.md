@@ -47,14 +47,22 @@ activation and hosted migration scenarios remain unfinished. Publication alone
 does not establish a working testing deployment.
 
 The separate `testing-native-approve.yml` workflow is a test-only owner-dispatched
-probe for applying an approval to one configured scratch PR. It builds its host
-from the workflow's protected-main source without secrets, validates the captured
-producer run, request attestation, Server authority, owner identity, and exact
-open PR head with a scratch-scoped read token, then exposes the existing Bot User
-token only to the exact-head review step. A bounded no-cache readback follows;
-readback failure does not submit a second review. This probe does not replace the
-production `/approve` command or authorize production PRs. It has local contract
-and behavior tests; hosted scratch qualification remains pending.
+probe for applying an approval to one configured scratch PR. It loads the fixed
+attested scratch package through `.github/actions/load-package` in both its
+validation and apply jobs. The workflow pins the current mapping directly:
+Server source `c6aa3110bb31d5ca5bae452d291870066f0147ef`, package build run
+`39710467717`, publisher run `39710779361`, immutable scratch release `420243090`,
+asset `664424003`, and SHA-256
+`a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083` for
+`v0.2.45-pre.12`. The loader rechecks the release, asset, digest, source
+attestation, signer, producer run and publication record before installing the
+binary. The workflow then validates the captured producer run, request
+attestation, Server authority, owner identity and exact open PR head with a
+scratch-scoped read token, and exposes the existing Bot User token only to the
+protected apply job after the independent validation succeeds. A bounded no-cache
+readback follows; readback failure does not submit a second review. This probe
+does not replace the production `/approve` command or authorize production PRs.
+Hosted scratch approval qualification remains pending.
 
 The separate `testing-native-merge.yml` workflow is a test-only owner-dispatched
 probe for one configured scratch PR. It requires independently attested merge and

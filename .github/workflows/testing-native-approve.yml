@@ -23,42 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-host:
-    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    timeout-minutes: 15
-    outputs:
-      artifact-id: ${{ steps.host.outputs.artifact-id }}
-      binary-sha256: ${{ steps.host-sha.outputs.sha256 }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-      - name: Require the exact protected workflow source
-        env:
-          EXPECTED_SOURCE_SHA: ${{ github.workflow_sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
-      - name: Install the pinned Rust toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal
-      - name: Build the protected approval host without secrets
-        run: cargo +1.99.0 build --locked --bin securefix
-      - name: Record the protected host digest
-        id: host-sha
-        run: echo "sha256=$(sha256sum target/debug/securefix | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        id: host
-        with:
-          name: native-approval-host-${{ github.run_id }}
-          path: target/debug/securefix
-          if-no-files-found: error
-          retention-days: 1
-
   validate-request:
-    needs: build-host
-    if: needs.build-host.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1 && github.sha == github.workflow_sha
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -70,18 +36,11 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          artifact-ids: ${{ needs.build-host.outputs.artifact-id }}
-          path: ${{ runner.temp }}/native-approval-host
-          merge-multiple: true
-      - name: Verify the protected host handoff
-        env:
-          EXPECTED_SHA256: ${{ needs.build-host.outputs.binary-sha256 }}
+      - name: Read the configured package repository identities
+        id: package-config
         run: |
           set -euo pipefail
-          echo "$EXPECTED_SHA256  $RUNNER_TEMP/native-approval-host/securefix" | sha256sum --check
-          chmod 755 "$RUNNER_TEMP/native-approval-host/securefix"
+          jq -r '"source-repository=" + .deployment.server.repository, "source-repository-id=" + (.deployment.server.id|tostring), "source-default-branch=" + .deployment.server.default_branch, "destination-repository=" + .deployment.integration.repository, "destination-repository-id=" + (.deployment.integration.id|tostring), "owner-id=" + (.owner_id|tostring)' .github/testing-policy.json >> "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: scratch-reader
         with:
@@ -92,6 +51,27 @@ jobs:
           permission-actions: read
           permission-contents: read
           permission-pull-requests: read
+      - name: Load the fixed immutable scratch package
+        uses: $/.github/actions/load-package
+        with:
+          action-sha: ${{ github.workflow_sha }}
+          source-repository: ${{ steps.package-config.outputs.source-repository }}
+          source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
+          destination-repository: ${{ steps.package-config.outputs.destination-repository }}
+          destination-repository-id: ${{ steps.package-config.outputs.destination-repository-id }}
+          source-default-branch: ${{ steps.package-config.outputs.source-default-branch }}
+          owner-id: ${{ steps.package-config.outputs.owner-id }}
+          channel: scratch
+          publication-source-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
+          publication-source-branch: main
+          publication-tag: v0.2.45-pre.12
+          publication-release-id: '420243090'
+          publication-asset-id: '664424003'
+          publication-asset-sha256: a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083
+          publication-asset-size: '10893768'
+          publication-producer-run-id: '39710467717'
+          publication-producer-run-attempt: '1'
+          token: ${{ github.token }}
       - name: Validate the owner-selected request without approval credentials
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -104,7 +84,7 @@ jobs:
           [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
           [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          "$RUNNER_TEMP/native-approval-host/securefix" new-server approval \
+          securefix new-server approval \
             --config repo-settings/native-securefix-test-instance.toml \
             --config-path repo-settings/native-securefix-test-instance.toml \
             --producer-repository civitaspo/testing-securefix-server \
@@ -113,8 +93,8 @@ jobs:
             --expected-head-sha "$EXPECTED_HEAD_SHA"
 
   apply-approval:
-    needs: [build-host, validate-request]
-    if: needs.build-host.result == 'success' && needs.validate-request.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    needs: validate-request
+    if: needs.validate-request.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1 && github.sha == github.workflow_sha
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -128,18 +108,11 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          artifact-ids: ${{ needs.build-host.outputs.artifact-id }}
-          path: ${{ runner.temp }}/native-approval-host
-          merge-multiple: true
-      - name: Verify the protected host handoff
-        env:
-          EXPECTED_SHA256: ${{ needs.build-host.outputs.binary-sha256 }}
+      - name: Read the configured package repository identities
+        id: package-config
         run: |
           set -euo pipefail
-          echo "$EXPECTED_SHA256  $RUNNER_TEMP/native-approval-host/securefix" | sha256sum --check
-          chmod 755 "$RUNNER_TEMP/native-approval-host/securefix"
+          jq -r '"source-repository=" + .deployment.server.repository, "source-repository-id=" + (.deployment.server.id|tostring), "source-default-branch=" + .deployment.server.default_branch, "destination-repository=" + .deployment.integration.repository, "destination-repository-id=" + (.deployment.integration.id|tostring), "owner-id=" + (.owner_id|tostring)' .github/testing-policy.json >> "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: scratch-reader
         with:
@@ -150,6 +123,27 @@ jobs:
           permission-actions: read
           permission-contents: read
           permission-pull-requests: read
+      - name: Load the fixed immutable scratch package
+        uses: $/.github/actions/load-package
+        with:
+          action-sha: ${{ github.workflow_sha }}
+          source-repository: ${{ steps.package-config.outputs.source-repository }}
+          source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
+          destination-repository: ${{ steps.package-config.outputs.destination-repository }}
+          destination-repository-id: ${{ steps.package-config.outputs.destination-repository-id }}
+          source-default-branch: ${{ steps.package-config.outputs.source-default-branch }}
+          owner-id: ${{ steps.package-config.outputs.owner-id }}
+          channel: scratch
+          publication-source-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
+          publication-source-branch: main
+          publication-tag: v0.2.45-pre.12
+          publication-release-id: '420243090'
+          publication-asset-id: '664424003'
+          publication-asset-sha256: a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083
+          publication-asset-size: '10893768'
+          publication-producer-run-id: '39710467717'
+          publication-producer-run-attempt: '1'
+          token: ${{ github.token }}
       - name: Apply the current-head approval with the trusted Bot credential
         id: approve
         env:
@@ -162,7 +156,7 @@ jobs:
         run: |
           set -euo pipefail
           command_log="$RUNNER_TEMP/native-approval-apply.log"
-          "$RUNNER_TEMP/native-approval-host/securefix" new-server approval \
+          securefix new-server approval \
             --config repo-settings/native-securefix-test-instance.toml \
             --config-path repo-settings/native-securefix-test-instance.toml \
             --producer-repository civitaspo/testing-securefix-server \
