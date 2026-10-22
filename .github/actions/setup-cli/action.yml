@@ -16,7 +16,9 @@ runs:
   steps:
     - name: Reuse a verified main CI build when available
       id: reuse
-      if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      if: >-
+        github.event_name != 'pull_request' &&
+        (github.event_name != 'pull_request_target' || inputs.candidate-run-id != '')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -24,6 +26,13 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         CANDIDATE_RUN_ID: ${{ inputs.candidate-run-id }}
       run: bash "$ACTION_PATH/reuse-build.sh"
+
+    - name: Require the exact candidate artifact for pull request target events
+      if: github.event_name == 'pull_request_target' && steps.reuse.outputs.reused != 'true'
+      shell: bash
+      run: |
+        echo "pull_request_target requires a verified candidate artifact; local builds are disabled" >&2
+        exit 1
 
     - name: Install Rust toolchain
       if: steps.reuse.outputs.binary == ''

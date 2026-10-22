@@ -1204,13 +1204,10 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
 
 #[test]
 fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
-    const CANDIDATE_SOURCE_SHA: &str = "7b5da5d248078c774d44d54a0e7fd145ddf67fd7";
     let producer = workflow("request-producer-probe.yml");
     let inputs = &producer["on"]["workflow_call"]["inputs"];
-    assert_eq!(
-        inputs["candidate_source_sha"]["default"],
-        CANDIDATE_SOURCE_SHA
-    );
+    assert_eq!(inputs["candidate_source_sha"]["required"], true);
+    assert!(inputs["candidate_source_sha"].get("default").is_none());
 
     let capture = &producer["jobs"]["capture"];
     let steps = capture["steps"].as_array().unwrap();
@@ -4204,7 +4201,7 @@ case "$2" in
     ;;
   repos/civitaspo/securefix-server/actions/runs/39212230238/artifacts*)
     digest="$MOCK_CANDIDATE_DIGEST"
-    [[ "$MOCK_MODE" != candidate-digest-mismatch ]] || digest=0000000000000000000000000000000000000000000000000000000000000000
+    [[ "$MOCK_MODE" != *digest-mismatch ]] || digest=0000000000000000000000000000000000000000000000000000000000000000
     printf '{"artifacts":[{"id":12171131611,"name":"candidate-runtime","expired":false,"size_in_bytes":5000,"digest":"sha256:%s","workflow_run":{"id":39212230238,"repository_id":1250079425,"head_repository_id":1250079425,"head_branch":"main","head_sha":"%s"}}]}\n' "$digest" "$MOCK_WORKFLOW_SHA"
     ;;
   repos/civitaspo/securefix-server/actions/runs/39212230237/artifacts*)
@@ -4322,6 +4319,20 @@ esac
             "candidate-valid",
         ),
         (
+            "candidate-pr-target-valid",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            true,
+            "candidate-pr-target-valid",
+        ),
+        (
+            "candidate-pr-target-digest-mismatch",
+            source_sha.as_str(),
+            artifact_digest.as_str(),
+            false,
+            "candidate-pr-target-digest-mismatch",
+        ),
+        (
             "candidate-source-mismatch",
             source_sha.as_str(),
             artifact_digest.as_str(),
@@ -4391,7 +4402,14 @@ esac
             )
             .env("ACTION_PATH", &action)
             .env("GITHUB_WORKSPACE", &repository)
-            .env("EVENT_NAME", "workflow_dispatch")
+            .env(
+                "EVENT_NAME",
+                if mode.starts_with("candidate-pr-target-") {
+                    "pull_request_target"
+                } else {
+                    "workflow_dispatch"
+                },
+            )
             .env("ImageOS", "ubuntu24")
             .env("RUNNER_TEMP", &scenario_dir)
             .env("GITHUB_OUTPUT", &output)
@@ -4413,11 +4431,15 @@ esac
             .env("MOCK_CANDIDATE_DIGEST", candidate_digest)
             .output()
             .unwrap();
-        assert!(
-            result.status.success(),
-            "{scenario}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        if mode.starts_with("candidate-pr-target-") && !expected_reuse {
+            assert!(!result.status.success(), "{scenario} must fail closed");
+        } else {
+            assert!(
+                result.status.success(),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
         let output = fs::read_to_string(output).unwrap();
         if expected_reuse {
             assert!(
