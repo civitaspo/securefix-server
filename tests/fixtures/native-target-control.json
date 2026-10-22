@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "generation": 10,
+  "source_sha": "865a26535fb9a1756bf255df9ecbc58199c66c3f",
+  "policy_sha256": "919fa383a7e2942fd952ca6a8d5ff8840e44e84ebde37fab50f4ad6e22ab114f",
+  "archive_sha256": "27acbcba9183fa1ea75c92550d52175e0a38126c8bb44a81e46a225efee5108b",
+  "release_id": 418697086,
+  "asset_id": 660047122,
+  "publisher_run_id": 39469762248,
+  "verification_run_id": 39469261260,
+  "previous": "ed46c418e8be966ef1731697cd86bb295f494f433c96eda415f02b0ef8ab8e01"
+}

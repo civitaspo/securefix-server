@@ -46,7 +46,7 @@ pub struct NativeScratchTarget<'a> {
     pub caller_workflow_path: &'a str,
     pub caller_workflow_sha: &'a str,
     pub client_workflow_epoch: &'a str,
-    pub control_identity: Option<&'a str>,
+    pub target_policy_control_identity: Option<&'a str>,
     pub destination_branch: Option<&'a str>,
 }
 
@@ -128,7 +128,7 @@ struct NativeScratchWrite {
     caller_workflow_path: String,
     caller_workflow_sha: String,
     client_workflow_epoch: String,
-    control_identity: Option<String>,
+    target_policy_control_identity: Option<String>,
     destination_branch: Option<String>,
 }
 
@@ -369,15 +369,17 @@ impl GitHub {
             config_bytes.len() <= 256 * 1024,
             "instance config exceeds size limit"
         );
-        match (request.mode, request.control_identity) {
+        match (request.mode, request.target_policy_control_identity) {
             (NativeScratchMode::Merge, Some(identity)) => {
-                validate_sha256(identity, "native merge control identity")?;
+                validate_sha256(identity, "native target policy control identity")?;
             }
             (NativeScratchMode::Merge, None) => {
-                anyhow::bail!("native merge lacks its current control identity")
+                anyhow::bail!("native merge lacks its target policy control identity")
             }
             (_, None) => {}
-            (_, Some(_)) => anyhow::bail!("control identity is only valid for native merge"),
+            (_, Some(_)) => {
+                anyhow::bail!("target policy control identity is only valid for native merge")
+            }
         }
         let configured_target = config
             .repositories
@@ -483,7 +485,9 @@ impl GitHub {
             caller_workflow_path: request.caller_workflow_path.to_owned(),
             caller_workflow_sha: request.caller_workflow_sha.to_owned(),
             client_workflow_epoch: request.client_workflow_epoch.to_owned(),
-            control_identity: request.control_identity.map(str::to_owned),
+            target_policy_control_identity: request
+                .target_policy_control_identity
+                .map(str::to_owned),
             destination_branch: request.destination_branch.map(str::to_owned),
         }));
         Ok(api)
@@ -1043,7 +1047,7 @@ impl GitHub {
             caller_workflow_path,
             caller_workflow_sha,
             client_workflow_epoch,
-            control_identity,
+            target_policy_control_identity,
             destination_branch,
         } = write.as_ref();
 
@@ -1115,17 +1119,18 @@ impl GitHub {
         require_native_authority_unchanged(server_authority, &current_authority)
             .context("native Server deployment authority changed before write")?;
         if *mode == NativeScratchMode::Merge {
-            let expected = control_identity
+            let expected = target_policy_control_identity
                 .as_deref()
-                .context("native merge control identity is missing")?;
-            let current = native_current_control_identity(
-                &server_reader,
-                instance_repository,
-                default_branch,
+                .context("native target policy control identity is missing")?;
+            let current = native_target_policy_control_identity(
+                self,
+                target_repository,
+                *target_id,
+                base_ref,
             )?;
             ensure!(
                 current == expected,
-                "native merge control identity changed before write"
+                "native target policy control identity changed before write"
             );
         }
         let current_client_epoch = capture_native_client_workflow_epoch(
@@ -1170,6 +1175,21 @@ impl GitHub {
                 && author_login == actor_login,
             "native request PR is closed, retargeted, or has a different head or identity"
         );
+        if *mode == NativeScratchMode::Merge {
+            let expected = target_policy_control_identity
+                .as_deref()
+                .context("native target policy control identity is missing")?;
+            let current = native_target_policy_control_identity(
+                self,
+                target_repository,
+                *target_id,
+                base_ref,
+            )?;
+            ensure!(
+                current == expected,
+                "native target policy control identity changed immediately before write"
+            );
+        }
         Ok(())
     }
 
@@ -2339,6 +2359,29 @@ pub fn native_current_control_identity(
     control.identity()
 }
 
+pub fn native_target_policy_control_identity(
+    api: &GitHub,
+    repository: &str,
+    repository_id: u64,
+    default_branch: &str,
+) -> Result<String> {
+    crate::policy::validate_repository(repository)?;
+    crate::config::validate_branch(default_branch)?;
+    ensure!(
+        repository_id > 0,
+        "native policy target repository ID is missing"
+    );
+    require_single_repository_installation(api, repository_id, repository)?;
+    let current: Value = api.get_uncached(&format!("/repos/{repository}"))?;
+    ensure!(
+        current["id"].as_u64() == Some(repository_id)
+            && current["full_name"].as_str() == Some(repository)
+            && current["default_branch"].as_str() == Some(default_branch),
+        "native policy target repository identity or default branch changed"
+    );
+    native_current_control_identity(api, repository, default_branch)
+}
+
 pub fn validate_native_server_execution_workflow(
     snapshot: &NativeAuthoritySnapshot,
     mode: NativeScratchMode,
@@ -3008,10 +3051,100 @@ mod tests {
             caller_workflow_path: ".github/workflows/policy-check.yml".into(),
             caller_workflow_sha: "2".repeat(40),
             client_workflow_epoch: "3".repeat(40),
-            control_identity: None,
+            target_policy_control_identity: None,
             destination_branch: None,
         }));
         api
+    }
+
+    #[test]
+    fn native_merge_policy_control_identity_comes_from_the_configured_target_repository() {
+        use crate::fixtures::{Fixture, Route};
+
+        let server_control: crate::control::ControlRevision = serde_json::from_slice(
+            include_bytes!("../tests/fixtures/native-server-instance-control.json"),
+        )
+        .unwrap();
+        let target_bytes = include_bytes!("../tests/fixtures/native-target-control.json");
+        let target_control: crate::control::ControlRevision =
+            serde_json::from_slice(target_bytes).unwrap();
+        let server_identity = server_control.identity().unwrap();
+        let target_identity = target_control.identity().unwrap();
+        assert_eq!(
+            server_identity,
+            "fbb4c101499cebb45a56b980363c70c21f15af79eff459eae6c301b56bca5209"
+        );
+        assert_eq!(
+            target_identity,
+            "824f3066c5d35178102dad38ccd00f375d5cdcd6e31343b445b653c493fb853c"
+        );
+        assert_ne!(server_identity, target_identity);
+
+        use base64::Engine as _;
+        let encoded_target = base64::engine::general_purpose::STANDARD.encode(target_bytes);
+        let fixture = Fixture::new(vec![
+            Route::get(
+                "/installation/repositories?per_page=100",
+                serde_json::json!({
+                    "total_count":1,
+                    "repositories":[{
+                        "id":1_410_312_556,
+                        "full_name":"civitaspo/testing-securefix-server"
+                    }]
+                }),
+            ),
+            Route::get(
+                "/repos/civitaspo/testing-securefix-server",
+                serde_json::json!({
+                    "id":1_410_312_556,
+                    "full_name":"civitaspo/testing-securefix-server",
+                    "default_branch":"main"
+                }),
+            ),
+            Route::get(
+                "/repos/civitaspo/testing-securefix-server/contents/control/active.json?ref=main",
+                serde_json::json!({"encoding":"base64","content":encoded_target}),
+            ),
+        ]);
+        let actual = native_target_policy_control_identity(
+            &fixture.api,
+            "civitaspo/testing-securefix-server",
+            1_410_312_556,
+            "main",
+        )
+        .unwrap();
+        assert_eq!(actual, target_identity);
+        assert_ne!(actual, server_identity);
+        fixture.finish();
+    }
+
+    #[test]
+    fn native_merge_target_control_read_rejects_an_unscoped_client_token() {
+        use crate::fixtures::{Fixture, Route};
+
+        let mut installation = native_installation_repository_response_fixture();
+        installation["total_count"] = 2.into();
+        installation["repositories"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": 9,
+                "full_name": "civitaspo/unexpected-repository"
+            }));
+        let fixture = Fixture::new(vec![Route::get(
+            "/installation/repositories?per_page=100",
+            installation,
+        )]);
+        assert!(
+            native_target_policy_control_identity(
+                &fixture.api,
+                "civitaspo/testing-securefix-server",
+                1_410_312_556,
+                "main",
+            )
+            .is_err()
+        );
+        fixture.finish();
     }
 
     #[test]

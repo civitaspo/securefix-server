@@ -188,7 +188,7 @@ struct VerifiedRequest {
     config_bytes: Vec<u8>,
     manifest: RequestManifest,
     manifest_bytes: Vec<u8>,
-    control_identity: Option<String>,
+    target_policy_control_identity: Option<String>,
     writer: Option<securefix::api::GitHub>,
     client_api: securefix::api::GitHub,
     producer_run: Value,
@@ -246,15 +246,6 @@ fn verify_request(
         &manifest.server_authority,
         &server_authority,
     )?;
-    let control_identity = if mode == securefix::api::NativeScratchMode::Merge {
-        Some(securefix::api::native_current_control_identity(
-            &server_api,
-            &config.instance.repository,
-            &config.instance.default_branch,
-        )?)
-    } else {
-        None
-    };
     let workflow_ref = std::env::var("GITHUB_WORKFLOW_REF")
         .context("missing GITHUB_WORKFLOW_REF for native Server execution")?;
     let workflow_sha = std::env::var("GITHUB_WORKFLOW_SHA")
@@ -287,6 +278,16 @@ fn verify_request(
     let bundle_bytes = read_bounded(bundle_path, MAX_BUNDLE_BYTES)?;
     ensure!(!bundle_bytes.is_empty(), "attestation bundle is empty");
     let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
+    let target_policy_control_identity = if mode == securefix::api::NativeScratchMode::Merge {
+        Some(securefix::api::native_target_policy_control_identity(
+            &api,
+            &manifest.repository.full_name,
+            manifest.repository.id,
+            &manifest.pull_request.base_ref,
+        )?)
+    } else {
+        None
+    };
     let acceptable_client: Value =
         server_api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
     ensure!(
@@ -388,7 +389,7 @@ fn verify_request(
             &manifest,
             &manifest_bytes,
             mode,
-            control_identity.as_deref(),
+            target_policy_control_identity.as_deref(),
         )?)
     } else {
         None
@@ -398,7 +399,7 @@ fn verify_request(
         config_bytes,
         manifest,
         manifest_bytes,
-        control_identity,
+        target_policy_control_identity,
         writer,
         client_api: api,
         producer_run: run,
@@ -538,7 +539,7 @@ fn native_scratch_writer(
     manifest: &RequestManifest,
     manifest_bytes: &[u8],
     mode: securefix::api::NativeScratchMode,
-    control_identity: Option<&str>,
+    target_policy_control_identity: Option<&str>,
 ) -> Result<securefix::api::GitHub> {
     let request_sha256 = securefix::hex_encode(Sha256::digest(manifest_bytes));
     let target = securefix::api::NativeScratchTarget {
@@ -558,7 +559,7 @@ fn native_scratch_writer(
         caller_workflow_path: &manifest.producer.workflow_path,
         caller_workflow_sha: &manifest.producer.workflow_sha,
         client_workflow_epoch: &manifest.client_workflow_epoch,
-        control_identity,
+        target_policy_control_identity,
         destination_branch: (mode == securefix::api::NativeScratchMode::Securefix)
             .then_some(manifest.pull_request.head_branch.as_str()),
     };
@@ -952,18 +953,19 @@ fn validate_native_merge_readiness(
     let api = &merge.client_api;
     verify_current_pull_request(api, manifest)?;
 
-    let current_control = securefix::api::native_current_control_identity(
-        &securefix::api::GitHub::from_env("GITHUB_TOKEN")?,
-        &merge.config.instance.repository,
-        &merge.config.instance.default_branch,
+    let current_policy_control = securefix::api::native_target_policy_control_identity(
+        api,
+        &manifest.repository.full_name,
+        manifest.repository.id,
+        &manifest.pull_request.base_ref,
     )?;
     let expected_control = merge
-        .control_identity
+        .target_policy_control_identity
         .as_deref()
-        .context("native merge request lacks its captured control identity")?;
+        .context("native merge request lacks its target policy control identity")?;
     ensure!(
-        current_control == expected_control,
-        "native merge control identity changed during request validation"
+        current_policy_control == expected_control,
+        "native target policy control identity changed during request validation"
     );
     let expected_policy_id = format!("{}:{}", manifest.pull_request.head_sha, expected_control);
 
@@ -2080,6 +2082,48 @@ mod tests {
         let mut duplicate = checks.clone();
         duplicate.push(checks[1].clone());
         assert!(native_merge_checks_ready(&duplicate, 701, 502, "head:control").is_err());
+    }
+
+    #[test]
+    fn native_merge_policy_check_is_bound_to_the_target_controller_not_server_instance() {
+        let server_control: securefix::control::ControlRevision = serde_json::from_slice(
+            include_bytes!("../tests/fixtures/native-server-instance-control.json"),
+        )
+        .unwrap();
+        let target_control: securefix::control::ControlRevision = serde_json::from_slice(
+            include_bytes!("../tests/fixtures/native-target-control.json"),
+        )
+        .unwrap();
+        let server_identity = server_control.identity().unwrap();
+        let target_identity = target_control.identity().unwrap();
+        assert_ne!(server_identity, target_identity);
+
+        let head = "f".repeat(40);
+        let checks = vec![
+            serde_json::json!({
+                "id": 1,
+                "name": "status-check",
+                "status": "completed",
+                "conclusion": "success",
+                "app": {"id": 701}
+            }),
+            serde_json::json!({
+                "id": 2,
+                "name": "securefix-policy-check",
+                "status": "completed",
+                "conclusion": "success",
+                "external_id": format!("{head}:{target_identity}"),
+                "app": {"id": 502}
+            }),
+        ];
+        assert!(
+            native_merge_checks_ready(&checks, 701, 502, &format!("{head}:{target_identity}"))
+                .unwrap()
+        );
+        assert!(
+            !native_merge_checks_ready(&checks, 701, 502, &format!("{head}:{server_identity}"))
+                .unwrap()
+        );
     }
 
     #[test]
