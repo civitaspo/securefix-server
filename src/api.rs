@@ -761,7 +761,7 @@ impl GitHub {
     ) -> Result<reqwest::blocking::RequestBuilder> {
         let token = match &self.writes {
             WriteContext::NativeScratch(write)
-                if method == Method::POST
+                if (method == Method::POST
                     && match write.mode {
                         NativeScratchMode::PolicyCheck => {
                             path == format!("/repos/{}/check-runs", write.target_repository)
@@ -773,7 +773,10 @@ impl GitHub {
                             )
                         }
                         NativeScratchMode::Securefix => path == "/graphql",
-                    } =>
+                    })
+                    || (method == Method::GET
+                        && write.mode == NativeScratchMode::Approval
+                        && path == "/user") =>
             {
                 self.write_token.as_deref().unwrap_or(&self.token)
             }
@@ -3048,6 +3051,38 @@ mod tests {
             post.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
             "Bearer review-user-token"
         );
+    }
+
+    #[test]
+    fn native_approval_uses_writer_token_only_for_user_and_review_requests() {
+        use crate::fixtures::{Fixture, Route};
+
+        let mut api = native_approval_api();
+        api.token = "reader-test-token".into();
+        api.write_token = Some("writer-test-token".into());
+        let pull_path = format!("/repos/{SCRATCH_REPOSITORY}/pulls/4");
+        let review_path = format!("{pull_path}/reviews");
+        let fixture = Fixture::new(vec![
+            Route::get(
+                "/user",
+                serde_json::json!({"id": 11, "login": "reviewer", "type": "User"}),
+            )
+            .with_request_header("Authorization", "Bearer writer-test-token"),
+            Route::get(&pull_path, serde_json::json!({"state": "open"}))
+                .with_request_header("Authorization", "Bearer reader-test-token"),
+            Route::request("POST", &review_path, 200, serde_json::json!({"ok": true}))
+                .with_request_header("Authorization", "Bearer writer-test-token"),
+        ]);
+        api.base = fixture.base.clone();
+
+        api.get::<Value>("/user").unwrap();
+        api.get::<Value>(&pull_path).unwrap();
+        api.builder(Method::POST, &review_path)
+            .unwrap()
+            .json(&serde_json::json!({"event": "APPROVE"}))
+            .send()
+            .unwrap();
+        fixture.finish();
     }
 
     #[test]
