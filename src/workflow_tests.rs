@@ -3772,7 +3772,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         package_loader["uses"]
                             .as_str()
                             .unwrap()
-                            .ends_with("@0000000000000000000000000000000000000000")
+                            .ends_with("@c6aa3110bb31d5ca5bae452d291870066f0147ef")
                     );
                     assert!(
                         steps
@@ -4490,9 +4490,11 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
         assert_eq!(fixed_ref.len(), 40);
         assert!(fixed_ref.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(loader["with"]["action-sha"], fixed_ref);
-        if fixed_ref == "0000000000000000000000000000000000000000" {
-            assert!(production_yaml.contains("Candidate template only. Replace this exact pin"));
-        }
+        assert_eq!(fixed_ref, "c6aa3110bb31d5ca5bae452d291870066f0147ef");
+        assert!(
+            production_yaml
+                .contains("Candidate-source CI only: pre12 lacks the Release Tag CLI contract")
+        );
         assert_eq!(loader["with"]["channel"], "stable");
         assert_eq!(
             loader["with"]["source-repository"],
