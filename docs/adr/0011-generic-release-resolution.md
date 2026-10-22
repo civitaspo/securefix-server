@@ -117,10 +117,19 @@ The native publisher accepts that state only for an exact unpublished draft
 whose source, producer, publisher, asset contract, and canonical release record
 still validate. After the exact asset is uploaded, it creates `refs/tags/<tag>`
 only at the validated destination target commit, reads that association back,
-and only then changes the release from draft to published. A draft with an
-existing tag must already point to that exact commit; a published release must
-have the exact tag ref. Recovery remains bound to the existing publisher/source
-identity contract.
+and only then changes the release from draft to published. Before token
+issuance, the host uses the workflow token for its read-only source, producer,
+destination, and tag qualification. After qualification, the writer phase uses
+the destination-scoped App token to revalidate destination identity, release
+and asset state, and tag state around the writes. This token is also used for
+the immediate prepublish draft read because a draft created in the destination
+repository may be invisible to the workflow token, even when preflight
+qualified the destination. The publisher requires the tag ref to still target the
+validated commit before changing `draft` to `false`. API errors retain only a
+bounded, sanitized JSON `message`; response bodies and headers are not logged.
+A draft with an existing tag must already point to that exact commit; a
+published release must have the exact tag ref. Recovery remains bound to the
+existing publisher/source identity contract.
 
 This publisher implementation has local contract tests but is not yet
 scratch-qualified. Its presence does not qualify a release, wire a package
