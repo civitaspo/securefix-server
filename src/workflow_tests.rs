@@ -128,6 +128,20 @@ fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
             "missing producer binding: {binding}"
         );
     }
+    let publish_source_recheck = value["jobs"]["publish-scratch"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"] == "Recheck the selected source and target before minting a scratch token"
+        })
+        .unwrap();
+    let publish_source_recheck_run = publish_source_recheck["run"].as_str().unwrap();
+    assert!(publish_source_recheck_run.contains("\"$source_policy\" == \"$harness_policy\""));
+    assert!(publish_source_recheck_run.contains("\"$source_control\" == \"$main_control\""));
+    assert!(publish_source_recheck_run.contains("\"$harness_control\" == \"$main_control\""));
+    assert!(!publish_source_recheck_run.contains("main_policy"));
+    assert!(!publish_source_recheck_run.contains("policy.json?ref=$WORKFLOW_SHA"));
 
     let publish = &value["jobs"]["publish-scratch"];
     assert_eq!(publish["environment"], "main");
