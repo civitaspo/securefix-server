@@ -31,10 +31,10 @@ jobs:
     steps:
       - name: Load the fixed Securefix Server package
         id: package
-        # Candidate template only. Replace this exact pin and action-sha after package qualification.
-        uses: civitaspo/securefix-server/.github/actions/load-package@0000000000000000000000000000000000000000
+        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
+        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
         with:
-          action-sha: 0000000000000000000000000000000000000000
+          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
           source-repository: civitaspo/securefix-server
           source-repository-id: '1250079425'
           destination-repository: civitaspo/securefix-server
