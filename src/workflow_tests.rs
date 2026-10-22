@@ -1427,31 +1427,38 @@ fn native_approval_uses_the_fixed_package_and_keeps_the_user_token_in_one_protec
             .iter()
             .find(|step| {
                 step["uses"]
-                    == "civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef"
+                    == "civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a"
             })
             .unwrap();
         assert_eq!(package["name"], "Load the fixed immutable scratch package");
         assert_eq!(
             package["with"]["action-sha"],
-            "c6aa3110bb31d5ca5bae452d291870066f0147ef"
+            "6be9fb42e14770a9162301787e158f7db3ab918a"
         );
         assert_eq!(package["with"]["channel"], "scratch");
         assert_eq!(
             package["with"]["publication-source-sha"],
-            "c6aa3110bb31d5ca5bae452d291870066f0147ef"
+            "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
         );
-        assert_eq!(package["with"]["publication-source-branch"], "main");
-        assert_eq!(package["with"]["publication-tag"], "v0.2.45-pre.12");
-        assert_eq!(package["with"]["publication-release-id"], "420243090");
-        assert_eq!(package["with"]["publication-asset-id"], "664424003");
+        assert_eq!(
+            package["with"]["manifest-source-sha"],
+            "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
+        );
+        assert_eq!(
+            package["with"]["publication-source-branch"],
+            "integration/native-package-pre23"
+        );
+        assert_eq!(package["with"]["publication-tag"], "v0.2.45-pre.23");
+        assert_eq!(package["with"]["publication-release-id"], "420735040");
+        assert_eq!(package["with"]["publication-asset-id"], "665912019");
         assert_eq!(
             package["with"]["publication-asset-sha256"],
-            "a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083"
+            "fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936"
         );
-        assert_eq!(package["with"]["publication-asset-size"], "10893768");
+        assert_eq!(package["with"]["publication-asset-size"], "11767224");
         assert_eq!(
             package["with"]["publication-producer-run-id"],
-            "39710467717"
+            "39783133806"
         );
         assert_eq!(package["with"]["publication-producer-run-attempt"], "1");
         assert_eq!(package["with"]["token"], "${{ github.token }}");
