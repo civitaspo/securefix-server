@@ -1,8 +1,10 @@
 # Generic package release resolution
 
 Status: accepted for read-only stable metadata resolution, byte integrity, and
-the single-workflow publisher-proof contract described below. No operational
-caller is wired to the verified result; broader D01 remains open.
+the single-workflow publisher-proof contract described below. The source also
+contains a separate native-package producer and publisher path; it is not yet
+scratch-qualified. No operational caller is wired to the verified result;
+broader D01 remains open.
 
 ## Context
 
@@ -13,8 +15,9 @@ select executable code, and a pinned source revision alone does not prove that
 the release asset was produced by an authorized workflow.
 
 The existing runtime publisher and active descriptor use the legacy runtime
-archive contract. This decision adds no call site to that flow and does not
-change its schema or behavior. A generic package resolver needs to establish
+archive contract. The native-package publisher has a separate release contract;
+it does not change the legacy runtime archive schema or add an operational
+consumer to that flow. A generic package resolver needs to establish
 the bounded GitHub metadata relationship that a later caller can use without
 enumerating releases or silently choosing a fallback.
 
@@ -85,8 +88,34 @@ caller-selected; the resolver checks the single asset name.
 
 The resolver does not load legacy `Policy::active()` or `config::trusted()`,
 read an active descriptor, enumerate latest releases, choose a version, or
-write GitHub state. No operational caller, repository settings, credential, or
-release-publishing path changes in this decision.
+write GitHub state. It remains separate from the native-package publishing
+writer and has no operational caller. Repository settings, active control, and
+legacy runtime publication are unchanged.
+
+## Native package producer and publisher
+
+`.github/workflows/native-package-build.yml` is the owner-dispatched producer.
+It builds and tests the selected source with read-only repository access, uploads
+only the raw executable, then creates a separate repository-bound attestation.
+The build job has no package writer token, signing key, or candidate-provided
+credentials.
+
+`.github/workflows/publish-native-package.yml` builds its publisher host from
+the exact protected workflow revision in a read-only job. In a separate `main`
+environment job, that host validates the requested producer run, its exact
+artifact and attestation, and the selected stable or scratch destination using
+read-only GitHub access before the workflow mints an App token. The token grants
+only `contents:write` to the selected destination repository. When the exact
+package is already published as an immutable release and its recorded producer
+and publisher evidence match, the workflow skips token creation. The host
+rechecks the source, asset bytes, release state, and recovery evidence before
+writing.
+
+This publisher implementation has local contract tests but is not yet
+scratch-qualified. Its presence does not qualify a release, wire a package
+consumer, select a package version, change the active runtime, or activate a
+caller. Those steps remain subject to the source and evidence gates in the
+deployment workflow.
 
 ## Consequences and limits
 
