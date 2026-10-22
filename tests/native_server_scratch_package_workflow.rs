@@ -107,3 +107,83 @@ fn scratch_server_policy_receiver_admits_only_its_exact_label_context_before_net
         );
     }
 }
+
+#[test]
+fn server_policy_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() {
+    let workflow: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(format!(
+            "{}/.github/workflows/reusable-server-policy-check.yml",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
+    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-policy-check.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
+    let stable = steps
+        .iter()
+        .find(|step| step["id"] == "package-stable")
+        .unwrap();
+    let scratch = steps
+        .iter()
+        .find(|step| step["id"] == "package-scratch")
+        .unwrap();
+    assert!(
+        stable["if"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("!({scratch_context})"))
+    );
+    assert_eq!(
+        stable["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef"
+    );
+    assert_eq!(stable["with"]["channel"], "stable");
+    assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
+    assert_eq!(
+        scratch["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@7d04df0755f857d45897c4df53ce51d2c14fe0a4"
+    );
+    assert_eq!(
+        scratch["with"]["action-sha"],
+        "7d04df0755f857d45897c4df53ce51d2c14fe0a4"
+    );
+    for (key, expected) in [
+        ("channel", "scratch"),
+        (
+            "manifest-source-sha",
+            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
+        ),
+        (
+            "publication-source-sha",
+            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
+        ),
+        (
+            "publication-source-branch",
+            "integration/native-consumer-pre35-20261023",
+        ),
+        ("publication-tag", "v0.2.45-pre.35"),
+        ("publication-release-id", "421283713"),
+        ("publication-asset-id", "667334470"),
+        (
+            "publication-asset-sha256",
+            "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
+        ),
+        ("publication-asset-size", "12173384"),
+        ("publication-producer-run-id", "39866598474"),
+        ("publication-producer-run-attempt", "1"),
+    ] {
+        assert_eq!(scratch["with"][key], expected, "{key}");
+    }
+    for name in [
+        "Resolve the authenticated Client request label",
+        "Validate the exact-head policy check without a writer token",
+        "Revalidate and publish the exact-head policy check",
+    ] {
+        let step = steps.iter().find(|step| step["name"] == name).unwrap();
+        assert_eq!(
+            step["env"]["CLI_BINARY"],
+            "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
+        );
+    }
+}
