@@ -52,9 +52,9 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: $/.github/actions/load-package
+        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
         with:
-          action-sha: ${{ github.workflow_sha }}
+          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
           source-repository: ${{ steps.package-config.outputs.source-repository }}
           source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
           destination-repository: ${{ steps.package-config.outputs.destination-repository }}
@@ -124,9 +124,9 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: $/.github/actions/load-package
+        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
         with:
-          action-sha: ${{ github.workflow_sha }}
+          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
           source-repository: ${{ steps.package-config.outputs.source-repository }}
           source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
           destination-repository: ${{ steps.package-config.outputs.destination-repository }}
