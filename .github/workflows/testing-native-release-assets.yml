@@ -69,6 +69,20 @@ jobs:
           mkdir -p probe
           install -m 755 "$binary" probe/release-probe-tests
           install -m 644 policy.json probe/policy.json
+      - name: Capture the active control policy for scratch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          control="$(gh api "repos/${GITHUB_REPOSITORY}/contents/control/active.json?ref=main")"
+          jq -er .content <<<"$control" | base64 --decode > probe/active-control.json
+          active_source_sha="$(jq -er .source_sha probe/active-control.json)"
+          active_policy_sha="$(jq -er .policy_sha256 probe/active-control.json)"
+          [[ "$active_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$active_policy_sha" =~ ^[0-9a-f]{64}$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/contents/policy.json?ref=$active_source_sha" --jq .content \
+            | base64 --decode > probe/active-policy.json
+          printf '%s  %s\n' "$active_policy_sha" probe/active-policy.json | sha256sum --check
       - name: Read the configured native target matrix
         id: targets
         env:
@@ -180,7 +194,8 @@ jobs:
       - name: Independently verify current-run native artifacts before any write token exists
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/active-policy.json
+          SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
           SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}
           SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA: ${{ github.sha }}
           SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA: ${{ github.sha }}
@@ -225,10 +240,25 @@ jobs:
         run: |
           current="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq .object.sha)"
           [[ "$current" == "$CANDIDATE_SHA" ]] || { echo 'frozen candidate branch moved before scratch publication' >&2; exit 1; }
+      - name: Refresh the active control policy before scratch validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          control="$(gh api "repos/${GITHUB_REPOSITORY}/contents/control/active.json?ref=main")"
+          jq -er .content <<<"$control" | base64 --decode > probe/active-control.json
+          active_source_sha="$(jq -er .source_sha probe/active-control.json)"
+          active_policy_sha="$(jq -er .policy_sha256 probe/active-control.json)"
+          [[ "$active_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$active_policy_sha" =~ ^[0-9a-f]{64}$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/contents/policy.json?ref=$active_source_sha" --jq .content \
+            | base64 --decode > probe/active-policy.json
+          printf '%s  %s\n' "$active_policy_sha" probe/active-policy.json | sha256sum --check
       - name: Revalidate exact native artifacts before minting the scratch token
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/active-policy.json
+          SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
           SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}
           SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA: ${{ github.sha }}
           SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA: ${{ github.sha }}
@@ -251,7 +281,8 @@ jobs:
       - name: Publish the verified native binaries to a scratch prerelease
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
+          SECUREFIX_POLICY_PATH: ${{ github.workspace }}/probe/active-policy.json
+          SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH: ${{ github.workspace }}/probe/policy.json
           SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
           SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
           SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}

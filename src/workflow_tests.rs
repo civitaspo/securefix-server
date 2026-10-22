@@ -3137,6 +3137,7 @@ fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease
     let compile_text = serde_json::to_string(compile).unwrap();
     assert!(!compile_text.contains("secrets."));
     assert!(!compile_text.contains("APP_TOKEN"));
+    assert!(compile_text.contains("Capture the active control policy for scratch writes"));
     assert_eq!(
         compile["steps"][0]["with"]["ref"],
         "${{ needs.guard.outputs.candidate-sha }}"
@@ -3248,6 +3249,14 @@ fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease
                 || run.contains("native_release_assets_scratch_publish_probe")
             {
                 assert_eq!(
+                    step["env"]["SECUREFIX_POLICY_PATH"],
+                    "${{ github.workspace }}/probe/active-policy.json"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"],
+                    "${{ github.workspace }}/probe/policy.json"
+                );
+                assert_eq!(
                     step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"],
                     "${{ github.sha }}"
                 );
@@ -3274,6 +3283,7 @@ fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease
     assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"));
     assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"));
     assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"));
     assert!(source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)"));
     assert!(
         source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)?")

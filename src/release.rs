@@ -3952,6 +3952,115 @@ mod tests {
         native_release_assets_scratch_publish_probe_inner().unwrap();
     }
 
+    #[test]
+    #[ignore = "requires local active-control and candidate-policy fixtures"]
+    fn native_release_assets_scratch_write_context_preflight() {
+        use crate::fixtures::{Fixture, Route};
+
+        let control: crate::control::ControlRevision = serde_json::from_slice(
+            &std::fs::read(env("SECUREFIX_NATIVE_RELEASE_PROBE_CONTROL_PATH").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let active_policy = crate::config::trusted_policy_bytes().unwrap();
+        use sha2::Digest;
+        assert_eq!(
+            control.policy_sha256,
+            crate::hex_encode(sha2::Sha256::digest(active_policy))
+        );
+        assert_eq!(
+            env("GITHUB_REPOSITORY").unwrap(),
+            "civitaspo/securefix-server"
+        );
+        let server_sha =
+            CommitSha::parse(&env("SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA").unwrap()).unwrap();
+        let harness_sha =
+            CommitSha::parse(&env("SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA").unwrap()).unwrap();
+        assert_eq!(harness_sha.as_str(), env("GITHUB_SHA").unwrap());
+        assert!(server_sha.as_str() != harness_sha.as_str());
+        assert_eq!(
+            env("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT").unwrap(),
+            "1"
+        );
+
+        let candidate_policy = crate::policy::Policy::load(
+            env("SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            candidate_policy
+                .repository(NATIVE_PROBE_CLIENT_REPOSITORY)
+                .unwrap()
+                .native_binaries
+                .len(),
+            4
+        );
+
+        let repo_name = env("SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY").unwrap();
+        assert_eq!(
+            repo_name,
+            crate::config::trusted()
+                .unwrap()
+                .deployment
+                .integration
+                .repository
+        );
+        let repo = Repository::parse(&repo_name).unwrap();
+        let run_id = env("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(run_id > 0);
+        let tag = ReleaseTag::parse(&format!("v0.8.1-pre.{run_id}.missing")).unwrap();
+        let tag_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            repo.as_str(),
+            url_encode(tag.as_str())
+        );
+        let tag_release_path = format!(
+            "/repos/{}/releases/tags/{}",
+            repo.as_str(),
+            url_encode(tag.as_str())
+        );
+        let release_list_path = format!("/repos/{}/releases?per_page=100&page=1", repo.as_str());
+        let release_path = format!("/repos/{}/releases", repo.as_str());
+        let target_sha = "c".repeat(40);
+        let expected_body = json!({
+            "tag_name":tag.as_str(),
+            "target_commitish":target_sha,
+            "name":tag.as_str(),
+            "draft":true,
+            "prerelease":true,
+            "generate_release_notes":false,
+        });
+        let fixture = Fixture::new(vec![
+            Route::request("GET", tag_path, 404, json!({})),
+            Route::request("GET", tag_release_path, 404, json!({})),
+            Route::get(release_list_path, json!([])),
+            Route::active_control(&control),
+            Route::request(
+                "POST",
+                release_path,
+                201,
+                json!({
+                    "id": 9001,
+                    "tag_name":tag.as_str(),
+                    "draft":true,
+                    "prerelease":true,
+                }),
+            )
+            .with_request_body(expected_body),
+        ]);
+        let api = GitHub::new(&fixture.base, "fixture-token".into())
+            .unwrap()
+            .with_control_revision(&control)
+            .unwrap();
+        assert_eq!(
+            create_native_probe_draft(&api, &repo, &tag, &target_sha).unwrap(),
+            9001
+        );
+        fixture.finish();
+    }
+
     fn native_release_assets_scratch_publish_probe_inner() -> Result<()> {
         let inputs = native_probe_inputs()?;
         let repo_name = env("SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY")?;
@@ -4184,7 +4293,8 @@ mod tests {
             "pinned Client source PR number is invalid"
         );
 
-        let policy = crate::policy::Policy::load(env("SECUREFIX_POLICY_PATH")?)?;
+        let policy =
+            crate::policy::Policy::load(env("SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH")?)?;
         let targets = policy
             .repository(source_repository.as_str())?
             .native_binaries
