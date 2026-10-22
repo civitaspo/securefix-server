@@ -15,6 +15,11 @@ on:
         description: Exact successful native-package-build workflow run
         required: true
         type: string
+      preflight_only:
+        description: Validate the exact package inputs without creating a writer token or publishing
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -99,12 +104,15 @@ jobs:
           printf '%s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
           already_published="$(jq -er '.evidence.release_state.state == "already_published"' <<< "$result")"
           printf 'already-published=%s\n' "$already_published" >> "$GITHUB_OUTPUT"
+      - name: Record the read-only package preflight
+        if: inputs.preflight_only == true
+        run: printf '%s\n' 'Read-only package preflight completed; no writer token was requested and no release was changed.' >> "$GITHUB_STEP_SUMMARY"
       - name: Record verified immutable package release recovery
         if: steps.preflight.outputs.already-published == 'true'
         run: printf '%s\n' 'A matching immutable release from a successful recorded publisher run was verified; no write token was issued.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: writer
-        if: steps.preflight.outputs.already-published != 'true'
+        if: steps.preflight.outputs.already-published != 'true' && inputs.preflight_only != true
         with:
           app-id: '3872533'
           private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
@@ -112,7 +120,7 @@ jobs:
           repositories: ${{ inputs.channel == 'stable' && 'securefix-server' || 'testing-securefix-server' }}
           permission-contents: write
       - name: Publish the exact attested executable
-        if: steps.preflight.outputs.already-published != 'true'
+        if: steps.preflight.outputs.already-published != 'true' && inputs.preflight_only != true
         env:
           CHANNEL: ${{ inputs.channel }}
           GITHUB_ACTOR_ID: ${{ github.actor_id }}

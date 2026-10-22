@@ -3519,6 +3519,9 @@ fn production_native_package_workflows_isolate_build_preflight_and_publisher_wri
     assert_eq!(publisher["permissions"], serde_json::json!({}));
     let inputs = &publisher["on"]["workflow_dispatch"]["inputs"];
     assert_eq!(inputs["producer_run_id"]["required"], true);
+    assert_eq!(inputs["preflight_only"]["required"], false);
+    assert_eq!(inputs["preflight_only"]["default"], false);
+    assert_eq!(inputs["preflight_only"]["type"], "boolean");
     assert_eq!(
         inputs["channel"]["options"],
         serde_json::json!(["stable", "scratch"])
@@ -3582,6 +3585,19 @@ fn production_native_package_workflows_isolate_build_preflight_and_publisher_wri
         .position(|step| step["name"] == "Publish the exact attested executable")
         .unwrap();
     assert!(validate_host < preflight && preflight < writer && writer < publish_step);
+    let read_only_record = steps
+        .iter()
+        .position(|step| step["name"] == "Record the read-only package preflight")
+        .unwrap();
+    assert!(preflight < read_only_record && read_only_record < writer);
+    for step in [&steps[writer], &steps[publish_step]] {
+        assert!(
+            step["if"]
+                .as_str()
+                .unwrap()
+                .contains("inputs.preflight_only != true")
+        );
+    }
     let validate_host_run = steps[validate_host]["run"].as_str().unwrap();
     for check in [
         "[[ -f publisher/securefix && ! -L publisher/securefix ]]",
@@ -3610,7 +3626,7 @@ fn production_native_package_workflows_isolate_build_preflight_and_publisher_wri
     );
     assert_eq!(
         steps[writer]["if"],
-        "steps.preflight.outputs.already-published != 'true'"
+        "steps.preflight.outputs.already-published != 'true' && inputs.preflight_only != true"
     );
     assert_eq!(steps[writer]["with"]["permission-contents"], "write");
     assert!(
@@ -3629,6 +3645,10 @@ fn production_native_package_workflows_isolate_build_preflight_and_publisher_wri
     assert_eq!(
         steps[publish_step]["env"]["SECUREFIX_PACKAGE_PUBLISH_TOKEN"],
         "${{ inputs.channel == 'stable' && steps.writer.outputs.token || '' }}"
+    );
+    assert_eq!(
+        steps[publish_step]["if"],
+        "steps.preflight.outputs.already-published != 'true' && inputs.preflight_only != true"
     );
     assert!(
         !serde_json::to_string(publish)
