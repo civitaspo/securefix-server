@@ -1050,10 +1050,16 @@ fn native_approval_uses_the_fixed_package_and_keeps_the_user_token_in_one_protec
         let steps = jobs[job_name]["steps"].as_array().unwrap();
         let package = steps
             .iter()
-            .find(|step| step["uses"] == "$/.github/actions/load-package")
+            .find(|step| {
+                step["uses"]
+                    == "civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef"
+            })
             .unwrap();
         assert_eq!(package["name"], "Load the fixed immutable scratch package");
-        assert_eq!(package["with"]["action-sha"], "${{ github.workflow_sha }}");
+        assert_eq!(
+            package["with"]["action-sha"],
+            "c6aa3110bb31d5ca5bae452d291870066f0147ef"
+        );
         assert_eq!(package["with"]["channel"], "scratch");
         assert_eq!(
             package["with"]["publication-source-sha"],
