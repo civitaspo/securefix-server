@@ -3238,7 +3238,42 @@ fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease
     assert!(writer_text.contains("native_release_assets_validate_probe_inputs"));
     assert!(writer_text.contains("native-release-assets-probe-evidence"));
 
+    let mut probe_invocations = 0;
+    for job_id in ["verify-native-targets", "publish-scratch-prerelease"] {
+        for step in probe["jobs"][job_id]["steps"].as_array().unwrap() {
+            let Some(run) = step["run"].as_str() else {
+                continue;
+            };
+            if run.contains("native_release_assets_validate_probe_inputs")
+                || run.contains("native_release_assets_scratch_publish_probe")
+            {
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"],
+                    "${{ github.sha }}"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"],
+                    "${{ github.sha }}"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"],
+                    "${{ github.run_id }}"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"],
+                    "${{ github.run_attempt }}"
+                );
+                probe_invocations += 1;
+            }
+        }
+    }
+    assert_eq!(probe_invocations, 3);
+
     let source = include_str!("release.rs");
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"));
     assert!(source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)"));
     assert!(
         source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)?")

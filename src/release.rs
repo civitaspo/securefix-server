@@ -3923,6 +3923,7 @@ mod tests {
         client_sha: CommitSha,
         client_pr_number: u64,
         package_version: String,
+        harness_sha: CommitSha,
         server_sha: CommitSha,
         run_id: RunId,
         run_attempt: u64,
@@ -3955,7 +3956,7 @@ mod tests {
         let inputs = native_probe_inputs()?;
         let repo_name = env("SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY")?;
         let (api, repo) = probe_scratch_write_api(&repo_name, "SECUREFIX_SERVER_APP_TOKEN")?;
-        let candidate_sha = inputs.server_sha.as_str().to_owned();
+        let candidate_sha = inputs.harness_sha.as_str().to_owned();
         let scratch_sha = probe_scratch_target_sha(&repo)?;
         let run_component = inputs.run_id.0;
         let missing_tag = ReleaseTag::parse(&format!(
@@ -4129,9 +4130,11 @@ mod tests {
             client_sha.as_str() == NATIVE_PROBE_CLIENT_SHA,
             "native release probe Client source SHA differs from the reviewed pin"
         );
-        let server_sha = CommitSha::parse(&env("GITHUB_SHA")?)?;
-        let run_id = RunId(env("GITHUB_RUN_ID")?.parse()?);
-        let run_attempt = env("GITHUB_RUN_ATTEMPT")?.parse::<u64>()?;
+        let server_sha = CommitSha::parse(&env("SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA")?)?;
+        let harness_sha = CommitSha::parse(&env("SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA")?)?;
+        let run_id = RunId(env("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID")?.parse()?);
+        let run_attempt =
+            env("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT")?.parse::<u64>()?;
         ensure!(
             run_id.0 > 0 && run_attempt == 1,
             "native release probe run identity is invalid"
@@ -4422,6 +4425,7 @@ mod tests {
             client_sha,
             client_pr_number,
             package_version,
+            harness_sha,
             server_sha,
             run_id,
             run_attempt,
@@ -4485,6 +4489,7 @@ mod tests {
         Ok(json!({
             "schema_version": 1,
             "server_repository": env("GITHUB_REPOSITORY")?,
+            "server_harness_sha": inputs.harness_sha.as_str(),
             "server_run_id": inputs.run_id.0,
             "server_run_attempt": inputs.run_attempt,
             "server_source_sha": inputs.server_sha.as_str(),
