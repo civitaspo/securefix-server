@@ -1980,7 +1980,9 @@ fn unpack_provider_bundle(
             entry.size() > 0 && entry.size() <= MAX_PROVIDER_ARCHIVE_BYTES,
             "provider artifact asset has invalid size"
         );
-        let mut output = std::fs::File::create(destination.join(&name))?;
+        let output_path = destination.join(&name);
+        let mut output = std::fs::File::create(&output_path)
+            .with_context(|| format!("create native artifact entry {}", output_path.display()))?;
         let declared_size = entry.size();
         let copied = std::io::copy(
             &mut entry.by_ref().take(MAX_PROVIDER_ARCHIVE_BYTES + 1),
@@ -3075,6 +3077,23 @@ fn publish_release_assets(
     plan: &ReleasePlanV2,
     assets_dir: &Path,
 ) -> Result<()> {
+    let mut upload = |api: &GitHub, path: &str, bytes: Vec<u8>, content_type: &str| {
+        api.upload(path, bytes, content_type)
+    };
+    publish_release_assets_with_upload(api, repo, release_id, plan, assets_dir, &mut upload)
+}
+
+fn publish_release_assets_with_upload<F>(
+    api: &GitHub,
+    repo: &Repository,
+    release_id: u64,
+    plan: &ReleasePlanV2,
+    assets_dir: &Path,
+    upload: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&GitHub, &str, Vec<u8>, &str) -> Result<Value>,
+{
     let release_path = format!("/repos/{}/releases/{release_id}", repo.as_str());
     let release: Value = api.get(&release_path)?;
     ensure!(
@@ -3089,7 +3108,15 @@ fn publish_release_assets(
         return Ok(());
     }
     ensure!(release["draft"] == true, "release draft state is missing");
-    upload_release_assets(api, repo, release_id, assets_dir, &plan.assets, &existing)?;
+    upload_release_assets(
+        api,
+        repo,
+        release_id,
+        assets_dir,
+        &plan.assets,
+        &existing,
+        upload,
+    )?;
     let ready: Vec<Value> = api.paginate(&asset_path)?;
     validate_release_asset_state(&plan.assets, &ready, true)?;
     let before_publish: Value = api.get(&release_path)?;
@@ -3107,25 +3134,32 @@ fn publish_release_assets(
     validate_release_asset_state(&plan.assets, &published_assets, true)
 }
 
-fn upload_release_assets(
+fn upload_release_assets<F>(
     api: &GitHub,
     repo: &Repository,
     release_id: u64,
     assets_dir: &Path,
     expected: &[PlannedAsset],
     existing: &[Value],
-) -> Result<()> {
+    upload: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&GitHub, &str, Vec<u8>, &str) -> Result<Value>,
+{
     validate_release_asset_state(expected, existing, false)?;
     let mut local_assets = Vec::with_capacity(expected.len());
     for asset in expected {
         let path = assets_dir.join(&asset.name);
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect release asset {}", path.display()))?;
         ensure!(
             metadata.file_type().is_file()
                 && !metadata.file_type().is_symlink()
                 && metadata.len() > 0
                 && metadata.len() <= MAX_NATIVE_ASSET_BYTES
-                && sha256_file(&path)? == asset.sha256,
+                && sha256_file(&path)
+                    .with_context(|| format!("hash release asset {}", path.display()))?
+                    == asset.sha256,
             "publish asset digest mismatch or invalid file: {}",
             asset.name
         );
@@ -3143,11 +3177,9 @@ fn upload_release_assets(
             repo.as_str(),
             url_encode(&asset.name)
         );
-        api.upload(
-            &upload_url,
-            std::fs::read(path)?,
-            "application/octet-stream",
-        )?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read release asset {}", path.display()))?;
+        upload(api, &upload_url, bytes, "application/octet-stream")?;
     }
     let uploaded: Vec<Value> = api.paginate(&format!(
         "/repos/{}/releases/{release_id}/assets",
@@ -4061,12 +4093,259 @@ mod tests {
         fixture.finish();
     }
 
+    #[test]
+    #[ignore = "requires exact saved native artifacts, policy fixtures, and read-only GitHub access"]
+    fn native_release_assets_scratch_publish_probe_fixture() {
+        use crate::fixtures::{Fixture, Route};
+
+        let inputs = native_probe_inputs().unwrap();
+        let repo =
+            Repository::parse(&env("SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY").unwrap()).unwrap();
+        let scratch_sha = probe_scratch_target_sha(&repo).unwrap();
+        let missing_tag = ReleaseTag::parse(&format!(
+            "v{}-pre.{}.missing",
+            inputs.package_version, inputs.run_id.0
+        ))
+        .unwrap();
+        let success_tag = ReleaseTag::parse(&format!(
+            "v{}-pre.{}.native",
+            inputs.package_version, inputs.run_id.0
+        ))
+        .unwrap();
+        let control = Fixture::control_revision();
+        let releases_path = format!("/repos/{}/releases", repo.as_str());
+        let mut routes = Vec::new();
+        let push_draft_routes = |routes: &mut Vec<Route>, tag: &ReleaseTag, release_id| {
+            let ref_path = format!(
+                "/repos/{}/git/ref/tags/{}",
+                repo.as_str(),
+                url_encode(tag.as_str())
+            );
+            routes.push(Route::request("GET", &ref_path, 404, json!({})));
+            routes.push(Route::request(
+                "GET",
+                format!(
+                    "/repos/{}/releases/tags/{}",
+                    repo.as_str(),
+                    url_encode(tag.as_str())
+                ),
+                404,
+                json!({}),
+            ));
+            routes.push(Route::get(
+                format!("{releases_path}?per_page=100&page=1"),
+                json!([]),
+            ));
+            routes.push(Route::active_control(&control));
+            let body = json!({
+                "tag_name": tag.as_str(),
+                "target_commitish": scratch_sha,
+                "name": tag.as_str(),
+                "draft": true,
+                "prerelease": true,
+                "generate_release_notes": false,
+            });
+            routes.push(
+                Route::request(
+                    "POST",
+                    &releases_path,
+                    201,
+                    json!({
+                        "id": release_id,
+                        "tag_name": tag.as_str(),
+                        "draft": true,
+                        "prerelease": true,
+                    }),
+                )
+                .with_request_body(body),
+            );
+        };
+        push_draft_routes(&mut routes, &missing_tag, 9001);
+
+        let missing_release_path = format!("{releases_path}/9001");
+        let missing_release = json!({
+            "id": 9001,
+            "tag_name": missing_tag.as_str(),
+            "draft": true,
+            "prerelease": true,
+        });
+        routes.push(Route::get(&missing_release_path, missing_release.clone()));
+        routes.push(Route::get(
+            format!("{missing_release_path}/assets?per_page=100&page=1"),
+            json!([]),
+        ));
+        routes.push(Route::get(&missing_release_path, missing_release));
+        routes.push(Route::get(
+            &missing_release_path,
+            json!({
+                "id": 9001,
+                "tag_name": missing_tag.as_str(),
+                "draft": true,
+                "prerelease": true,
+            }),
+        ));
+        routes.push(Route::active_control(&control));
+        routes.push(Route::request(
+            "DELETE",
+            &missing_release_path,
+            204,
+            json!({}),
+        ));
+        let missing_ref_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            repo.as_str(),
+            url_encode(missing_tag.as_str())
+        );
+        let tag_ref = json!({"object":{"type":"commit","sha":scratch_sha}});
+        routes.push(Route::get(&missing_ref_path, tag_ref.clone()));
+        routes.push(Route::get(&missing_ref_path, tag_ref));
+        routes.push(Route::active_control(&control));
+        routes.push(Route::request(
+            "DELETE",
+            format!(
+                "/repos/{}/git/refs/tags/{}",
+                repo.as_str(),
+                url_encode(missing_tag.as_str())
+            ),
+            204,
+            json!({}),
+        ));
+        routes.push(Route::request("GET", &missing_release_path, 404, json!({})));
+        routes.push(Route::request("GET", &missing_ref_path, 404, json!({})));
+
+        push_draft_routes(&mut routes, &success_tag, 9002);
+        let success_release_path = format!("{releases_path}/9002");
+        let success_release = json!({
+            "id": 9002,
+            "tag_name": success_tag.as_str(),
+            "draft": true,
+            "prerelease": true,
+        });
+        let published_release = json!({
+            "id": 9002,
+            "tag_name": success_tag.as_str(),
+            "draft": false,
+            "prerelease": true,
+            "immutable": true,
+        });
+        let published_assets: Vec<_> = inputs
+            .manifest
+            .assets
+            .iter()
+            .enumerate()
+            .map(|(index, asset)| {
+                json!({
+                    "id": 9100 + index as u64,
+                    "name": asset.filename,
+                    "size": asset.size,
+                    "digest": format!("sha256:{}", asset.sha256),
+                })
+            })
+            .collect();
+        routes.push(Route::get(&success_release_path, success_release.clone()));
+        routes.push(Route::get(
+            format!("{success_release_path}/assets?per_page=100&page=1"),
+            json!([]),
+        ));
+        routes.push(Route::get(
+            format!("{success_release_path}/assets?per_page=100&page=1"),
+            json!(published_assets.clone()),
+        ));
+        routes.push(Route::get(
+            format!("{success_release_path}/assets?per_page=100&page=1"),
+            json!(published_assets.clone()),
+        ));
+        routes.push(Route::get(&success_release_path, success_release.clone()));
+        routes.push(Route::active_control(&control));
+        routes.push(
+            Route::request(
+                "PATCH",
+                &success_release_path,
+                200,
+                published_release.clone(),
+            )
+            .with_request_body(json!({"draft":false})),
+        );
+        routes.push(Route::get(&success_release_path, published_release.clone()));
+        routes.push(Route::get(
+            format!("{success_release_path}/assets?per_page=100&page=1"),
+            json!(published_assets.clone()),
+        ));
+        routes.push(Route::get(&success_release_path, published_release.clone()));
+        routes.push(Route::get(
+            format!("{success_release_path}/assets?per_page=100&page=1"),
+            json!(published_assets.clone()),
+        ));
+        routes.push(Route::get(&success_release_path, published_release.clone()));
+        routes.push(Route::get(&success_release_path, published_release));
+
+        let fixture = Fixture::new(routes);
+        let api = GitHub::new(&fixture.base, "fixture-token".into())
+            .unwrap()
+            .with_control_revision(&control)
+            .unwrap();
+        let work = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_ASSET_DIR").unwrap());
+        let mut uploaded = BTreeSet::new();
+        let mut upload = |_: &GitHub, path: &str, bytes: Vec<u8>, content_type: &str| {
+            assert_eq!(content_type, "application/octet-stream");
+            let name = path.split_once("?name=").unwrap().1;
+            let asset = inputs
+                .manifest
+                .assets
+                .iter()
+                .find(|asset| url_encode(&asset.filename) == name)
+                .unwrap();
+            assert_eq!(bytes.len() as u64, asset.size);
+            assert_eq!(crate::hex_encode(Sha256::digest(&bytes)), asset.sha256);
+            assert!(uploaded.insert(asset.filename.clone()));
+            Ok(json!({"name":asset.filename,"size":asset.size}))
+        };
+        native_release_assets_scratch_publish_probe_with_inputs(
+            &inputs,
+            &api,
+            &repo,
+            &scratch_sha,
+            &work,
+            &mut upload,
+        )
+        .unwrap();
+        assert_eq!(uploaded.len(), inputs.targets.len());
+        fixture.finish();
+    }
+
     fn native_release_assets_scratch_publish_probe_inner() -> Result<()> {
-        let inputs = native_probe_inputs()?;
+        let inputs = native_probe_inputs().context("validate exact native probe inputs")?;
         let repo_name = env("SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY")?;
-        let (api, repo) = probe_scratch_write_api(&repo_name, "SECUREFIX_SERVER_APP_TOKEN")?;
+        let (api, repo) = probe_scratch_write_api(&repo_name, "SECUREFIX_SERVER_APP_TOKEN")
+            .context("load scratch-scoped release writer")?;
+        let scratch_sha =
+            probe_scratch_target_sha(&repo).context("read scratch default-branch SHA")?;
+        let work = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_ASSET_DIR")?);
+        let mut upload = |api: &GitHub, path: &str, bytes: Vec<u8>, content_type: &str| {
+            api.upload(path, bytes, content_type)
+        };
+        native_release_assets_scratch_publish_probe_with_inputs(
+            &inputs,
+            &api,
+            &repo,
+            &scratch_sha,
+            &work,
+            &mut upload,
+        )
+    }
+
+    fn native_release_assets_scratch_publish_probe_with_inputs<F>(
+        inputs: &NativeProbeInputs,
+        api: &GitHub,
+        repo: &Repository,
+        scratch_sha: &str,
+        work: &Path,
+        upload: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&GitHub, &str, Vec<u8>, &str) -> Result<Value>,
+    {
         let candidate_sha = inputs.harness_sha.as_str().to_owned();
-        let scratch_sha = probe_scratch_target_sha(&repo)?;
         let run_component = inputs.run_id.0;
         let missing_tag = ReleaseTag::parse(&format!(
             "v{}-pre.{run_component}.missing",
@@ -4076,21 +4355,30 @@ mod tests {
             "v{}-pre.{run_component}.native",
             inputs.package_version
         ))?;
-        let work = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_ASSET_DIR")?);
         if work.exists() {
-            std::fs::remove_dir_all(&work)?;
+            std::fs::remove_dir_all(work).with_context(|| {
+                format!("remove native probe asset workspace {}", work.display())
+            })?;
         }
-        std::fs::create_dir_all(&work)?;
+        std::fs::create_dir_all(work)
+            .with_context(|| format!("create native probe asset workspace {}", work.display()))?;
         let mut drafts = Vec::new();
 
         let result = (|| -> Result<Value> {
-            let mut incomplete = native_probe_manifest(&inputs, missing_tag.clone());
+            let mut incomplete = native_probe_manifest(inputs, missing_tag.clone());
             incomplete.assets.pop();
-            let missing_bundle = native_probe_bundle(&incomplete, &inputs.asset_paths)?;
-            let missing_id = create_native_probe_draft(&api, &repo, &missing_tag, &scratch_sha)?;
+            let missing_bundle = native_probe_bundle(&incomplete, &inputs.asset_paths)
+                .context("bundle the incomplete native target set")?;
+            let missing_id = create_native_probe_draft(api, repo, &missing_tag, scratch_sha)
+                .context("create incomplete native probe draft")?;
             drafts.push((missing_id, missing_tag.clone()));
             let rejected = work.join("missing-artifact");
-            std::fs::create_dir_all(&rejected)?;
+            std::fs::create_dir_all(&rejected).with_context(|| {
+                format!(
+                    "create incomplete artifact directory {}",
+                    rejected.display()
+                )
+            })?;
             ensure!(
                 unpack_native_bundle(
                     &missing_bundle,
@@ -4098,45 +4386,80 @@ mod tests {
                     &inputs.client_repository,
                     &inputs.targets
                 )
+                .with_context(|| format!(
+                    "unpack incomplete native bundle into {}",
+                    rejected.display()
+                ))
                 .is_err(),
                 "incomplete native target set was accepted"
             );
-            let missing_release: Value =
-                api.get(&format!("/repos/{}/releases/{missing_id}", repo.as_str()))?;
-            let missing_assets: Vec<Value> = api.paginate(&format!(
-                "/repos/{}/releases/{missing_id}/assets",
-                repo.as_str()
-            ))?;
+            let missing_release: Value = api
+                .get(&format!("/repos/{}/releases/{missing_id}", repo.as_str()))
+                .context("read incomplete native probe draft")?;
+            let missing_assets: Vec<Value> = api
+                .paginate(&format!(
+                    "/repos/{}/releases/{missing_id}/assets",
+                    repo.as_str()
+                ))
+                .context("read incomplete native probe draft assets")?;
             ensure!(
                 missing_release["draft"] == true && missing_assets.is_empty(),
                 "incomplete native target set reached release publication"
             );
-            cleanup_native_probe_draft(&api, &repo, missing_id, &missing_tag, &scratch_sha)?;
+            cleanup_native_probe_draft(api, repo, missing_id, &missing_tag, scratch_sha)
+                .context("remove incomplete native probe draft")?;
             drafts.retain(|(id, _)| *id != missing_id);
 
-            let manifest = native_probe_manifest(&inputs, success_tag.clone());
-            let bundle = native_probe_bundle(&manifest, &inputs.asset_paths)?;
+            let manifest = native_probe_manifest(inputs, success_tag.clone());
+            let bundle = native_probe_bundle(&manifest, &inputs.asset_paths)
+                .context("bundle the complete native target set")?;
             let assets_dir = work.join("publish-assets");
             if assets_dir.exists() {
-                std::fs::remove_dir_all(&assets_dir)?;
+                std::fs::remove_dir_all(&assets_dir).with_context(|| {
+                    format!(
+                        "remove native publish asset directory {}",
+                        assets_dir.display()
+                    )
+                })?;
             }
+            std::fs::create_dir_all(&assets_dir).with_context(|| {
+                format!(
+                    "create native publish asset directory {}",
+                    assets_dir.display()
+                )
+            })?;
             unpack_native_bundle(
                 &bundle,
                 &assets_dir,
                 &inputs.client_repository,
                 &inputs.targets,
+            )
+            .with_context(|| {
+                format!(
+                    "unpack complete native bundle into {}",
+                    assets_dir.display()
+                )
+            })?;
+            let decoded: NativeAssetManifest = serde_json::from_slice(
+                &std::fs::read(assets_dir.join(NATIVE_BUNDLE_MANIFEST)).with_context(|| {
+                    format!("read native bundle manifest from {}", assets_dir.display())
+                })?,
             )?;
-            let decoded: NativeAssetManifest =
-                serde_json::from_slice(&std::fs::read(assets_dir.join(NATIVE_BUNDLE_MANIFEST))?)?;
-            let source_manifest = native_probe_source_manifest(&inputs, success_tag.clone());
+            let source_manifest = native_probe_source_manifest(inputs, success_tag.clone());
             validate_native_manifest(
                 &decoded,
                 &inputs.client_repository,
                 &inputs.targets,
                 &source_manifest,
             )?;
-            validate_native_asset_files(&assets_dir, &decoded)?;
-            let release_id = create_native_probe_draft(&api, &repo, &success_tag, &scratch_sha)?;
+            validate_native_asset_files(&assets_dir, &decoded).with_context(|| {
+                format!(
+                    "validate extracted native assets in {}",
+                    assets_dir.display()
+                )
+            })?;
+            let release_id = create_native_probe_draft(api, repo, &success_tag, scratch_sha)
+                .context("create complete native probe draft")?;
             drafts.push((release_id, success_tag.clone()));
             let assets = decoded
                 .assets
@@ -4166,18 +4489,24 @@ mod tests {
                 native_assets: decoded.assets.clone(),
             };
             plan.validate()?;
-            publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)?;
-            let published: Value =
-                api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
+            publish_release_assets_with_upload(api, repo, release_id, &plan, &assets_dir, upload)
+                .with_context(|| {
+                format!("publish native probe assets from {}", assets_dir.display())
+            })?;
+            let published: Value = api
+                .get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))
+                .context("reread published native probe release")?;
             ensure_published_immutable_release(&published, release_id, &success_tag)?;
             ensure!(
                 published["prerelease"] == true,
                 "native scratch release is not a prerelease"
             );
-            let published_assets: Vec<Value> = api.paginate(&format!(
-                "/repos/{}/releases/{release_id}/assets",
-                repo.as_str()
-            ))?;
+            let published_assets: Vec<Value> = api
+                .paginate(&format!(
+                    "/repos/{}/releases/{release_id}/assets",
+                    repo.as_str()
+                ))
+                .context("reread published native probe assets")?;
             validate_release_asset_state(&plan.assets, &published_assets, true)?;
             let assets = published_assets
                 .iter()
@@ -4208,18 +4537,24 @@ mod tests {
                     "immutable": true,
                     "assets": assets,
                 },
-                "source": native_probe_input_evidence(&inputs)?,
+                "source": native_probe_input_evidence(inputs)?,
             }))
         })();
 
         let cleanup = drafts.iter().try_for_each(|(release_id, tag)| {
-            cleanup_native_probe_draft(&api, &repo, *release_id, tag, &scratch_sha)
+            cleanup_native_probe_draft(api, repo, *release_id, tag, scratch_sha)
         });
         cleanup?;
         let evidence = result?;
         let output = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_OUTPUT_DIR")?);
-        std::fs::create_dir_all(&output)?;
-        write_json(output.join("native-release-assets-probe.json"), &evidence)?;
+        std::fs::create_dir_all(&output).with_context(|| {
+            format!(
+                "create native probe evidence directory {}",
+                output.display()
+            )
+        })?;
+        write_json(output.join("native-release-assets-probe.json"), &evidence)
+            .with_context(|| format!("write native probe evidence in {}", output.display()))?;
         crate::output("scratch_repository", repo.as_str())?;
         crate::output("published_prerelease", success_tag.as_str())?;
         crate::output(

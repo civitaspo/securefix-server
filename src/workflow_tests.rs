@@ -3284,10 +3284,12 @@ fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease
     assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"));
     assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"));
     assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"));
-    assert!(source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)"));
-    assert!(
-        source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)?")
-    );
+    assert!(source.contains(
+        "publish_release_assets_with_upload(api, repo, release_id, plan, assets_dir, &mut upload)"
+    ));
+    assert!(source.contains(
+        "publish_release_assets_with_upload(api, repo, release_id, &plan, &assets_dir, upload)"
+    ));
     assert!(source.contains("incomplete native target set was accepted"));
     assert!(source.contains("std::io::copy(&mut file, &mut archive)?"));
     assert!(source.contains("Client source is not the pinned verified commit"));
