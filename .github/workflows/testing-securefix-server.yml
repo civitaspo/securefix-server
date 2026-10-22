@@ -8,9 +8,9 @@ on:
         type: string
         default: ''
       phase:
-        description: Prepare/verify Securefix fixtures, reconcile managed scratch files, run the legacy bootstrap probe, or exercise provider and native release scratch probes
+        description: Build a candidate artifact without scratch writes, prepare/verify Securefix fixtures, reconcile managed scratch files, run the legacy bootstrap probe, or exercise provider and native release scratch probes
         type: choice
-        options: [prepare, verify, bootstrap, provider, release-assets, managed-files]
+        options: [candidate-artifact, prepare, verify, bootstrap, provider, release-assets, managed-files]
         default: prepare
       fixture_run_id:
         description: Successful prepare run whose exact-source fixture state is reused
@@ -240,7 +240,7 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'default branch did not resolve to a full SHA' >&2; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'prepare' || inputs.phase == 'verify' || inputs.phase == 'bootstrap' || inputs.phase == 'managed-files') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'candidate-artifact' || inputs.phase == 'prepare' || inputs.phase == 'verify' || inputs.phase == 'bootstrap' || inputs.phase == 'managed-files') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -283,7 +283,7 @@ jobs:
 
   scratch:
     needs: [baseline, build]
-    if: always() && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && needs.build.result == 'success' && needs.baseline.result == 'success'
+    if: always() && (inputs.phase == 'prepare' || inputs.phase == 'verify') && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && needs.build.result == 'success' && needs.baseline.result == 'success'
     runs-on: ubuntu-24.04
     environment: main
     permissions:

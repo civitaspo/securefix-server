@@ -108,6 +108,90 @@ fn managed_files_scratch_probe_validates_before_scoped_writer_token() {
 }
 
 #[test]
+fn candidate_artifact_phase_only_builds_source_bound_runtime() {
+    let value = workflow("testing-securefix-server.yml");
+    let options = value["on"]["workflow_dispatch"]["inputs"]["phase"]["options"]
+        .as_array()
+        .unwrap();
+    assert!(options.iter().any(|phase| phase == "candidate-artifact"));
+
+    let build = &value["jobs"]["build"];
+    assert!(
+        build["if"]
+            .as_str()
+            .unwrap()
+            .contains("inputs.phase == 'candidate-artifact'")
+    );
+    assert_eq!(
+        build["permissions"],
+        serde_json::json!({"actions":"read", "contents":"read"})
+    );
+    let build_steps = build["steps"].as_array().unwrap();
+    let source_checkout = build_steps
+        .iter()
+        .find(|step| step["uses"] == "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
+        .unwrap();
+    assert_eq!(
+        source_checkout["with"]["ref"],
+        "${{ inputs.candidate_sha || job.workflow_sha }}"
+    );
+    let assemble = build_steps
+        .iter()
+        .find(|step| step["name"] == "Assemble source-bound candidate runtime")
+        .unwrap();
+    let assemble_script = assemble["run"].as_str().unwrap();
+    assert!(assemble_script.contains("\"$SOURCE_SHA\" \"$WORKFLOW_SHA\""));
+    let artifact = build_steps
+        .iter()
+        .find(|step| step["with"]["name"] == "candidate-runtime")
+        .unwrap();
+    assert!(
+        artifact["with"]["path"]
+            .as_str()
+            .unwrap()
+            .contains("candidate-runtime/")
+    );
+
+    let scratch = &value["jobs"]["scratch"];
+    let scratch_condition = scratch["if"].as_str().unwrap();
+    assert!(scratch_condition.contains("inputs.phase == 'prepare' || inputs.phase == 'verify'"));
+    assert!(!scratch_condition.contains("candidate-artifact"));
+    assert!(
+        scratch["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| { step["id"] == "server" || step["id"] == "client" })
+    );
+
+    for (job_id, phase) in [
+        ("bootstrap-host", "bootstrap"),
+        ("bootstrap-legacy-runtime", "bootstrap"),
+        ("bootstrap-scratch", "bootstrap"),
+        ("managed-files-probe", "managed-files"),
+        ("provider-release-probe", "provider"),
+    ] {
+        let condition = value["jobs"][job_id]["if"].as_str().unwrap();
+        assert!(
+            condition.contains(&format!("inputs.phase == '{phase}'")),
+            "{job_id} must be limited to the {phase} phase"
+        );
+        assert!(
+            !condition.contains("candidate-artifact"),
+            "{job_id} must not run during candidate-artifact"
+        );
+    }
+
+    for job_id in ["baseline", "build"] {
+        assert_eq!(
+            value["jobs"][job_id]["permissions"],
+            serde_json::json!({"actions":"read", "contents":"read"}),
+            "candidate-artifact's only shared jobs must remain read-only"
+        );
+    }
+}
+
+#[test]
 fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
     let value = workflow("testing-native-release-assets-publish.yml");
     assert_eq!(value["permissions"], serde_json::json!({}));
@@ -2598,6 +2682,7 @@ fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_bas
     assert_eq!(
         testing["on"]["workflow_dispatch"]["inputs"]["phase"]["options"],
         serde_json::json!([
+            "candidate-artifact",
             "prepare",
             "verify",
             "bootstrap",

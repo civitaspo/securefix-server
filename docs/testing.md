@@ -11,6 +11,13 @@ harness.
 
 Use `testing-Candidate Runtime` on the server's trusted main workflow with a full reviewed candidate SHA. The candidate does not need a merged production revision or a Runtime Release.
 
+Use `phase=candidate-artifact` when a source-bound `candidate-runtime` artifact is
+needed for a read-only event/provenance probe. This phase runs the baseline and
+credential-free build jobs only; the credentialed scratch job runs only for
+`prepare` and `verify`, while bootstrap, provider, and managed-file jobs require
+their own explicit phase. The artifact records both its candidate source SHA and
+the defining workflow SHA.
+
 ```sh
 gh workflow run testing-securefix-server.yml --repo civitaspo/securefix-server --ref main -f candidate_sha="$CANDIDATE_SHA" -f phase=prepare
 ```
