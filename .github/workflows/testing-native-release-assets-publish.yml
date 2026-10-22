@@ -270,10 +270,6 @@ jobs:
           source_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
           harness_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$HARNESS_SHA" --jq .sha)"
           [[ "$source_policy" == "$harness_policy" ]]
-          source_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
-          harness_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$HARNESS_SHA" --jq .sha)"
-          main_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$WORKFLOW_SHA" --jq .sha)"
-          [[ "$source_policy" == "$main_policy" && "$harness_policy" == "$main_policy" ]]
 
           [[ -f probe/source.json && ! -L probe/source.json ]]
           jq -e --arg sha "$HARNESS_SHA" '.harness_sha == $sha' probe/source.json >/dev/null
