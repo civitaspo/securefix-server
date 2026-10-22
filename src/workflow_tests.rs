@@ -46,6 +46,68 @@ fn testing_workflows_have_testing_file_and_display_names() {
 }
 
 #[test]
+fn managed_files_scratch_probe_validates_before_scoped_writer_token() {
+    let value = workflow("testing-securefix-server.yml");
+    let inputs = &value["on"]["workflow_dispatch"]["inputs"];
+    assert!(
+        inputs["phase"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase == "managed-files")
+    );
+    for name in [
+        "client_repository",
+        "client_implementation_sha",
+        "client_version",
+    ] {
+        assert_eq!(inputs[name]["default"], "");
+    }
+
+    let job = &value["jobs"]["managed-files-probe"];
+    assert_eq!(job["needs"], serde_json::json!(["baseline", "build"]));
+    assert_eq!(job["environment"], "main");
+    assert_eq!(
+        job["permissions"],
+        serde_json::json!({"actions":"read", "contents":"read"})
+    );
+    let steps = job["steps"].as_array().unwrap();
+    let validate = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Validate the exact selected candidate before minting a writer token"
+        })
+        .unwrap();
+    let mint = steps
+        .iter()
+        .position(|step| step["id"] == "managed-writer")
+        .unwrap();
+    let write = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Create the reviewable managed-file PR from the selected source"
+        })
+        .unwrap();
+    assert!(validate < mint && mint < write);
+    assert_eq!(
+        steps[mint]["with"]["repositories"],
+        "testing-securefix-server"
+    );
+    assert_eq!(steps[mint]["with"]["permission-contents"], "write");
+    assert_eq!(steps[mint]["with"]["permission-pull-requests"], "write");
+    assert_eq!(steps[mint]["with"]["permission-workflows"], "write");
+    let serialized = serde_json::to_string(job).unwrap();
+    assert!(!serialized.contains("permission-administration"));
+    assert!(!serialized.contains("SECUREFIX_ADMIN"));
+    assert!(
+        steps[write]["run"]
+            .as_str()
+            .unwrap()
+            .contains("securefix settings managed-reconcile-scratch --source-sha")
+    );
+}
+
+#[test]
 fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
     let value = workflow("testing-native-release-assets-publish.yml");
     assert_eq!(value["permissions"], serde_json::json!({}));
