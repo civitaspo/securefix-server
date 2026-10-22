@@ -1179,6 +1179,8 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 } else if job_id == "bootstrap-scratch" || job_id == "scratch" {
                                     "${{ github.workflow_sha }}"
+                                } else if job_id == "managed-files-probe" {
+                                    "${{ job.workflow_sha }}"
                                 } else {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 }
@@ -2600,7 +2602,8 @@ fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_bas
             "verify",
             "bootstrap",
             "provider",
-            "release-assets"
+            "release-assets",
+            "managed-files"
         ])
     );
     let legacy = &testing["jobs"]["bootstrap-legacy-runtime"];
@@ -3731,6 +3734,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                                 || verified_native_package_smoke
                                 || (path == ".github/workflows/testing-securefix-server.yml"
                                     && (step["env"]["CANDIDATE_SHA"].is_string()
+                                        || (job_id == "managed-files-probe"
+                                            && step["env"]["SOURCE_SHA"].is_string())
                                         || job["env"]["CANDIDATE_SHA"].is_string()
                                         || (run.starts_with("securefix integration resolve-test-runtime --published-runtime-sha ")
                                             && step["env"]["PUBLISHED_RUNTIME_SHA"].is_string()
