@@ -2955,11 +2955,10 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
         serde_json::json!({"contents":"read"})
     );
     let verify_steps = verify["steps"].as_array().unwrap();
-    assert!(
-        verify_steps
-            .iter()
-            .any(|step| { step["uses"] == "$/.github/actions/load-package" })
-    );
+    assert!(verify_steps.iter().all(|step| {
+        step["uses"] != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+            || step["with"]["path"] != "candidate-source"
+    }));
     let execute = verify_steps
         .iter()
         .find(|step| step["name"] == "Execute the verified package without credentials")
@@ -2967,9 +2966,6 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(execute["run"], "securefix --version");
     assert_eq!(execute["env"]["GH_TOKEN"], "");
     assert_eq!(execute["env"]["GITHUB_TOKEN"], "");
-    assert!(verify_steps.iter().any(|step| {
-        step["uses"] == "$/.github/actions/load-package" && step["with"]["channel"] == "scratch"
-    }));
     let package_loader = verify_steps
         .iter()
         .find(|step| step["uses"] == "$/.github/actions/load-package")
@@ -2978,6 +2974,11 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
         package_loader["with"]["action-sha"],
         "${{ github.workflow_sha }}"
     );
+    assert_eq!(
+        package_loader["with"]["manifest-source-sha"],
+        "${{ needs.publish.outputs.source-sha }}"
+    );
+    assert_eq!(package_loader["with"]["channel"], "scratch");
     for (input, output) in [
         ("publication-source-sha", "source-sha"),
         ("publication-source-branch", "source-branch"),
@@ -3005,7 +3006,17 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     .unwrap();
     let load_script = fs::read_to_string(".github/actions/load-package/load.sh").unwrap();
     let action_step = &package_action["runs"]["steps"][0];
+    assert!(
+        load_script.contains(
+            "contents/.github/actions/load-package/package.json?ref=$MANIFEST_SOURCE_SHA"
+        )
+    );
+    assert!(load_script.contains("\"$PUBLICATION_SOURCE_SHA\" == \"$MANIFEST_SOURCE_SHA\""));
+    assert!(load_script.contains("\"$manifest_source_sha\" == \"$MANIFEST_SOURCE_SHA\""));
+    assert!(load_script.contains("stable package loads cannot override the fixed manifest source"));
+    assert!(load_script.contains("source differs from the fixed loader mapping"));
     for input in [
+        "manifest-source-sha",
         "publication-source-sha",
         "publication-source-branch",
         "publication-tag",

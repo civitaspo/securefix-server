@@ -138,6 +138,7 @@ jobs:
           source-default-branch: ${{ steps.config.outputs.source-default-branch }}
           owner-id: ${{ steps.config.outputs.owner-id }}
           channel: scratch
+          manifest-source-sha: ${{ needs.publish.outputs.source-sha }}
           publication-source-sha: ${{ needs.publish.outputs.source-sha }}
           publication-source-branch: ${{ needs.publish.outputs.source-branch }}
           publication-tag: ${{ needs.publish.outputs.tag }}

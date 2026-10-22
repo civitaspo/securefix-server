@@ -25,6 +25,9 @@ inputs:
   channel:
     description: stable for normal consumers or scratch for an explicit prerelease probe
     required: true
+  manifest-source-sha:
+    description: Exact source revision for the scratch package manifest; forbidden for stable loads
+    required: false
   publication-source-sha:
     description: Source commit in the current trusted scratch publication record
     required: false
@@ -96,6 +99,7 @@ runs:
         SOURCE_DEFAULT_BRANCH: ${{ inputs.source-default-branch }}
         OWNER_ID: ${{ inputs.owner-id }}
         CHANNEL: ${{ inputs.channel }}
+        MANIFEST_SOURCE_SHA: ${{ inputs.manifest-source-sha }}
         PUBLICATION_SOURCE_SHA: ${{ inputs.publication-source-sha }}
         PUBLICATION_SOURCE_BRANCH: ${{ inputs.publication-source-branch }}
         PUBLICATION_TAG: ${{ inputs.publication-tag }}

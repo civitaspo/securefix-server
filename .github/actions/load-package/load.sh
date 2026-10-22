@@ -1,10 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-manifest="$ACTION_PATH/package.json"
-[[ -f "$manifest" && ! -L "$manifest" && "$(stat -c %s "$manifest")" -le 16384 ]] || { echo 'fixed package manifest is missing or too large' >&2; exit 1; }
-jq -e 'keys | sort == ["assets","component","max_bytes","producer_workflow","protocol","schema_version","version"]' "$manifest" >/dev/null
+work="$(mktemp -d "$RUNNER_TEMP/securefix-package.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+manifest="$work/package.json"
+[[ "$ACTION_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$DESTINATION_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'package source identity is invalid' >&2; exit 1; }
+[[ "$SOURCE_REPOSITORY_ID" =~ ^[1-9][0-9]{0,19}$ && "$DESTINATION_REPOSITORY_ID" =~ ^[1-9][0-9]{0,19}$ && "$OWNER_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'package repository ID is invalid' >&2; exit 1; }
+[[ "$SOURCE_DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "$SOURCE_DEFAULT_BRANCH" != *..* && -n "$GH_TOKEN" ]] || { echo 'package branch or token is invalid' >&2; exit 1; }
+[[ "$CHANNEL" == stable || "$CHANNEL" == scratch ]] || { echo 'unsupported package channel' >&2; exit 1; }
+if [[ "$CHANNEL" == scratch ]]; then
+  [[ "$MANIFEST_SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$PUBLICATION_SOURCE_SHA" == "$MANIFEST_SOURCE_SHA" ]] || { echo 'scratch manifest source must equal the selected publication source SHA' >&2; exit 1; }
+  manifest_response="$work/package-manifest-response.json"
+  curl_config="$work/curl-config"
+  printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" > "$curl_config"
+  chmod 600 "$curl_config"
+  curl --config "$curl_config" --fail --silent --show-error --max-time 30 --max-filesize 65536 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/$SOURCE_REPOSITORY/contents/.github/actions/load-package/package.json?ref=$MANIFEST_SOURCE_SHA" \
+    -o "$manifest_response"
+  [[ "$(stat -c %s "$manifest_response")" -gt 0 && "$(stat -c %s "$manifest_response")" -le 65536 ]] || { echo 'scratch package manifest response is missing or too large' >&2; exit 1; }
+  manifest_b64="$(jq -er 'select(.path == ".github/actions/load-package/package.json" and .encoding == "base64" and (.content | type == "string" and length > 0 and length <= 21848)) | .content' "$manifest_response")"
+  printf '%s' "$manifest_b64" | tr -d '\r\n' | base64 --decode > "$manifest" || { echo 'scratch package manifest encoding is invalid' >&2; exit 1; }
+else
+  [[ -z "$MANIFEST_SOURCE_SHA" ]] || { echo 'stable package loads cannot override the fixed manifest source' >&2; exit 1; }
+  fixed_manifest="$ACTION_PATH/package.json"
+  [[ -f "$fixed_manifest" && ! -L "$fixed_manifest" && "$(stat -c %s "$fixed_manifest")" -le 16384 ]] || { echo 'fixed package manifest is missing or too large' >&2; exit 1; }
+  install -m 600 "$fixed_manifest" "$manifest"
+fi
+[[ -f "$manifest" && ! -L "$manifest" && "$(stat -c %s "$manifest")" -le 16384 ]] || { echo 'package manifest is missing or too large' >&2; exit 1; }
+jq -e '((keys | sort) == ["assets","component","max_bytes","producer_workflow","protocol","schema_version","version"]) or ((keys | sort) == ["assets","component","max_bytes","producer_workflow","protocol","schema_version","source_sha","version"])' "$manifest" >/dev/null
 [[ "$(jq -er '.schema_version' "$manifest")" == 1 && "$(jq -er '.component' "$manifest")" == securefix-server && "$(jq -er '.protocol' "$manifest")" == securefix-native-request/v1 ]] || { echo 'unsupported package manifest' >&2; exit 1; }
+manifest_source_sha="$(jq -r '.source_sha // ""' "$manifest")"
+if [[ -z "$manifest_source_sha" ]]; then
+  if [[ "$CHANNEL" == scratch ]]; then manifest_source_sha="$MANIFEST_SOURCE_SHA"; else manifest_source_sha="$ACTION_SHA"; fi
+else
+  [[ "$manifest_source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'package binary source SHA is invalid' >&2; exit 1; }
+  if [[ "$CHANNEL" == scratch ]]; then
+    [[ "$manifest_source_sha" == "$MANIFEST_SOURCE_SHA" ]] || { echo 'scratch manifest binary source differs from its selected source revision' >&2; exit 1; }
+  fi
+fi
 version="$(jq -er '.version' "$manifest")"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo 'package version is not canonical SemVer' >&2; exit 1; }
 asset_name="$(jq -er '.assets["linux-x86_64"]' "$manifest")"
@@ -13,11 +48,6 @@ workflow="$(jq -er '.producer_workflow' "$manifest")"
 [[ "$workflow" == .github/workflows/*.yml && "$workflow" != *..* ]] || { echo 'package signer workflow path is invalid' >&2; exit 1; }
 limit="$(jq -er '.max_bytes' "$manifest")"
 [[ "$limit" =~ ^[1-9][0-9]{0,8}$ && "$limit" -le 536870912 ]] || { echo 'package size limit is invalid' >&2; exit 1; }
-[[ "$ACTION_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$DESTINATION_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'package source identity is invalid' >&2; exit 1; }
-[[ "$SOURCE_REPOSITORY_ID" =~ ^[1-9][0-9]{0,19}$ && "$DESTINATION_REPOSITORY_ID" =~ ^[1-9][0-9]{0,19}$ && "$OWNER_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'package repository ID is invalid' >&2; exit 1; }
-[[ "$SOURCE_DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "$SOURCE_DEFAULT_BRANCH" != *..* && -n "$GH_TOKEN" ]] || { echo 'package branch or token is invalid' >&2; exit 1; }
-[[ "$CHANNEL" == stable || "$CHANNEL" == scratch ]] || { echo 'unsupported package channel' >&2; exit 1; }
-
 if [[ -n "$ACTION_REF" ]]; then
   [[ "$ACTION_REF" =~ ^[0-9a-f]{40}$ ]] || { echo 'remote package actions must use a full immutable SHA pin' >&2; exit 1; }
   [[ "$ACTION_REF" == "$ACTION_SHA" ]] || { echo 'loader SHA differs from the immutable action pin' >&2; exit 1; }
@@ -32,8 +62,6 @@ else
 fi
 
 tag="v$version"
-work="$(mktemp -d "$RUNNER_TEMP/securefix-package.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
 source_info="$(gh api "repos/$SOURCE_REPOSITORY")"
 destination_info="$(gh api "repos/$DESTINATION_REPOSITORY")"
 jq -e --arg repo "$SOURCE_REPOSITORY" --argjson id "$SOURCE_REPOSITORY_ID" --argjson owner "$OWNER_ID" --arg branch "$SOURCE_DEFAULT_BRANCH" '.full_name == $repo and .id == $id and .owner.id == $owner and .default_branch == $branch' <<<"$source_info" >/dev/null || { echo 'package source repository identity or default branch changed' >&2; exit 1; }
@@ -83,6 +111,7 @@ GH_TOKEN= GITHUB_TOKEN= GH_CONFIG_DIR="$work/gh-config" HOME="$work" XDG_CACHE_H
 [[ "$(stat -c %s "$preverified")" -gt 0 && "$(stat -c %s "$preverified")" -le 1048576 ]] || { echo 'attestation verifier output is missing or too large' >&2; exit 1; }
 [[ "$(jq -er 'length' "$preverified")" == 1 ]] || { echo 'attestation verifier did not return exactly one source package result' >&2; exit 1; }
 source_sha="$(jq -er '.[0].verificationResult.signature.certificate.sourceRepositoryDigest | select(test("^[0-9a-f]{40}$"))' "$preverified")"
+[[ "$source_sha" == "$manifest_source_sha" ]] || { echo 'attested package source differs from the fixed loader mapping' >&2; exit 1; }
 source_ref="$(jq -er '.[0].verificationResult.signature.certificate.sourceRepositoryRef | select(type == "string")' "$preverified")"
 [[ "$source_ref" =~ ^refs/heads/([A-Za-z0-9._/-]+)$ ]] || { echo 'attested package source ref is not a branch' >&2; exit 1; }
 source_branch="${BASH_REMATCH[1]}"
