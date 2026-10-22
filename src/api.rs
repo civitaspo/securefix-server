@@ -632,9 +632,21 @@ impl GitHub {
             target.destination_repository,
             encode_path_segment(target.tag)
         ))?;
-        let tag_exists = refs
+        let exact_refs: Vec<_> = refs
             .iter()
-            .any(|reference| reference["ref"] == format!("refs/tags/{}", target.tag));
+            .filter(|reference| reference["ref"] == format!("refs/tags/{}", target.tag))
+            .collect();
+        ensure!(
+            exact_refs.len() <= 1,
+            "package release tag ref is duplicated"
+        );
+        let tag_commit = exact_refs
+            .first()
+            .map(|reference| {
+                package_release_tag_ref_commit(&api, target.destination_repository, reference)
+            })
+            .transpose()?;
+        let tag_exists = tag_commit.is_some();
         let Some(release) = matching.first().copied() else {
             ensure!(
                 !tag_exists,
@@ -656,15 +668,11 @@ impl GitHub {
         let draft = release["draft"] == true;
         validate_package_release_prior_publisher_run(target, &record, &prior_publisher, draft)?;
 
-        ensure!(
-            tag_exists,
-            "existing package release has no matching tag ref"
-        );
-        ensure!(
-            current_tag_commit(&api, target.destination_repository, target.tag)?
-                == target.destination_target_sha,
-            "existing package release tag does not target the exact source commit"
-        );
+        validate_package_release_tag_binding(
+            target.destination_target_sha,
+            release,
+            tag_commit.as_deref(),
+        )?;
 
         if draft {
             validate_package_release_recoverable_draft(target, release, release_id)?;
@@ -828,11 +836,58 @@ impl GitHub {
             bail!("package release writer context is missing");
         };
         let release_id = write.release_id.context("package release ID is missing")?;
+        self.package_release_ensure_tag()?;
         let path = format!(
             "/repos/{}/releases/{release_id}",
             write.destination_repository
         );
         self.patch(&path, &serde_json::json!({"draft": false}))
+    }
+
+    /// Create or verify the exact lightweight package tag before publishing.
+    /// GitHub can create a draft release without creating its tag ref, so a
+    /// tagless draft is valid only while it remains unpublished.
+    fn package_release_ensure_tag(&self) -> Result<()> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        ensure!(write.release_id.is_some(), "package release ID is missing");
+        self.require_package_release_current()?;
+
+        let writer_reader = self.package_writer_reader()?;
+        if let Some(commit) =
+            optional_current_tag_commit(&writer_reader, &write.destination_repository, &write.tag)?
+        {
+            ensure!(
+                commit == write.destination_target_sha,
+                "package release tag does not target the exact destination commit"
+            );
+            return self.package_release_require_exact_tag();
+        }
+
+        let path = format!("/repos/{}/git/refs", write.destination_repository);
+        self.post::<Value>(
+            &path,
+            &serde_json::json!({
+                "ref": format!("refs/tags/{}", write.tag),
+                "sha": write.destination_target_sha,
+            }),
+        )?;
+        self.package_release_require_exact_tag()
+    }
+
+    fn package_release_require_exact_tag(&self) -> Result<()> {
+        let WriteContext::PackageRelease(write) = &self.writes else {
+            bail!("package release writer context is missing");
+        };
+        self.require_package_release_current()?;
+        let writer_reader = self.package_writer_reader()?;
+        let tag_commit =
+            optional_current_tag_commit(&writer_reader, &write.destination_repository, &write.tag)?;
+        validate_package_release_tag_for_publish(
+            &write.destination_target_sha,
+            tag_commit.as_deref(),
+        )
     }
 
     /// Confirm that GitHub published the exact immutable package release and
@@ -851,7 +906,7 @@ impl GitHub {
         ensure!(
             current_tag_commit(&writer_reader, &write.destination_repository, &write.tag)?
                 == write.destination_target_sha,
-            "published package tag no longer targets the exact source commit"
+            "published package tag no longer targets the exact destination commit"
         );
         Ok(release)
     }
@@ -1011,9 +1066,25 @@ impl GitHub {
             write.destination_repository,
             encode_path_segment(&write.tag)
         ))?;
-        let tag_exists = refs
+        let exact_refs: Vec<_> = refs
             .iter()
-            .any(|reference| reference["ref"] == format!("refs/tags/{}", write.tag));
+            .filter(|reference| reference["ref"] == format!("refs/tags/{}", write.tag))
+            .collect();
+        ensure!(
+            exact_refs.len() <= 1,
+            "package release tag ref is duplicated"
+        );
+        let tag_commit = exact_refs
+            .first()
+            .map(|reference| {
+                package_release_tag_ref_commit(
+                    &writer_reader,
+                    &write.destination_repository,
+                    reference,
+                )
+            })
+            .transpose()?;
+        let tag_exists = tag_commit.is_some();
         if let Some(release_id) = write.release_id {
             let release: Value = writer_reader.get_uncached(&format!(
                 "/repos/{}/releases/{release_id}",
@@ -1041,15 +1112,14 @@ impl GitHub {
                 validate_package_release_draft(write, &release, release_id, require_asset)?;
             }
             ensure!(
-                matching.len() == 1 && matching[0]["id"].as_u64() == Some(release_id) && tag_exists,
-                "selected package draft or tag is no longer unique"
+                matching.len() == 1 && matching[0]["id"].as_u64() == Some(release_id),
+                "selected package draft is no longer unique"
             );
-            let tag_commit =
-                current_tag_commit(&writer_reader, &write.destination_repository, &write.tag)?;
-            ensure!(
-                tag_commit == write.destination_target_sha,
-                "package release tag no longer targets the exact source commit"
-            );
+            validate_package_release_tag_binding(
+                &write.destination_target_sha,
+                &release,
+                tag_commit.as_deref(),
+            )?;
         } else {
             match write.preflight_state {
                 PackageReleasePreflightState::Create => ensure!(
@@ -1058,27 +1128,22 @@ impl GitHub {
                 ),
                 PackageReleasePreflightState::ResumeDraft { release_id, .. } => {
                     ensure!(
-                        matching.len() == 1
-                            && matching[0]["id"].as_u64() == Some(release_id)
-                            && tag_exists,
-                        "recoverable package draft or tag is no longer unique"
+                        matching.len() == 1 && matching[0]["id"].as_u64() == Some(release_id),
+                        "recoverable package draft is no longer unique"
                     );
                     let release = matching[0];
                     validate_package_release_draft_recovery_record(write, release, release_id)?;
+                    validate_package_release_tag_binding(
+                        &write.destination_target_sha,
+                        release,
+                        tag_commit.as_deref(),
+                    )?;
                     validate_package_release_recovery_asset_for_write(
                         write,
                         &writer_reader,
                         release,
                         false,
                     )?;
-                    ensure!(
-                        current_tag_commit(
-                            &writer_reader,
-                            &write.destination_repository,
-                            &write.tag
-                        )? == write.destination_target_sha,
-                        "recoverable package tag no longer targets the exact source commit"
-                    );
                 }
                 PackageReleasePreflightState::AlreadyPublished { .. } => {
                     bail!("an already-published package release cannot be rewritten")
@@ -1476,8 +1541,10 @@ impl GitHub {
                 });
             let valid_asset =
                 *method == Method::POST && package_release_upload_path(write, path).is_ok();
+            let valid_tag = *method == Method::POST
+                && path == format!("/repos/{}/git/refs", write.destination_repository);
             ensure!(
-                valid_create || valid_publish || valid_asset,
+                valid_create || valid_publish || valid_asset || valid_tag,
                 "package writer target is outside its exact release lifecycle"
             );
             ensure!(
@@ -1591,6 +1658,8 @@ impl GitHub {
             WriteContext::PackageRelease(write)
                 if (method == Method::POST
                     && path == format!("/repos/{}/releases", write.destination_repository))
+                    || (method == Method::POST
+                        && path == format!("/repos/{}/git/refs", write.destination_repository))
                     || (method == Method::PATCH
                         && write.release_id.is_some_and(|id| {
                             path == format!("/repos/{}/releases/{id}", write.destination_repository)
@@ -1764,6 +1833,24 @@ impl GitHub {
         if method != Method::GET && method != Method::HEAD && !read_only_graphql {
             self.require_write_target(&method, path)?;
             self.require_current_revision()?;
+        }
+        if method == Method::PATCH
+            && body.is_some_and(|body| {
+                body.as_object()
+                    .is_some_and(|fields| fields.len() == 1 && body["draft"] == false)
+            })
+            && let WriteContext::PackageRelease(write) = &self.writes
+        {
+            let writer_reader = self.package_writer_reader()?;
+            let tag_commit = optional_current_tag_commit(
+                &writer_reader,
+                &write.destination_repository,
+                &write.tag,
+            )?;
+            validate_package_release_tag_for_publish(
+                &write.destination_target_sha,
+                tag_commit.as_deref(),
+            )?;
         }
         let mut request = self.builder(method.clone(), path)?;
         if no_cache {
@@ -3390,7 +3477,11 @@ fn current_branch_sha(api: &GitHub, repository: &str, branch: &str) -> Result<St
     Ok(sha.to_owned())
 }
 
-fn current_tag_commit(api: &GitHub, repository: &str, tag: &str) -> Result<String> {
+fn optional_current_tag_commit(
+    api: &GitHub,
+    repository: &str,
+    tag: &str,
+) -> Result<Option<String>> {
     let refs: Vec<Value> = api.get_uncached(&format!(
         "/repos/{repository}/git/matching-refs/tags/{}",
         encode_path_segment(tag)
@@ -3399,15 +3490,27 @@ fn current_tag_commit(api: &GitHub, repository: &str, tag: &str) -> Result<Strin
         .iter()
         .filter(|reference| reference["ref"] == format!("refs/tags/{tag}"))
         .collect();
-    ensure!(
-        exact.len() == 1,
-        "package release tag ref is missing or duplicated"
-    );
-    let object_sha = exact[0]["object"]["sha"]
+    ensure!(exact.len() <= 1, "package release tag ref is duplicated");
+    exact
+        .first()
+        .map(|reference| package_release_tag_ref_commit(api, repository, reference))
+        .transpose()
+}
+
+fn current_tag_commit(api: &GitHub, repository: &str, tag: &str) -> Result<String> {
+    optional_current_tag_commit(api, repository, tag)?.context("package release tag ref is missing")
+}
+
+fn package_release_tag_ref_commit(
+    api: &GitHub,
+    repository: &str,
+    reference: &Value,
+) -> Result<String> {
+    let object_sha = reference["object"]["sha"]
         .as_str()
         .context("package release tag object SHA is missing")?;
     crate::policy::validate_sha(object_sha)?;
-    match exact[0]["object"]["type"].as_str() {
+    match reference["object"]["type"].as_str() {
         Some("commit") => Ok(object_sha.to_owned()),
         Some("tag") => {
             let object: Value =
@@ -3424,6 +3527,38 @@ fn current_tag_commit(api: &GitHub, repository: &str, tag: &str) -> Result<Strin
         }
         _ => anyhow::bail!("package release tag has an unsupported object type"),
     }
+}
+
+fn validate_package_release_tag_binding(
+    expected_commit: &str,
+    release: &Value,
+    tag_commit: Option<&str>,
+) -> Result<()> {
+    if release["draft"] == true {
+        if let Some(tag_commit) = tag_commit {
+            ensure!(
+                tag_commit == expected_commit,
+                "package release tag does not target the exact destination commit"
+            );
+        }
+    } else {
+        ensure!(
+            tag_commit == Some(expected_commit),
+            "published package release tag does not target the exact destination commit"
+        );
+    }
+    Ok(())
+}
+
+fn validate_package_release_tag_for_publish(
+    expected_commit: &str,
+    tag_commit: Option<&str>,
+) -> Result<()> {
+    ensure!(
+        tag_commit == Some(expected_commit),
+        "package release tag is missing or does not target the exact destination commit"
+    );
+    Ok(())
 }
 
 fn validate_package_release_producer_run(write: &PackageReleaseWrite, run: &Value) -> Result<()> {
@@ -4050,7 +4185,20 @@ fn validate_package_release_write_body(
     if *method == Method::POST && package_release_upload_path(write, path).is_ok() {
         return Ok(());
     }
-    bail!("package release write is outside the exact draft, asset, and publish lifecycle")
+    if *method == Method::POST
+        && path == format!("/repos/{}/git/refs", write.destination_repository)
+    {
+        ensure!(write.release_id.is_some(), "package release ID is missing");
+        ensure!(
+            body == &serde_json::json!({
+                "ref": format!("refs/tags/{}", write.tag),
+                "sha": write.destination_target_sha,
+            }),
+            "package release tag creation differs from the exact verified package"
+        );
+        return Ok(());
+    }
+    bail!("package release write is outside the exact draft, asset, tag, and publish lifecycle")
 }
 
 fn validate_sha256(value: &str, description: &str) -> Result<()> {
@@ -6244,7 +6392,11 @@ mod tests {
     }
 
     fn package_release_write_fixture() -> PackageReleaseWrite {
-        let target = package_release_target_fixture(PackageReleaseChannel::Stable);
+        package_release_write_fixture_for(PackageReleaseChannel::Stable)
+    }
+
+    fn package_release_write_fixture_for(channel: PackageReleaseChannel) -> PackageReleaseWrite {
+        let target = package_release_target_fixture(channel);
         PackageReleaseWrite {
             channel: target.channel,
             source_repository: target.source_repository.to_owned(),
@@ -6406,6 +6558,165 @@ mod tests {
         let mut changed_asset = draft;
         changed_asset["assets"][0]["size"] = json!(1025);
         assert!(validate_package_release_draft(&write, &changed_asset, 103, true).is_err());
+    }
+
+    #[test]
+    fn tagless_scratch_draft_must_bind_exact_asset_and_tag_before_publication() {
+        use serde_json::json;
+
+        let write = package_release_write_fixture_for(PackageReleaseChannel::Scratch);
+        let mut create_write = write.clone();
+        create_write.release_id = None;
+        let release_path = format!("/repos/{}/releases", write.destination_repository);
+        let create_body = json!({
+            "tag_name": write.tag,
+            "name": write.tag,
+            "target_commitish": write.destination_default_branch,
+            "draft": true,
+            "prerelease": true,
+            "generate_release_notes": false,
+            "body": package_release_record_body(&write).unwrap(),
+        });
+        validate_package_release_write_body(
+            &create_write,
+            &Method::POST,
+            &release_path,
+            &create_body,
+        )
+        .unwrap();
+
+        let mut draft = json!({
+            "id": 103,
+            "tag_name": write.tag,
+            "name": write.tag,
+            "target_commitish": write.destination_default_branch,
+            "draft": true,
+            "prerelease": true,
+            "immutable": false,
+            "body": package_release_record_body(&write).unwrap(),
+            "assets": [],
+        });
+        validate_package_release_draft(&write, &draft, 103, false).unwrap();
+        validate_package_release_tag_binding(&write.destination_target_sha, &draft, None).unwrap();
+
+        draft["assets"] = json!([{
+            "id": 109,
+            "name": write.asset_name,
+            "size": write.asset_size,
+            "digest": format!("sha256:{}", write.asset_sha256),
+            "state": "uploaded",
+        }]);
+        validate_package_release_draft(&write, &draft, 103, true).unwrap();
+        validate_package_release_tag_binding(&write.destination_target_sha, &draft, None).unwrap();
+
+        let tag_path = format!("/repos/{}/git/refs", write.destination_repository);
+        let exact_tag_body = json!({
+            "ref": format!("refs/tags/{}", write.tag),
+            "sha": write.destination_target_sha,
+        });
+        validate_package_release_write_body(&write, &Method::POST, &tag_path, &exact_tag_body)
+            .unwrap();
+        validate_package_release_tag_for_publish(
+            &write.destination_target_sha,
+            Some(&write.destination_target_sha),
+        )
+        .unwrap();
+        assert!(
+            validate_package_release_tag_for_publish(&write.destination_target_sha, None).is_err()
+        );
+        let publish_path = format!("/repos/{}/releases/103", write.destination_repository);
+        validate_package_release_write_body(
+            &write,
+            &Method::PATCH,
+            &publish_path,
+            &json!({"draft": false}),
+        )
+        .unwrap();
+
+        let mut published = draft.clone();
+        published["draft"] = json!(false);
+        published["immutable"] = json!(true);
+        validate_package_release_published(&write, &published, 103).unwrap();
+        validate_package_release_tag_binding(
+            &write.destination_target_sha,
+            &published,
+            Some(&write.destination_target_sha),
+        )
+        .unwrap();
+
+        let wrong_tag_body = json!({
+            "ref": format!("refs/tags/{}-other", write.tag),
+            "sha": write.destination_target_sha,
+        });
+        assert!(
+            validate_package_release_write_body(&write, &Method::POST, &tag_path, &wrong_tag_body,)
+                .is_err()
+        );
+        let wrong_target_body = json!({
+            "ref": format!("refs/tags/{}", write.tag),
+            "sha": write.source_sha,
+        });
+        assert!(
+            validate_package_release_write_body(
+                &write,
+                &Method::POST,
+                &tag_path,
+                &wrong_target_body,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_package_release_tag_for_publish(
+                &write.destination_target_sha,
+                Some(&write.source_sha),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_package_release_tag_binding(&write.destination_target_sha, &published, None)
+                .is_err()
+        );
+        assert!(
+            validate_package_release_tag_binding(
+                &write.destination_target_sha,
+                &draft,
+                Some(&write.source_sha),
+            )
+            .is_err()
+        );
+
+        let mut changed_record = draft.clone();
+        changed_record["body"] = changed_record["body"]
+            .as_str()
+            .unwrap()
+            .replace("\"producer_run_id\":100", "\"producer_run_id\":999")
+            .into();
+        assert!(validate_package_release_draft(&write, &changed_record, 103, true).is_err());
+        let mut changed_asset = draft;
+        changed_asset["assets"][0]["digest"] = json!(format!("sha256:{}", "d".repeat(64)));
+        assert!(validate_package_release_draft(&write, &changed_asset, 103, true).is_err());
+    }
+
+    #[test]
+    fn stable_package_tag_creation_is_bound_to_the_attested_source_commit() {
+        use serde_json::json;
+
+        let write = package_release_write_fixture();
+        let path = format!("/repos/{}/git/refs", write.destination_repository);
+        let exact_body = json!({
+            "ref": format!("refs/tags/{}", write.tag),
+            "sha": write.source_sha,
+        });
+        assert_eq!(write.destination_target_sha, write.source_sha);
+        validate_package_release_write_body(&write, &Method::POST, &path, &exact_body).unwrap();
+
+        let wrong_body = json!({
+            "ref": format!("refs/tags/{}", write.tag),
+            "sha": write.destination_branch_sha,
+        });
+        assert!(
+            validate_package_release_write_body(&write, &Method::POST, &path, &wrong_body).is_err()
+        );
     }
 
     #[test]
