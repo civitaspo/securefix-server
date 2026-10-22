@@ -484,6 +484,35 @@ compiled only for tests; the installed runtime retains its normal authorization
 and provenance requirements. This verifies build, signing, and draft recovery;
 Terraform Registry ingestion still requires a published release.
 
+## Native release asset rehearsal
+
+The `release-assets` phase of `testing-securefix-server.yml` calls
+`testing-native-release-assets.yml` from a reviewed, frozen integration branch.
+Its builder compiles the source-bound Rust test executable without credentials.
+The publish job rechecks the frozen branch, then receives only a Server App token
+installed on `civitaspo/testing-securefix-server` with Contents write access.
+
+The probe reads the four target and runner pairs from the configured
+`herdr-linear-agent` release policy and builds pinned Client commit
+`ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00` on those matching runners. The build
+jobs have no credentials. A read-only Rust validator checks the current run and
+attempt, exact artifact names and IDs, archive digests, source commit signature
+and merged PR, `.release-version` at the source commit, runner/version evidence,
+and each binary's size and digest. The writer repeats validation before minting
+its scratch-only token.
+
+The success case passes those same four binary files through the production
+native-bundle validator and shared exact asset publisher. It publishes a unique
+immutable scratch prerelease and rereads its release state plus every asset ID,
+name, size, and digest; the immutable release is retained as evidence. The
+scratch tag is a unique prerelease while the expected binary version remains
+bound to the pinned source's `.release-version`. The rejection case omits one
+configured target from an otherwise verified bundle; validation must reject it
+while the separate scratch release remains a draft with no assets, then remove
+that draft and tag. A failed or incomplete matrix job prevents the writer job
+from starting. The workflow uploads the successful input and release evidence
+artifacts for seven days.
+
 The candidate verify phase exercises receipt reactions on both owner commands and the configured scratch bot's `/merge`. After the scratch merge, it checks the completion comment's squash SHA and Server run URL. The policy feedback probe publishes two failure results, verifies only the latest failure comment is visible, then publishes success and verifies both failure comments are hidden. The comment bodies identify the server CI and target commit. These probes use scratch-scoped Server App credentials.
 
 Prepare also exercises the shared policy feedback probe: wrapping multiline failure comments, superseding an older failure, and hiding failures after success. It preserves the server run and commit references and leaves no visible probe failure comment.

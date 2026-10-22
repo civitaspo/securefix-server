@@ -859,6 +859,42 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         }
                         continue;
                     }
+                    if matches!(
+                        path.as_str(),
+                        ".github/workflows/reusable-release-tag.yml"
+                            | ".github/workflows/testing-reusable-release-tag.yml"
+                    ) && job_id == "assemble-native"
+                        && inputs["pattern"].is_string()
+                    {
+                        assert_eq!(
+                            inputs["pattern"], "native-target-*-${{ github.run_attempt }}",
+                            "{path}/{job_id}"
+                        );
+                        assert_eq!(inputs["path"], "native-input");
+                        assert!(inputs.get("merge-multiple").is_none());
+                        assert!(inputs.get("artifact-ids").is_none());
+                        assert!(inputs.get("repository").is_none());
+                        assert!(inputs.get("run-id").is_none());
+                        continue;
+                    }
+                    if path == ".github/workflows/testing-native-release-assets.yml"
+                        && matches!(
+                            job_id.as_str(),
+                            "verify-native-targets" | "publish-scratch-prerelease"
+                        )
+                        && inputs["pattern"].is_string()
+                    {
+                        assert_eq!(
+                            inputs["pattern"], "native-target-*-${{ github.run_attempt }}",
+                            "{path}/{job_id}"
+                        );
+                        assert_eq!(inputs["path"], "native-input");
+                        assert!(inputs.get("merge-multiple").is_none());
+                        assert!(inputs.get("artifact-ids").is_none());
+                        assert!(inputs.get("repository").is_none());
+                        assert!(inputs.get("run-id").is_none());
+                        continue;
+                    }
                     assert!(
                         inputs["artifact-ids"].as_str().is_some_and(|v| {
                             v.starts_with("${{ needs.") || v.starts_with("${{ steps.state.")
@@ -1838,6 +1874,17 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             {
                 continue;
             }
+            if path == ".github/workflows/testing-native-release-assets.yml"
+                && matches!(job_id.as_str(), "compile-harness" | "build-native")
+            {
+                continue;
+            }
+            if (path == ".github/workflows/reusable-release-tag.yml"
+                || path == ".github/workflows/testing-reusable-release-tag.yml")
+                && job_id == "build-native"
+            {
+                continue;
+            }
             for step in job["steps"].as_array().into_iter().flatten() {
                 if let Some(run) = step["run"].as_str() {
                     assert!(
@@ -2301,7 +2348,13 @@ fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_bas
     let testing = workflow("testing-securefix-server.yml");
     assert_eq!(
         testing["on"]["workflow_dispatch"]["inputs"]["phase"]["options"],
-        serde_json::json!(["prepare", "verify", "bootstrap", "provider"])
+        serde_json::json!([
+            "prepare",
+            "verify",
+            "bootstrap",
+            "provider",
+            "release-assets"
+        ])
     );
     let legacy = &testing["jobs"]["bootstrap-legacy-runtime"];
     let legacy_if = legacy["if"].as_str().unwrap();
@@ -3028,6 +3081,177 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
 }
 
 #[test]
+fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease() {
+    let dispatcher = workflow("testing-securefix-server.yml");
+    let caller_if = dispatcher["jobs"]["native-release-assets-probe"]["if"]
+        .as_str()
+        .unwrap();
+    for required in [
+        "inputs.phase == 'release-assets'",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+        "refs/heads/integration/native-",
+        "inputs.candidate_sha == github.sha",
+    ] {
+        assert!(
+            caller_if.contains(required),
+            "caller guard lacks {required}"
+        );
+    }
+    assert_eq!(
+        dispatcher["jobs"]["native-release-assets-probe"]["secrets"],
+        serde_json::json!({
+            "SECUREFIX_SERVER_PRIVATE_KEY": "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+        })
+    );
+
+    let probe = workflow("testing-native-release-assets.yml");
+    assert!(probe["on"].get("workflow_call").is_some());
+    assert_eq!(probe["permissions"], serde_json::json!({}));
+    assert_eq!(
+        probe["env"]["PROBE_REPOSITORY"],
+        "civitaspo/testing-securefix-server"
+    );
+    assert_eq!(
+        probe["on"]["workflow_call"]["secrets"],
+        serde_json::json!({"SECUREFIX_SERVER_PRIVATE_KEY":{"required":true}})
+    );
+    let guard = &probe["jobs"]["guard"];
+    let guard_if = guard["if"].as_str().unwrap();
+    for required in [
+        "github.repository == 'civitaspo/securefix-server'",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+        "refs/heads/integration/native-",
+    ] {
+        assert!(guard_if.contains(required), "probe guard lacks {required}");
+    }
+    assert!(
+        guard["steps"][0]["run"]
+            .as_str()
+            .unwrap()
+            .contains("[[ \"$current\" == \"$CANDIDATE_SHA\" ]]")
+    );
+
+    let compile = &probe["jobs"]["compile-harness"];
+    let compile_text = serde_json::to_string(compile).unwrap();
+    assert!(!compile_text.contains("secrets."));
+    assert!(!compile_text.contains("APP_TOKEN"));
+    assert_eq!(
+        compile["steps"][0]["with"]["ref"],
+        "${{ needs.guard.outputs.candidate-sha }}"
+    );
+
+    let build = &probe["jobs"]["build-native"];
+    assert!(
+        build["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.compile-harness.result == 'success'")
+    );
+    assert_eq!(build["runs-on"], "${{ matrix.target.runner }}");
+    assert_eq!(build["permissions"], serde_json::json!({"contents":"read"}));
+    assert_eq!(
+        build["strategy"]["matrix"]["target"],
+        "${{ fromJSON(needs.compile-harness.outputs.native-targets) }}"
+    );
+    assert_eq!(
+        probe["env"]["CLIENT_REPOSITORY"],
+        "civitaspo/herdr-linear-agent"
+    );
+    assert_eq!(
+        probe["env"]["CLIENT_SOURCE_SHA"],
+        "ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00"
+    );
+    let build_text = serde_json::to_string(build).unwrap();
+    assert_eq!(
+        build["steps"][0]["with"]["repository"],
+        "${{ env.CLIENT_REPOSITORY }}"
+    );
+    assert_eq!(
+        build["steps"][0]["with"]["ref"],
+        "${{ env.CLIENT_SOURCE_SHA }}"
+    );
+    assert!(build_text.contains("cargo +1.99.0 build --locked --release"));
+    assert!(build_text.contains("env -i PATH=\\\"$PATH\\\""));
+    assert!(build_text.contains("--version"));
+    for forbidden in [
+        "secrets.",
+        "create-github-app-token",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    ] {
+        assert!(
+            !build_text.contains(forbidden),
+            "native builder exposes {forbidden}"
+        );
+    }
+
+    let verify = &probe["jobs"]["verify-native-targets"];
+    let verify_if = verify["if"].as_str().unwrap();
+    assert!(verify_if.contains("needs.build-native.result == 'success'"));
+    assert!(verify_if.contains("needs.compile-harness.result == 'success'"));
+    assert_eq!(
+        verify["permissions"],
+        serde_json::json!({"actions":"read","contents":"read"})
+    );
+    assert!(
+        verify["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|need| need == "build-native")
+    );
+    assert!(
+        serde_json::to_string(verify)
+            .unwrap()
+            .contains("native_release_assets_validate_probe_inputs")
+    );
+
+    let writer = &probe["jobs"]["publish-scratch-prerelease"];
+    assert_eq!(writer["environment"], "main");
+    let writer_if = writer["if"].as_str().unwrap();
+    assert!(writer_if.contains("needs.build-native.result == 'success'"));
+    assert!(writer_if.contains("needs.verify-native-targets.result == 'success'"));
+    assert!(writer_if.contains("needs.compile-harness.result == 'success'"));
+    assert!(
+        writer["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|need| need == "verify-native-targets")
+    );
+    let token = writer["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "scratch-token")
+        .unwrap();
+    assert_eq!(token["with"]["owner"], "civitaspo");
+    assert_eq!(token["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(token["with"]["permission-contents"], "write");
+    let writer_text = serde_json::to_string(writer).unwrap();
+    assert!(!writer_text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+    assert!(writer_text.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
+    assert!(writer_text.contains("native_release_assets_scratch_publish_probe"));
+    assert!(writer_text.contains("native_release_assets_validate_probe_inputs"));
+    assert!(writer_text.contains("native-release-assets-probe-evidence"));
+
+    let source = include_str!("release.rs");
+    assert!(source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)"));
+    assert!(
+        source.contains("publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)?")
+    );
+    assert!(source.contains("incomplete native target set was accepted"));
+    assert!(source.contains("std::io::copy(&mut file, &mut archive)?"));
+    assert!(source.contains("Client source is not the pinned verified commit"));
+    assert!(
+        source
+            .contains("ensure_published_immutable_release(&published, release_id, &success_tag)?")
+    );
+}
+
+#[test]
 fn scratch_uses_one_selected_runtime_and_test_scoped_tokens() {
     let value = workflow("testing-securefix-server.yml");
     let text = serde_json::to_string(&value).unwrap();
@@ -3112,6 +3336,14 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         && step["with"]["artifact-ids"].is_string()
                 });
             if path == ".github/workflows/testing-provider-release.yml" {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-release-assets.yml"
+                && matches!(
+                    job_id.as_str(),
+                    "compile-harness" | "verify-native-targets" | "publish-scratch-prerelease"
+                )
+            {
                 continue;
             }
             let installer = steps.iter().position(|step| {
@@ -3335,6 +3567,72 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("select(")
                     && !run.contains(" == ")
                     && !run.contains("test(");
+                let bounded_native_release_source_guard = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "guard"
+                    && step["name"] == "Require the frozen candidate branch to match this run"
+                    && run.contains("git/ref/heads/${BRANCH}")
+                    && run.contains("\"$current\" == \"$CANDIDATE_SHA\"")
+                    && run.contains("integration/native-[0-9a-f]{12}")
+                    && run.contains("${BRANCH##*-}")
+                    && run.contains("${CANDIDATE_SHA:0:12}")
+                    && run.matches("gh api ").count() == 1
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method");
+                let bounded_native_release_harness = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "compile-harness"
+                    && step["name"] == "Compile the isolated native release probe test binary"
+                    && run.contains("cargo +1.99.0 test --locked --bin securefix --no-run")
+                    && run.contains("target.name == \"securefix\"")
+                    && run.contains(".executable")
+                    && run.matches("jq ").count() == 1
+                    && !run.contains("gh api")
+                    && !run.contains("gh release");
+                let bounded_native_release_target_matrix = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "compile-harness"
+                    && step["name"] == "Read the configured native target matrix"
+                    && run.contains("jq -ce --arg repository")
+                    && run.contains(".native_binaries[]")
+                    && run.contains("jq 'length'")
+                    && !run.contains("gh api")
+                    && !run.contains("gh release");
+                let bounded_native_release_target_build = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "build-native"
+                    && step["name"]
+                        == "Build and execute the pinned Client source on its target runner"
+                    && run.contains(
+                        "cargo +1.99.0 build --locked --release --bin herdr-linear-agent --target",
+                    )
+                    && run.contains("git rev-parse HEAD")
+                    && run.contains("--version")
+                    && run.contains("jq -n")
+                    && run.matches("jq ").count() == 1
+                    && run.contains("source_run_id:$source_run_id")
+                    && run.contains("source_run_attempt:$source_run_attempt")
+                    && run.contains("release_pr_number:$release_pr_number")
+                    && run.contains("release_pr_sha:$release_pr_sha")
+                    && !run.contains("jq -e")
+                    && !run.contains("select(")
+                    && !run.contains("gh api")
+                    && !run.contains("gh release");
+                let bounded_native_target_evidence = (path
+                    == ".github/workflows/reusable-release-tag.yml"
+                    || path == ".github/workflows/testing-reusable-release-tag.yml")
+                    && job_id == "build-native"
+                    && step["name"] == "Build and execute the native binary on its target runner"
+                    && run.contains("jq -n")
+                    && run.matches("jq ").count() == 1
+                    && run.contains("source_run_id:$source_run_id")
+                    && run.contains("source_run_attempt:$source_run_attempt")
+                    && run.contains("release_pr_number:$release_pr_number")
+                    && run.contains("release_pr_sha:$release_pr_sha")
+                    && !run.contains("jq -e")
+                    && !run.contains("select(")
+                    && !run.contains("test(")
+                    && run.contains("mktemp -d");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
@@ -3345,7 +3643,12 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             || bounded_release_artifact_lookup
                             || bounded_native_test_assertion
                             || native_package_config_projection
-                            || native_package_record_projection)
+                            || native_package_record_projection
+                            || bounded_native_release_source_guard
+                            || bounded_native_release_harness
+                            || bounded_native_release_target_matrix
+                            || bounded_native_release_target_build
+                            || bounded_native_target_evidence)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
@@ -3646,7 +3949,7 @@ fn native_caller_distribution_mints_only_target_scoped_write_credentials() {
 }
 
 #[test]
-fn provider_build_sign_and_publish_have_distinct_credentials() {
+fn release_build_sign_and_publish_keep_credentials_separate() {
     let client: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/reusable-release-tag.yml").unwrap())
             .unwrap();
@@ -3663,6 +3966,127 @@ fn provider_build_sign_and_publish_have_distinct_credentials() {
             .unwrap()
             .iter()
             .any(|s| s["with"]["ref"] == "${{ needs.resolve.outputs.merge_sha }}")
+    );
+    let native = &client["jobs"]["build-native"];
+    assert_eq!(native["runs-on"], "${{ matrix.target.runner }}");
+    assert_eq!(
+        native["permissions"],
+        serde_json::json!({"contents":"read"})
+    );
+    let native_text = serde_json::to_string(native).unwrap();
+    for forbidden in [
+        "secrets.",
+        "create-github-app-token",
+        "SECUREFIX_SERVER_PRIVATE_KEY",
+        "SECUREFIX_CLIENT_PRIVATE_KEY",
+    ] {
+        assert!(
+            !native_text.contains(forbidden),
+            "native builder exposes {forbidden}"
+        );
+    }
+    assert!(native_text.contains("musl-tools"));
+    assert!(native_text.contains("cargo build --locked --release --bin"));
+    assert!(native_text.contains("--version"));
+    assert!(native_text.contains("version_output="));
+    let build_step = native["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Build and execute the native binary on its target runner")
+        .unwrap();
+    assert_eq!(build_step["env"]["RUNNER_OS"], "${{ runner.os }}");
+    assert_eq!(build_step["env"]["RUNNER_ARCH"], "${{ runner.arch }}");
+    assert_eq!(
+        build_step["env"]["NATIVE_SOURCE_SHA"],
+        "${{ needs.resolve.outputs.merge_sha }}"
+    );
+    assert_eq!(
+        build_step["env"]["RELEASE_PR_NUMBER"],
+        "${{ needs.resolve.outputs.pr_number }}"
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("git rev-parse HEAD")
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("source_run_id:$source_run_id")
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("release_pr_sha:$release_pr_sha")
+    );
+    assert!(build_step["run"].as_str().unwrap().contains("mktemp -d"));
+    let upload = native["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .unwrap();
+    assert_eq!(
+        upload["with"]["path"],
+        "${{ steps.target.outputs.artifact_dir }}/*"
+    );
+    assert!(
+        native_text.contains("native-target-${{ matrix.target.target }}-${{ github.run_attempt }}")
+    );
+    assert!(native_text.contains("needs.resolve.outputs.native_targets"));
+    assert!(!native_text.contains("securefix-runtime"));
+    assert!(!native_text.contains("securefix release build-native"));
+    for forbidden in ["GITHUB_TOKEN", "GH_TOKEN", "SECUREFIX_SERVER_APP_TOKEN"] {
+        assert!(!native_text.contains(forbidden));
+    }
+    let release_source = include_str!("release.rs");
+    assert!(!release_source.contains("fn build_native("));
+    let native_assembler = release_source.split_once("fn assemble_native(").unwrap().1;
+    assert!(native_assembler.contains("source_run_sha.as_str() == env(\"GITHUB_SHA\")?"));
+    assert!(native_assembler.contains("build.source_run_id == run_id"));
+    assert!(native_assembler.contains("build.source_run_attempt == run_attempt"));
+    assert!(native_assembler.contains("build.release_pr_sha == merge_sha"));
+    assert!(native_assembler.contains("native-target-{}-{run_attempt}"));
+    assert!(native_assembler.contains("validate_native_manifest"));
+    assert!(native_assembler.contains("sha256_file(&binary_path)?"));
+    let assemble = &client["jobs"]["assemble-native"];
+    assert_eq!(
+        assemble["permissions"],
+        serde_json::json!({"actions":"read","contents":"read","pull-requests":"read"})
+    );
+    assert!(
+        serde_json::to_string(assemble)
+            .unwrap()
+            .contains("native-target-*")
+    );
+    let tag = &client["jobs"]["tag"];
+    let tag_if = tag["if"].as_str().unwrap();
+    assert!(tag_if.contains("needs.build-native.result == 'success'"));
+    assert!(tag_if.contains("needs.assemble-native.result == 'success'"));
+    assert!(!tag_if.contains("needs.build-native.result == 'failure'"));
+    assert!(
+        tag["needs"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("assemble-native"))
+    );
+    assert!(
+        serde_json::to_string(tag)
+            .unwrap()
+            .contains("needs.assemble-native.outputs.artifact_id")
+    );
+    assert!(
+        serde_json::to_string(tag)
+            .unwrap()
+            .contains("RELEASE_BUNDLE_ARTIFACT_ID")
     );
     let server: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/release.yml").unwrap()).unwrap();

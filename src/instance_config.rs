@@ -82,6 +82,8 @@ pub struct ConfiguredRepository {
     #[serde(default)]
     pub release: Option<crate::policy::ReleaseStrategy>,
     #[serde(default)]
+    pub native_binaries: Vec<crate::policy::NativeBinaryTarget>,
+    #[serde(default)]
     pub sensitive_paths: Vec<String>,
     pub protect_tags: bool,
 }
@@ -92,6 +94,7 @@ impl ConfiguredRepository {
             repository: self.repository.clone(),
             capabilities: self.capabilities.clone(),
             release: self.release,
+            native_binaries: self.native_binaries.clone(),
             sensitive_paths: self.sensitive_paths.clone(),
             protect_tags: self.protect_tags,
         }

@@ -12,15 +12,16 @@ sequenceDiagram
   Owner->>Client: Merge release/next PR into main
   Client->>Server: Call pinned Release Tag reusable
   Server->>Client: Validate merged PR and owner marker
-  Server->>Client: Build fixed provider target matrix without secrets
-  Server->>Client: Create annotated tag and upload v2 manifest
+  Server->>Client: Build configured native target matrix without credentials
+  Server->>Client: Create annotated tag and upload v2 manifest plus bundle artifact
   Client->>Server: Create release-request-RUN label
   Server->>Client: Validate successful run, reusable pin, PR, tag, artifacts
+  Server->>Server: Validate source-bound bundle and exact asset contract
   Server->>Server: Sign canonical checksum (provider strategy)
-  Server->>Client: Publish draft, verify assets, publish once
+  Server->>Client: Upload exact assets to draft, verify, publish, reread immutable assets
 ```
 
-The active control revision supplies the policy used for privileged effects. The source Release Tag run must be successful, originate in the exact client repository, expose a confined caller workflow path, and reference the runtime source selected by the active descriptor. For PR runs, the run SHA must match the associated PR head SHA; the server reads the caller workflow from the PR's base SHA, which must be on the default branch, and requires its reusable call to pin the active runtime source. Owner-dispatched retries read the workflow at the run SHA and require that SHA on the default branch. The v2 manifest binds its run ID/attempt, full control identity, runtime source, release PR, merge commit, tag, and provider artifact ID. The PR must be merged `release/next` → `main` by the server bot. The server also reads `.release-version` from the merged commit and requires it to match the tag. Sensitive owner authorization is represented by a server-authored marker bound to the exact PR head SHA and full control identity.
+The active control revision supplies the policy used for privileged effects. The source Release Tag run must be successful, originate in the exact client repository, expose a confined caller workflow path, and reference the runtime source selected by the active descriptor. For PR runs, the run SHA must match the associated PR head SHA; the server reads the caller workflow from the PR's base SHA, which must be on the default branch, and requires its reusable call to pin the active runtime source. Owner-dispatched retries read the workflow at the run SHA and require that SHA on the default branch. The v2 manifest binds its run ID/attempt, full control identity, runtime source, release PR, merge commit, tag, and configured release-bundle artifact ID. The PR must be merged `release/next` → `main` by the server bot. The server also reads `.release-version` from the merged commit and requires it to match the tag. Sensitive owner authorization is represented by a server-authored marker bound to the exact PR head SHA and full control identity.
 
 ## Runtime distribution
 
@@ -66,6 +67,10 @@ The build job compiles the fixed provider target matrix from the validated merge
 ## Client policy and strategies
 
 [`policy.json`](../policy.json) is the exact allowlist and strategy source. Supported strategies are `github-release` and `terraform-provider`; no client-provided release configuration is evaluated. A policy change requires review and a merge to this repository.
+
+For a `github-release` repository with an empty `native_binaries` list, Release Tag retains its existing zero-asset behavior. A configured native matrix is built from the validated release merge commit before the tag manifest and server request are created. The Linux Rust controller resolves the allowed target/runner matrix; each build job checks out that exact merge commit and runs only the fixed `cargo build --locked --release --bin <repository> --target <target>` command on the configured GitHub-hosted runner. The job reads `.release-version` from the checked-out commit, executes the resulting binary's `--version` on that runner, and uploads the binary with runner and version evidence. Those build jobs receive no app token or signing key, and checkout credentials are disabled. The Linux Rust assembler checks the current run and attempt, exact artifact names and target set, and binds each artifact's configured runner, actual runner OS/CPU, executed version output, filename, size, and digest to the source run, release PR, and package version. For ordinary releases the package version and release tag version come from the same `.release-version` value; the scratch rehearsal uses a unique prerelease tag while keeping the binary version bound to the pinned Client source. Preflight validates the artifact's source run and exact target set; the publisher rechecks local bytes, uploads only missing exact-name, digest, and size assets to the draft, verifies the complete set before publishing, and rereads the published immutable release and every asset digest. It never overwrites or mutates a published release.
+
+The `herdr-linear-agent` package uses four native targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-musl`, and `x86_64-unknown-linux-musl`. Published filenames are `<repository>-<target>`. The existing client-side `release-assets.yml` workflow builds and uploads after `release.published`; it must be retired or converted as part of caller migration before this path is enabled because immutable releases reject late asset uploads.
 
 For `terraform-provider`, the server builds 13 ZIP assets using Go 1.26.5 and fixed Go build flags/targets. Each ZIP contains exactly `CHANGELOG.md`, `LICENSE`, `README.md`, and `${project}_v${version}` (with `.exe` on Windows); this matches the existing Sigma provider archive contract. Asset names are `${project}_${version}_${os}_${arch}.zip`, and the manifest is `${project}_${version}_manifest.json`. The server generates `${project}_${version}_SHA256SUMS` for all ZIPs and the manifest and its detached `.sig`. These names and archive contents are part of the Terraform Registry compatibility contract.
 

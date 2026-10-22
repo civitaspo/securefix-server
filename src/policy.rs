@@ -31,8 +31,17 @@ pub struct RepositoryPolicy {
     pub capabilities: Vec<Capability>,
     pub release: Option<ReleaseStrategy>,
     #[serde(default)]
+    pub native_binaries: Vec<NativeBinaryTarget>,
+    #[serde(default)]
     pub sensitive_paths: Vec<String>,
     pub protect_tags: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeBinaryTarget {
+    pub target: String,
+    pub runner: String,
 }
 
 /// Principals allowed to make additional owner-sensitive approvals unnecessary.
@@ -170,6 +179,54 @@ impl Policy {
                     == repository.capabilities.contains(&Capability::Release),
                 "release strategy/capability mismatch"
             );
+            ensure!(
+                repository.native_binaries.is_empty()
+                    || repository.release == Some(ReleaseStrategy::GithubRelease),
+                "native binaries require the GitHub Release strategy"
+            );
+            ensure!(
+                repository.native_binaries.len() <= 8,
+                "too many native binary targets"
+            );
+            let mut native_targets = HashSet::new();
+            for target in &repository.native_binaries {
+                ensure!(
+                    !target.target.is_empty()
+                        && target.target.len() <= 80
+                        && target.target.bytes().all(|byte| byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || byte == b'-'
+                            || byte == b'_'),
+                    "invalid native binary target"
+                );
+                ensure!(
+                    native_targets.insert(target.target.as_str()),
+                    "duplicate native binary target"
+                );
+                ensure!(
+                    matches!(
+                        target.runner.as_str(),
+                        "ubuntu-24.04" | "ubuntu-24.04-arm" | "macos-15" | "macos-15-intel"
+                    ),
+                    "unsupported native binary runner"
+                );
+                let (runner_os, runner_arch) = match target.runner.as_str() {
+                    "ubuntu-24.04" => ("linux", "x86_64"),
+                    "ubuntu-24.04-arm" => ("linux", "aarch64"),
+                    "macos-15" => ("apple-darwin", "aarch64"),
+                    "macos-15-intel" => ("apple-darwin", "x86_64"),
+                    _ => unreachable!(),
+                };
+                let target_os_matches = if runner_os == "linux" {
+                    target.target.contains("-linux-")
+                } else {
+                    target.target.ends_with("-apple-darwin")
+                };
+                ensure!(
+                    target.target.starts_with(&format!("{runner_arch}-")) && target_os_matches,
+                    "native binary target does not match its runner"
+                );
+            }
             ensure!(
                 !repository.sensitive_paths.is_empty(),
                 "missing sensitive paths"
@@ -440,6 +497,67 @@ mod tests {
         invalid["repositories"][0]["repository"] = Value::String("civitaspo/*".into());
         assert!(Policy::parse(&serde_json::to_vec(&invalid).unwrap()).is_err());
     }
+
+    #[test]
+    fn native_binary_release_targets_are_optional_and_repository_specific() {
+        let production = Policy::load("policy.json").unwrap();
+        let native = &production
+            .repository("civitaspo/herdr-linear-agent")
+            .unwrap()
+            .native_binaries;
+        assert_eq!(
+            native,
+            &vec![
+                NativeBinaryTarget {
+                    target: "aarch64-apple-darwin".into(),
+                    runner: "macos-15".into(),
+                },
+                NativeBinaryTarget {
+                    target: "x86_64-apple-darwin".into(),
+                    runner: "macos-15-intel".into(),
+                },
+                NativeBinaryTarget {
+                    target: "aarch64-unknown-linux-musl".into(),
+                    runner: "ubuntu-24.04-arm".into(),
+                },
+                NativeBinaryTarget {
+                    target: "x86_64-unknown-linux-musl".into(),
+                    runner: "ubuntu-24.04".into(),
+                },
+            ]
+        );
+        assert!(
+            production
+                .repository("civitaspo/dbt-authorized-models")
+                .unwrap()
+                .native_binaries
+                .is_empty()
+        );
+        assert!(
+            Policy::load("tests/fixtures/policy.json")
+                .unwrap()
+                .repositories
+                .iter()
+                .all(|repository| repository.native_binaries.is_empty())
+        );
+
+        let mut value: Value = serde_json::from_slice(include_bytes!("../policy.json")).unwrap();
+        let native_index = value["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|repository| repository["repository"] == "civitaspo/herdr-linear-agent")
+            .unwrap();
+        value["repositories"][native_index]["native_binaries"][1]["target"] =
+            serde_json::json!("aarch64-apple-darwin");
+        assert!(Policy::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["repositories"][native_index]["native_binaries"][1]["target"] =
+            serde_json::json!("x86_64-apple-darwin");
+        value["repositories"][native_index]["native_binaries"][1]["runner"] =
+            serde_json::json!("ubuntu-24.04");
+        assert!(Policy::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
     #[test]
     fn sensitive_paths_cover_code_workflows_and_dependencies() {
         let policy = Policy::load("tests/fixtures/policy.json").unwrap();

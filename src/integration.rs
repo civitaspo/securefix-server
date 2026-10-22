@@ -4618,6 +4618,7 @@ fn scratch_policy(candidate_sha: &str) -> Result<Policy> {
             Capability::Release,
         ],
         release: Some(ReleaseStrategy::GithubRelease),
+        native_binaries: Vec::new(),
         sensitive_paths: policy.default_sensitive_paths.clone(),
         protect_tags: false,
     }];

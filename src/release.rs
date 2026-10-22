@@ -19,6 +19,11 @@ use sha2::{Digest, Sha256};
 
 const MAX_PROVIDER_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PROVIDER_ARCHIVE_FILES: usize = 32;
+const MAX_NATIVE_ASSET_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_NATIVE_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
+const NATIVE_BUNDLE_NAME: &str = "native-bundle";
+const NATIVE_BUNDLE_MANIFEST: &str = "native-assets.json";
+const NATIVE_TARGET_MANIFEST: &str = "native-target.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repository(String);
@@ -119,6 +124,10 @@ pub struct ReleaseManifestV2 {
     pub release_pr_number: u64,
     pub release_pr_sha: CommitSha,
     pub tag: ReleaseTag,
+    /// Package version read from the release source commit. Native scratch
+    /// prerelease tags may differ from this stable Client version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_version: Option<String>,
     pub artifact_id: Option<u64>,
 }
 
@@ -132,6 +141,10 @@ impl ReleaseManifestV2 {
         CommitSha::parse(self.source_revision.as_str())?;
         CommitSha::parse(self.release_pr_sha.as_str())?;
         ReleaseTag::parse(self.tag.as_str())?;
+        if let Some(package_version) = &self.package_version {
+            Version::parse(package_version)
+                .context("release manifest package version is invalid")?;
+        }
         if self.source_run_id.0 == 0
             || self.run_attempt == 0
             || self.release_pr_number == 0
@@ -140,6 +153,12 @@ impl ReleaseManifestV2 {
             bail!("release manifest contains an empty numeric identifier");
         }
         Ok(())
+    }
+
+    fn package_version(&self) -> &str {
+        self.package_version
+            .as_deref()
+            .unwrap_or_else(|| self.tag.version())
     }
 }
 
@@ -218,10 +237,14 @@ pub struct ReleasePlanV2 {
     pub release_pr_sha: String,
     pub tag: ReleaseTag,
     pub source_manifest: ReleaseManifestV2,
+    #[serde(default)]
+    pub native_binary_repository: Option<String>,
     pub release_id: Option<u64>,
     #[serde(default)]
     pub existing_signature_sha256: Option<String>,
     pub assets: Vec<PlannedAsset>,
+    #[serde(default)]
+    pub native_assets: Vec<NativeAssetEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +252,57 @@ pub struct ReleasePlanV2 {
 pub struct PlannedAsset {
     pub name: String,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAssetManifest {
+    pub schema_version: u8,
+    pub repository: String,
+    pub source_run_id: RunId,
+    pub source_run_sha: CommitSha,
+    pub run_attempt: u64,
+    pub source_revision: CommitSha,
+    pub release_pr_number: u64,
+    pub release_pr_sha: CommitSha,
+    pub tag: ReleaseTag,
+    pub package_version: String,
+    pub assets: Vec<NativeAssetEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAssetEvidence {
+    pub target: String,
+    pub runner: String,
+    pub runner_name: String,
+    pub runner_os: String,
+    pub runner_arch: String,
+    pub filename: String,
+    pub size: u64,
+    pub sha256: String,
+    pub version_output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeTargetEvidence {
+    pub schema_version: u8,
+    pub source_run_id: RunId,
+    pub source_run_attempt: u64,
+    pub source_run_sha: CommitSha,
+    pub release_pr_number: u64,
+    pub release_pr_sha: CommitSha,
+    pub package_version: String,
+    pub target: String,
+    pub runner: String,
+    pub runner_name: String,
+    pub runner_os: String,
+    pub runner_arch: String,
+    pub filename: String,
+    pub version_output: String,
 }
 
 impl ReleasePlanV2 {
@@ -241,8 +315,7 @@ impl ReleasePlanV2 {
         ReleaseTag::parse(self.tag.as_str())?;
         self.source_manifest.validate()?;
         ensure!(
-            self.source_manifest.repository == self.repository
-                && self.source_manifest.source_run_id == self.source_run_id
+            self.source_manifest.source_run_id == self.source_run_id
                 && self.source_manifest.run_attempt == self.source_run_attempt
                 && self.source_manifest.source_revision.as_str() == self.source_revision
                 && self.source_manifest.release_pr_number == self.release_pr_number
@@ -250,6 +323,20 @@ impl ReleasePlanV2 {
                 && self.source_manifest.tag == self.tag,
             "release plan does not match its source manifest"
         );
+        if self.native_assets.is_empty() {
+            ensure!(
+                self.source_manifest.repository == self.repository
+                    && self.native_binary_repository.is_none(),
+                "non-native release plan does not match its source repository"
+            );
+        } else {
+            ensure!(
+                self.strategy == ReleaseStrategy::GithubRelease
+                    && self.native_binary_repository.as_deref()
+                        == Some(self.source_manifest.repository.as_str()),
+                "native release plan does not bind its binary source repository"
+            );
+        }
         ensure!(
             self.source_run_id.0 > 0 && self.source_run_attempt > 0 && self.release_pr_number > 0,
             "invalid release plan identifiers"
@@ -289,15 +376,186 @@ impl ReleasePlanV2 {
                         .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
                 "invalid asset digest"
             );
+            ensure!(
+                asset
+                    .size
+                    .is_none_or(|size| size > 0 && size <= MAX_NATIVE_ASSET_BYTES),
+                "invalid expected asset size"
+            );
+        }
+        validate_native_evidence(&self.native_assets)?;
+        if !self.native_assets.is_empty() {
+            ensure!(
+                self.strategy == ReleaseStrategy::GithubRelease
+                    && self.native_assets.len() == self.assets.len()
+                    && self.native_assets.iter().all(|native| {
+                        self.assets.iter().any(|asset| {
+                            asset.name == native.filename
+                                && asset.sha256 == native.sha256
+                                && asset.size == Some(native.size)
+                        })
+                    }),
+                "native release assets do not match the release plan"
+            );
         }
         if self.strategy == ReleaseStrategy::GithubRelease {
             ensure!(
-                self.assets.is_empty(),
-                "GitHub Release plans cannot contain provider assets"
+                self.native_assets.len() == self.assets.len(),
+                "GitHub Release plan assets lack native evidence"
+            );
+        } else {
+            ensure!(
+                self.native_assets.is_empty(),
+                "provider release plan contains native assets"
             );
         }
         Ok(())
     }
+}
+
+fn validate_native_evidence(assets: &[NativeAssetEvidence]) -> Result<()> {
+    let mut targets = BTreeSet::new();
+    let mut filenames = BTreeSet::new();
+    for asset in assets {
+        ensure!(
+            !asset.target.is_empty()
+                && asset.target.len() <= 80
+                && asset.target.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'-'
+                        || byte == b'_'
+                }),
+            "invalid native asset target"
+        );
+        ensure!(
+            targets.insert(asset.target.as_str()),
+            "duplicate native asset target"
+        );
+        ensure!(
+            !asset.filename.is_empty()
+                && asset.filename.len() <= 120
+                && asset
+                    .filename
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_alphanumeric() || b"._-".contains(&byte) }),
+            "invalid native asset filename"
+        );
+        ensure!(
+            filenames.insert(asset.filename.as_str()),
+            "duplicate native asset filename"
+        );
+        ensure!(
+            asset.size > 0 && asset.size <= MAX_NATIVE_ASSET_BYTES,
+            "native asset has invalid size"
+        );
+        ensure!(
+            asset.sha256.len() == 64
+                && asset
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "invalid native asset digest"
+        );
+        ensure!(
+            !asset.runner_name.is_empty()
+                && asset.runner_name.len() <= 200
+                && !asset.runner_name.contains(['\n', '\r', '\0'])
+                && matches!(asset.runner_os.as_str(), "Linux" | "macOS")
+                && matches!(asset.runner_arch.as_str(), "ARM64" | "X64"),
+            "invalid native runner evidence"
+        );
+        let (expected_os, expected_arch) = runner_platform(&asset.runner);
+        ensure!(
+            (asset.runner_os.as_str(), asset.runner_arch.as_str()) == (expected_os, expected_arch),
+            "native runner evidence does not match its configured runner"
+        );
+        let (target_os, target_arch) = target_platform(&asset.target)?;
+        ensure!(
+            (target_os, target_arch) == (expected_os, expected_arch),
+            "native target was not built on a matching runner"
+        );
+        ensure!(
+            !asset.version_output.is_empty()
+                && asset.version_output.len() <= 512
+                && !asset.version_output.contains(['\n', '\r', '\0']),
+            "invalid native binary version evidence"
+        );
+    }
+    Ok(())
+}
+
+fn runner_platform(runner: &str) -> (&'static str, &'static str) {
+    match runner {
+        "ubuntu-24.04" => ("Linux", "X64"),
+        "ubuntu-24.04-arm" => ("Linux", "ARM64"),
+        "macos-15" => ("macOS", "ARM64"),
+        "macos-15-intel" => ("macOS", "X64"),
+        _ => ("", ""),
+    }
+}
+
+fn target_platform(target: &str) -> Result<(&'static str, &'static str)> {
+    let architecture = target.split('-').next().unwrap_or_default();
+    let arch = match architecture {
+        "aarch64" => "ARM64",
+        "x86_64" => "X64",
+        _ => bail!("unsupported native target architecture"),
+    };
+    let os = if target.ends_with("-apple-darwin") {
+        "macOS"
+    } else if target.contains("-linux-") {
+        "Linux"
+    } else {
+        bail!("unsupported native target operating system")
+    };
+    Ok((os, arch))
+}
+
+fn validate_native_manifest(
+    manifest: &NativeAssetManifest,
+    repository: &Repository,
+    targets: &[crate::policy::NativeBinaryTarget],
+    source: &ReleaseManifestV2,
+) -> Result<()> {
+    ensure!(
+        manifest.schema_version == 1
+            && manifest.repository == repository.as_str()
+            && manifest.source_run_id == source.source_run_id
+            && manifest.source_run_sha == source.source_run_sha
+            && manifest.run_attempt == source.run_attempt
+            && manifest.source_revision == source.source_revision
+            && manifest.release_pr_number == source.release_pr_number
+            && manifest.release_pr_sha == source.release_pr_sha
+            && manifest.tag == source.tag
+            && manifest.package_version == source.package_version(),
+        "native asset manifest does not match its source release"
+    );
+    ensure!(
+        !targets.is_empty() && manifest.assets.len() == targets.len(),
+        "native asset set does not match configured targets"
+    );
+    validate_native_evidence(&manifest.assets)?;
+    Version::parse(&manifest.package_version)
+        .context("native asset manifest package version is invalid")?;
+    let version_prefix = format!("{} {}+", repository.name(), manifest.package_version);
+    for target in targets {
+        let asset = manifest
+            .assets
+            .iter()
+            .find(|asset| asset.target == target.target)
+            .with_context(|| format!("native asset target is missing: {}", target.target))?;
+        ensure!(
+            asset.runner == target.runner
+                && asset.filename == format!("{}-{}", repository.name(), target.target),
+            "native asset does not match configured target"
+        );
+        ensure!(
+            asset.version_output.starts_with(&version_prefix),
+            "native binary reports an unexpected version"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Args)]
@@ -316,6 +574,7 @@ pub enum Command {
     Classify,
     ResolvePr(PrArgs),
     BuildProvider(PrArgs),
+    AssembleNative(PrArgs),
     TagPr {
         #[command(flatten)]
         pr: PrArgs,
@@ -337,6 +596,7 @@ pub fn run(command: Command) -> Result<()> {
         Command::Classify => classify(),
         Command::ResolvePr(pr) => resolve_pr_command(pr.release_pr_number),
         Command::BuildProvider(pr) => build_provider(pr.release_pr_number),
+        Command::AssembleNative(pr) => assemble_native(pr.release_pr_number),
         Command::TagPr { pr, artifact_id } => tag_pr(pr.release_pr_number, artifact_id),
         Command::RequestServer => request_server(),
         Command::ParseRequest => parse_request(),
@@ -476,17 +736,28 @@ fn resolve_pr_command(number: u64) -> Result<()> {
     let policy = current_policy(&api)?;
     require_dispatch_owner(&api, &policy)?;
     let (pr, merge_sha) = authorized_release_pr(&api, &policy, &repo, number)?;
-    let strategy = strategy_for(&api, &repo)?;
+    let repository_policy = policy.repository(repo.as_str())?;
+    let strategy = repository_policy
+        .release
+        .context("release strategy is not configured")?;
     crate::output("merge_sha", merge_sha.as_str())?;
     crate::output("head_sha", &pr.head.sha)?;
     crate::output("strategy", serde_yaml::to_string(&strategy)?.trim())?;
+    crate::output(
+        "native_targets",
+        serde_json::to_string(&repository_policy.native_binaries)?,
+    )?;
     Ok(())
 }
 
 fn classify() -> Result<()> {
     let api = api()?;
     let repo = current_repository()?;
-    let strategy = strategy_for(&api, &repo)?;
+    let policy = current_policy(&api)?;
+    let repository_policy = policy.repository(repo.as_str())?;
+    let strategy = repository_policy
+        .release
+        .context("release strategy is not configured")?;
     crate::output("strategy", serde_yaml::to_string(&strategy)?.trim())?;
     crate::output(
         "build_provider",
@@ -495,6 +766,10 @@ fn classify() -> Result<()> {
         } else {
             "false"
         },
+    )?;
+    crate::output(
+        "native_targets",
+        serde_json::to_string(&repository_policy.native_binaries)?,
     )?;
     Ok(())
 }
@@ -861,6 +1136,261 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
     Ok(())
 }
 
+fn assemble_native(release_pr_number: u64) -> Result<()> {
+    let api = api()?;
+    let repo = current_repository()?;
+    let policy = current_policy(&api)?;
+    let _runtime = require_current_runtime(&api, ".github/workflows/reusable-release-tag.yml")?;
+    require_dispatch_owner(&api, &policy)?;
+    let repository_policy = policy.repository(repo.as_str())?;
+    ensure!(
+        repository_policy.release == Some(ReleaseStrategy::GithubRelease)
+            && !repository_policy.native_binaries.is_empty(),
+        "native binary assembly is not enabled for this repository"
+    );
+    let (_pr, merge_sha) = authorized_release_pr(&api, &policy, &repo, release_pr_number)?;
+    ensure!(
+        git_output(&["rev-parse", "HEAD"])? == merge_sha.as_str(),
+        "checked out source is not the approved release merge commit"
+    );
+    let version = std::fs::read_to_string(".release-version")?;
+    let tag = ReleaseTag::parse(&format!("v{}", version.trim()))?;
+    let run_id = RunId(env("GITHUB_RUN_ID")?.parse()?);
+    let run_attempt = env("GITHUB_RUN_ATTEMPT")?.parse()?;
+    let source_revision = CommitSha::parse(&policy.revision)?;
+    let source_run: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{}",
+        repo.as_str(),
+        run_id.0
+    ))?;
+    ensure!(
+        source_run["status"] == "in_progress"
+            && source_run["run_attempt"].as_u64() == Some(run_attempt),
+        "release source run attempt changed during native assembly"
+    );
+    let source_run_sha = CommitSha::parse(
+        source_run["head_sha"]
+            .as_str()
+            .context("release source run lacks head SHA")?,
+    )?;
+    ensure!(
+        source_run_sha.as_str() == env("GITHUB_SHA")?,
+        "release source run head changed"
+    );
+    let artifact_list: ArtifactList = api.get(&format!(
+        "/repos/{}/actions/runs/{}/artifacts?per_page=100",
+        repo.as_str(),
+        run_id.0
+    ))?;
+    let expected_artifacts: BTreeSet<_> = repository_policy
+        .native_binaries
+        .iter()
+        .map(|target| format!("native-target-{}-{run_attempt}", target.target))
+        .collect();
+    let native_artifacts: Vec<_> = artifact_list
+        .artifacts
+        .iter()
+        .filter_map(|artifact| artifact["name"].as_str())
+        .filter(|name| {
+            name.starts_with("native-target-") && name.ends_with(&format!("-{run_attempt}"))
+        })
+        .collect();
+    let actual_artifacts: BTreeSet<_> = native_artifacts
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    ensure!(
+        native_artifacts.len() == expected_artifacts.len()
+            && actual_artifacts == expected_artifacts,
+        "native build artifacts do not match the configured target set"
+    );
+    let mut artifact_ids = BTreeSet::new();
+    let mut artifact_bytes = 0_u64;
+    for artifact in artifact_list.artifacts.iter().filter(|artifact| {
+        artifact["name"].as_str().is_some_and(|name| {
+            name.starts_with("native-target-") && name.ends_with(&format!("-{run_attempt}"))
+        })
+    }) {
+        ensure!(
+            artifact["expired"] == false
+                && artifact["size_in_bytes"].as_u64().unwrap_or_default() > 0,
+            "native build artifact is expired or empty"
+        );
+        ensure!(
+            artifact_ids.insert(
+                artifact["id"]
+                    .as_u64()
+                    .context("native artifact lacks ID")?
+            ),
+            "duplicate native build artifact ID"
+        );
+        artifact_bytes =
+            artifact_bytes.saturating_add(artifact["size_in_bytes"].as_u64().unwrap_or_default());
+        ensure!(
+            artifact_bytes <= MAX_NATIVE_BUNDLE_BYTES,
+            "native build artifacts exceed the bundle size limit"
+        );
+    }
+    let input_dir = Path::new("native-input");
+    let package_version = tag.version().to_owned();
+    let mut found = BTreeSet::new();
+    let mut asset_paths = std::collections::BTreeMap::new();
+    let mut total_size = 0_u64;
+    let mut manifest = NativeAssetManifest {
+        schema_version: 1,
+        repository: repo.as_str().to_owned(),
+        source_run_id: run_id,
+        source_run_sha: source_run_sha.clone(),
+        run_attempt,
+        source_revision,
+        release_pr_number,
+        release_pr_sha: merge_sha.clone(),
+        tag,
+        package_version: package_version.clone(),
+        assets: Vec::new(),
+    };
+    for entry in std::fs::read_dir(input_dir).context("native target artifacts are missing")? {
+        let directory = entry?.path();
+        let directory_metadata = std::fs::symlink_metadata(&directory)?;
+        ensure!(
+            directory_metadata.file_type().is_dir() && !directory_metadata.file_type().is_symlink(),
+            "native target artifact is not a regular directory"
+        );
+        let target_manifest_path = directory.join(NATIVE_TARGET_MANIFEST);
+        let metadata = std::fs::symlink_metadata(&target_manifest_path)?;
+        ensure!(
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() > 0
+                && metadata.len() <= 1024 * 1024,
+            "native target artifact metadata has invalid size or type"
+        );
+        let build: NativeTargetEvidence =
+            serde_json::from_slice(&std::fs::read(&target_manifest_path)?)?;
+        ensure!(
+            build.schema_version == 1
+                && build.source_run_id == run_id
+                && build.source_run_attempt == run_attempt
+                && build.source_run_sha == source_run_sha
+                && build.release_pr_number == release_pr_number
+                && build.release_pr_sha == merge_sha
+                && build.package_version == package_version,
+            "native target evidence does not match the current source run and release PR"
+        );
+        ensure!(
+            repository_policy
+                .native_binaries
+                .iter()
+                .any(|target| target.target == build.target),
+            "native target artifact is not configured"
+        );
+        ensure!(
+            directory.file_name().and_then(|name| name.to_str())
+                == Some(format!("native-target-{}-{run_attempt}", build.target).as_str()),
+            "native target artifact name does not match its target"
+        );
+        ensure!(
+            found.insert(build.target.clone()),
+            "duplicate native target artifact"
+        );
+        let mut files = std::fs::read_dir(&directory)?;
+        let file_names = files
+            .by_ref()
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("native target artifact filename is not UTF-8"))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        ensure!(
+            file_names.len() == 2
+                && file_names.contains(NATIVE_TARGET_MANIFEST)
+                && file_names.contains(&build.filename),
+            "native target artifact contains unexpected files"
+        );
+        let binary_path = directory.join(&build.filename);
+        let binary_metadata = std::fs::symlink_metadata(&binary_path)?;
+        ensure!(
+            binary_metadata.file_type().is_file()
+                && !binary_metadata.file_type().is_symlink()
+                && binary_metadata.len() > 0
+                && binary_metadata.len() <= MAX_NATIVE_ASSET_BYTES,
+            "native target artifact file has invalid type or size"
+        );
+        total_size = total_size
+            .saturating_add(binary_metadata.len())
+            .saturating_add(metadata.len());
+        ensure!(
+            total_size <= MAX_NATIVE_BUNDLE_BYTES,
+            "native target artifacts exceed the bundle size limit"
+        );
+        asset_paths.insert(build.target.clone(), binary_path.clone());
+        manifest.assets.push(NativeAssetEvidence {
+            target: build.target,
+            runner: build.runner,
+            runner_name: build.runner_name,
+            runner_os: build.runner_os,
+            runner_arch: build.runner_arch,
+            filename: build.filename,
+            size: binary_metadata.len(),
+            sha256: sha256_file(&binary_path)?,
+            version_output: build.version_output,
+        });
+    }
+    let expected: BTreeSet<_> = repository_policy
+        .native_binaries
+        .iter()
+        .map(|target| target.target.as_str())
+        .collect();
+    ensure!(
+        found.iter().map(String::as_str).collect::<BTreeSet<_>>() == expected,
+        "native target artifacts do not match the configured target set"
+    );
+    let source_manifest = ReleaseManifestV2 {
+        schema_version: 2,
+        repository: manifest.repository.clone(),
+        source_run_id: manifest.source_run_id,
+        source_run_sha,
+        run_attempt: manifest.run_attempt,
+        source_revision: manifest.source_revision.clone(),
+        release_pr_number: manifest.release_pr_number,
+        release_pr_sha: manifest.release_pr_sha.clone(),
+        tag: manifest.tag.clone(),
+        package_version: Some(manifest.package_version.clone()),
+        artifact_id: None,
+    };
+    validate_native_manifest(
+        &manifest,
+        &repo,
+        &repository_policy.native_binaries,
+        &source_manifest,
+    )?;
+    let output_dir = Path::new("dist/native-release-assets");
+    if output_dir.exists() {
+        std::fs::remove_dir_all(output_dir)?;
+    }
+    std::fs::create_dir_all(output_dir)?;
+    for asset in &manifest.assets {
+        let source = asset_paths
+            .get(&asset.target)
+            .map(PathBuf::as_path)
+            .context("native asset disappeared during assembly")?
+            .to_owned();
+        std::fs::copy(source, output_dir.join(&asset.filename))?;
+    }
+    write_json(output_dir.join(NATIVE_BUNDLE_MANIFEST), &manifest)?;
+    crate::output("asset_count", manifest.assets.len().to_string())?;
+    crate::output(
+        "manifest_path",
+        output_dir
+            .join(NATIVE_BUNDLE_MANIFEST)
+            .display()
+            .to_string(),
+    )?;
+    Ok(())
+}
+
 fn build_provider_target(
     source_dir: &Path,
     project: &str,
@@ -984,14 +1514,18 @@ fn tag_pr(release_pr_number: u64, artifact_id: Option<u64>) -> Result<()> {
     let policy = current_policy(&api)?;
     let _runtime = require_current_runtime(&api, ".github/workflows/reusable-release-tag.yml")?;
     require_dispatch_owner(&api, &policy)?;
-    let strategy = strategy_for(&api, &repo)?;
+    let repository_policy = policy.repository(repo.as_str())?;
+    let strategy = repository_policy
+        .release
+        .context("release strategy is not configured")?;
+    let has_native_assets = !repository_policy.native_binaries.is_empty();
     ensure!(
         strategy != ReleaseStrategy::TerraformProvider || artifact_id.is_some_and(|id| id > 0),
         "provider release requires an unsigned build artifact ID"
     );
     ensure!(
-        strategy != ReleaseStrategy::GithubRelease || artifact_id.is_none(),
-        "GitHub release does not accept a provider artifact"
+        strategy != ReleaseStrategy::GithubRelease || has_native_assets == artifact_id.is_some(),
+        "GitHub release artifact does not match its configured native assets"
     );
     let (pr, merge_sha) = authorized_release_pr(&api, &policy, &repo, release_pr_number)?;
     let version_bytes = api.content(repo.as_str(), ".release-version", merge_sha.as_str())?;
@@ -1026,6 +1560,7 @@ fn tag_pr(release_pr_number: u64, artifact_id: Option<u64>) -> Result<()> {
         release_pr_number,
         release_pr_sha: merge_sha,
         tag,
+        package_version: Some(version),
         artifact_id,
     };
     manifest.validate()?;
@@ -1247,66 +1782,113 @@ fn preflight() -> Result<()> {
         release_pr_sha: manifest.release_pr_sha.as_str().to_owned(),
         tag,
         source_manifest: manifest.clone(),
+        native_binary_repository: None,
         release_id,
         existing_signature_sha256: None,
         assets: Vec::new(),
+        native_assets: Vec::new(),
     };
     let input_dir = PathBuf::from("release-input");
     if input_dir.exists() {
         std::fs::remove_dir_all(&input_dir)?;
     }
     std::fs::create_dir_all(&input_dir)?;
-    if strategy == ReleaseStrategy::TerraformProvider {
+    if strategy == ReleaseStrategy::TerraformProvider || !repo_policy.native_binaries.is_empty() {
+        let artifact_name = if strategy == ReleaseStrategy::TerraformProvider {
+            "provider-bundle"
+        } else {
+            NATIVE_BUNDLE_NAME
+        };
+        let maximum_size = if strategy == ReleaseStrategy::TerraformProvider {
+            512 * 1024 * 1024
+        } else {
+            MAX_NATIVE_BUNDLE_BYTES
+        };
         let bundle_id = manifest
             .artifact_id
-            .context("provider release manifest lacks its bundle artifact ID")?;
-        let artifact = get_artifact(&app, &repo, bundle_id, run_id)?;
+            .context("release manifest lacks its bundle artifact ID")?;
+        let artifact = get_artifact(&app, &repo, bundle_id, run_id, artifact_name)?;
+        ensure!(
+            artifact["size_in_bytes"].as_u64().unwrap_or_default() <= maximum_size,
+            "release bundle artifact is too large"
+        );
         let bytes = app.download(
             &format!("/repos/{}/actions/artifacts/{bundle_id}/zip", repo.as_str()),
-            512 * 1024 * 1024,
+            maximum_size as usize,
         )?;
         let assets_dir = input_dir.join("assets");
         std::fs::create_dir_all(&assets_dir)?;
-        unpack_provider_bundle(&bytes, &assets_dir, &plan.tag, repo.name())?;
-        let assets = validate_asset_directory(&assets_dir, &plan.tag, repo.name())?;
-        plan.assets = assets
-            .iter()
-            .map(|path| {
-                Ok(PlannedAsset {
-                    name: path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .context("invalid asset filename")?
-                        .to_owned(),
-                    sha256: sha256_file(path)?,
+        if strategy == ReleaseStrategy::TerraformProvider {
+            unpack_provider_bundle(&bytes, &assets_dir, &plan.tag, repo.name())?;
+            let assets = validate_asset_directory(&assets_dir, &plan.tag, repo.name())?;
+            plan.assets = assets
+                .iter()
+                .map(|path| {
+                    Ok(PlannedAsset {
+                        name: path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .context("invalid asset filename")?
+                            .to_owned(),
+                        sha256: sha256_file(path)?,
+                        size: None,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if let Some(release) = release.as_ref() {
-            let existing_assets: Vec<Value> = app.paginate(&format!(
-                "/repos/{}/releases/{}/assets",
-                repo.as_str(),
-                release_id.context("existing release lacks ID")?
-            ))?;
-            plan.existing_signature_sha256 = prepare_existing_provider_signature(
-                &app,
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(release) = release.as_ref() {
+                let existing_assets: Vec<Value> = app.paginate(&format!(
+                    "/repos/{}/releases/{}/assets",
+                    repo.as_str(),
+                    release_id.context("existing release lacks ID")?
+                ))?;
+                plan.existing_signature_sha256 = prepare_existing_provider_signature(
+                    &app,
+                    &repo,
+                    release,
+                    &existing_assets,
+                    &plan,
+                    &assets_dir,
+                    &input_dir,
+                )?;
+            }
+        } else {
+            unpack_native_bundle(&bytes, &assets_dir, &repo, &repo_policy.native_binaries)?;
+            let native_manifest: NativeAssetManifest =
+                serde_json::from_slice(&std::fs::read(assets_dir.join(NATIVE_BUNDLE_MANIFEST))?)?;
+            validate_native_manifest(
+                &native_manifest,
                 &repo,
-                release,
-                &existing_assets,
-                &plan,
-                &assets_dir,
-                &input_dir,
+                &repo_policy.native_binaries,
+                &manifest,
             )?;
+            validate_native_asset_files(&assets_dir, &native_manifest)?;
+            plan.assets = native_manifest
+                .assets
+                .iter()
+                .map(|asset| PlannedAsset {
+                    name: asset.filename.clone(),
+                    sha256: asset.sha256.clone(),
+                    size: Some(asset.size),
+                })
+                .collect();
+            plan.native_binary_repository = Some(native_manifest.repository.clone());
+            plan.native_assets = native_manifest.assets;
         }
-        ensure!(
-            artifact["size_in_bytes"].as_u64().unwrap_or_default() <= 512 * 1024 * 1024,
-            "provider artifact is too large"
-        );
     } else {
         ensure!(
             manifest.artifact_id.is_none(),
-            "GitHub Release manifest must not include provider artifacts"
+            "GitHub Release manifest unexpectedly names a bundle artifact"
         );
+    }
+    if strategy == ReleaseStrategy::GithubRelease
+        && let Some(release) = release.as_ref()
+    {
+        let existing_assets: Vec<Value> = app.paginate(&format!(
+            "/repos/{}/releases/{}/assets",
+            repo.as_str(),
+            release_id.context("existing release lacks ID")?
+        ))?;
+        validate_release_asset_state(&plan.assets, &existing_assets, release["draft"] == false)?;
     }
     plan.validate()?;
     write_json(input_dir.join("plan.json"), &plan)?;
@@ -1326,7 +1908,13 @@ struct ArtifactList {
     artifacts: Vec<Value>,
 }
 
-fn get_artifact(api: &GitHub, repo: &Repository, artifact_id: u64, run_id: RunId) -> Result<Value> {
+fn get_artifact(
+    api: &GitHub,
+    repo: &Repository,
+    artifact_id: u64,
+    run_id: RunId,
+    expected_name: &str,
+) -> Result<Value> {
     let list: ArtifactList = api.get(&format!(
         "/repos/{}/actions/runs/{}/artifacts?per_page=100",
         repo.as_str(),
@@ -1341,12 +1929,12 @@ fn get_artifact(api: &GitHub, repo: &Repository, artifact_id: u64, run_id: RunId
         .context("release artifact is not attached to the source run")?;
     ensure!(found.next().is_none(), "duplicate artifact ID");
     ensure!(
-        artifact["expired"] == false && artifact["name"] == "provider-bundle",
-        "unexpected or expired provider artifact"
+        artifact["expired"] == false && artifact["name"] == expected_name,
+        "unexpected or expired release bundle artifact"
     );
     ensure!(
         artifact["size_in_bytes"].as_u64().unwrap_or_default() > 0,
-        "provider artifact is empty"
+        "release bundle artifact is empty"
     );
     Ok(artifact)
 }
@@ -1404,6 +1992,121 @@ fn unpack_provider_bundle(
         );
     }
     ensure!(found == expected, "provider artifact is incomplete");
+    Ok(())
+}
+
+fn unpack_native_bundle(
+    bytes: &[u8],
+    destination: &Path,
+    repository: &Repository,
+    targets: &[crate::policy::NativeBinaryTarget],
+) -> Result<()> {
+    ensure!(
+        !targets.is_empty() && targets.len() <= 8,
+        "native release target set is invalid"
+    );
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).context("read uploaded native artifact")?;
+    ensure!(
+        archive.len() == targets.len() + 1,
+        "native artifact has an unexpected entry count"
+    );
+    let mut expected: BTreeSet<String> = targets
+        .iter()
+        .map(|target| format!("{}-{}", repository.name(), target.target))
+        .collect();
+    expected.insert(NATIVE_BUNDLE_MANIFEST.to_owned());
+    let mut found = BTreeSet::new();
+    let mut total_size = 0_u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .context("read native artifact entry")?;
+        let name = entry.name().to_owned();
+        let path = Path::new(&name);
+        ensure!(
+            path.components().count() == 1
+                && !path.is_absolute()
+                && !name.contains(['/', '\\'])
+                && !entry.is_dir(),
+            "native artifact contains an invalid path"
+        );
+        ensure!(
+            entry
+                .unix_mode()
+                .is_none_or(|mode| mode & 0o170000 != 0o120000),
+            "native artifact contains a symbolic link"
+        );
+        ensure!(
+            expected.contains(&name) && found.insert(name.clone()),
+            "native artifact contains an unexpected or duplicate asset"
+        );
+        let limit = if name == NATIVE_BUNDLE_MANIFEST {
+            1024 * 1024
+        } else {
+            MAX_NATIVE_ASSET_BYTES
+        };
+        ensure!(
+            entry.size() > 0 && entry.size() <= limit,
+            "native artifact entry has invalid size"
+        );
+        total_size = total_size.saturating_add(entry.size());
+        ensure!(
+            total_size <= MAX_NATIVE_BUNDLE_BYTES,
+            "native artifact exceeds its uncompressed size limit"
+        );
+        let mut output = std::fs::File::create(destination.join(&name))?;
+        let declared_size = entry.size();
+        let copied = std::io::copy(&mut entry.by_ref().take(limit + 1), &mut output)?;
+        ensure!(
+            copied == declared_size && copied <= limit,
+            "native artifact entry size changed during extraction"
+        );
+    }
+    ensure!(found == expected, "native artifact is incomplete");
+    Ok(())
+}
+
+fn validate_native_asset_files(directory: &Path, manifest: &NativeAssetManifest) -> Result<()> {
+    let mut expected: BTreeSet<String> = manifest
+        .assets
+        .iter()
+        .map(|asset| asset.filename.clone())
+        .collect();
+    expected.insert(NATIVE_BUNDLE_MANIFEST.to_owned());
+    let mut actual = BTreeSet::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("native asset path is not UTF-8")?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "native asset directory contains a non-file entry"
+        );
+        ensure!(
+            actual.insert(name.to_owned()),
+            "native asset directory has duplicate names"
+        );
+    }
+    ensure!(
+        actual == expected,
+        "native asset directory does not match its manifest"
+    );
+    for asset in &manifest.assets {
+        let path = directory.join(&asset.filename);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        ensure!(
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() == asset.size
+                && sha256_file(&path)? == asset.sha256,
+            "native release asset differs from its manifest: {}",
+            asset.filename
+        );
+    }
     Ok(())
 }
 
@@ -1556,9 +2259,10 @@ fn validate_source_manifest_provenance(
             "provider manifest lacks artifact provenance"
         );
     } else {
+        let native_assets = !policy.repository(repo.as_str())?.native_binaries.is_empty();
         ensure!(
-            manifest.artifact_id.is_none(),
-            "GitHub Release manifest unexpectedly names provider artifact"
+            manifest.artifact_id.is_some_and(|id| id > 0) == native_assets,
+            "GitHub Release bundle provenance does not match its native asset policy"
         );
     }
     Ok(())
@@ -1803,9 +2507,10 @@ fn validated_source(
             "provider release manifest lacks artifact provenance"
         );
     } else {
+        let native_assets = !policy.repository(repo.as_str())?.native_binaries.is_empty();
         ensure!(
-            manifest.artifact_id.is_none(),
-            "GitHub Release request unexpectedly names a provider artifact"
+            manifest.artifact_id.is_some_and(|id| id > 0) == native_assets,
+            "GitHub Release bundle provenance does not match its native asset policy"
         );
     }
     if run["event"] == "pull_request" {
@@ -2087,6 +2792,7 @@ fn sign() -> Result<()> {
             .context("invalid checksum filename")?
             .to_owned(),
         sha256: sha256_file(&sums_path)?,
+        size: None,
     });
     plan.assets.push(PlannedAsset {
         name: signature_path
@@ -2095,6 +2801,7 @@ fn sign() -> Result<()> {
             .context("invalid signature filename")?
             .to_owned(),
         sha256: sha256_file(&signature_path)?,
+        size: None,
     });
     plan.validate()?;
     validate_signed_provider_assets(&assets_dir, &plan)?;
@@ -2266,11 +2973,44 @@ fn publish() -> Result<()> {
         repo_policy.release == Some(plan.strategy),
         "release strategy changed after preflight"
     );
+    if plan.strategy == ReleaseStrategy::GithubRelease {
+        ensure!(
+            repo_policy.native_binaries.is_empty() == plan.native_assets.is_empty(),
+            "native release plan does not match its asset policy"
+        );
+        if !repo_policy.native_binaries.is_empty() {
+            ensure!(
+                plan.native_binary_repository.as_deref() == Some(repo.as_str()),
+                "native release plan source repository differs from its release repository"
+            );
+            let native_manifest = NativeAssetManifest {
+                schema_version: 1,
+                repository: plan.native_binary_repository.clone().unwrap_or_default(),
+                source_run_id: plan.source_manifest.source_run_id,
+                source_run_sha: plan.source_manifest.source_run_sha.clone(),
+                run_attempt: plan.source_manifest.run_attempt,
+                source_revision: plan.source_manifest.source_revision.clone(),
+                release_pr_number: plan.source_manifest.release_pr_number,
+                release_pr_sha: plan.source_manifest.release_pr_sha.clone(),
+                tag: plan.source_manifest.tag.clone(),
+                package_version: plan.source_manifest.package_version().to_owned(),
+                assets: plan.native_assets.clone(),
+            };
+            validate_native_manifest(
+                &native_manifest,
+                &repo,
+                &repo_policy.native_binaries,
+                &plan.source_manifest,
+            )?;
+            validate_native_asset_files(&assets_dir, &native_manifest)?;
+        }
+    }
     let manifest = validated_source(&read, &policy, &repo, plan.source_run_id, plan.strategy)?;
     ensure!(
         manifest.release_pr_number == plan.release_pr_number
             && manifest.release_pr_sha.as_str() == plan.release_pr_sha
-            && manifest.tag == plan.tag,
+            && manifest.tag == plan.tag
+            && manifest.package_version() == plan.source_manifest.package_version(),
         "publish plan no longer matches authorized source"
     );
     let tag_ref: Value = api.get(&format!(
@@ -2324,56 +3064,96 @@ fn publish() -> Result<()> {
             "signed provider asset set is incomplete"
         );
         validate_signed_provider_assets(&assets_dir, &plan)?;
-        let published_assets: Vec<Value> = api.paginate(&format!(
-            "/repos/{}/releases/{release_id}/assets",
-            repo.as_str()
-        ))?;
-        if release["draft"] == false {
-            validate_release_asset_state(&plan.assets, &published_assets, true)?;
-            ensure_published_immutable_release(&release, release_id, &plan.tag)?;
-            return Ok(());
-        }
-        validate_release_asset_state(&plan.assets, &published_assets, false)?;
-        for asset in &plan.assets {
-            let path = assets_dir.join(&asset.name);
-            ensure!(
-                path.is_file() && sha256_file(&path)? == asset.sha256,
-                "publish asset digest mismatch: {}",
-                asset.name
-            );
-            if let Some(existing) = published_assets
-                .iter()
-                .find(|published| published["name"] == asset.name)
-            {
-                let digest = format!("sha256:{}", asset.sha256);
-                ensure!(
-                    existing["digest"] == digest,
-                    "release asset already exists with different bytes: {}",
-                    asset.name
-                );
-                continue;
-            }
-            let upload_url = format!(
-                "https://uploads.github.com/repos/{}/releases/{release_id}/assets?name={}",
-                repo.as_str(),
-                url_encode(&asset.name)
-            );
-            api.upload(
-                &upload_url,
-                std::fs::read(path)?,
-                "application/octet-stream",
-            )?;
-        }
     }
-    if release["draft"] == true {
-        let _: Value = api.patch(
-            &format!("/repos/{}/releases/{release_id}", repo.as_str()),
-            &json!({"draft":false}),
+    publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)
+}
+
+fn publish_release_assets(
+    api: &GitHub,
+    repo: &Repository,
+    release_id: u64,
+    plan: &ReleasePlanV2,
+    assets_dir: &Path,
+) -> Result<()> {
+    let release_path = format!("/repos/{}/releases/{release_id}", repo.as_str());
+    let release: Value = api.get(&release_path)?;
+    ensure!(
+        release["id"].as_u64() == Some(release_id) && release["tag_name"] == plan.tag.as_str(),
+        "release identity changed before asset publication"
+    );
+    let asset_path = format!("/repos/{}/releases/{release_id}/assets", repo.as_str());
+    let existing: Vec<Value> = api.paginate(&asset_path)?;
+    if release["draft"] == false {
+        validate_release_asset_state(&plan.assets, &existing, true)?;
+        ensure_published_immutable_release(&release, release_id, &plan.tag)?;
+        return Ok(());
+    }
+    ensure!(release["draft"] == true, "release draft state is missing");
+    upload_release_assets(api, repo, release_id, assets_dir, &plan.assets, &existing)?;
+    let ready: Vec<Value> = api.paginate(&asset_path)?;
+    validate_release_asset_state(&plan.assets, &ready, true)?;
+    let before_publish: Value = api.get(&release_path)?;
+    ensure!(
+        before_publish["id"].as_u64() == Some(release_id)
+            && before_publish["tag_name"] == plan.tag.as_str()
+            && before_publish["draft"] == true,
+        "release changed before publication"
+    );
+    let _: Value = api.patch(&release_path, &json!({"draft":false}))?;
+
+    let published: Value = api.get(&release_path)?;
+    ensure_published_immutable_release(&published, release_id, &plan.tag)?;
+    let published_assets: Vec<Value> = api.paginate(&asset_path)?;
+    validate_release_asset_state(&plan.assets, &published_assets, true)
+}
+
+fn upload_release_assets(
+    api: &GitHub,
+    repo: &Repository,
+    release_id: u64,
+    assets_dir: &Path,
+    expected: &[PlannedAsset],
+    existing: &[Value],
+) -> Result<()> {
+    validate_release_asset_state(expected, existing, false)?;
+    let mut local_assets = Vec::with_capacity(expected.len());
+    for asset in expected {
+        let path = assets_dir.join(&asset.name);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        ensure!(
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() > 0
+                && metadata.len() <= MAX_NATIVE_ASSET_BYTES
+                && sha256_file(&path)? == asset.sha256,
+            "publish asset digest mismatch or invalid file: {}",
+            asset.name
+        );
+        local_assets.push((asset, path));
+    }
+    for (asset, path) in local_assets {
+        if existing
+            .iter()
+            .any(|published| published["name"] == asset.name)
+        {
+            continue;
+        }
+        let upload_url = format!(
+            "https://uploads.github.com/repos/{}/releases/{release_id}/assets?name={}",
+            repo.as_str(),
+            url_encode(&asset.name)
+        );
+        api.upload(
+            &upload_url,
+            std::fs::read(path)?,
+            "application/octet-stream",
         )?;
     }
-    let published: Value = api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
-    ensure_published_immutable_release(&published, release_id, &plan.tag)?;
-    Ok(())
+    let uploaded: Vec<Value> = api.paginate(&format!(
+        "/repos/{}/releases/{release_id}/assets",
+        repo.as_str()
+    ))?;
+    validate_release_asset_state(expected, &uploaded, true)
 }
 
 fn ensure_published_immutable_release(
@@ -2412,20 +3192,26 @@ fn validate_release_asset_state(
 ) -> Result<()> {
     let expected: std::collections::BTreeMap<_, _> = expected
         .iter()
-        .map(|asset| (asset.name.as_str(), asset.sha256.as_str()))
+        .map(|asset| (asset.name.as_str(), asset))
         .collect();
     let mut found = BTreeSet::new();
     for asset in existing {
         let name = asset["name"]
             .as_str()
             .context("existing release asset lacks name")?;
-        let digest = expected
+        let expected_asset = expected
             .get(name)
             .with_context(|| format!("release contains an unexpected asset: {name}"))?;
         ensure!(
-            asset["digest"] == format!("sha256:{digest}"),
+            asset["digest"] == format!("sha256:{}", expected_asset.sha256),
             "release asset already exists with different bytes: {name}"
         );
+        if let Some(size) = expected_asset.size {
+            ensure!(
+                asset["size"].as_u64() == Some(size),
+                "release asset size does not match the expected bytes: {name}"
+            );
+        }
         ensure!(found.insert(name), "duplicate release asset: {name}");
     }
     if require_complete {
@@ -2865,6 +3651,7 @@ mod tests {
                         expected.assets.push(PlannedAsset {
                             name,
                             sha256: sha256_file(&path)?,
+                            size: None,
                         });
                     }
                 }
@@ -3022,6 +3809,7 @@ mod tests {
                         plan.assets.push(PlannedAsset {
                             name,
                             sha256: sha256_file(&path)?,
+                            size: None,
                         });
                     }
                 }
@@ -3124,6 +3912,674 @@ mod tests {
             }
             _ => bail!("unsupported provider probe phase"),
         }
+        Ok(())
+    }
+
+    const NATIVE_PROBE_CLIENT_REPOSITORY: &str = "civitaspo/herdr-linear-agent";
+    const NATIVE_PROBE_CLIENT_SHA: &str = "ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00";
+
+    struct NativeProbeInputs {
+        client_repository: Repository,
+        client_sha: CommitSha,
+        client_pr_number: u64,
+        package_version: String,
+        server_sha: CommitSha,
+        run_id: RunId,
+        run_attempt: u64,
+        targets: Vec<crate::policy::NativeBinaryTarget>,
+        artifacts: Vec<Value>,
+        manifest: NativeAssetManifest,
+        asset_paths: std::collections::BTreeMap<String, PathBuf>,
+    }
+
+    #[test]
+    #[ignore = "requires isolated native release probe workflow and read-only artifact access"]
+    fn native_release_assets_validate_probe_inputs() {
+        let inputs = native_probe_inputs().unwrap();
+        let output = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_OUTPUT_DIR").unwrap());
+        std::fs::create_dir_all(&output).unwrap();
+        let evidence = native_probe_input_evidence(&inputs).unwrap();
+        write_json(output.join("native-release-assets-inputs.json"), &evidence).unwrap();
+    }
+
+    // The frozen release rehearsal verifies the exact native artifacts from
+    // this workflow run, then feeds those same bytes through the trusted
+    // scratch release writer and immutable-state reread.
+    #[test]
+    #[ignore = "requires isolated native release probe workflow and scratch token"]
+    fn native_release_assets_scratch_publish_probe() {
+        native_release_assets_scratch_publish_probe_inner().unwrap();
+    }
+
+    fn native_release_assets_scratch_publish_probe_inner() -> Result<()> {
+        let inputs = native_probe_inputs()?;
+        let repo_name = env("SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY")?;
+        let (api, repo) = probe_scratch_write_api(&repo_name, "SECUREFIX_SERVER_APP_TOKEN")?;
+        let candidate_sha = inputs.server_sha.as_str().to_owned();
+        let scratch_sha = probe_scratch_target_sha(&repo)?;
+        let run_component = inputs.run_id.0;
+        let missing_tag = ReleaseTag::parse(&format!(
+            "v{}-pre.{run_component}.missing",
+            inputs.package_version
+        ))?;
+        let success_tag = ReleaseTag::parse(&format!(
+            "v{}-pre.{run_component}.native",
+            inputs.package_version
+        ))?;
+        let work = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_ASSET_DIR")?);
+        if work.exists() {
+            std::fs::remove_dir_all(&work)?;
+        }
+        std::fs::create_dir_all(&work)?;
+        let mut drafts = Vec::new();
+
+        let result = (|| -> Result<Value> {
+            let mut incomplete = native_probe_manifest(&inputs, missing_tag.clone());
+            incomplete.assets.pop();
+            let missing_bundle = native_probe_bundle(&incomplete, &inputs.asset_paths)?;
+            let missing_id = create_native_probe_draft(&api, &repo, &missing_tag, &scratch_sha)?;
+            drafts.push((missing_id, missing_tag.clone()));
+            let rejected = work.join("missing-artifact");
+            std::fs::create_dir_all(&rejected)?;
+            ensure!(
+                unpack_native_bundle(
+                    &missing_bundle,
+                    &rejected,
+                    &inputs.client_repository,
+                    &inputs.targets
+                )
+                .is_err(),
+                "incomplete native target set was accepted"
+            );
+            let missing_release: Value =
+                api.get(&format!("/repos/{}/releases/{missing_id}", repo.as_str()))?;
+            let missing_assets: Vec<Value> = api.paginate(&format!(
+                "/repos/{}/releases/{missing_id}/assets",
+                repo.as_str()
+            ))?;
+            ensure!(
+                missing_release["draft"] == true && missing_assets.is_empty(),
+                "incomplete native target set reached release publication"
+            );
+            cleanup_native_probe_draft(&api, &repo, missing_id, &missing_tag, &scratch_sha)?;
+            drafts.retain(|(id, _)| *id != missing_id);
+
+            let manifest = native_probe_manifest(&inputs, success_tag.clone());
+            let bundle = native_probe_bundle(&manifest, &inputs.asset_paths)?;
+            let assets_dir = work.join("publish-assets");
+            if assets_dir.exists() {
+                std::fs::remove_dir_all(&assets_dir)?;
+            }
+            unpack_native_bundle(
+                &bundle,
+                &assets_dir,
+                &inputs.client_repository,
+                &inputs.targets,
+            )?;
+            let decoded: NativeAssetManifest =
+                serde_json::from_slice(&std::fs::read(assets_dir.join(NATIVE_BUNDLE_MANIFEST))?)?;
+            let source_manifest = native_probe_source_manifest(&inputs, success_tag.clone());
+            validate_native_manifest(
+                &decoded,
+                &inputs.client_repository,
+                &inputs.targets,
+                &source_manifest,
+            )?;
+            validate_native_asset_files(&assets_dir, &decoded)?;
+            let release_id = create_native_probe_draft(&api, &repo, &success_tag, &scratch_sha)?;
+            drafts.push((release_id, success_tag.clone()));
+            let assets = decoded
+                .assets
+                .iter()
+                .map(|asset| PlannedAsset {
+                    name: asset.filename.clone(),
+                    sha256: asset.sha256.clone(),
+                    size: Some(asset.size),
+                })
+                .collect();
+            let plan = ReleasePlanV2 {
+                schema_version: 2,
+                server_revision: candidate_sha.clone(),
+                repository: repo.as_str().to_owned(),
+                strategy: ReleaseStrategy::GithubRelease,
+                source_run_id: inputs.run_id,
+                source_run_attempt: inputs.run_attempt,
+                source_revision: inputs.server_sha.as_str().to_owned(),
+                release_pr_number: source_manifest.release_pr_number,
+                release_pr_sha: source_manifest.release_pr_sha.as_str().to_owned(),
+                tag: success_tag.clone(),
+                source_manifest,
+                native_binary_repository: Some(inputs.client_repository.as_str().to_owned()),
+                release_id: Some(release_id),
+                existing_signature_sha256: None,
+                assets,
+                native_assets: decoded.assets.clone(),
+            };
+            plan.validate()?;
+            publish_release_assets(&api, &repo, release_id, &plan, &assets_dir)?;
+            let published: Value =
+                api.get(&format!("/repos/{}/releases/{release_id}", repo.as_str()))?;
+            ensure_published_immutable_release(&published, release_id, &success_tag)?;
+            ensure!(
+                published["prerelease"] == true,
+                "native scratch release is not a prerelease"
+            );
+            let published_assets: Vec<Value> = api.paginate(&format!(
+                "/repos/{}/releases/{release_id}/assets",
+                repo.as_str()
+            ))?;
+            validate_release_asset_state(&plan.assets, &published_assets, true)?;
+            let assets = published_assets
+                .iter()
+                .map(|asset| {
+                    Ok(json!({
+                        "id": asset["id"].as_u64().context("published native asset lacks ID")?,
+                        "name": asset["name"].as_str().context("published native asset lacks name")?,
+                        "digest": asset["digest"].as_str().context("published native asset lacks digest")?,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!({
+                "schema_version": 1,
+                "candidate_sha": candidate_sha,
+                "scratch_repository": repo.as_str(),
+                "target_commit": scratch_sha,
+                "rejected_incomplete_artifact": {
+                    "tag": missing_tag.as_str(),
+                    "release_id": missing_id,
+                    "draft_after_rejection": true,
+                    "published_assets": 0,
+                    "draft_deleted": true,
+                },
+                "published_prerelease": {
+                    "tag": success_tag.as_str(),
+                    "release_id": release_id,
+                    "draft": false,
+                    "immutable": true,
+                    "assets": assets,
+                },
+                "source": native_probe_input_evidence(&inputs)?,
+            }))
+        })();
+
+        let cleanup = drafts.iter().try_for_each(|(release_id, tag)| {
+            cleanup_native_probe_draft(&api, &repo, *release_id, tag, &scratch_sha)
+        });
+        cleanup?;
+        let evidence = result?;
+        let output = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_OUTPUT_DIR")?);
+        std::fs::create_dir_all(&output)?;
+        write_json(output.join("native-release-assets-probe.json"), &evidence)?;
+        crate::output("scratch_repository", repo.as_str())?;
+        crate::output("published_prerelease", success_tag.as_str())?;
+        crate::output(
+            "published_release_id",
+            evidence["published_prerelease"]["release_id"]
+                .as_u64()
+                .context("probe evidence lacks published release ID")?
+                .to_string(),
+        )?;
+        Ok(())
+    }
+
+    fn native_probe_inputs() -> Result<NativeProbeInputs> {
+        let source_repository = Repository::parse(NATIVE_PROBE_CLIENT_REPOSITORY)?;
+        let client_sha = CommitSha::parse(&env("SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA")?)?;
+        ensure!(
+            client_sha.as_str() == NATIVE_PROBE_CLIENT_SHA,
+            "native release probe Client source SHA differs from the reviewed pin"
+        );
+        let server_sha = CommitSha::parse(&env("GITHUB_SHA")?)?;
+        let run_id = RunId(env("GITHUB_RUN_ID")?.parse()?);
+        let run_attempt = env("GITHUB_RUN_ATTEMPT")?.parse::<u64>()?;
+        ensure!(
+            run_id.0 > 0 && run_attempt == 1,
+            "native release probe run identity is invalid"
+        );
+
+        let read_api = GitHub::new("https://api.github.com", env("GITHUB_TOKEN")?)?;
+        let commit: Value = read_api.get(&format!(
+            "/repos/{}/commits/{}",
+            source_repository.as_str(),
+            client_sha.as_str()
+        ))?;
+        ensure!(
+            commit["sha"] == client_sha.as_str()
+                && commit["commit"]["verification"]["verified"] == true,
+            "native release probe Client source is not the pinned verified commit"
+        );
+        let package_version = String::from_utf8(read_api.content(
+            source_repository.as_str(),
+            ".release-version",
+            client_sha.as_str(),
+        )?)?
+        .trim()
+        .to_owned();
+        Version::parse(&package_version).context("Client source package version is invalid")?;
+        let source_prs = read_api.paginate(&format!(
+            "/repos/{}/commits/{}/pulls",
+            source_repository.as_str(),
+            client_sha.as_str()
+        ))?;
+        let source_prs: Vec<_> = source_prs
+            .into_iter()
+            .filter(|pr| {
+                pr["state"] == "closed"
+                    && pr["merged_at"].is_string()
+                    && pr["merge_commit_sha"] == client_sha.as_str()
+            })
+            .collect();
+        ensure!(
+            source_prs.len() == 1,
+            "pinned Client source does not identify exactly one merged PR"
+        );
+        let client_pr_number = source_prs[0]["number"]
+            .as_u64()
+            .context("pinned Client source PR lacks a number")?;
+        ensure!(
+            client_pr_number > 0,
+            "pinned Client source PR number is invalid"
+        );
+
+        let policy = crate::policy::Policy::load(env("SECUREFIX_POLICY_PATH")?)?;
+        let targets = policy
+            .repository(source_repository.as_str())?
+            .native_binaries
+            .clone();
+        ensure!(
+            targets.len() == 4,
+            "native release probe policy does not contain exactly four Client targets"
+        );
+        let expected_artifacts: BTreeSet<_> = targets
+            .iter()
+            .map(|target| format!("native-target-{}-{run_attempt}", target.target))
+            .collect();
+        let artifact_list: ArtifactList = read_api.get(&format!(
+            "/repos/{}/actions/runs/{}/artifacts?per_page=100",
+            env("GITHUB_REPOSITORY")?,
+            run_id.0
+        ))?;
+        let native_artifacts: Vec<_> = artifact_list
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact["name"].as_str().is_some_and(|name| {
+                    name.starts_with("native-target-") && name.ends_with(&format!("-{run_attempt}"))
+                })
+            })
+            .cloned()
+            .collect();
+        let actual_artifacts: BTreeSet<_> = native_artifacts
+            .iter()
+            .map(|artifact| {
+                artifact["name"]
+                    .as_str()
+                    .context("native target artifact lacks name")
+                    .map(str::to_owned)
+            })
+            .collect::<Result<_>>()?;
+        ensure!(
+            actual_artifacts == expected_artifacts && native_artifacts.len() == targets.len(),
+            "current run does not contain the exact native target artifact set"
+        );
+        let mut artifact_ids = BTreeSet::new();
+        let mut artifact_bytes = 0_u64;
+        for artifact in &native_artifacts {
+            ensure!(
+                artifact["expired"] == false,
+                "native target artifact is expired"
+            );
+            let artifact_id = artifact["id"]
+                .as_u64()
+                .context("native target artifact lacks ID")?;
+            ensure!(
+                artifact_ids.insert(artifact_id),
+                "duplicate native target artifact ID"
+            );
+            let size = artifact["size_in_bytes"]
+                .as_u64()
+                .context("native target artifact lacks size")?;
+            ensure!(size > 0, "native target artifact is empty");
+            artifact_bytes = artifact_bytes.saturating_add(size);
+            ensure!(
+                artifact_bytes <= MAX_NATIVE_BUNDLE_BYTES,
+                "native target artifacts exceed the size limit"
+            );
+            let digest = artifact["digest"]
+                .as_str()
+                .context("native target artifact lacks a digest")?;
+            ensure!(
+                digest.starts_with("sha256:")
+                    && digest.len() == 71
+                    && digest[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                "native target artifact digest is invalid"
+            );
+        }
+
+        let input_dir = PathBuf::from(env("SECUREFIX_NATIVE_RELEASE_PROBE_INPUT_DIR")?);
+        let expected_directories: BTreeSet<_> = expected_artifacts.clone();
+        let mut actual_directories = BTreeSet::new();
+        let mut assets = Vec::with_capacity(targets.len());
+        let mut asset_paths = std::collections::BTreeMap::new();
+        let mut native_artifact_evidence = std::collections::BTreeMap::new();
+        let mut total_size = 0_u64;
+        for entry in
+            std::fs::read_dir(&input_dir).context("native target artifact inputs are missing")?
+        {
+            let directory = entry?.path();
+            let directory_metadata = std::fs::symlink_metadata(&directory)?;
+            ensure!(
+                directory_metadata.file_type().is_dir()
+                    && !directory_metadata.file_type().is_symlink(),
+                "native target artifact is not a regular directory"
+            );
+            let directory_name = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("native artifact directory name is invalid")?
+                .to_owned();
+            ensure!(
+                actual_directories.insert(directory_name.clone()),
+                "duplicate native artifact directory"
+            );
+            let metadata_path = directory.join(NATIVE_TARGET_MANIFEST);
+            let metadata = std::fs::symlink_metadata(&metadata_path)?;
+            ensure!(
+                metadata.file_type().is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() > 0
+                    && metadata.len() <= 1024 * 1024,
+                "native artifact metadata has invalid size or type"
+            );
+            let build: NativeTargetEvidence =
+                serde_json::from_slice(&std::fs::read(&metadata_path)?)?;
+            let target = targets
+                .iter()
+                .find(|target| target.target == build.target)
+                .context("native artifact target is not configured")?;
+            ensure!(
+                build.schema_version == 1
+                    && build.source_run_id == run_id
+                    && build.source_run_attempt == run_attempt
+                    && build.source_run_sha == server_sha
+                    && build.release_pr_number == client_pr_number
+                    && build.release_pr_sha == client_sha
+                    && build.package_version == package_version
+                    && build.runner == target.runner
+                    && directory_name == format!("native-target-{}-{run_attempt}", target.target),
+                "native target metadata does not match this run and pinned Client source"
+            );
+            let (expected_os, expected_arch) = runner_platform(&target.runner);
+            ensure!(
+                build.runner_os == expected_os
+                    && build.runner_arch == expected_arch
+                    && target_platform(&target.target)? == (expected_os, expected_arch),
+                "native artifact was not built on its configured target runner"
+            );
+            ensure!(
+                build.filename == format!("{}-{}", source_repository.name(), target.target)
+                    && build.version_output.starts_with(&format!(
+                        "{} {}+",
+                        source_repository.name(),
+                        package_version
+                    )),
+                "native artifact name or executed version does not match the Client source"
+            );
+            let mut entries = std::fs::read_dir(&directory)?;
+            let names = entries
+                .by_ref()
+                .map(|entry| {
+                    entry?
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("native artifact filename is not UTF-8"))
+                })
+                .collect::<Result<BTreeSet<_>>>()?;
+            ensure!(
+                names.len() == 2
+                    && names.contains(NATIVE_TARGET_MANIFEST)
+                    && names.contains(&build.filename),
+                "native artifact contains unexpected files"
+            );
+            let binary_path = directory.join(&build.filename);
+            let binary_metadata = std::fs::symlink_metadata(&binary_path)?;
+            ensure!(
+                binary_metadata.file_type().is_file()
+                    && !binary_metadata.file_type().is_symlink()
+                    && binary_metadata.len() > 0
+                    && binary_metadata.len() <= MAX_NATIVE_ASSET_BYTES,
+                "native binary artifact has invalid size or type"
+            );
+            total_size = total_size
+                .saturating_add(binary_metadata.len())
+                .saturating_add(metadata.len());
+            ensure!(
+                total_size <= MAX_NATIVE_BUNDLE_BYTES,
+                "native target artifacts exceed the bundle size limit"
+            );
+            let digest = sha256_file(&binary_path)?;
+            asset_paths.insert(build.target.clone(), binary_path);
+            assets.push(NativeAssetEvidence {
+                target: build.target.clone(),
+                runner: build.runner.clone(),
+                runner_name: build.runner_name.clone(),
+                runner_os: build.runner_os.clone(),
+                runner_arch: build.runner_arch.clone(),
+                filename: build.filename.clone(),
+                size: binary_metadata.len(),
+                sha256: digest,
+                version_output: build.version_output.clone(),
+            });
+            let artifact_name = format!("native-target-{}-{run_attempt}", build.target);
+            let artifact = native_artifacts
+                .iter()
+                .find(|artifact| artifact["name"] == artifact_name)
+                .context("native target artifact lacks its workflow-run record")?;
+            native_artifact_evidence.insert(artifact_name, json!({
+                "id": artifact["id"],
+                "digest": artifact["digest"],
+                "archive_size": artifact["size_in_bytes"],
+                "binary_size": binary_metadata.len(),
+                "binary_sha256": assets.last().map(|asset| asset.sha256.clone()).unwrap_or_default(),
+            }));
+        }
+        ensure!(
+            actual_directories == expected_directories,
+            "downloaded native target artifact directories do not match configured targets"
+        );
+        assets.sort_by(|left, right| left.target.cmp(&right.target));
+        let manifest = NativeAssetManifest {
+            schema_version: 1,
+            repository: source_repository.as_str().to_owned(),
+            source_run_id: run_id,
+            source_run_sha: server_sha.clone(),
+            run_attempt,
+            source_revision: server_sha.clone(),
+            release_pr_number: client_pr_number,
+            release_pr_sha: client_sha.clone(),
+            tag: ReleaseTag::parse(&format!("v{package_version}"))?,
+            package_version: package_version.clone(),
+            assets,
+        };
+        let source_manifest = ReleaseManifestV2 {
+            schema_version: 2,
+            repository: source_repository.as_str().to_owned(),
+            source_run_id: run_id,
+            source_run_sha: server_sha.clone(),
+            run_attempt,
+            source_revision: server_sha.clone(),
+            release_pr_number: client_pr_number,
+            release_pr_sha: client_sha.clone(),
+            tag: manifest.tag.clone(),
+            package_version: Some(package_version.clone()),
+            artifact_id: None,
+        };
+        validate_native_manifest(&manifest, &source_repository, &targets, &source_manifest)?;
+        Ok(NativeProbeInputs {
+            client_repository: source_repository,
+            client_sha,
+            client_pr_number,
+            package_version,
+            server_sha,
+            run_id,
+            run_attempt,
+            targets,
+            artifacts: native_artifact_evidence.into_values().collect(),
+            manifest,
+            asset_paths,
+        })
+    }
+
+    fn native_probe_manifest(inputs: &NativeProbeInputs, tag: ReleaseTag) -> NativeAssetManifest {
+        let mut manifest = inputs.manifest.clone();
+        manifest.tag = tag;
+        manifest
+    }
+
+    fn native_probe_source_manifest(
+        inputs: &NativeProbeInputs,
+        tag: ReleaseTag,
+    ) -> ReleaseManifestV2 {
+        ReleaseManifestV2 {
+            schema_version: 2,
+            repository: inputs.client_repository.as_str().to_owned(),
+            source_run_id: inputs.run_id,
+            source_run_sha: inputs.server_sha.clone(),
+            run_attempt: inputs.run_attempt,
+            source_revision: inputs.server_sha.clone(),
+            release_pr_number: inputs.client_pr_number,
+            release_pr_sha: inputs.client_sha.clone(),
+            tag,
+            package_version: Some(inputs.package_version.clone()),
+            artifact_id: None,
+        }
+    }
+
+    fn native_probe_bundle(
+        manifest: &NativeAssetManifest,
+        asset_paths: &std::collections::BTreeMap<String, PathBuf>,
+    ) -> Result<Vec<u8>> {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        archive.start_file(NATIVE_BUNDLE_MANIFEST, options)?;
+        archive.write_all(&serde_json::to_vec(manifest)?)?;
+        for asset in &manifest.assets {
+            archive.start_file(&asset.filename, options)?;
+            let path = asset_paths
+                .get(&asset.target)
+                .context("verified native asset path is missing")?;
+            ensure!(
+                sha256_file(path)? == asset.sha256,
+                "verified native asset changed before bundling"
+            );
+            let mut file = std::fs::File::open(path)?;
+            std::io::copy(&mut file, &mut archive)?;
+        }
+        Ok(archive.finish()?.into_inner())
+    }
+
+    fn native_probe_input_evidence(inputs: &NativeProbeInputs) -> Result<Value> {
+        Ok(json!({
+            "schema_version": 1,
+            "server_repository": env("GITHUB_REPOSITORY")?,
+            "server_run_id": inputs.run_id.0,
+            "server_run_attempt": inputs.run_attempt,
+            "server_source_sha": inputs.server_sha.as_str(),
+            "client_repository": inputs.client_repository.as_str(),
+            "client_source_sha": inputs.client_sha.as_str(),
+            "client_source_pr_number": inputs.client_pr_number,
+            "client_package_version": inputs.package_version,
+            "artifacts": inputs.artifacts,
+            "binaries": inputs.manifest.assets.iter().map(|asset| json!({
+                "target": asset.target,
+                "filename": asset.filename,
+                "size": asset.size,
+                "sha256": asset.sha256,
+                "version_output": asset.version_output,
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn create_native_probe_draft(
+        api: &GitHub,
+        repo: &Repository,
+        tag: &ReleaseTag,
+        target_sha: &str,
+    ) -> Result<u64> {
+        let tag_ref = format!(
+            "/repos/{}/git/ref/tags/{}",
+            repo.as_str(),
+            url_encode(tag.as_str())
+        );
+        ensure!(
+            probe_not_found(api, &tag_ref)?,
+            "scratch probe tag already exists"
+        );
+        ensure!(
+            find_release(api, repo, tag)?.is_none(),
+            "scratch probe release already exists"
+        );
+        let release: Value = api.post(
+            &format!("/repos/{}/releases", repo.as_str()),
+            &json!({"tag_name":tag.as_str(),"target_commitish":target_sha,"name":tag.as_str(),"draft":true,"prerelease":true,"generate_release_notes":false}),
+        )?;
+        let release_id = release["id"]
+            .as_u64()
+            .context("created native probe draft lacks ID")?;
+        ensure!(
+            release_id > 0
+                && release["tag_name"] == tag.as_str()
+                && release["draft"] == true
+                && release["prerelease"] == true,
+            "created native probe release is not the expected prerelease draft"
+        );
+        Ok(release_id)
+    }
+
+    fn cleanup_native_probe_draft(
+        api: &GitHub,
+        repo: &Repository,
+        release_id: u64,
+        tag: &ReleaseTag,
+        target_sha: &str,
+    ) -> Result<()> {
+        let release_path = format!("/repos/{}/releases/{release_id}", repo.as_str());
+        if !probe_not_found(api, &release_path)? {
+            let release: Value = api.get(&release_path)?;
+            ensure!(
+                release["id"].as_u64() == Some(release_id) && release["tag_name"] == tag.as_str(),
+                "native probe cleanup release identity changed"
+            );
+            if release["draft"] == true {
+                api.delete(&release_path)?;
+            } else {
+                ensure_published_immutable_release(&release, release_id, tag)?;
+                return Ok(());
+            }
+        }
+        let ref_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            repo.as_str(),
+            url_encode(tag.as_str())
+        );
+        if !probe_not_found(api, &ref_path)? {
+            ensure!(
+                probe_tag_points_to_commit(api, repo, tag.as_str(), target_sha)?,
+                "native probe cleanup tag differs from its exact scratch target"
+            );
+            api.delete(&format!(
+                "/repos/{}/git/refs/tags/{}",
+                repo.as_str(),
+                url_encode(tag.as_str())
+            ))?;
+        }
+        ensure!(
+            probe_not_found(api, &release_path)? && probe_not_found(api, &ref_path)?,
+            "native probe draft or tag remains after cleanup"
+        );
         Ok(())
     }
 
@@ -3273,32 +4729,23 @@ mod tests {
 
     fn probe_write_api() -> Result<(GitHub, Repository)> {
         let repo_name = env("SECUREFIX_PROVIDER_PROBE_REPOSITORY")?;
+        probe_scratch_write_api(&repo_name, "SECUREFIX_SERVER_APP_TOKEN")
+    }
+
+    fn probe_scratch_write_api(repo_name: &str, token_name: &str) -> Result<(GitHub, Repository)> {
         ensure!(
             repo_name == crate::config::trusted()?.deployment.integration.repository,
-            "provider probe repository is not the trusted integration repository"
+            "release probe repository is not the trusted integration repository"
         );
-        let repo = Repository::parse(&repo_name)?;
-        let token_name = "SECUREFIX_SERVER_APP_TOKEN";
+        let repo = Repository::parse(repo_name)?;
         let token = env(token_name)?;
         // This validation requires the installation to be scoped to the one configured scratch repository.
         let candidate_sha = env("GITHUB_SHA")?;
         let _validated_scratch_token = GitHub::scratch_from_env(token_name, &candidate_sha)?;
         let anonymous = GitHub::anonymous()?;
-        let server = &crate::config::trusted()?.deployment.server;
-        let repository: Value = anonymous.get(&format!("/repos/{}", server.repository))?;
-        let branch = repository["default_branch"]
-            .as_str()
-            .context("server default branch missing")?;
-        let reference: Value = anonymous.get(&format!(
-            "/repos/{}/git/ref/heads/{}",
-            server.repository,
-            url_encode(branch)
-        ))?;
-        let runtime_sha = reference["object"]["sha"]
-            .as_str()
-            .context("server runtime ref lacks SHA")?;
+        let control = crate::control::ControlRevision::load(&anonymous)?;
         Ok((
-            GitHub::new("https://api.github.com", token)?.with_runtime_revision(runtime_sha)?,
+            GitHub::new("https://api.github.com", token)?.with_control_revision(&control)?,
             repo,
         ))
     }
@@ -3332,6 +4779,7 @@ mod tests {
                 Ok(PlannedAsset {
                     sha256: sha256_file(&assets.join(&name))?,
                     name,
+                    size: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -3356,11 +4804,14 @@ mod tests {
                 release_pr_number: 1,
                 release_pr_sha: CommitSha::parse(&"0".repeat(40))?,
                 tag: ReleaseTag::parse("v0.0.1")?,
+                package_version: Some("0.0.1".into()),
                 artifact_id: None,
             },
+            native_binary_repository: None,
             release_id: Some(1),
             existing_signature_sha256: None,
             assets,
+            native_assets: Vec::new(),
         })
     }
 
@@ -3379,6 +4830,7 @@ mod tests {
             plan.assets.push(PlannedAsset {
                 sha256: sha256_file(assets.join(&name).as_path())?,
                 name,
+                size: None,
             });
         }
         Ok(())
@@ -3411,6 +4863,7 @@ mod tests {
             release_pr_number: 8,
             release_pr_sha: CommitSha::parse(&"b".repeat(40)).unwrap(),
             tag: ReleaseTag::parse("v1.2.3").unwrap(),
+            package_version: Some("1.2.3".into()),
             source_run_sha: CommitSha::parse(&"c".repeat(40)).unwrap(),
             run_attempt: 1,
             artifact_id: Some(9),
@@ -3436,6 +4889,7 @@ mod tests {
             release_pr_number: 8,
             release_pr_sha: CommitSha::parse(&"c".repeat(40)).unwrap(),
             tag: ReleaseTag::parse("v1.2.3").unwrap(),
+            package_version: Some("1.2.3".into()),
             artifact_id: None,
         };
         let plan = ReleasePlanV2 {
@@ -3450,14 +4904,169 @@ mod tests {
             release_pr_sha: source_manifest.release_pr_sha.as_str().to_owned(),
             tag: source_manifest.tag.clone(),
             source_manifest: source_manifest.clone(),
+            native_binary_repository: None,
             release_id: None,
             existing_signature_sha256: None,
             assets: Vec::new(),
+            native_assets: Vec::new(),
         };
         assert!(plan.validate().is_ok());
         let mut tampered = plan;
         tampered.release_pr_sha = "e".repeat(40);
         assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn native_asset_bundle_is_bound_to_source_targets_and_exact_file_bytes() {
+        let repository = Repository::parse("civitaspo/herdr-linear-agent").unwrap();
+        let targets = vec![
+            crate::policy::NativeBinaryTarget {
+                target: "aarch64-apple-darwin".into(),
+                runner: "macos-15".into(),
+            },
+            crate::policy::NativeBinaryTarget {
+                target: "x86_64-apple-darwin".into(),
+                runner: "macos-15-intel".into(),
+            },
+            crate::policy::NativeBinaryTarget {
+                target: "aarch64-unknown-linux-musl".into(),
+                runner: "ubuntu-24.04-arm".into(),
+            },
+            crate::policy::NativeBinaryTarget {
+                target: "x86_64-unknown-linux-musl".into(),
+                runner: "ubuntu-24.04".into(),
+            },
+        ];
+        let source = ReleaseManifestV2 {
+            schema_version: 2,
+            repository: repository.as_str().into(),
+            source_run_id: RunId(17),
+            source_run_sha: CommitSha::parse(&"a".repeat(40)).unwrap(),
+            run_attempt: 1,
+            source_revision: CommitSha::parse(&"b".repeat(40)).unwrap(),
+            release_pr_number: 23,
+            release_pr_sha: CommitSha::parse(&"c".repeat(40)).unwrap(),
+            tag: ReleaseTag::parse("v0.8.2-pre.17.native").unwrap(),
+            package_version: Some("0.8.2".into()),
+            artifact_id: Some(29),
+        };
+        let mut manifest = NativeAssetManifest {
+            schema_version: 1,
+            repository: repository.as_str().into(),
+            source_run_id: source.source_run_id,
+            source_run_sha: source.source_run_sha.clone(),
+            run_attempt: source.run_attempt,
+            source_revision: source.source_revision.clone(),
+            release_pr_number: source.release_pr_number,
+            release_pr_sha: source.release_pr_sha.clone(),
+            tag: source.tag.clone(),
+            package_version: source.package_version().to_owned(),
+            assets: Vec::new(),
+        };
+        let contents = [
+            b"arm macOS".as_slice(),
+            b"x64 macOS",
+            b"arm Linux",
+            b"x64 Linux",
+        ];
+        for (target, bytes) in targets.iter().zip(contents) {
+            let (runner_os, runner_arch) = runner_platform(&target.runner);
+            manifest.assets.push(NativeAssetEvidence {
+                target: target.target.clone(),
+                runner: target.runner.clone(),
+                runner_name: format!("{} release runner", target.runner),
+                runner_os: runner_os.into(),
+                runner_arch: runner_arch.into(),
+                filename: format!("{}-{}", repository.name(), target.target),
+                size: bytes.len() as u64,
+                sha256: securefix::hex_encode(Sha256::digest(bytes)),
+                version_output: "herdr-linear-agent 0.8.2+candidate".into(),
+            });
+        }
+        validate_native_manifest(&manifest, &repository, &targets, &source).unwrap();
+        let destination = Repository::parse("civitaspo/testing-securefix-server").unwrap();
+        let plan = ReleasePlanV2 {
+            schema_version: 2,
+            server_revision: "d".repeat(40),
+            repository: destination.as_str().to_owned(),
+            strategy: ReleaseStrategy::GithubRelease,
+            source_run_id: source.source_run_id,
+            source_run_attempt: source.run_attempt,
+            source_revision: source.source_revision.as_str().to_owned(),
+            release_pr_number: source.release_pr_number,
+            release_pr_sha: source.release_pr_sha.as_str().to_owned(),
+            tag: source.tag.clone(),
+            source_manifest: source.clone(),
+            native_binary_repository: Some(repository.as_str().to_owned()),
+            release_id: None,
+            existing_signature_sha256: None,
+            assets: manifest
+                .assets
+                .iter()
+                .map(|asset| PlannedAsset {
+                    name: asset.filename.clone(),
+                    sha256: asset.sha256.clone(),
+                    size: Some(asset.size),
+                })
+                .collect(),
+            native_assets: manifest.assets.clone(),
+        };
+        plan.validate().unwrap();
+        let mut wrong_binary_repository = plan.clone();
+        wrong_binary_repository.native_binary_repository = Some(destination.as_str().to_owned());
+        assert!(wrong_binary_repository.validate().is_err());
+        let mut stale_version = source.clone();
+        stale_version.package_version = Some("0.8.3".into());
+        assert!(
+            validate_native_manifest(&manifest, &repository, &targets, &stale_version).is_err()
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        for (asset, bytes) in manifest.assets.iter().zip(contents) {
+            std::fs::write(temp.path().join(&asset.filename), bytes).unwrap();
+        }
+        std::fs::write(
+            temp.path().join(NATIVE_BUNDLE_MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        validate_native_asset_files(temp.path(), &manifest).unwrap();
+        std::fs::write(
+            temp.path().join(&manifest.assets[0].filename),
+            b"changed bytes",
+        )
+        .unwrap();
+        assert!(validate_native_asset_files(temp.path(), &manifest).is_err());
+
+        let make_bundle = |assets: usize| {
+            let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o644);
+            archive.start_file(NATIVE_BUNDLE_MANIFEST, options).unwrap();
+            archive
+                .write_all(&serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+            for (asset, bytes) in manifest.assets.iter().zip(contents).take(assets) {
+                archive.start_file(&asset.filename, options).unwrap();
+                archive.write_all(bytes).unwrap();
+            }
+            archive.finish().unwrap().into_inner()
+        };
+        let complete = make_bundle(manifest.assets.len());
+        let extracted = tempfile::tempdir().unwrap();
+        unpack_native_bundle(&complete, extracted.path(), &repository, &targets).unwrap();
+        validate_native_asset_files(extracted.path(), &manifest).unwrap();
+        let missing = make_bundle(manifest.assets.len() - 1);
+        let rejected = tempfile::tempdir().unwrap();
+        assert!(unpack_native_bundle(&missing, rejected.path(), &repository, &targets).is_err());
+
+        let mut stale_source = source.clone();
+        stale_source.source_run_sha = CommitSha::parse(&"d".repeat(40)).unwrap();
+        assert!(validate_native_manifest(&manifest, &repository, &targets, &stale_source).is_err());
+        let mut missing_target = manifest;
+        missing_target.assets.pop();
+        assert!(validate_native_manifest(&missing_target, &repository, &targets, &source).is_err());
     }
 
     #[test]
@@ -3563,6 +5172,7 @@ mod tests {
             release_pr_number: 8,
             release_pr_sha: CommitSha::parse(&"c".repeat(40)).unwrap(),
             tag: tag.clone(),
+            package_version: Some("1.2.3".into()),
             artifact_id: Some(9),
         };
         let mut plan = ReleasePlanV2 {
@@ -3577,15 +5187,18 @@ mod tests {
             release_pr_sha: "c".repeat(40),
             tag,
             source_manifest,
+            native_binary_repository: None,
             release_id: Some(17),
             existing_signature_sha256: None,
             assets: Vec::new(),
+            native_assets: Vec::new(),
         };
         let asset = assets_dir.join("provider.zip");
         std::fs::write(&asset, b"provider bytes").unwrap();
         plan.assets.push(PlannedAsset {
             name: "provider.zip".into(),
             sha256: sha256_file(&asset).unwrap(),
+            size: None,
         });
         plan
     }
@@ -4052,6 +5665,7 @@ mod tests {
             release_pr_number: 55,
             release_pr_sha: CommitSha::parse(&"d".repeat(40)).unwrap(),
             tag: ReleaseTag::parse("v1.2.3").unwrap(),
+            package_version: Some("1.2.3".into()),
             artifact_id: None,
         }
     }
@@ -4550,10 +6164,12 @@ mod tests {
             PlannedAsset {
                 name: "one.zip".into(),
                 sha256: "a".repeat(64),
+                size: None,
             },
             PlannedAsset {
                 name: "two.zip".into(),
                 sha256: "b".repeat(64),
+                size: None,
             },
         ];
         let partial = vec![json!({"name":"one.zip","digest":format!("sha256:{}", "a".repeat(64))})];
@@ -4565,6 +6181,37 @@ mod tests {
         let unexpected =
             vec![json!({"name":"extra.zip","digest":format!("sha256:{}", "a".repeat(64))})];
         assert!(validate_release_asset_state(&expected, &unexpected, false).is_err());
+    }
+
+    #[test]
+    fn native_release_assets_require_exact_published_size() {
+        let expected = [PlannedAsset {
+            name: "herdr-linear-agent-x86_64-unknown-linux-musl".into(),
+            sha256: "a".repeat(64),
+            size: Some(32),
+        }];
+        let matching = [expected_release_asset(
+            &expected[0].name,
+            &expected[0].sha256,
+            7,
+            32,
+        )];
+        assert!(validate_release_asset_state(&expected, &matching, true).is_ok());
+
+        let wrong_size = [expected_release_asset(
+            &expected[0].name,
+            &expected[0].sha256,
+            7,
+            31,
+        )];
+        assert!(validate_release_asset_state(&expected, &wrong_size, true).is_err());
+
+        let missing_size = [json!({
+            "name": expected[0].name,
+            "digest": format!("sha256:{}", expected[0].sha256),
+            "id": 7
+        })];
+        assert!(validate_release_asset_state(&expected, &missing_size, true).is_err());
     }
 
     #[test]

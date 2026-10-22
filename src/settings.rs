@@ -2309,6 +2309,7 @@ mod tests {
             repository: "civitaspo/example".into(),
             capabilities: vec![Capability::Settings],
             release: None,
+            native_binaries: Vec::new(),
             sensitive_paths: vec![".github/**".into()],
             protect_tags: false,
         };
@@ -2338,6 +2339,7 @@ mod tests {
                 .clone(),
             capabilities: vec![Capability::Settings],
             release: None,
+            native_binaries: Vec::new(),
             sensitive_paths: vec![".github/**".into()],
             protect_tags: false,
         };
@@ -2375,6 +2377,7 @@ mod tests {
             repository: "civitaspo/example".into(),
             capabilities: vec![Capability::Release],
             release: Some(crate::policy::ReleaseStrategy::GithubRelease),
+            native_binaries: Vec::new(),
             sensitive_paths: vec![".github/**".into()],
             protect_tags: false,
         };

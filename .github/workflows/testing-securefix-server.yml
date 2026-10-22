@@ -10,7 +10,7 @@ on:
       phase:
         description: Prepare/verify Securefix fixtures, run the explicit legacy bootstrap probe, or test the no-publish Sigma release flow
         type: choice
-        options: [prepare, verify, bootstrap, provider]
+        options: [prepare, verify, bootstrap, provider, release-assets]
         default: prepare
       fixture_run_id:
         description: Successful prepare run whose exact-source fixture state is reused
@@ -203,7 +203,7 @@ jobs:
           retention-days: 7
 
   baseline:
-    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)))
+    if: inputs.phase != 'provider' && inputs.phase != 'bootstrap' && inputs.phase != 'release-assets' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)))
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -271,7 +271,7 @@ jobs:
 
   scratch:
     needs: [baseline, build]
-    if: always() && inputs.phase != 'bootstrap' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && needs.build.result == 'success' && needs.baseline.result == 'success'
+    if: always() && inputs.phase != 'bootstrap' && inputs.phase != 'release-assets' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && needs.build.result == 'success' && needs.baseline.result == 'success'
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -426,4 +426,13 @@ jobs:
     secrets:
       TERRAFORM_PROVIDER_GPG_PRIVATE_KEY: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
       TERRAFORM_PROVIDER_GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+      SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+
+  native-release-assets-probe:
+    if: inputs.phase == 'release-assets' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    uses: ./.github/workflows/testing-native-release-assets.yml
+    permissions:
+      actions: read
+      contents: read
+    secrets:
       SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
