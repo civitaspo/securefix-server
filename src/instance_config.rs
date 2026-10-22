@@ -14,6 +14,7 @@ const MAX_CONFIG_BYTES: usize = 256 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
     pub schema_version: u32,
+    pub release_request_label_prefix: String,
     pub instance: crate::config::Repository,
     pub identities: Identities,
     pub apps: Apps,
@@ -133,6 +134,7 @@ impl InstanceConfig {
             self.schema_version == 1,
             "unsupported instance schema version"
         );
+        validate_release_request_label_prefix(&self.release_request_label_prefix)?;
         crate::policy::validate_repository(&self.instance.repository)?;
         ensure!(
             self.instance.id > 0,
@@ -311,6 +313,22 @@ impl InstanceConfig {
         )?;
         Ok(())
     }
+}
+
+fn validate_release_request_label_prefix(prefix: &str) -> Result<()> {
+    ensure!(
+        prefix.is_empty()
+            || (prefix.len() <= 32
+                && prefix.ends_with('-')
+                && prefix.as_bytes()[0].is_ascii_lowercase()
+                && prefix[..prefix.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'-')),
+        "release request label prefix is invalid"
+    );
+    Ok(())
 }
 
 fn validate_workflow_path(path: &str) -> Result<()> {
@@ -502,6 +520,35 @@ mod tests {
             same_owner.identities.owner,
             same_owner.identities.repository_owner
         );
+    }
+
+    #[test]
+    fn release_request_label_prefix_is_explicit_bounded_and_namespaced() {
+        rejects(&changed(
+            &fixture_text(),
+            "release_request_label_prefix = \"\"\n",
+            "",
+        ));
+        let testing = changed(
+            &fixture_text(),
+            "release_request_label_prefix = \"\"",
+            "release_request_label_prefix = \"testing-\"",
+        );
+        assert_eq!(
+            InstanceConfig::parse(testing.as_bytes())
+                .unwrap()
+                .release_request_label_prefix,
+            "testing-"
+        );
+        let too_long = "x".repeat(33);
+        for invalid in ["Testing-", "testing", "../", too_long.as_str()] {
+            let source = changed(
+                &fixture_text(),
+                "release_request_label_prefix = \"\"",
+                &format!("release_request_label_prefix = {invalid:?}"),
+            );
+            rejects(&source);
+        }
     }
 
     #[test]
