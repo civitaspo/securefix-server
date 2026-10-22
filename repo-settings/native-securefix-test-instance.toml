@@ -33,6 +33,8 @@ policy_check_id = 3872533
 
 [workflow_roles]
 approve = ".github/workflows/testing-native-approve.yml"
+merge = ".github/workflows/testing-native-merge.yml"
+policy_check = ".github/workflows/testing-native-policy-check-authority.yml"
 securefix = ".github/workflows/testing-native-securefix-server.yml"
 
 [policy]
@@ -56,7 +58,7 @@ github_apps = []
 [[repositories]]
 repository = "civitaspo/testing-securefix-server"
 id = 1410312556
-capabilities = ["approve", "securefix"]
+capabilities = ["approve", "merge", "securefix"]
 protect_tags = false
 
 [acceptable_clients]
