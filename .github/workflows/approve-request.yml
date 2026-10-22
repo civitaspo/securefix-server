@@ -28,8 +28,12 @@ jobs:
     permissions:
       actions: read
       contents: read
-      attestations: read
+      attestations: write
+      id-token: write
       issues: read
       pull-requests: read
+    with:
+      server_repository: civitaspo/securefix-server
+      instance_config_path: securefix-server.toml
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

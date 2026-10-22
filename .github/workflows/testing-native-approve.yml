@@ -15,6 +15,10 @@ on:
         description: Exact owner-authored scratch PR head selected for approval
         required: true
         type: string
+      package_publication_json:
+        description: Exact 9-field package publication JSON accepted by the qualified pre23 host (source_sha, source_branch, tag, release_id, asset_id, asset_sha256, asset_size, producer_run_id, producer_run_attempt).
+        required: true
+        type: string
 
 permissions: {}
 
@@ -80,6 +84,7 @@ jobs:
           PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON: ${{ inputs.package_publication_json }}
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -155,6 +160,7 @@ jobs:
           PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
           PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON: ${{ inputs.package_publication_json }}
         run: |
           set -euo pipefail
           command_log="$RUNNER_TEMP/native-approval-apply.log"

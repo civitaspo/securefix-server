@@ -504,3 +504,12 @@ jobs:
       TERRAFORM_PROVIDER_GPG_PRIVATE_KEY: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
       TERRAFORM_PROVIDER_GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
       SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+
+  native-release-assets-probe:
+    if: inputs.phase == 'release-assets' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && inputs.candidate_sha == github.sha
+    uses: ./.github/workflows/testing-native-release-assets.yml
+    permissions:
+      actions: read
+      contents: read
+    secrets:
+      SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}

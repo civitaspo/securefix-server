@@ -117,7 +117,7 @@ if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != pull_request_target && -
   fi
 fi
 
-if [[ "$EVENT_NAME" == workflow_dispatch && "${CANDIDATE_RUN_ID:-}" =~ ^[1-9][0-9]*$ && -n "${GH_TOKEN:-}" ]]; then
+if [[ ( "$EVENT_NAME" == workflow_dispatch || "$EVENT_NAME" == pull_request_target ) && "${CANDIDATE_RUN_ID:-}" =~ ^[1-9][0-9]*$ && -n "${GH_TOKEN:-}" ]]; then
   candidate_run_id="$CANDIDATE_RUN_ID"
   if candidate_run="$(gh api "repos/civitaspo/securefix-server/actions/runs/$candidate_run_id" 2>/dev/null)"; then
     candidate_branch="$(jq -r '.head_branch // empty' <<<"$candidate_run")"
@@ -161,6 +161,11 @@ if [[ "$EVENT_NAME" == workflow_dispatch && "${CANDIDATE_RUN_ID:-}" =~ ^[1-9][0-
       fi
     fi
   fi
+fi
+
+if [[ "$EVENT_NAME" == pull_request_target ]]; then
+  echo "No verified candidate artifact for pull_request_target; refusing to build locally." >&2
+  exit 1
 fi
 
 echo "No qualified reusable artifact for $source_sha; building this checkout."

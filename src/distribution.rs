@@ -361,7 +361,11 @@ fn workflow_path(actual: &Value, expected: &str, default_branch: &str) -> Result
     }))
 }
 
-fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: bool) -> Result<()> {
+fn validate_previous_generation(
+    files: &BTreeMap<String, Vec<u8>>,
+    default_branch: &str,
+    releases: bool,
+) -> Result<()> {
     let path = ".github/workflows/approve-request.yml";
     let approve: serde_yaml::Value = serde_yaml::from_slice(
         files
@@ -379,24 +383,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
         .rsplit_once('@')
         .context("automation branch pin missing")?;
     validate_sha(sha)?;
-    let check_path = ".github/workflows/policy-check.yml";
-    let check: serde_yaml::Value = serde_yaml::from_slice(
-        files
-            .get(&crate::config::workflow_path(check_path)?)
-            .context("managed policy-check workflow missing")?,
-    )?;
-    let event_key = serde_yaml::Value::Bool(true);
-    let on = check
-        .as_mapping()
-        .and_then(|map| map.get("on").or_else(|| map.get(&event_key)))
-        .context("managed policy event missing")?;
-    let branches = &on["push"]["branches"];
-    let branch = branches
-        .as_sequence()
-        .and_then(|values| (values.len() == 1).then(|| values[0].as_str()).flatten())
-        .context("managed policy branch missing")?;
-    validate_branch(branch)?;
-    let expected = rendered_files(sha, "v0.0.0", branch, releases)?;
+    let expected = rendered_files(sha, "v0.0.0", default_branch, releases)?;
     for (path, contents) in &expected {
         let actual = files
             .get(path)
@@ -411,7 +398,7 @@ fn validate_previous_generation(files: &BTreeMap<String, Vec<u8>>, releases: boo
             "automation branch does not contain a previously generated canonical workflow: {path}"
         );
     }
-    caller::validate_previous_client_generation(files, sha, branch)?;
+    caller::validate_previous_client_generation(files, sha, default_branch)?;
     Ok(())
 }
 
@@ -633,6 +620,7 @@ fn validate_automation_branch(
     }
     validate_previous_generation(
         &branch_files,
+        &migration.default_branch,
         migration.files.contains_key(&crate::config::workflow_path(
             ".github/workflows/release-pr.yml",
         )?),

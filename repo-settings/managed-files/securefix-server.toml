@@ -28,14 +28,19 @@ id = 308696683
 
 [apps]
 client_id = 3872492
-server_id = 15368
+server_id = 3872533
 status_check_id = 15368
-policy_check_id = 15368
+policy_check_id = 3872533
 
 [workflow_roles]
-approve = ".github/workflows/testing-approve-request.yml"
-merge = ".github/workflows/testing-merge-request.yml"
-policy_check = ".github/workflows/policy-check.yml"
+approve = ".github/workflows/server-approve.yml"
+merge = ".github/workflows/server-merge.yml"
+policy_check = ".github/workflows/server-policy-check.yml"
+release = ".github/workflows/server-release.yml"
+securefix = ".github/workflows/server-securefix.yml"
+
+[branches]
+release = "release/next"
 
 [policy]
 trusted_committers = [
@@ -58,11 +63,12 @@ github_apps = []
 [[repositories]]
 repository = "civitaspo/testing-securefix-server"
 id = 1410312556
-capabilities = ["merge"]
+capabilities = ["approve", "merge", "release", "securefix"]
+release = "github-release"
 protect_tags = false
 
 [acceptable_clients]
 repository = "civitaspo/securefix-server"
 id = 1250079425
-producer_workflow = ".github/workflows/request-producer-probe.yml"
-version = ">=0.1.0"
+producer_workflow = ".github/workflows/reusable-client-request.yml"
+version = ">=0.2.45-pre.23"

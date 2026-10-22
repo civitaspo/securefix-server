@@ -20,7 +20,7 @@ inputs:
     description: Configured source repository default branch
     required: true
   owner-id:
-    description: Configured repository owner ID used to qualify a scratch prerelease
+    description: Trusted User actor ID declared by the immutable caller for owner-dispatched package runs
     required: true
   channel:
     description: stable for normal consumers or scratch for an explicit prerelease probe
@@ -111,6 +111,8 @@ runs:
         PUBLICATION_PRODUCER_RUN_ATTEMPT: ${{ inputs.publication-producer-run-attempt }}
         GH_TOKEN: ${{ inputs.token }}
         CALLER_REPOSITORY: ${{ github.repository }}
+        CALLER_REPOSITORY_ID: ${{ github.repository_id }}
+        CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
         EVENT_NAME: ${{ github.event_name }}
         ACTOR_ID: ${{ github.actor_id }}
         RUN_ATTEMPT: ${{ github.run_attempt }}

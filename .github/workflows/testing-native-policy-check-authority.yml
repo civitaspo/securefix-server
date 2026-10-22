@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       producer_run_id:
-        description: Exact successful scratch Client policy-check producer run
+        description: Exact successful attested Client policy-check request run
         required: true
         type: string
       package_publication_json:
-        description: Exact owner-selected scratch package publication record JSON
+        description: "JSON fields: source_sha, source_branch, tag, release_id, asset_id, asset_sha256, asset_size, producer_run_id, producer_run_attempt. Omit repository identity fields."
         required: true
         type: string
 
@@ -30,11 +30,8 @@ jobs:
       pull-requests: read
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-      - name: Load the exact verified scratch package
+      - name: Load the fixed immutable scratch package
+        id: package
         uses: civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a # v0.2.45-pre.12
         with:
           action-sha: 6be9fb42e14770a9162301787e158f7db3ab918a
@@ -56,8 +53,10 @@ jobs:
           publication-producer-run-id: '39783133806'
           publication-producer-run-attempt: '1'
           token: ${{ github.token }}
-      - name: Confirm the verified package implements the instance writer
-        run: securefix new-server instance-policy-check-run --help
+      - name: Confirm the fixed package exposes the policy-check validator
+        env:
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: '"$CLI_BINARY" new-server instance-policy-check-run --help'
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: scratch-reader
         with:
@@ -72,13 +71,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
-          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
           SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON: ${{ inputs.package_publication_json }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON" =~ ^\{.*\}$ ]]
-          securefix new-server instance-policy-check-run \
+          "$CLI_BINARY" new-server instance-policy-check-run \
             --config-path repo-settings/native-securefix-test-instance.toml \
             --producer-repository civitaspo/testing-securefix-server \
             --producer-run-id "$PRODUCER_RUN_ID" \
@@ -96,11 +95,18 @@ jobs:
       pull-requests: read
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch-reader
         with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-      - name: Load the exact verified scratch package
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Load the fixed immutable scratch package
+        id: package
         uses: civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a # v0.2.45-pre.12
         with:
           action-sha: 6be9fb42e14770a9162301787e158f7db3ab918a
@@ -122,16 +128,21 @@ jobs:
           publication-producer-run-id: '39783133806'
           publication-producer-run-attempt: '1'
           token: ${{ github.token }}
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: scratch-reader
-        with:
-          app-id: '3872533'
-          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: testing-securefix-server
-          permission-actions: read
-          permission-contents: read
-          permission-pull-requests: read
+      - name: Validate the owner-selected policy request before minting a check writer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON: ${{ inputs.package_publication_json }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          "$CLI_BINARY" new-server instance-policy-check-run \
+            --config-path repo-settings/native-securefix-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID" \
+            --owner-selected-test-package
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: check-writer
         with:
@@ -140,17 +151,18 @@ jobs:
           owner: civitaspo
           repositories: testing-securefix-server
           permission-checks: write
-      - name: Revalidate and publish the exact-head policy check
+      - name: Revalidate and publish the current-head policy check
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
           SECUREFIX_NATIVE_CHECK_TOKEN: ${{ steps.check-writer.outputs.token }}
-          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
           SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON: ${{ inputs.package_publication_json }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          securefix new-server instance-policy-check-run \
+          "$CLI_BINARY" new-server instance-policy-check-run \
             --config-path repo-settings/native-securefix-test-instance.toml \
             --producer-repository civitaspo/testing-securefix-server \
             --producer-run-id "$PRODUCER_RUN_ID" \
