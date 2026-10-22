@@ -2958,7 +2958,18 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert!(
         verify_steps
             .iter()
-            .any(|step| { step["uses"] == "$/.github/actions/load-package" })
+            .any(|step| { step["uses"] == "./candidate-source/.github/actions/load-package" })
+    );
+    let candidate_checkout = verify_steps
+        .iter()
+        .find(|step| {
+            step["uses"] == "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+                && step["with"]["path"] == "candidate-source"
+        })
+        .unwrap();
+    assert_eq!(
+        candidate_checkout["with"]["ref"],
+        "${{ inputs.source_sha }}"
     );
     let execute = verify_steps
         .iter()
@@ -2968,15 +2979,16 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(execute["env"]["GH_TOKEN"], "");
     assert_eq!(execute["env"]["GITHUB_TOKEN"], "");
     assert!(verify_steps.iter().any(|step| {
-        step["uses"] == "$/.github/actions/load-package" && step["with"]["channel"] == "scratch"
+        step["uses"] == "./candidate-source/.github/actions/load-package"
+            && step["with"]["channel"] == "scratch"
     }));
     let package_loader = verify_steps
         .iter()
-        .find(|step| step["uses"] == "$/.github/actions/load-package")
+        .find(|step| step["uses"] == "./candidate-source/.github/actions/load-package")
         .unwrap();
     assert_eq!(
         package_loader["with"]["action-sha"],
-        "${{ github.workflow_sha }}"
+        "${{ inputs.source_sha }}"
     );
     for (input, output) in [
         ("publication-source-sha", "source-sha"),

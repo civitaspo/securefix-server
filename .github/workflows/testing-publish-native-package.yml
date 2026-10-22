@@ -121,6 +121,11 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: candidate-source
+          persist-credentials: false
       - name: Read the configured package identities
         id: config
         run: |
@@ -128,9 +133,9 @@ jobs:
           jq -r '"source-repository=" + .deployment.server.repository, "source-repository-id=" + (.deployment.server.id|tostring), "source-default-branch=" + .deployment.server.default_branch, "destination-repository=" + .deployment.integration.repository, "destination-repository-id=" + (.deployment.integration.id|tostring), "owner-id=" + (.owner_id|tostring)' .github/testing-policy.json >> "$GITHUB_OUTPUT"
       - name: Load and verify the immutable scratch package
         id: package
-        uses: $/.github/actions/load-package
+        uses: ./candidate-source/.github/actions/load-package
         with:
-          action-sha: ${{ github.workflow_sha }}
+          action-sha: ${{ inputs.source_sha }}
           source-repository: ${{ steps.config.outputs.source-repository }}
           source-repository-id: ${{ steps.config.outputs.source-repository-id }}
           destination-repository: ${{ steps.config.outputs.destination-repository }}
