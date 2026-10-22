@@ -14,6 +14,7 @@ const MAX_CONFIG_BYTES: usize = 256 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
     pub schema_version: u32,
+    pub release_request_label_prefix: String,
     pub instance: crate::config::Repository,
     pub identities: Identities,
     pub apps: Apps,
@@ -82,6 +83,8 @@ pub struct ConfiguredRepository {
     #[serde(default)]
     pub release: Option<crate::policy::ReleaseStrategy>,
     #[serde(default)]
+    pub native_binaries: Vec<crate::policy::NativeBinaryTarget>,
+    #[serde(default)]
     pub sensitive_paths: Vec<String>,
     pub protect_tags: bool,
 }
@@ -92,6 +95,7 @@ impl ConfiguredRepository {
             repository: self.repository.clone(),
             capabilities: self.capabilities.clone(),
             release: self.release,
+            native_binaries: self.native_binaries.clone(),
             sensitive_paths: self.sensitive_paths.clone(),
             protect_tags: self.protect_tags,
         }
@@ -133,6 +137,7 @@ impl InstanceConfig {
             self.schema_version == 1,
             "unsupported instance schema version"
         );
+        validate_release_request_label_prefix(&self.release_request_label_prefix)?;
         crate::policy::validate_repository(&self.instance.repository)?;
         ensure!(
             self.instance.id > 0,
@@ -245,6 +250,10 @@ impl InstanceConfig {
                         .contains(&crate::policy::Capability::Release),
                 "release strategy/capability mismatch"
             );
+            crate::policy::validate_native_binary_targets(
+                repository.release,
+                &repository.native_binaries,
+            )?;
             if repository.sensitive_paths.is_empty() {
                 repository
                     .sensitive_paths
@@ -311,6 +320,20 @@ impl InstanceConfig {
         )?;
         Ok(())
     }
+}
+
+fn validate_release_request_label_prefix(prefix: &str) -> Result<()> {
+    ensure!(
+        prefix.is_empty()
+            || (prefix.len() <= 32
+                && prefix.ends_with('-')
+                && prefix.as_bytes()[0].is_ascii_lowercase()
+                && prefix[..prefix.len() - 1].bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                })),
+        "release request label prefix is invalid"
+    );
+    Ok(())
 }
 
 fn validate_workflow_path(path: &str) -> Result<()> {
@@ -446,6 +469,7 @@ mod tests {
     fn parses_synthetic_configuration_without_defaulting_optional_authority() {
         let config = InstanceConfig::parse(FIXTURE).unwrap();
         assert_eq!(config.schema_version, 1);
+        assert_eq!(config.release_request_label_prefix, "");
         assert_eq!(config.instance.repository, "example-org/securefix-server");
         assert_eq!(config.identities.owner.login, "maintainer");
         assert_eq!(
@@ -502,6 +526,30 @@ mod tests {
             same_owner.identities.owner,
             same_owner.identities.repository_owner
         );
+    }
+
+    #[test]
+    fn release_request_label_prefix_is_explicit_bounded_and_namespaced() {
+        let testing = changed(
+            &fixture_text(),
+            "release_request_label_prefix = \"\"",
+            "release_request_label_prefix = \"testing-\"",
+        );
+        assert_eq!(
+            InstanceConfig::parse(testing.as_bytes())
+                .unwrap()
+                .release_request_label_prefix,
+            "testing-"
+        );
+        let too_long = "x".repeat(33);
+        for invalid in ["Testing-", "testing", "../", too_long.as_str()] {
+            let source = changed(
+                &fixture_text(),
+                "release_request_label_prefix = \"\"",
+                &format!("release_request_label_prefix = {invalid:?}"),
+            );
+            rejects(&source);
+        }
     }
 
     #[test]
@@ -818,6 +866,41 @@ mod tests {
                 .version
                 .matches(&semver::Version::parse("2.0.0").unwrap())
         );
+    }
+
+    #[test]
+    fn native_binaries_are_optional_and_release_strategy_is_checked() {
+        assert!(
+            InstanceConfig::parse(FIXTURE).unwrap().repositories[0]
+                .native_binaries
+                .is_empty()
+        );
+
+        let with_native_targets = changed(
+            &fixture_text(),
+            "release = \"github-release\"\nprotect_tags = true",
+            "release = \"github-release\"\nnative_binaries = [{ target = \"x86_64-unknown-linux-musl\", runner = \"ubuntu-24.04\" }]\nprotect_tags = true",
+        );
+        let parsed = InstanceConfig::parse(with_native_targets.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.repositories[0].native_binaries[0].target,
+            "x86_64-unknown-linux-musl"
+        );
+
+        let missing_release = changed(
+            &with_native_targets,
+            "capabilities = [\"approve\", \"merge\", \"securefix\", \"release\", \"settings\"]",
+            "capabilities = [\"approve\", \"merge\", \"securefix\", \"settings\"]",
+        );
+        let missing_release = changed(&missing_release, "release = \"github-release\"\n", "");
+        rejects(&missing_release);
+
+        let mismatched_runner = changed(
+            &with_native_targets,
+            "runner = \"ubuntu-24.04\"",
+            "runner = \"macos-15\"",
+        );
+        rejects(&mismatched_runner);
     }
 
     #[test]

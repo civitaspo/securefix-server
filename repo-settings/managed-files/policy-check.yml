@@ -1,154 +1,26 @@
-name: testing-Policy Check
+name: testing-Policy Check Request Producer
 
 on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: Probe token scope, produce an attested request, or consume a completed request
-        type: choice
-        required: true
-        options:
-          - token-probe
-          - produce
-          - consume
-      candidate_run_id:
-        description: Exact successful candidate build run
-        type: string
-        required: true
-        default: "39575187035"
-      pull_request_number:
-        description: Owner-authored scratch pull request
-        type: string
-        required: true
-        default: "365"
-      producer_run_id:
-        description: Completed scratch run that produced native-request-proof
-        type: string
-        required: false
-        default: ""
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
 jobs:
-  token-probe:
-    if: inputs.mode == 'token-probe'
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      contents: read
-    timeout-minutes: 5
-    steps:
-      - name: Probe scratch installation and exact candidate artifact read access
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-        run: |
-          set -euo pipefail
-          installation_path="$RUNNER_TEMP/installation.json"
-          installation_status="$(curl -sS -o "$installation_path" -w '%{http_code}' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            'https://api.github.com/installation/repositories?per_page=100')"
-          echo "installation_repositories_status=$installation_status"
-          if [[ "$installation_status" == 200 ]]; then
-            jq '{total_count, repositories: [.repositories[] | {id,full_name}]}' "$installation_path"
-          else
-            jq '{message,documentation_url}' "$installation_path" 2>/dev/null || true
-          fi
-          artifact_list="$RUNNER_TEMP/candidate-artifacts.json"
-          artifact_status="$(curl -sS -o "$artifact_list" -w '%{http_code}' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/civitaspo/securefix-server/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100")"
-          echo "candidate_artifact_list_status=$artifact_status"
-          if [[ "$artifact_status" != 200 ]]; then
-            jq '{message,documentation_url}' "$artifact_list" 2>/dev/null || true
-            exit 0
-          fi
-          artifact="$(jq -cer --argjson run_id "$CANDIDATE_RUN_ID" '
-            [.artifacts[] | select(.name == "candidate-runtime" and .workflow_run.id == $run_id and .expired == false)]
-            | if length == 1 then .[0] else empty end' "$artifact_list")"
-          artifact_id="$(jq -r '.id' <<<"$artifact")"
-          expected_digest="$(jq -r '.digest | sub("^sha256:"; "")' <<<"$artifact")"
-          archive="$RUNNER_TEMP/candidate-runtime.zip"
-          download_status="$(curl -sS -L -o "$archive" -w '%{http_code}' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/civitaspo/securefix-server/actions/artifacts/$artifact_id/zip")"
-          actual_digest="$(sha256sum "$archive" | cut -d ' ' -f 1)"
-          actual_size="$(stat -c %s "$archive")"
-          echo "candidate_artifact_download_status=$download_status"
-          echo "candidate_artifact_id=$artifact_id"
-          echo "candidate_artifact_digest=$actual_digest"
-          echo "candidate_artifact_size=$actual_size"
-          [[ "$download_status" == 200 && "$actual_digest" == "$expected_digest" && "$actual_size" == "$(jq -r '.size_in_bytes' <<<"$artifact")" ]]
-
   produce:
-    if: inputs.mode == 'produce'
-    uses: civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@82e678f41d53896e4108811e8cff739575960210
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.run_attempt == 1
+    uses: civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@bf200655844cd60003b8cd612715db6b6d025310 # reviewed helper workflow source commit
     with:
-      candidate_run_id: ${{ inputs.candidate_run_id }}
-      pull_request_number: ${{ inputs.pull_request_number }}
+      operation: policy_check
+      candidate_run_id: "39803448159"
+      candidate_source_sha: 5cca7b5f28c5f08750525347b5b81f0869380e9d
+      pull_request_number: ${{ format('{0}', github.event.pull_request.number) }}
+      server_repository: civitaspo/securefix-server
+      instance_config_path: repo-settings/native-securefix-test-instance.toml
     permissions:
       actions: read
       attestations: write
       contents: read
       id-token: write
+      issues: read
       pull-requests: read
-
-  consume:
-    if: inputs.mode == 'consume'
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      checks: write
-      contents: read
-      pull-requests: read
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          name: native-request-proof
-          repository: civitaspo/testing-securefix-server
-          run-id: ${{ inputs.producer_run_id }}
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/native-policy-check
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: civitaspo/securefix-server
-          ref: 96c2f3e9223f7f5f357660e59718558f3e2b283b
-          path: server-source
-          persist-credentials: false
-      - name: Require the exact source-bound candidate artifact
-        id: candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          ACTION_PATH: ${{ github.workspace }}/server-source/.github/actions/setup-cli
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-        run: |
-          set -euo pipefail
-          GITHUB_WORKSPACE="$GITHUB_WORKSPACE/server-source" bash "$ACTION_PATH/reuse-build.sh"
-          grep -qx "reused=true" "$GITHUB_OUTPUT"
-      - uses: civitaspo/securefix-server/.github/actions/install-cli@96c2f3e9223f7f5f357660e59718558f3e2b283b # source commit
-        with:
-          binary: ${{ github.workspace }}/server-source/target/release/securefix
-      - name: Verify and publish the exact current-head policy check
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_NATIVE_CHECK_TOKEN: ${{ github.token }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test "$PRODUCER_RUN_ID" -gt 0
-          securefix new-server policy-check \
-            --config securefix-server.toml \
-            --config-path securefix-server.toml \
-            --manifest "$RUNNER_TEMP/native-policy-check/manifest.json" \
-            --bundle "$RUNNER_TEMP/native-policy-check/bundle.json" \
-            --publish

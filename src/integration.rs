@@ -1718,7 +1718,6 @@ fn prepare(candidate_sha: &str, state_file: &Path) -> Result<()> {
             .context("scratch policy control fixture missing")?,
         Phase::Prepare,
     )?;
-    crate::settings::managed_reconcile_scratch(candidate_sha)?;
     println!("Prepared Securefix scratch integration state.");
     println!(
         "Positive PR (add the current-head control-bound owner review, then post separate /approve and /merge comments): {}",
@@ -4618,6 +4617,7 @@ fn scratch_policy(candidate_sha: &str) -> Result<Policy> {
             Capability::Release,
         ],
         release: Some(ReleaseStrategy::GithubRelease),
+        native_binaries: Vec::new(),
         sensitive_paths: policy.default_sensitive_paths.clone(),
         protect_tags: false,
     }];

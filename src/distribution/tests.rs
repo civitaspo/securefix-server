@@ -2064,7 +2064,7 @@ fn isolated_distribution_includes_only_its_configured_control_repository() {
 }
 
 #[test]
-fn actual_eight_caller_inventory_contains_only_supported_managed_workflow_shapes() {
+fn actual_eight_caller_inventory_keeps_legacy_ops_and_rejects_stale_request_wrappers() {
     let callers: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/distribution-callers.json"
     ))
@@ -2083,12 +2083,30 @@ fn actual_eight_caller_inventory_contains_only_supported_managed_workflow_shapes
             "{repository}"
         );
         for (path, contents) in files {
-            validate_existing(
+            let actual: serde_yaml::Value =
+                serde_yaml::from_str(contents.as_str().unwrap()).unwrap();
+            let reusable_request = match path.as_str() {
+                ".github/workflows/approve-request.yml" => {
+                    actual["jobs"]["approve"]["uses"].is_string()
+                }
+                ".github/workflows/merge-request.yml" => {
+                    actual["jobs"]["request"]["uses"].is_string()
+                }
+                _ => false,
+            };
+            let validation = validate_existing(
                 path,
                 contents.as_str().unwrap().as_bytes(),
                 caller["default_branch"].as_str().unwrap(),
-            )
-            .unwrap_or_else(|e| panic!("{repository}/{path}: {e:#}"));
+            );
+            if reusable_request {
+                assert!(
+                    validation.is_err(),
+                    "{repository}/{path}: historical reusable caller must not satisfy the new required instance-input contract"
+                );
+            } else {
+                validation.unwrap_or_else(|e| panic!("{repository}/{path}: {e:#}"));
+            }
         }
     }
 }

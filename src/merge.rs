@@ -366,7 +366,7 @@ pub(crate) fn validate_state(
     Ok(())
 }
 
-fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool {
+pub(crate) fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool {
     let cutoff = accepted_at.timestamp();
     events.iter().any(|event| {
         event["created_at"]

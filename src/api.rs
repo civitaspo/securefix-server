@@ -9,7 +9,7 @@ use std::{
     io::Read,
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -25,6 +25,7 @@ const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024;
 const MAX_GIT_OPERATION_TIME: Duration = Duration::from_secs(60);
 const MAX_AUTHORITY_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PACKAGE_SCRATCH_ASSET_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_NATIVE_RELEASE_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 const ISOLATED_GIT_PATH: &str = "/usr/bin:/bin";
 
 pub const POLICY_FAILURE_COMMENT_MARKER: &str = "<!-- securefix:v1:policy-check -->";
@@ -50,6 +51,149 @@ pub struct NativeScratchTarget<'a> {
     pub destination_branch: Option<&'a str>,
 }
 
+/// The exact request label a native Client dispatch may create. The Server
+/// authority snapshot must be the one validated from the captured request
+/// manifest before this target is constructed.
+#[derive(Clone, Copy)]
+pub struct NativeClientLabelTarget<'a> {
+    pub server_repository: &'a str,
+    pub server_authority: &'a NativeAuthoritySnapshot,
+    pub client_repository: &'a str,
+    pub operation: &'a str,
+    pub run_id: u64,
+}
+
+/// The one release-request label a Client release producer may create in its
+/// captured external Server instance. The token is scoped to the Server
+/// repository; the release destination and source run are fixed from the
+/// protected instance configuration and current workflow run. The accepted
+/// Client distributor remains a separate package-signing authority.
+#[derive(Clone, Copy)]
+pub struct NativeClientReleaseLabelTarget<'a> {
+    pub instance: &'a NativeServerInstanceAuthority,
+    pub config_path: &'a str,
+    pub release_repository: &'a str,
+    pub release_repository_id: u64,
+    pub source_run_id: u64,
+}
+
+/// A Client release-tag mutation bound to its protected Server instance and
+/// one merged, Release-capable application repository PR.
+pub struct NativeReleaseTagWriteTarget<'a> {
+    pub instance: &'a NativeServerInstanceAuthority,
+    pub config_path: &'a str,
+    pub repository: &'a str,
+    pub repository_id: u64,
+    pub release_pr_number: u64,
+    pub release_pr_head_sha: &'a str,
+    pub release_pr_merge_sha: &'a str,
+    pub tag: &'a str,
+}
+
+/// The only production mutations permitted through an external-instance
+/// request writer. Release publication has a separate lifecycle and writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeInstanceMode {
+    PolicyCheck,
+    Securefix,
+    Approve,
+    Merge,
+}
+
+impl NativeInstanceMode {
+    fn capability(self) -> crate::policy::Capability {
+        match self {
+            Self::PolicyCheck | Self::Merge => crate::policy::Capability::Merge,
+            Self::Securefix => crate::policy::Capability::Securefix,
+            Self::Approve => crate::policy::Capability::Approve,
+        }
+    }
+
+    fn workflow_role(self) -> crate::instance_config::WorkflowRole {
+        match self {
+            Self::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
+            Self::Securefix => crate::instance_config::WorkflowRole::Securefix,
+            Self::Approve => crate::instance_config::WorkflowRole::Approve,
+            Self::Merge => crate::instance_config::WorkflowRole::Merge,
+        }
+    }
+
+    fn scratch_mode(self) -> NativeScratchMode {
+        match self {
+            Self::PolicyCheck => NativeScratchMode::PolicyCheck,
+            Self::Securefix => NativeScratchMode::Securefix,
+            Self::Approve => NativeScratchMode::Approval,
+            Self::Merge => NativeScratchMode::Merge,
+        }
+    }
+}
+
+/// Values taken from an already authenticated native request. The writer
+/// binds every mutation to these identities and rechecks the request head and
+/// protected instance authority immediately before the API call.
+pub struct NativeInstanceWriteTarget<'a> {
+    pub mode: NativeInstanceMode,
+    pub config_path: &'a str,
+    pub repository: &'a str,
+    pub repository_id: u64,
+    pub pull_number: u64,
+    pub head_sha: &'a str,
+    pub head_branch: &'a str,
+    pub head_repository_id: u64,
+    pub base_sha: &'a str,
+    pub base_ref: &'a str,
+    pub author_id: u64,
+    pub author_login: &'a str,
+    pub actor_id: u64,
+    pub actor_login: &'a str,
+    pub request_sha256: &'a str,
+    pub producer_run_id: u64,
+    pub producer_run_attempt: u32,
+    pub producer_workflow_path: &'a str,
+    pub producer_workflow_sha: &'a str,
+    pub client_workflow_epoch: &'a str,
+}
+
+/// One release asset admitted by an already validated immutable release plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeReleaseAsset {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub content_type: String,
+}
+
+/// Release identities supplied by the source-manifest and plan verifier.
+/// The writer re-fetches all remote identities before each mutation.
+pub struct NativeReleaseWriteTarget<'a> {
+    pub config_path: &'a str,
+    pub instance: &'a NativeServerInstanceAuthority,
+    pub repository: &'a str,
+    pub repository_id: u64,
+    pub release_pr_number: u64,
+    pub release_pr_head_sha: &'a str,
+    pub release_pr_merge_sha: &'a str,
+    pub tag: &'a str,
+    /// Client destination repository's Release Tag workflow run from the
+    /// release manifest. This is distinct from the distributor package run.
+    pub release_source_run_id: u64,
+    pub release_source_run_attempt: u64,
+    pub release_source_run_sha: &'a str,
+    /// SHA of the accepted Client `reusable-release-tag.yml` implementation.
+    pub release_source_workflow_sha: &'a str,
+    /// Schema-2 source manifest already qualified by the release producer.
+    pub release_manifest: &'a crate::release_manifest::ReleaseManifestV2,
+    /// Exact attested `manifest.json` bytes; the writer binds their digest and
+    /// parses them again before authorizing its first mutation.
+    pub release_manifest_bytes: &'a [u8],
+    /// Client package independently admitted from the configured OSS distributor.
+    pub client_package: &'a crate::package::VerifiedNativeClientPackage,
+    pub assets: &'a [NativeReleaseAsset],
+    /// Native binaries selected by the release plan, keyed to configured targets.
+    pub native_assets: &'a [NativeReleaseAsset],
+    pub release_id: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeScratchMode {
     PolicyCheck,
@@ -70,6 +214,24 @@ pub struct NativeAuthoritySnapshot {
     pub workflows: Vec<NativeWorkflowAuthority>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeInstancePolicyCheckIdentity {
+    pub head_sha: String,
+    pub authority_sha256: String,
+    pub request_sha256: String,
+}
+
+/// The parsed instance configuration and exact protected-main authority used
+/// by one ordinary Server operation. Callers must re-capture this snapshot
+/// before any protected write; the configuration fields are claims until the
+/// capture method authenticates them against GitHub's repository APIs.
+#[derive(Debug, Clone)]
+pub struct NativeServerInstanceAuthority {
+    pub config: crate::instance_config::InstanceConfig,
+    pub config_bytes: Vec<u8>,
+    pub authority: NativeAuthoritySnapshot,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeWorkflowAuthority {
@@ -85,6 +247,13 @@ enum WriteContext {
     ClientLabel {
         server: String,
     },
+    NativeClientLabel {
+        server: String,
+        name: String,
+        description: String,
+    },
+    NativeClientReleaseLabel(Box<NativeClientReleaseLabelWrite>),
+    NativeReleaseTag(Box<NativeReleaseTagWrite>),
     Production {
         revision: Option<String>,
         control_id: Option<String>,
@@ -102,6 +271,8 @@ enum WriteContext {
         release_id: Option<u64>,
     },
     NativeScratch(Box<NativeScratchWrite>),
+    NativeInstance(Box<NativeInstanceWrite>),
+    NativeRelease(Box<NativeReleaseWrite>),
 }
 
 #[derive(Clone)]
@@ -130,6 +301,113 @@ struct NativeScratchWrite {
     client_workflow_epoch: String,
     target_policy_control_identity: Option<String>,
     destination_branch: Option<String>,
+}
+
+#[derive(Clone)]
+struct NativeInstanceWrite {
+    mode: NativeInstanceMode,
+    instance_repository: String,
+    instance_id: u64,
+    default_branch: String,
+    config_path: String,
+    config_bytes: Vec<u8>,
+    server_authority: NativeAuthoritySnapshot,
+    target_repository: String,
+    target_id: u64,
+    pull_number: u64,
+    head_sha: String,
+    head_branch: String,
+    head_repository_id: u64,
+    base_sha: String,
+    base_ref: String,
+    author_id: u64,
+    author_login: String,
+    actor_id: u64,
+    actor_login: String,
+    request_sha256: String,
+    producer_run_id: u64,
+    producer_run_attempt: u32,
+    producer_workflow_path: String,
+    producer_workflow_sha: String,
+    client_workflow_epoch: String,
+}
+
+#[derive(Clone)]
+struct NativeReleaseWrite {
+    instance_repository: String,
+    instance_id: u64,
+    default_branch: String,
+    config_path: String,
+    config_bytes: Vec<u8>,
+    server_authority: NativeAuthoritySnapshot,
+    target_repository: String,
+    target_id: u64,
+    target_default_branch: String,
+    release_pr_number: u64,
+    release_pr_head_sha: String,
+    release_pr_merge_sha: String,
+    tag: String,
+    release_source_run_id: u64,
+    release_source_run_attempt: u64,
+    release_source_run_sha: String,
+    release_source_workflow_sha: String,
+    release_manifest: crate::release_manifest::ReleaseManifestV2,
+    release_manifest_bytes: Vec<u8>,
+    release_manifest_sha256: String,
+    client_package: NativeClientPackageIdentity,
+    assets: Vec<NativeReleaseAsset>,
+    native_assets: Vec<NativeReleaseAsset>,
+    release_id: Option<u64>,
+}
+
+#[derive(Clone)]
+struct NativeClientReleaseLabelWrite {
+    instance: NativeServerInstanceAuthority,
+    config_path: String,
+    server_repository: String,
+    server_repository_id: u64,
+    release_repository: String,
+    release_repository_id: u64,
+    release_request_label_prefix: String,
+    source_run_id: u64,
+    name: String,
+    description: String,
+}
+
+#[derive(Clone)]
+struct NativeReleaseTagWrite {
+    instance: NativeServerInstanceAuthority,
+    config_path: String,
+    repository: String,
+    repository_id: u64,
+    release_pr_number: u64,
+    release_pr_head_sha: String,
+    release_pr_merge_sha: String,
+    tag: String,
+    source_run_id: u64,
+    tag_object_sha: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeClientPackageIdentity {
+    distributor_repository: String,
+    distributor_id: u64,
+    implementation_sha: String,
+    implementation_version: String,
+    loader_action_sha: String,
+    binary_source_sha: String,
+    binary_version: String,
+    protocol: String,
+    release_tag: String,
+    release_id: u64,
+    asset_id: u64,
+    asset_name: String,
+    asset_size: u64,
+    asset_sha256: String,
+    publisher_workflow: String,
+    publisher_branch: String,
+    publisher_run_id: u64,
+    publisher_run_attempt: u64,
 }
 
 #[derive(Debug)]
@@ -174,6 +452,69 @@ impl GitHub {
         };
         Ok(api)
     }
+
+    /// Create a write-scoped Client API connection for one exact native
+    /// request label. The route and request body are both fixed from the
+    /// validated request manifest identities.
+    pub fn native_client_label_from_env(
+        name: &str,
+        target: &NativeClientLabelTarget<'_>,
+    ) -> Result<Self> {
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let (label, description) = validate_native_client_label_target(target)?;
+        let mut api = Self::new("https://api.github.com", token)?;
+        api.writes = WriteContext::NativeClientLabel {
+            server: target.server_repository.to_owned(),
+            name: label,
+            description,
+        };
+        Ok(api)
+    }
+    /// Create a Server-scoped writer for the exact native release request
+    /// label belonging to the current Client workflow run.
+    pub fn native_client_release_label_from_env(
+        name: &str,
+        target: &NativeClientReleaseLabelTarget<'_>,
+    ) -> Result<Self> {
+        let write = validate_native_client_release_label_target(target)?;
+        validate_native_client_release_label_execution(&write)?;
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let api = Self::new("https://api.github.com", token)?;
+        require_single_repository_installation(
+            &api,
+            write.server_repository_id,
+            &write.server_repository,
+        )?;
+        let mut api = api;
+        api.writes = WriteContext::NativeClientReleaseLabel(Box::new(write));
+        Ok(api)
+    }
+
+    /// Create a Client-repository-scoped writer for one annotated release tag.
+    /// Every mutation is checked against the captured Server authority and the
+    /// current merged PR immediately before the API request.
+    pub fn native_release_tag_from_env(
+        name: &str,
+        target: &NativeReleaseTagWriteTarget<'_>,
+    ) -> Result<Self> {
+        let source_run_id = std::env::var("GITHUB_RUN_ID")
+            .context("missing GITHUB_RUN_ID for native release tag")?
+            .parse::<u64>()
+            .context("invalid GITHUB_RUN_ID for native release tag")?;
+        let mut write = validate_native_release_tag_target(target, source_run_id)?;
+        validate_native_release_tag_execution(&write)?;
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let api = Self::new("https://api.github.com", token)?;
+        require_single_repository_installation(&api, write.repository_id, &write.repository)?;
+        write.tag_object_sha = Arc::new(Mutex::new(None));
+        let mut api = api;
+        api.writes = WriteContext::NativeReleaseTag(Box::new(write));
+        Ok(api)
+    }
+
     pub fn from_env(name: &str) -> Result<Self> {
         let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
         ensure!(!token.is_empty(), "{name} is empty");
@@ -332,6 +673,292 @@ impl GitHub {
             unreachable!("package release writer context changed during validation");
         };
         *allowed = Some(release_id);
+        Ok(())
+    }
+
+    /// Create an ordinary instance-bound request writer. This context is
+    /// separate from the owner-only scratch writer and the legacy runtime
+    /// writer. The supplied instance must have been captured from protected
+    /// main and the request must already have passed its operation verifier.
+    pub fn native_instance_from_env(
+        read_name: &str,
+        write_name: &str,
+        instance: &NativeServerInstanceAuthority,
+        target: &NativeInstanceWriteTarget<'_>,
+    ) -> Result<Self> {
+        validate_instance_config_path(target.config_path)?;
+        validate_native_authority_snapshot(&instance.authority)?;
+        let config = crate::instance_config::InstanceConfig::parse(&instance.config_bytes)?;
+        validate_native_instance_write_target(&config, target)?;
+        ensure!(
+            instance.authority.instance_repository == config.instance.repository
+                && instance.authority.instance_id == config.instance.id
+                && instance.authority.default_branch == config.instance.default_branch
+                && instance.authority.config_path == target.config_path
+                && instance.authority.config_sha256
+                    == crate::hex_encode(sha2::Sha256::digest(&instance.config_bytes)),
+            "native Server instance snapshot does not match its protected configuration"
+        );
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref()
+                == Ok(config.instance.repository.as_str()),
+            "native Server instance differs from the current job repository"
+        );
+        let expected_ref = format!("refs/heads/{}", config.instance.default_branch);
+        ensure!(
+            std::env::var("GITHUB_REF").as_deref() == Ok(expected_ref.as_str()),
+            "native Server writer must execute from the protected instance branch"
+        );
+
+        let read_token =
+            std::env::var(read_name).with_context(|| format!("missing {read_name}"))?;
+        ensure!(!read_token.is_empty(), "{read_name} is empty");
+        let write_token =
+            std::env::var(write_name).with_context(|| format!("missing {write_name}"))?;
+        ensure!(!write_token.is_empty(), "{write_name} is empty");
+        let mut api = Self::new("https://api.github.com", read_token)?;
+        require_single_repository_installation(&api, target.repository_id, target.repository)?;
+        let write_api = Self::new("https://api.github.com", write_token.clone())?;
+        if target.mode == NativeInstanceMode::Approve {
+            let reviewer: Value = write_api.get("/user")?;
+            ensure!(
+                reviewer["id"].as_u64() == Some(config.identities.approval_reviewer.id)
+                    && reviewer["login"].as_str()
+                        == Some(config.identities.approval_reviewer.login.as_str())
+                    && reviewer["type"] == "User",
+                "approval token must authenticate as the configured review account"
+            );
+        } else {
+            require_single_repository_installation(
+                &write_api,
+                target.repository_id,
+                target.repository,
+            )?;
+        }
+
+        let server_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+        ensure!(!server_token.is_empty(), "GITHUB_TOKEN is empty");
+        let server_reader = Self::new("https://api.github.com", server_token)?;
+        let (remote_config, current_authority) = server_reader.capture_native_server_authority(
+            &config,
+            target.config_path,
+            &instance.config_bytes,
+        )?;
+        ensure!(
+            remote_config == instance.config_bytes,
+            "native Server config does not match the protected default branch"
+        );
+        require_native_authority_unchanged(&instance.authority, &current_authority)?;
+
+        let workflow_ref = std::env::var("GITHUB_WORKFLOW_REF")
+            .context("missing GITHUB_WORKFLOW_REF for native Server execution")?;
+        let workflow_sha = std::env::var("GITHUB_WORKFLOW_SHA")
+            .context("missing GITHUB_WORKFLOW_SHA for native Server execution")?;
+        let role = target.mode.workflow_role();
+        let workflow_path = config
+            .workflow_roles
+            .get(&role)
+            .context("native Server workflow role is not configured")?;
+        let workflow_bytes =
+            server_reader.content(&config.instance.repository, workflow_path, &workflow_sha)?;
+        validate_native_server_execution_workflow(
+            &instance.authority,
+            target.mode.scratch_mode(),
+            &workflow_ref,
+            &workflow_sha,
+            &workflow_bytes,
+        )?;
+
+        api.write_token = Some(write_token);
+        api.writes = WriteContext::NativeInstance(Box::new(NativeInstanceWrite {
+            mode: target.mode,
+            instance_repository: config.instance.repository,
+            instance_id: config.instance.id,
+            default_branch: config.instance.default_branch,
+            config_path: target.config_path.to_owned(),
+            config_bytes: instance.config_bytes.clone(),
+            server_authority: instance.authority.clone(),
+            target_repository: target.repository.to_owned(),
+            target_id: target.repository_id,
+            pull_number: target.pull_number,
+            head_sha: target.head_sha.to_owned(),
+            head_branch: target.head_branch.to_owned(),
+            head_repository_id: target.head_repository_id,
+            base_sha: target.base_sha.to_owned(),
+            base_ref: target.base_ref.to_owned(),
+            author_id: target.author_id,
+            author_login: target.author_login.to_owned(),
+            actor_id: target.actor_id,
+            actor_login: target.actor_login.to_owned(),
+            request_sha256: target.request_sha256.to_owned(),
+            producer_run_id: target.producer_run_id,
+            producer_run_attempt: target.producer_run_attempt,
+            producer_workflow_path: target.producer_workflow_path.to_owned(),
+            producer_workflow_sha: target.producer_workflow_sha.to_owned(),
+            client_workflow_epoch: target.client_workflow_epoch.to_owned(),
+        }));
+        api.require_native_instance_current()?;
+        Ok(api)
+    }
+
+    /// Create the API writer for one validated release plan. Reads use the
+    /// existing read-only installation token; only the exact release draft,
+    /// planned assets, and final draft transition use the write token.
+    pub fn native_release_from_env(
+        read_name: &str,
+        write_name: &str,
+        instance: &NativeServerInstanceAuthority,
+        target: &NativeReleaseWriteTarget<'_>,
+    ) -> Result<Self> {
+        validate_instance_config_path(target.config_path)?;
+        validate_native_authority_snapshot(&instance.authority)?;
+        let config = crate::instance_config::InstanceConfig::parse(&instance.config_bytes)?;
+        let (client_package, release_manifest_sha256) =
+            validate_native_release_target(&config, &instance.authority, target)?;
+        ensure!(
+            instance.authority.instance_repository == config.instance.repository
+                && instance.authority.instance_id == config.instance.id
+                && instance.authority.default_branch == config.instance.default_branch
+                && instance.authority.config_path == target.config_path
+                && instance.authority.config_sha256
+                    == crate::hex_encode(sha2::Sha256::digest(&instance.config_bytes)),
+            "native Server instance snapshot does not match its protected configuration"
+        );
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref()
+                == Ok(config.instance.repository.as_str()),
+            "native Server release differs from the current job repository"
+        );
+        let expected_ref = format!("refs/heads/{}", config.instance.default_branch);
+        ensure!(
+            std::env::var("GITHUB_REF").as_deref() == Ok(expected_ref.as_str()),
+            "native Server release writer must execute from the protected instance branch"
+        );
+
+        let read_token =
+            std::env::var(read_name).with_context(|| format!("missing {read_name}"))?;
+        ensure!(!read_token.is_empty(), "{read_name} is empty");
+        let write_token =
+            std::env::var(write_name).with_context(|| format!("missing {write_name}"))?;
+        ensure!(!write_token.is_empty(), "{write_name} is empty");
+        let mut api = Self::new("https://api.github.com", read_token)?;
+        require_single_repository_installation(&api, target.repository_id, target.repository)?;
+        let write_api = Self::new("https://api.github.com", write_token.clone())?;
+        require_single_repository_installation(
+            &write_api,
+            target.repository_id,
+            target.repository,
+        )?;
+
+        let server_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+        ensure!(!server_token.is_empty(), "GITHUB_TOKEN is empty");
+        let server_reader = Self::new("https://api.github.com", server_token)?;
+        let (remote_config, current_authority) = server_reader.capture_native_server_authority(
+            &config,
+            target.config_path,
+            &instance.config_bytes,
+        )?;
+        ensure!(
+            remote_config == instance.config_bytes,
+            "native Server config does not match the protected default branch"
+        );
+        require_native_authority_unchanged(&instance.authority, &current_authority)?;
+
+        let workflow_ref = std::env::var("GITHUB_WORKFLOW_REF")
+            .context("missing GITHUB_WORKFLOW_REF for native Server release")?;
+        let workflow_sha = std::env::var("GITHUB_WORKFLOW_SHA")
+            .context("missing GITHUB_WORKFLOW_SHA for native Server release")?;
+        let workflow_path = config
+            .workflow_roles
+            .get(&crate::instance_config::WorkflowRole::Release)
+            .context("native Server Release workflow role is not configured")?;
+        let workflow_bytes =
+            server_reader.content(&config.instance.repository, workflow_path, &workflow_sha)?;
+        validate_native_server_execution_workflow_role(
+            &instance.authority,
+            crate::instance_config::WorkflowRole::Release,
+            &workflow_ref,
+            &workflow_sha,
+            &workflow_bytes,
+        )?;
+
+        let repository: Value = api.get_uncached(&format!("/repos/{}", target.repository))?;
+        ensure!(
+            repository["id"].as_u64() == Some(target.repository_id)
+                && repository["full_name"].as_str() == Some(target.repository)
+                && repository["default_branch"]
+                    .as_str()
+                    .is_some_and(|branch| !branch.is_empty()),
+            "native release destination repository identity is invalid"
+        );
+        let default_branch = repository["default_branch"]
+            .as_str()
+            .context("native release destination has no default branch")?
+            .to_owned();
+
+        api.write_token = Some(write_token);
+        api.writes = WriteContext::NativeRelease(Box::new(NativeReleaseWrite {
+            instance_repository: config.instance.repository,
+            instance_id: config.instance.id,
+            default_branch: config.instance.default_branch,
+            config_path: target.config_path.to_owned(),
+            config_bytes: instance.config_bytes.clone(),
+            server_authority: instance.authority.clone(),
+            target_repository: target.repository.to_owned(),
+            target_id: target.repository_id,
+            target_default_branch: default_branch,
+            release_pr_number: target.release_pr_number,
+            release_pr_head_sha: target.release_pr_head_sha.to_owned(),
+            release_pr_merge_sha: target.release_pr_merge_sha.to_owned(),
+            tag: target.tag.to_owned(),
+            release_source_run_id: target.release_source_run_id,
+            release_source_run_attempt: target.release_source_run_attempt,
+            release_source_run_sha: target.release_source_run_sha.to_owned(),
+            release_source_workflow_sha: target.release_source_workflow_sha.to_owned(),
+            release_manifest: target.release_manifest.clone(),
+            release_manifest_bytes: target.release_manifest_bytes.to_vec(),
+            release_manifest_sha256,
+            client_package,
+            assets: target.assets.to_vec(),
+            native_assets: target.native_assets.to_vec(),
+            release_id: target.release_id,
+        }));
+        api.require_native_release_current()?;
+        Ok(api)
+    }
+
+    /// Bind the release ID returned by the exact draft-create call to this
+    /// writer before uploads or publication are permitted.
+    pub fn native_release_select(&mut self, release_id: u64) -> Result<()> {
+        ensure!(release_id > 0, "native release ID is invalid");
+        let WriteContext::NativeRelease(write) = &self.writes else {
+            bail!("native release writer context is missing");
+        };
+        ensure!(
+            write
+                .release_id
+                .is_none_or(|selected| selected == release_id),
+            "native release writer already selected a different release"
+        );
+        let repository = write.target_repository.clone();
+        let tag = write.tag.clone();
+        let default_branch = write.target_default_branch.clone();
+        let release: Value =
+            self.get_uncached(&format!("/repos/{}/releases/{release_id}", repository))?;
+        let version = semver::Version::parse(tag.strip_prefix('v').unwrap_or_default())?;
+        ensure!(
+            release["id"].as_u64() == Some(release_id)
+                && release["tag_name"] == tag
+                && release["name"] == tag
+                && release["target_commitish"] == default_branch
+                && release["prerelease"] == !version.pre.is_empty()
+                && release["draft"] == true,
+            "selected native release is not the exact draft"
+        );
+        let WriteContext::NativeRelease(write) = &mut self.writes else {
+            unreachable!("native release writer context changed during selection");
+        };
+        write.release_id = Some(release_id);
         Ok(())
     }
 
@@ -558,6 +1185,46 @@ impl GitHub {
         )
     }
 
+    /// Load an instance configuration only from the repository's current
+    /// protected default branch and bind it to the selected operation wrappers.
+    /// The caller supplies the repository and root-relative config path as
+    /// locators; the returned configuration is usable only with this captured
+    /// authority snapshot and the exact bytes it records.
+    pub fn capture_remote_native_server_instance_authority(
+        &self,
+        repository_name: &str,
+        config_path: &str,
+    ) -> Result<NativeServerInstanceAuthority> {
+        let (config_bytes, authority) =
+            self.capture_remote_native_server_authority(repository_name, config_path)?;
+        let config = crate::instance_config::InstanceConfig::parse(&config_bytes)?;
+        ensure!(
+            config.instance.repository == authority.instance_repository
+                && config.instance.id == authority.instance_id
+                && config.instance.default_branch == authority.default_branch
+                && authority.config_path == config_path,
+            "captured instance config does not match its authenticated authority"
+        );
+        Ok(NativeServerInstanceAuthority {
+            config,
+            config_bytes,
+            authority,
+        })
+    }
+
+    /// Reconstruct the protected-main config and role authority and reject a
+    /// stale snapshot before the caller performs a protected write.
+    pub fn require_remote_native_server_instance_authority_unchanged(
+        &self,
+        captured: &NativeServerInstanceAuthority,
+    ) -> Result<()> {
+        let current = self.capture_remote_native_server_instance_authority(
+            &captured.authority.instance_repository,
+            &captured.authority.config_path,
+        )?;
+        require_native_server_instance_authority_unchanged(captured, &current)
+    }
+
     fn capture_native_server_authority_for_repository(
         &self,
         config: &crate::instance_config::InstanceConfig,
@@ -676,6 +1343,27 @@ impl GitHub {
                 "client write target is not the configured request-label endpoint"
             );
         }
+        if let WriteContext::NativeClientLabel { server, .. } = &self.writes {
+            ensure!(
+                *method == Method::POST && path == format!("/repos/{server}/labels"),
+                "native Client may only create its exact request label"
+            );
+        }
+        if let WriteContext::NativeClientReleaseLabel(write) = &self.writes {
+            ensure!(
+                *method == Method::POST
+                    && path == format!("/repos/{}/labels", write.server_repository),
+                "native Client may only create its exact release request label"
+            );
+        }
+        if let WriteContext::NativeReleaseTag(write) = &self.writes {
+            let tag_path = format!("/repos/{}/git/tags", write.repository);
+            let ref_path = format!("/repos/{}/git/refs", write.repository);
+            ensure!(
+                *method == Method::POST && (path == tag_path || path == ref_path),
+                "native release tag writer may only create its exact annotated tag and ref"
+            );
+        }
         if let WriteContext::Scratch { candidate_sha } = &self.writes {
             crate::policy::validate_sha(candidate_sha)?;
         }
@@ -713,6 +1401,56 @@ impl GitHub {
                     "native merge may only merge the exact PR"
                 ),
             }
+        }
+        if let WriteContext::NativeInstance(write) = &self.writes {
+            match write.mode {
+                NativeInstanceMode::PolicyCheck => ensure!(
+                    *method == Method::POST
+                        && path == format!("/repos/{}/check-runs", write.target_repository),
+                    "native instance policy check may only create its exact check run"
+                ),
+                NativeInstanceMode::Securefix => ensure!(
+                    *method == Method::POST
+                        && path == format!("/repos/{}/git/commits", write.target_repository),
+                    "native instance Securefix may only create a commit for its exact PR head"
+                ),
+                NativeInstanceMode::Approve => ensure!(
+                    *method == Method::POST
+                        && path
+                            == format!(
+                                "/repos/{}/pulls/{}/reviews",
+                                write.target_repository, write.pull_number
+                            ),
+                    "native instance approval may only submit its exact PR review"
+                ),
+                NativeInstanceMode::Merge => ensure!(
+                    *method == Method::PUT
+                        && path
+                            == format!(
+                                "/repos/{}/pulls/{}/merge",
+                                write.target_repository, write.pull_number
+                            ),
+                    "native instance merge may only merge its exact PR"
+                ),
+            }
+        }
+        if let WriteContext::NativeRelease(write) = &self.writes {
+            let valid_create = *method == Method::POST
+                && path == format!("/repos/{}/releases", write.target_repository);
+            let valid_publish = *method == Method::PATCH
+                && write.release_id.is_some_and(|id| {
+                    path == format!("/repos/{}/releases/{id}", write.target_repository)
+                });
+            let valid_asset_upload =
+                *method == Method::POST && native_release_upload_url(write, path).is_ok();
+            ensure!(
+                valid_create || valid_publish || valid_asset_upload,
+                "native release writer target is outside its exact release lifecycle"
+            );
+            ensure!(
+                !valid_create || write.release_id.is_none(),
+                "native release draft already has a selected identity"
+            );
         }
         let isolated = matches!(
             &self.writes,
@@ -817,6 +1555,44 @@ impl GitHub {
             {
                 self.write_token.as_deref().unwrap_or(&self.token)
             }
+            WriteContext::NativeInstance(write)
+                if (method == Method::POST
+                    && match write.mode {
+                        NativeInstanceMode::PolicyCheck => {
+                            path == format!("/repos/{}/check-runs", write.target_repository)
+                        }
+                        NativeInstanceMode::Approve => {
+                            path == format!(
+                                "/repos/{}/pulls/{}/reviews",
+                                write.target_repository, write.pull_number
+                            )
+                        }
+                        NativeInstanceMode::Merge => false,
+                        NativeInstanceMode::Securefix => path == "/graphql",
+                    })
+                    || (method == Method::PUT
+                        && write.mode == NativeInstanceMode::Merge
+                        && path
+                            == format!(
+                                "/repos/{}/pulls/{}/merge",
+                                write.target_repository, write.pull_number
+                            ))
+                    || (method == Method::GET
+                        && write.mode == NativeInstanceMode::Approve
+                        && path == "/user") =>
+            {
+                self.write_token.as_deref().unwrap_or(&self.token)
+            }
+            WriteContext::NativeRelease(write)
+                if (method == Method::POST
+                    && path == format!("/repos/{}/releases", write.target_repository))
+                    || (method == Method::PATCH
+                        && write.release_id.is_some_and(|id| {
+                            path == format!("/repos/{}/releases/{id}", write.target_repository)
+                        })) =>
+            {
+                self.write_token.as_deref().unwrap_or(&self.token)
+            }
             _ => &self.token,
         };
         let mut request = self
@@ -848,6 +1624,42 @@ impl GitHub {
                 "client may only create configured server request labels"
             );
         }
+        if let WriteContext::NativeClientLabel {
+            server,
+            name,
+            description,
+        } = &self.writes
+        {
+            validate_native_client_label_body(
+                &method,
+                path,
+                server,
+                name,
+                description,
+                body.context("native Client label body is missing")?,
+            )?;
+        }
+        if let WriteContext::NativeClientReleaseLabel(write) = &self.writes {
+            validate_native_client_release_label_write(write)?;
+            validate_native_client_release_label_body(
+                &method,
+                path,
+                write,
+                body.context("native Client release label body is missing")?,
+            )?;
+        }
+        if let WriteContext::NativeReleaseTag(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            validate_native_release_tag_saved(write)?;
+            validate_native_release_tag_body(
+                write,
+                &method,
+                path,
+                body.context("native release tag body is missing")?,
+            )?;
+        }
         if let WriteContext::NativeScratch(write) = &self.writes
             && method != Method::GET
             && method != Method::HEAD
@@ -874,6 +1686,34 @@ impl GitHub {
                     body.context("native merge body is missing")?,
                 )?,
                 NativeScratchMode::Securefix => {
+                    bail!("Securefix writes must use the validated signed-commit path")
+                }
+            }
+        }
+        if let WriteContext::NativeInstance(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            match write.mode {
+                NativeInstanceMode::PolicyCheck => validate_native_instance_check_body(
+                    &method,
+                    path,
+                    write,
+                    body.context("native instance check body is missing")?,
+                )?,
+                NativeInstanceMode::Approve => validate_native_instance_approval_body(
+                    &method,
+                    path,
+                    write,
+                    body.context("native instance approval body is missing")?,
+                )?,
+                NativeInstanceMode::Merge => validate_native_instance_merge_body(
+                    &method,
+                    path,
+                    write,
+                    body.context("native instance merge body is missing")?,
+                )?,
+                NativeInstanceMode::Securefix => {
                     bail!("Securefix writes must use the validated signed-commit path")
                 }
             }
@@ -935,6 +1775,20 @@ impl GitHub {
                 "package destination repository identity changed"
             );
         }
+        if let WriteContext::NativeRelease(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            validate_native_release_write_body(
+                write,
+                &method,
+                path,
+                body.context("native release request body is missing")?,
+            )?;
+            if method == Method::PATCH {
+                self.validate_native_release_asset_inventory(write, true)?;
+            }
+        }
         let read_only_graphql = path == "/graphql"
             && method == Method::POST
             && body
@@ -970,19 +1824,38 @@ impl GitHub {
         if bytes.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_slice(&bytes).context("invalid GitHub JSON")
+        let value: Value = serde_json::from_slice(&bytes).context("invalid GitHub JSON")?;
+        if let WriteContext::NativeReleaseTag(write) = &self.writes
+            && method == Method::POST
+            && path == format!("/repos/{}/git/tags", write.repository)
+        {
+            record_native_release_tag_created_object(write, &value)?;
+        }
+        Ok(value)
     }
 
     fn require_current_revision(&self) -> Result<()> {
         let (expected, expected_control) = match &self.writes {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
-            WriteContext::ClientLabel { .. } => {
+            WriteContext::ClientLabel { .. } | WriteContext::NativeClientLabel { .. } => {
                 return Ok(());
+            }
+            WriteContext::NativeClientReleaseLabel(write) => {
+                return self.require_native_client_release_label_current(write);
+            }
+            WriteContext::NativeReleaseTag(write) => {
+                return self.require_native_release_tag_current(write);
             }
             WriteContext::Scratch { .. } => return Ok(()),
             WriteContext::PackageScratch { .. } => return Ok(()),
             WriteContext::NativeScratch(_) => {
                 return self.require_native_scratch_current();
+            }
+            WriteContext::NativeInstance(_) => {
+                return self.require_native_instance_current();
+            }
+            WriteContext::NativeRelease(_) => {
+                return self.require_native_release_current();
             }
             WriteContext::Production {
                 revision,
@@ -1193,6 +2066,450 @@ impl GitHub {
         Ok(())
     }
 
+    fn require_native_instance_current(&self) -> Result<()> {
+        let WriteContext::NativeInstance(write) = &self.writes else {
+            bail!("native instance write context is missing");
+        };
+        let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes)?;
+        let target = NativeInstanceWriteTarget {
+            mode: write.mode,
+            config_path: &write.config_path,
+            repository: &write.target_repository,
+            repository_id: write.target_id,
+            pull_number: write.pull_number,
+            head_sha: &write.head_sha,
+            head_branch: &write.head_branch,
+            head_repository_id: write.head_repository_id,
+            base_sha: &write.base_sha,
+            base_ref: &write.base_ref,
+            author_id: write.author_id,
+            author_login: &write.author_login,
+            actor_id: write.actor_id,
+            actor_login: &write.actor_login,
+            request_sha256: &write.request_sha256,
+            producer_run_id: write.producer_run_id,
+            producer_run_attempt: write.producer_run_attempt,
+            producer_workflow_path: &write.producer_workflow_path,
+            producer_workflow_sha: &write.producer_workflow_sha,
+            client_workflow_epoch: &write.client_workflow_epoch,
+        };
+        validate_native_instance_write_target(&config, &target)?;
+        ensure!(
+            config.instance.repository == write.instance_repository
+                && config.instance.id == write.instance_id
+                && config.instance.default_branch == write.default_branch
+                && write.server_authority.config_sha256
+                    == crate::hex_encode(sha2::Sha256::digest(&write.config_bytes)),
+            "native Server writer configuration differs from its authority snapshot"
+        );
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(write.instance_repository.as_str())
+                && std::env::var("GITHUB_REF").as_deref()
+                    == Ok(format!("refs/heads/{}", write.default_branch).as_str()),
+            "native Server writer is no longer executing from the protected instance branch"
+        );
+
+        require_single_repository_installation(self, write.target_id, &write.target_repository)?;
+        if let Some(token) = &self.write_token {
+            let write_api = Self::new("https://api.github.com", token.clone())?;
+            if write.mode == NativeInstanceMode::Approve {
+                let reviewer: Value = write_api.get_uncached("/user")?;
+                ensure!(
+                    reviewer["id"].as_u64() == Some(config.identities.approval_reviewer.id)
+                        && reviewer["login"].as_str()
+                            == Some(config.identities.approval_reviewer.login.as_str())
+                        && reviewer["type"] == "User",
+                    "approval token no longer authenticates as the configured review account"
+                );
+            } else {
+                require_single_repository_installation(
+                    &write_api,
+                    write.target_id,
+                    &write.target_repository,
+                )?;
+            }
+        }
+
+        let server_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+        ensure!(!server_token.is_empty(), "GITHUB_TOKEN is empty");
+        let server_reader = Self::new("https://api.github.com", server_token)?;
+        let (remote_config, current_authority) = server_reader.capture_native_server_authority(
+            &config,
+            &write.config_path,
+            &write.config_bytes,
+        )?;
+        ensure!(
+            remote_config == write.config_bytes,
+            "native Server config changed before write"
+        );
+        require_native_authority_unchanged(&write.server_authority, &current_authority)
+            .context("native Server configuration or role authority changed before write")?;
+
+        let current_client_epoch = capture_native_client_workflow_epoch(
+            self,
+            &write.target_repository,
+            write.target_id,
+            &write.base_ref,
+            &write.producer_workflow_path,
+            &write.producer_workflow_sha,
+        )?;
+        require_native_client_workflow_epoch_unchanged(
+            &write.client_workflow_epoch,
+            &current_client_epoch,
+        )?;
+
+        let target: Value = self.get_uncached(&format!("/repos/{}", write.target_repository))?;
+        ensure!(
+            target["id"].as_u64() == Some(write.target_id)
+                && target["full_name"].as_str() == Some(write.target_repository.as_str())
+                && target["default_branch"].as_str() == Some(write.base_ref.as_str()),
+            "native request target repository identity changed"
+        );
+        let pull: Value = self.get_uncached(&format!(
+            "/repos/{}/pulls/{}",
+            write.target_repository, write.pull_number
+        ))?;
+        ensure!(
+            pull["number"].as_u64() == Some(write.pull_number)
+                && pull["state"] == "open"
+                && pull["base"]["repo"]["id"].as_u64() == Some(write.target_id)
+                && pull["base"]["repo"]["full_name"].as_str()
+                    == Some(write.target_repository.as_str())
+                && pull["base"]["ref"].as_str() == Some(write.base_ref.as_str())
+                && pull["base"]["sha"].as_str() == Some(write.base_sha.as_str())
+                && pull["head"]["sha"].as_str() == Some(write.head_sha.as_str())
+                && pull["head"]["ref"].as_str() == Some(write.head_branch.as_str())
+                && pull["head"]["repo"]["id"].as_u64() == Some(write.head_repository_id)
+                && pull["user"]["id"].as_u64() == Some(write.author_id)
+                && pull["user"]["login"].as_str() == Some(write.author_login.as_str()),
+            "native request PR is closed, retargeted, or has a different head, base, or author"
+        );
+        if write.mode == NativeInstanceMode::Securefix {
+            ensure!(
+                write.head_repository_id == write.target_id,
+                "native Securefix requires a same-repository PR head"
+            );
+        }
+        Ok(())
+    }
+
+    fn require_native_client_release_label_current(
+        &self,
+        write: &NativeClientReleaseLabelWrite,
+    ) -> Result<()> {
+        validate_native_client_release_label_write(write)?;
+        validate_native_client_release_label_execution(write)?;
+        self.require_remote_native_server_instance_authority_unchanged(&write.instance)
+    }
+
+    fn require_native_release_tag_current(&self, write: &NativeReleaseTagWrite) -> Result<()> {
+        validate_native_release_tag_saved(write)?;
+        validate_native_release_tag_execution(write)?;
+        self.require_remote_native_server_instance_authority_unchanged(&write.instance)?;
+
+        let config = crate::instance_config::InstanceConfig::parse(&write.instance.config_bytes)?;
+        let repository: Value = self.get_uncached(&format!("/repos/{}", write.repository))?;
+        let default_branch = repository["default_branch"]
+            .as_str()
+            .context("native release destination lacks a default branch")?;
+        ensure!(
+            repository["id"].as_u64() == Some(write.repository_id)
+                && repository["full_name"].as_str() == Some(write.repository.as_str())
+                && repository["owner"]["id"].as_u64()
+                    == Some(config.identities.repository_owner.id),
+            "native release destination repository identity changed"
+        );
+        let pull: Value = self.get_uncached(&format!(
+            "/repos/{}/pulls/{}",
+            write.repository, write.release_pr_number
+        ))?;
+        let server_bot = &config.identities.server_bot;
+        ensure!(
+            pull["number"].as_u64() == Some(write.release_pr_number)
+                && pull["state"] == "closed"
+                && pull["merged"] == true
+                && pull["base"]["repo"]["id"].as_u64() == Some(write.repository_id)
+                && pull["base"]["repo"]["full_name"].as_str() == Some(write.repository.as_str())
+                && pull["base"]["ref"].as_str() == Some(default_branch)
+                && pull["head"]["repo"]["id"].as_u64() == Some(write.repository_id)
+                && pull["head"]["repo"]["full_name"].as_str() == Some(write.repository.as_str())
+                && pull["head"]["sha"].as_str() == Some(write.release_pr_head_sha.as_str())
+                && pull["merge_commit_sha"].as_str() == Some(write.release_pr_merge_sha.as_str())
+                && pull["merged_by"]["id"].as_u64() == Some(server_bot.id)
+                && pull["merged_by"]["login"].as_str() == Some(server_bot.login.as_str())
+                && pull["merged_by"]["type"] == "Bot",
+            "native release PR head, merge, base, repository, or Server merger changed"
+        );
+        let ancestry: Value = self.get_uncached(&format!(
+            "/repos/{}/compare/{}...{}",
+            write.repository,
+            write.release_pr_merge_sha,
+            encode_path_segment(default_branch),
+        ))?;
+        ensure!(
+            matches!(ancestry["status"].as_str(), Some("ahead" | "identical"))
+                && ancestry["base_commit"]["sha"].as_str()
+                    == Some(write.release_pr_merge_sha.as_str()),
+            "native release merge is no longer contained in the default branch"
+        );
+        let version_bytes = self.content(
+            &write.repository,
+            ".release-version",
+            &write.release_pr_merge_sha,
+        )?;
+        let version = String::from_utf8(version_bytes)?.trim().to_owned();
+        ensure!(
+            format!("v{version}") == write.tag,
+            "native release tag no longer matches the merged release version"
+        );
+
+        let tag_ref_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            write.repository,
+            encode_path_segment(&write.tag),
+        );
+        match self.get_uncached::<Value>(&tag_ref_path) {
+            Ok(reference) => {
+                let state = write
+                    .tag_object_sha
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("native release tag state is poisoned"))?;
+                ensure!(
+                    *state == reference["object"]["sha"].as_str().map(str::to_owned)
+                        && reference["object"]["type"] == "tag",
+                    "a different object now occupies the native release tag"
+                );
+                ensure!(
+                    !state.is_none(),
+                    "native release tag already exists before its authorized write"
+                );
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|api_error| api_error.status == StatusCode::NOT_FOUND) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    fn require_native_release_current(&self) -> Result<()> {
+        let WriteContext::NativeRelease(write) = &self.writes else {
+            bail!("native release writer context is missing");
+        };
+        let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes)?;
+        validate_native_release_saved(&config, &write.server_authority, write)?;
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(write.instance_repository.as_str())
+                && std::env::var("GITHUB_REF").as_deref()
+                    == Ok(format!("refs/heads/{}", write.default_branch).as_str()),
+            "native Server release writer is no longer executing from the protected instance branch"
+        );
+        require_single_repository_installation(self, write.target_id, &write.target_repository)?;
+        if let Some(token) = &self.write_token {
+            let write_api = Self::new("https://api.github.com", token.clone())?;
+            require_single_repository_installation(
+                &write_api,
+                write.target_id,
+                &write.target_repository,
+            )?;
+        }
+
+        let server_token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
+        ensure!(!server_token.is_empty(), "GITHUB_TOKEN is empty");
+        let server_reader = Self::new("https://api.github.com", server_token)?;
+        let (remote_config, current_authority) = server_reader.capture_native_server_authority(
+            &config,
+            &write.config_path,
+            &write.config_bytes,
+        )?;
+        ensure!(
+            remote_config == write.config_bytes,
+            "native Server config changed before release write"
+        );
+        require_native_authority_unchanged(&write.server_authority, &current_authority).context(
+            "native Server configuration or Release role authority changed before write",
+        )?;
+
+        let workflow_ref = std::env::var("GITHUB_WORKFLOW_REF")
+            .context("missing GITHUB_WORKFLOW_REF for native Server release")?;
+        let workflow_sha = std::env::var("GITHUB_WORKFLOW_SHA")
+            .context("missing GITHUB_WORKFLOW_SHA for native Server release")?;
+        let workflow_path = config
+            .workflow_roles
+            .get(&crate::instance_config::WorkflowRole::Release)
+            .context("native Server Release workflow role is not configured")?;
+        let workflow_bytes =
+            server_reader.content(&config.instance.repository, workflow_path, &workflow_sha)?;
+        validate_native_server_execution_workflow_role(
+            &write.server_authority,
+            crate::instance_config::WorkflowRole::Release,
+            &workflow_ref,
+            &workflow_sha,
+            &workflow_bytes,
+        )?;
+
+        let repository: Value =
+            self.get_uncached(&format!("/repos/{}", write.target_repository))?;
+        ensure!(
+            repository["id"].as_u64() == Some(write.target_id)
+                && repository["full_name"].as_str() == Some(write.target_repository.as_str())
+                && repository["default_branch"].as_str()
+                    == Some(write.target_default_branch.as_str()),
+            "native release destination identity or default branch changed"
+        );
+        match self.get_uncached::<Value>(&format!(
+            "/repos/{}/releases/tags/{}",
+            write.target_repository, write.tag
+        )) {
+            Ok(existing) => ensure!(
+                write.release_id.is_some()
+                    && existing["id"].as_u64() == write.release_id
+                    && existing["tag_name"] == write.tag,
+                "a different release now occupies the native release tag"
+            ),
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|api_error| api_error.status == StatusCode::NOT_FOUND) =>
+            {
+                ensure!(
+                    write.release_id.is_none(),
+                    "selected native release is no longer present for its tag"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+        let pull: Value = self.get_uncached(&format!(
+            "/repos/{}/pulls/{}",
+            write.target_repository, write.release_pr_number
+        ))?;
+        ensure!(
+            pull["number"].as_u64() == Some(write.release_pr_number)
+                && pull["state"] == "closed"
+                && pull["merged"] == true
+                && pull["base"]["repo"]["id"].as_u64() == Some(write.target_id)
+                && pull["base"]["repo"]["full_name"] == write.target_repository
+                && pull["base"]["ref"] == write.target_default_branch
+                && pull["head"]["repo"]["id"].as_u64() == Some(write.target_id)
+                && pull["head"]["sha"] == write.release_pr_head_sha
+                && pull["merge_commit_sha"] == write.release_pr_merge_sha,
+            "native release PR head, merge, repository, or base changed"
+        );
+
+        let source_run: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            write.target_repository, write.release_source_run_id, write.release_source_run_attempt
+        ))?;
+        validate_native_release_source_run(&config, write, &source_run)?;
+
+        server_reader.validate_native_client_package_current(&config, &write.client_package)?;
+
+        let tag_ref: Value = self.get_uncached(&format!(
+            "/repos/{}/git/ref/tags/{}",
+            write.target_repository, write.tag
+        ))?;
+        ensure!(
+            tag_ref["object"]["type"] == "tag",
+            "native release tag is not annotated"
+        );
+        let tag_object_sha = tag_ref["object"]["sha"]
+            .as_str()
+            .context("native release tag reference lacks object SHA")?;
+        crate::policy::validate_sha(tag_object_sha)?;
+        let tag_object: Value = self.get_uncached(&format!(
+            "/repos/{}/git/tags/{tag_object_sha}",
+            write.target_repository
+        ))?;
+        ensure!(
+            tag_object["object"]["sha"] == write.release_pr_merge_sha
+                && tag_object["object"]["type"] == "commit",
+            "native release tag no longer targets the authorized merge commit"
+        );
+        if let Some(release_id) = write.release_id {
+            let release: Value = self.get_uncached(&format!(
+                "/repos/{}/releases/{release_id}",
+                write.target_repository
+            ))?;
+            ensure!(
+                release["id"].as_u64() == Some(release_id)
+                    && release["tag_name"] == write.tag
+                    && release["name"] == write.tag
+                    && release["target_commitish"] == write.target_default_branch
+                    && release["prerelease"]
+                        == !semver::Version::parse(
+                            write.tag.strip_prefix('v').unwrap_or_default(),
+                        )?
+                        .pre
+                        .is_empty()
+                    && (release["draft"] == true || release["immutable"] == true),
+                "native release identity changed"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_native_client_package_current(
+        &self,
+        config: &crate::instance_config::InstanceConfig,
+        package: &NativeClientPackageIdentity,
+    ) -> Result<()> {
+        validate_native_client_package_snapshot(config, package)?;
+        let repository: Value =
+            self.get_uncached(&format!("/repos/{}", package.distributor_repository))?;
+        let release: Value = self.get_uncached(&format!(
+            "/repos/{}/releases/{}",
+            package.distributor_repository, package.release_id
+        ))?;
+        let tag_ref: Value = self.get_uncached(&format!(
+            "/repos/{}/git/ref/tags/{}",
+            package.distributor_repository, package.release_tag
+        ))?;
+        let publisher_run: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            package.distributor_repository, package.publisher_run_id, package.publisher_run_attempt
+        ))?;
+        validate_native_client_package_remote_identity(
+            package,
+            &repository,
+            &release,
+            &tag_ref,
+            &publisher_run,
+        )
+    }
+
+    fn validate_native_release_asset_inventory(
+        &self,
+        write: &NativeReleaseWrite,
+        require_complete: bool,
+    ) -> Result<Vec<Value>> {
+        let release_id = write
+            .release_id
+            .context("native release identity was not selected")?;
+        let release: Value = self.get_uncached(&format!(
+            "/repos/{}/releases/{release_id}",
+            write.target_repository
+        ))?;
+        ensure!(
+            release["id"].as_u64() == Some(release_id)
+                && release["tag_name"] == write.tag
+                && release["draft"] == true,
+            "native release asset inventory is not the selected draft"
+        );
+        let existing: Vec<Value> = self.paginate_uncached(&format!(
+            "/repos/{}/releases/{release_id}/assets",
+            write.target_repository
+        ))?;
+        validate_native_release_inventory(
+            write,
+            release_id,
+            &release,
+            &existing,
+            require_complete,
+        )?;
+        Ok(existing)
+    }
+
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Ok(serde_json::from_value(self.request(
             Method::GET,
@@ -1249,21 +2566,36 @@ impl GitHub {
     }
 
     pub fn merge_native_pull_request(&self) -> Result<String> {
-        let WriteContext::NativeScratch(write) = &self.writes else {
-            bail!("native scratch merge writer context is missing");
+        let (repository, pull_number, head_sha) = match &self.writes {
+            WriteContext::NativeScratch(write) => {
+                ensure!(
+                    write.mode == NativeScratchMode::Merge,
+                    "native scratch writer is not authorized to merge"
+                );
+                (
+                    write.target_repository.as_str(),
+                    write.pull_number,
+                    write.head_sha.as_str(),
+                )
+            }
+            WriteContext::NativeInstance(write) => {
+                ensure!(
+                    write.mode == NativeInstanceMode::Merge,
+                    "native instance writer is not authorized to merge"
+                );
+                (
+                    write.target_repository.as_str(),
+                    write.pull_number,
+                    write.head_sha.as_str(),
+                )
+            }
+            _ => bail!("native merge writer context is missing"),
         };
-        ensure!(
-            write.mode == NativeScratchMode::Merge,
-            "native scratch writer is not authorized to merge"
-        );
-        let path = format!(
-            "/repos/{}/pulls/{}/merge",
-            write.target_repository, write.pull_number
-        );
-        let result: Value = self.put(&path, &native_merge_body(&write.head_sha))?;
+        let path = format!("/repos/{repository}/pulls/{pull_number}/merge");
+        let result: Value = self.put(&path, &native_merge_body(head_sha))?;
         ensure!(
             result["merged"] == true,
-            "GitHub did not merge the exact native scratch pull request"
+            "GitHub did not merge the exact native pull request"
         );
         let merge_sha = result["sha"]
             .as_str()
@@ -1410,6 +2742,15 @@ impl GitHub {
                 write.mode == NativeScratchMode::Securefix
                     && repository == write.target_repository
                     && write.destination_branch.as_deref() == Some(branch)
+                    && expected_head == write.head_sha,
+                "native Securefix commit differs from the exact target PR head"
+            );
+        }
+        if let WriteContext::NativeInstance(write) = &self.writes {
+            ensure!(
+                write.mode == NativeInstanceMode::Securefix
+                    && repository == write.target_repository
+                    && branch == write.head_branch
                     && expected_head == write.head_sha,
                 "native Securefix commit differs from the exact target PR head"
             );
@@ -1640,6 +2981,40 @@ impl GitHub {
                     && release["draft"] == true,
                 "package upload release is not the selected draft prerelease"
             );
+        } else if let WriteContext::NativeRelease(write) = &self.writes {
+            let api_path = native_release_upload_url(write, path)?;
+            let asset = write
+                .assets
+                .iter()
+                .find(|asset| api_path.ends_with(&format!("?name={}", asset.name)))
+                .context("native release upload asset is not in the verified plan")?;
+            ensure!(
+                bytes.len() as u64 == asset.size
+                    && crate::hex_encode(sha2::Sha256::digest(&bytes)) == asset.sha256
+                    && content_type == asset.content_type,
+                "native release upload bytes differ from the verified plan"
+            );
+            let release_id = write
+                .release_id
+                .context("native release draft identity was not selected")?;
+            let existing = self.validate_native_release_asset_inventory(write, false)?;
+            ensure!(
+                !existing
+                    .iter()
+                    .any(|existing| existing["name"] == asset.name),
+                "native release asset already exists"
+            );
+            self.require_write_target(&Method::POST, &api_path)?;
+            let release: Value = self.get_uncached(&format!(
+                "/repos/{}/releases/{release_id}",
+                write.target_repository
+            ))?;
+            ensure!(
+                release["id"].as_u64() == Some(release_id)
+                    && release["tag_name"] == write.tag
+                    && release["draft"] == true,
+                "native release asset target is not the selected draft"
+            );
         } else {
             ensure!(
                 !matches!(
@@ -1658,10 +3033,17 @@ impl GitHub {
                 && url.password().is_none(),
             "invalid upload endpoint"
         );
+        let upload_token = if matches!(self.writes, WriteContext::NativeRelease(_)) {
+            self.write_token
+                .as_deref()
+                .context("native release write token is missing")?
+        } else {
+            &self.token
+        };
         let response = self
             .client
             .post(url)
-            .bearer_auth(&self.token)
+            .bearer_auth(upload_token)
             .header("User-Agent", "securefix")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("Content-Type", content_type)
@@ -2268,6 +3650,17 @@ pub fn require_native_authority_unchanged(
     Ok(())
 }
 
+fn require_native_server_instance_authority_unchanged(
+    captured: &NativeServerInstanceAuthority,
+    current: &NativeServerInstanceAuthority,
+) -> Result<()> {
+    ensure!(
+        captured.config_bytes == current.config_bytes,
+        "native Server config changed since authority capture"
+    );
+    require_native_authority_unchanged(&captured.authority, &current.authority)
+}
+
 pub fn validate_native_authority_snapshot(snapshot: &NativeAuthoritySnapshot) -> Result<()> {
     crate::policy::validate_repository(&snapshot.instance_repository)?;
     validate_instance_config_path(&snapshot.config_path)?;
@@ -2299,6 +3692,1165 @@ pub fn validate_native_authority_snapshot(snapshot: &NativeAuthoritySnapshot) ->
             crate::policy::validate_sha(revision)
                 .context("native Server workflow pin is not a full SHA")?;
         }
+    }
+    Ok(())
+}
+
+/// Return the canonical label name for a native request operation.
+pub fn native_client_request_label(operation: &str, run_id: u64) -> Result<String> {
+    ensure!(run_id > 0, "invalid native request run ID");
+    let role = match operation {
+        "policy_check" => "policy-check",
+        "securefix" => "securefix",
+        "approval" => "approve",
+        "merge" => "merge",
+        _ => anyhow::bail!("unsupported native request operation"),
+    };
+    let label = format!("securefix-native-{role}-{run_id}");
+    ensure!(
+        label.len() <= 50,
+        "native request label exceeds GitHub limit"
+    );
+    Ok(label)
+}
+
+fn validate_native_client_label_target(
+    target: &NativeClientLabelTarget<'_>,
+) -> Result<(String, String)> {
+    validate_native_authority_snapshot(target.server_authority)?;
+    crate::policy::validate_repository(target.server_repository)?;
+    crate::policy::validate_repository(target.client_repository)?;
+    ensure!(
+        target.server_repository == target.server_authority.instance_repository,
+        "native Client label target differs from the captured Server authority"
+    );
+    let label = native_client_request_label(target.operation, target.run_id)?;
+    let description = format!("{}/{}", target.client_repository, target.run_id);
+    ensure!(
+        description.len() <= 100,
+        "native request label description exceeds GitHub limit"
+    );
+    Ok((label, description))
+}
+
+fn validate_native_release_tag_target(
+    target: &NativeReleaseTagWriteTarget<'_>,
+    source_run_id: u64,
+) -> Result<NativeReleaseTagWrite> {
+    let instance = target.instance;
+    validate_native_authority_snapshot(&instance.authority)?;
+    validate_instance_config_path(target.config_path)?;
+    let config = crate::instance_config::InstanceConfig::parse(&instance.config_bytes)?;
+    ensure!(
+        instance.authority.instance_repository == config.instance.repository
+            && instance.authority.instance_id == config.instance.id
+            && instance.authority.default_branch == config.instance.default_branch
+            && instance.authority.config_path == target.config_path
+            && instance.authority.config_sha256
+                == crate::hex_encode(sha2::Sha256::digest(&instance.config_bytes))
+            && instance.config.instance.repository == config.instance.repository
+            && instance.config.instance.id == config.instance.id
+            && instance.config.instance.default_branch == config.instance.default_branch
+            && instance.config.workflow_roles == config.workflow_roles,
+        "native release tag Server config does not match its captured authority"
+    );
+    crate::policy::validate_repository(target.repository)?;
+    let destination = config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == target.repository && repository.id == target.repository_id
+        })
+        .context("native release tag destination is not configured")?;
+    destination
+        .policy()
+        .require(crate::policy::Capability::Release)
+        .context("native release tag destination lacks the Release capability")?;
+    let captured_destination = instance
+        .config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == target.repository && repository.id == target.repository_id
+        })
+        .context("captured native release tag destination is not configured")?;
+    captured_destination
+        .policy()
+        .require(crate::policy::Capability::Release)
+        .context("captured native release tag destination lacks the Release capability")?;
+    ensure!(
+        target.repository_id > 0 && target.release_pr_number > 0 && source_run_id > 0,
+        "native release tag repository, PR, or run identity is invalid"
+    );
+    crate::release_manifest::CommitSha::parse(target.release_pr_head_sha)?;
+    crate::release_manifest::CommitSha::parse(target.release_pr_merge_sha)?;
+    crate::release_manifest::ReleaseTag::parse(target.tag)?;
+    Ok(NativeReleaseTagWrite {
+        instance: instance.clone(),
+        config_path: target.config_path.to_owned(),
+        repository: target.repository.to_owned(),
+        repository_id: target.repository_id,
+        release_pr_number: target.release_pr_number,
+        release_pr_head_sha: target.release_pr_head_sha.to_owned(),
+        release_pr_merge_sha: target.release_pr_merge_sha.to_owned(),
+        tag: target.tag.to_owned(),
+        source_run_id,
+        tag_object_sha: Arc::new(Mutex::new(None)),
+    })
+}
+
+fn validate_native_release_tag_execution(write: &NativeReleaseTagWrite) -> Result<()> {
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(write.repository.as_str()),
+        "native release tag destination differs from the current workflow repository"
+    );
+    let run_id = std::env::var("GITHUB_RUN_ID")
+        .context("missing GITHUB_RUN_ID for native release tag")?
+        .parse::<u64>()
+        .context("invalid GITHUB_RUN_ID for native release tag")?;
+    ensure!(
+        run_id == write.source_run_id,
+        "native release tag run differs from the captured workflow run"
+    );
+    Ok(())
+}
+
+fn validate_native_release_tag_saved(write: &NativeReleaseTagWrite) -> Result<()> {
+    let target = NativeReleaseTagWriteTarget {
+        instance: &write.instance,
+        config_path: &write.config_path,
+        repository: &write.repository,
+        repository_id: write.repository_id,
+        release_pr_number: write.release_pr_number,
+        release_pr_head_sha: &write.release_pr_head_sha,
+        release_pr_merge_sha: &write.release_pr_merge_sha,
+        tag: &write.tag,
+    };
+    let expected = validate_native_release_tag_target(&target, write.source_run_id)?;
+    ensure!(
+        expected.instance.config.instance.repository == write.instance.config.instance.repository
+            && expected.config_path == write.config_path
+            && expected.repository == write.repository
+            && expected.repository_id == write.repository_id
+            && expected.release_pr_number == write.release_pr_number
+            && expected.release_pr_head_sha == write.release_pr_head_sha
+            && expected.release_pr_merge_sha == write.release_pr_merge_sha
+            && expected.tag == write.tag,
+        "saved native release tag differs from the protected instance and merged PR"
+    );
+    Ok(())
+}
+
+fn validate_native_release_tag_body(
+    write: &NativeReleaseTagWrite,
+    method: &Method,
+    path: &str,
+    body: &Value,
+) -> Result<()> {
+    let tag_path = format!("/repos/{}/git/tags", write.repository);
+    if *method == Method::POST && path == tag_path {
+        let state = write
+            .tag_object_sha
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native release tag state is poisoned"))?;
+        ensure!(
+            state.is_none(),
+            "native release tag object was already created"
+        );
+        ensure!(
+            body == &serde_json::json!({
+                "tag": write.tag,
+                "message": format!("Release {}", write.tag),
+                "object": write.release_pr_merge_sha,
+                "type": "commit",
+            }),
+            "native annotated tag request differs from the exact merged release plan"
+        );
+        return Ok(());
+    }
+    if *method == Method::POST && path == format!("/repos/{}/git/refs", write.repository) {
+        let state = write
+            .tag_object_sha
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native release tag state is poisoned"))?;
+        let object_sha = state
+            .as_deref()
+            .context("native release tag object response was not validated")?;
+        ensure!(
+            body == &serde_json::json!({
+                "ref": format!("refs/tags/{}", write.tag),
+                "sha": object_sha,
+            }),
+            "native release reference request differs from the validated annotated tag object"
+        );
+        return Ok(());
+    }
+    bail!("native release tag request is outside the exact annotated tag lifecycle")
+}
+
+fn record_native_release_tag_created_object(
+    write: &NativeReleaseTagWrite,
+    response: &Value,
+) -> Result<()> {
+    let object_sha = validate_native_release_tag_created_object(write, response)?;
+    let mut state = write
+        .tag_object_sha
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native release tag state is poisoned"))?;
+    ensure!(
+        state.is_none(),
+        "native release tag object was already created"
+    );
+    *state = Some(object_sha);
+    Ok(())
+}
+
+fn validate_native_release_tag_created_object(
+    write: &NativeReleaseTagWrite,
+    response: &Value,
+) -> Result<String> {
+    let sha = response["sha"]
+        .as_str()
+        .context("GitHub did not return a native annotated tag object SHA")?;
+    crate::policy::validate_sha(sha)?;
+    ensure!(
+        response["tag"] == write.tag
+            && response["message"] == format!("Release {}", write.tag)
+            && response["object"]["sha"] == write.release_pr_merge_sha
+            && response["object"]["type"] == "commit",
+        "GitHub returned an annotated tag object for a different release plan"
+    );
+    Ok(sha.to_owned())
+}
+
+fn validate_native_client_release_label_target(
+    target: &NativeClientReleaseLabelTarget<'_>,
+) -> Result<NativeClientReleaseLabelWrite> {
+    let instance = target.instance;
+    validate_native_authority_snapshot(&instance.authority)?;
+    validate_instance_config_path(target.config_path)?;
+    let config = crate::instance_config::InstanceConfig::parse(&instance.config_bytes)?;
+    ensure!(
+        instance.authority.instance_repository == config.instance.repository
+            && instance.authority.instance_id == config.instance.id
+            && instance.authority.default_branch == config.instance.default_branch
+            && instance.authority.config_path == target.config_path
+            && instance.authority.config_sha256
+                == crate::hex_encode(sha2::Sha256::digest(&instance.config_bytes))
+            && instance.config.instance.repository == config.instance.repository
+            && instance.config.instance.id == config.instance.id
+            && instance.config.instance.default_branch == config.instance.default_branch
+            && instance.config.release_request_label_prefix == config.release_request_label_prefix
+            && instance.config.acceptable_clients.repository
+                == config.acceptable_clients.repository
+            && instance.config.acceptable_clients.id == config.acceptable_clients.id,
+        "native release label Server config does not match its captured authority"
+    );
+    crate::policy::validate_repository(target.release_repository)?;
+    let release_destination = config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == target.release_repository
+                && repository.id == target.release_repository_id
+        })
+        .context("native release label destination is not configured")?;
+    release_destination
+        .policy()
+        .require(crate::policy::Capability::Release)
+        .context("native release label destination lacks the Release capability")?;
+    let captured_release_destination = instance
+        .config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == target.release_repository
+                && repository.id == target.release_repository_id
+        })
+        .context("captured native release label destination is not configured")?;
+    captured_release_destination
+        .policy()
+        .require(crate::policy::Capability::Release)
+        .context("captured native release label destination lacks the Release capability")?;
+    ensure!(
+        target.release_repository_id > 0,
+        "native release label destination ID is invalid"
+    );
+    ensure!(
+        target.source_run_id > 0,
+        "native release label run ID is invalid"
+    );
+    let label = native_client_release_label_name(
+        &config.release_request_label_prefix,
+        target.source_run_id,
+    )?;
+    let description = format!("{}/{}", target.release_repository, target.source_run_id);
+    ensure!(
+        description.len() <= 100,
+        "native release label description exceeds GitHub limit"
+    );
+    Ok(NativeClientReleaseLabelWrite {
+        instance: instance.clone(),
+        config_path: target.config_path.to_owned(),
+        server_repository: config.instance.repository,
+        server_repository_id: config.instance.id,
+        release_repository: target.release_repository.to_owned(),
+        release_repository_id: target.release_repository_id,
+        release_request_label_prefix: config.release_request_label_prefix,
+        source_run_id: target.source_run_id,
+        name: label,
+        description,
+    })
+}
+
+fn native_client_release_label_name(prefix: &str, source_run_id: u64) -> Result<String> {
+    ensure!(source_run_id > 0, "native release label run ID is invalid");
+    let name = format!("{prefix}securefix-native-release-{source_run_id}");
+    ensure!(
+        name.len() <= 50,
+        "native release request label exceeds GitHub limit"
+    );
+    Ok(name)
+}
+
+fn validate_native_client_release_label_write(write: &NativeClientReleaseLabelWrite) -> Result<()> {
+    let target = NativeClientReleaseLabelTarget {
+        instance: &write.instance,
+        config_path: &write.config_path,
+        release_repository: &write.release_repository,
+        release_repository_id: write.release_repository_id,
+        source_run_id: write.source_run_id,
+    };
+    let expected = validate_native_client_release_label_target(&target)?;
+    ensure!(
+        write.server_repository == expected.server_repository
+            && write.server_repository_id == expected.server_repository_id
+            && write.release_request_label_prefix == expected.release_request_label_prefix
+            && write.name == expected.name
+            && write.description == expected.description,
+        "saved native release label differs from the captured Server and release destination authority"
+    );
+    Ok(())
+}
+
+fn validate_native_client_release_label_execution(
+    write: &NativeClientReleaseLabelWrite,
+) -> Result<()> {
+    ensure!(
+        std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(write.release_repository.as_str()),
+        "native release label destination differs from the current workflow repository"
+    );
+    let run_id = std::env::var("GITHUB_RUN_ID")
+        .context("missing GITHUB_RUN_ID for native release label")?
+        .parse::<u64>()
+        .context("invalid GITHUB_RUN_ID for native release label")?;
+    ensure!(
+        run_id == write.source_run_id,
+        "native release label run differs from the current workflow run"
+    );
+    Ok(())
+}
+
+fn validate_native_client_release_label_body(
+    method: &Method,
+    path: &str,
+    write: &NativeClientReleaseLabelWrite,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::POST
+            && path == format!("/repos/{}/labels", write.server_repository)
+            && body
+                == &serde_json::json!({
+                    "name": write.name,
+                    "color": "1f6feb",
+                    "description": write.description,
+                }),
+        "native Client release label body does not match its exact source run"
+    );
+    Ok(())
+}
+
+fn validate_native_client_label_body(
+    method: &Method,
+    path: &str,
+    server_repository: &str,
+    label: &str,
+    description: &str,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::POST
+            && path == format!("/repos/{server_repository}/labels")
+            && body
+                == &serde_json::json!({
+                    "name": label,
+                    "color": "1f6feb",
+                    "description": description,
+                }),
+        "native Client label body does not match its exact request manifest"
+    );
+    Ok(())
+}
+
+fn validate_native_instance_write_target(
+    config: &crate::instance_config::InstanceConfig,
+    target: &NativeInstanceWriteTarget<'_>,
+) -> Result<()> {
+    validate_instance_config_path(target.config_path)?;
+    crate::policy::validate_repository(target.repository)?;
+    crate::policy::validate_sha(target.head_sha)?;
+    crate::policy::validate_sha(target.base_sha)?;
+    crate::policy::validate_sha(target.producer_workflow_sha)?;
+    crate::policy::validate_sha(target.client_workflow_epoch)?;
+    crate::config::validate_branch(target.head_branch)?;
+    crate::config::validate_branch(target.base_ref)?;
+    validate_sha256(target.request_sha256, "native request digest")?;
+    ensure!(
+        target.repository_id > 0
+            && target.pull_number > 0
+            && target.head_repository_id > 0
+            && target.author_id > 0
+            && target.actor_id > 0
+            && target.producer_run_id > 0
+            && target.producer_run_attempt > 0
+            && crate::config::is_valid_login(target.author_login)
+            && crate::config::is_valid_login(target.actor_login),
+        "native instance request target identity is invalid"
+    );
+    ensure!(
+        target
+            .producer_workflow_path
+            .starts_with(".github/workflows/")
+            && target.producer_workflow_path.ends_with(".yml")
+            && !target
+                .producer_workflow_path
+                .contains(['\\', '%', '?', '#'])
+            && target
+                .producer_workflow_path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        "native producer workflow path is invalid"
+    );
+    if target.mode == NativeInstanceMode::Securefix {
+        ensure!(
+            target.head_repository_id == target.repository_id,
+            "native Securefix requires a same-repository PR head"
+        );
+    }
+    let configured = config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == target.repository && repository.id == target.repository_id
+        })
+        .context("native request target repository is not configured")?;
+    configured
+        .policy()
+        .require(target.mode.capability())
+        .context("native request target lacks its configured capability")?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn native_release_target<'a>(
+    write: &'a NativeReleaseWrite,
+    instance: &'a NativeServerInstanceAuthority,
+    client_package: &'a crate::package::VerifiedNativeClientPackage,
+) -> NativeReleaseWriteTarget<'a> {
+    NativeReleaseWriteTarget {
+        config_path: &write.config_path,
+        instance,
+        repository: &write.target_repository,
+        repository_id: write.target_id,
+        release_pr_number: write.release_pr_number,
+        release_pr_head_sha: &write.release_pr_head_sha,
+        release_pr_merge_sha: &write.release_pr_merge_sha,
+        tag: &write.tag,
+        release_source_run_id: write.release_source_run_id,
+        release_source_run_attempt: write.release_source_run_attempt,
+        release_source_run_sha: &write.release_source_run_sha,
+        release_source_workflow_sha: &write.release_source_workflow_sha,
+        release_manifest: &write.release_manifest,
+        release_manifest_bytes: &write.release_manifest_bytes,
+        client_package,
+        assets: &write.assets,
+        native_assets: &write.native_assets,
+        release_id: write.release_id,
+    }
+}
+
+fn validate_native_release_target(
+    config: &crate::instance_config::InstanceConfig,
+    authority: &NativeAuthoritySnapshot,
+    target: &NativeReleaseWriteTarget<'_>,
+) -> Result<(NativeClientPackageIdentity, String)> {
+    validate_native_authority_snapshot(authority)?;
+    validate_instance_config_path(target.config_path)?;
+    ensure!(
+        target.instance.authority == *authority
+            && target.instance.config.instance.repository == config.instance.repository
+            && target.instance.config.instance.id == config.instance.id
+            && target.instance.config.instance.default_branch == config.instance.default_branch
+            && target.instance.authority.config_sha256
+                == crate::hex_encode(sha2::Sha256::digest(&target.instance.config_bytes)),
+        "native release target instance differs from its protected config"
+    );
+    let package = native_client_package_identity(config, target.client_package)?;
+    let manifest_sha256 = validate_native_release_manifest(
+        target.release_manifest,
+        target.release_manifest_bytes,
+        target.repository,
+        target.release_source_run_id,
+        target.release_source_run_attempt,
+        target.release_source_run_sha,
+        target.release_source_workflow_sha,
+        target.release_pr_number,
+        target.release_pr_merge_sha,
+        target.tag,
+    )?;
+    validate_native_release_common(
+        config,
+        authority,
+        target.config_path,
+        &target.instance.config_bytes,
+        &target.instance.config.instance.repository,
+        target.instance.config.instance.id,
+        &target.instance.config.instance.default_branch,
+        &target.instance.authority.config_sha256,
+        target.repository,
+        target.repository_id,
+        target.release_pr_number,
+        target.release_pr_head_sha,
+        target.release_pr_merge_sha,
+        target.tag,
+        target.release_source_run_id,
+        target.release_source_run_attempt,
+        target.release_source_run_sha,
+        target.release_source_workflow_sha,
+        &package,
+        target.assets,
+        target.native_assets,
+    )?;
+    Ok((package, manifest_sha256))
+}
+
+fn validate_native_release_saved(
+    config: &crate::instance_config::InstanceConfig,
+    authority: &NativeAuthoritySnapshot,
+    write: &NativeReleaseWrite,
+) -> Result<()> {
+    validate_native_authority_snapshot(authority)?;
+    validate_native_client_package_snapshot(config, &write.client_package)?;
+    let release_manifest_sha256 = validate_native_release_manifest(
+        &write.release_manifest,
+        &write.release_manifest_bytes,
+        &write.target_repository,
+        write.release_source_run_id,
+        write.release_source_run_attempt,
+        &write.release_source_run_sha,
+        &write.release_source_workflow_sha,
+        write.release_pr_number,
+        &write.release_pr_merge_sha,
+        &write.tag,
+    )?;
+    ensure!(
+        release_manifest_sha256 == write.release_manifest_sha256,
+        "saved release manifest bytes changed"
+    );
+    validate_native_release_common(
+        config,
+        authority,
+        &write.config_path,
+        &write.config_bytes,
+        &write.instance_repository,
+        write.instance_id,
+        &write.default_branch,
+        &authority.config_sha256,
+        &write.target_repository,
+        write.target_id,
+        write.release_pr_number,
+        &write.release_pr_head_sha,
+        &write.release_pr_merge_sha,
+        &write.tag,
+        write.release_source_run_id,
+        write.release_source_run_attempt,
+        &write.release_source_run_sha,
+        &write.release_source_workflow_sha,
+        &write.client_package,
+        &write.assets,
+        &write.native_assets,
+    )
+}
+
+const MAX_NATIVE_RELEASE_MANIFEST_BYTES: usize = 256 * 1024;
+
+// Keep every provenance field explicit here so the byte-level manifest
+// comparison remains auditable at the release trust boundary.
+#[allow(clippy::too_many_arguments)]
+fn validate_native_release_manifest(
+    manifest: &crate::release_manifest::ReleaseManifestV2,
+    manifest_bytes: &[u8],
+    repository: &str,
+    source_run_id: u64,
+    source_run_attempt: u64,
+    source_run_sha: &str,
+    source_workflow_sha: &str,
+    release_pr_number: u64,
+    release_pr_merge_sha: &str,
+    tag: &str,
+) -> Result<String> {
+    ensure!(
+        !manifest_bytes.is_empty() && manifest_bytes.len() <= MAX_NATIVE_RELEASE_MANIFEST_BYTES,
+        "native release manifest size is invalid"
+    );
+    let parsed: crate::release_manifest::ReleaseManifestV2 = serde_json::from_slice(manifest_bytes)
+        .context("native release manifest bytes are invalid JSON")?;
+    parsed.validate()?;
+    ensure!(
+        &parsed == manifest
+            && manifest.repository == repository
+            && manifest.source_run_id.0 == source_run_id
+            && manifest.run_attempt == source_run_attempt
+            && manifest.source_run_sha.as_str() == source_run_sha
+            && manifest.source_revision.as_str() == source_workflow_sha
+            && manifest.release_pr_number == release_pr_number
+            && manifest.release_pr_sha.as_str() == release_pr_merge_sha
+            && manifest.tag.as_str() == tag,
+        "native release manifest does not match the admitted source, PR, and tag"
+    );
+    Ok(crate::hex_encode(sha2::Sha256::digest(manifest_bytes)))
+}
+
+fn validate_native_client_package_snapshot(
+    config: &crate::instance_config::InstanceConfig,
+    package: &NativeClientPackageIdentity,
+) -> Result<()> {
+    crate::policy::validate_sha(&package.implementation_sha)?;
+    crate::policy::validate_sha(&package.loader_action_sha)?;
+    crate::policy::validate_sha(&package.binary_source_sha)?;
+    validate_native_release_workflow_path(&package.publisher_workflow)?;
+    crate::config::validate_branch(&package.publisher_branch)?;
+    let implementation_version = semver::Version::parse(&package.implementation_version)?;
+    let binary_version = semver::Version::parse(&package.binary_version)?;
+    ensure!(
+        package.distributor_repository == config.acceptable_clients.repository
+            && package.distributor_id == config.acceptable_clients.id
+            && config
+                .acceptable_clients
+                .version
+                .matches(&implementation_version)
+            && implementation_version.pre.is_empty()
+            && implementation_version.build.is_empty()
+            && binary_version.pre.is_empty()
+            && binary_version.build.is_empty()
+            && package.release_tag == format!("v{binary_version}")
+            && package.protocol == "securefix-native-request/v1"
+            && package.release_id > 0
+            && package.asset_id > 0
+            && package.asset_size > 0
+            && package.publisher_run_id > 0
+            && package.publisher_run_attempt > 0,
+        "saved Client package admission is invalid for the current instance policy"
+    );
+    validate_sha256(&package.asset_sha256, "Client package asset digest")
+}
+
+fn validate_native_release_source_run(
+    config: &crate::instance_config::InstanceConfig,
+    write: &NativeReleaseWrite,
+    source_run: &Value,
+) -> Result<()> {
+    ensure!(
+        source_run["id"].as_u64() == Some(write.release_source_run_id)
+            && source_run["run_attempt"].as_u64() == Some(write.release_source_run_attempt)
+            && source_run["status"] == "completed"
+            && source_run["conclusion"] == "success"
+            && source_run["head_sha"] == write.release_source_run_sha
+            && source_run["repository"]["id"].as_u64() == Some(write.target_id)
+            && source_run["repository"]["full_name"] == write.target_repository
+            && source_run["head_repository"]["id"].as_u64() == Some(write.target_id)
+            && source_run["head_repository"]["full_name"] == write.target_repository,
+        "Client release source run or attempt changed"
+    );
+    // GitHub's referenced_workflows is checked as source-run consistency
+    // metadata. The release admission verifies the signed source and exact
+    // reusable-workflow provenance independently.
+    let references: Vec<crate::workflow::ReferencedWorkflow> =
+        serde_json::from_value(source_run["referenced_workflows"].clone())
+            .context("Client release source run lacks reusable workflow metadata")?;
+    let expected_reference = format!(
+        "{}/{path}@{sha}",
+        config.acceptable_clients.repository,
+        path = ".github/workflows/reusable-release-tag.yml",
+        sha = write.release_source_workflow_sha,
+    );
+    ensure!(
+        references
+            .iter()
+            .filter(|reference| {
+                reference.path == expected_reference
+                    && reference.sha == write.release_source_workflow_sha
+            })
+            .count()
+            == 1
+            && references
+                .iter()
+                .filter(|reference| {
+                    reference.path.starts_with(&format!(
+                        "{}/{path}@",
+                        config.acceptable_clients.repository,
+                        path = ".github/workflows/reusable-release-tag.yml"
+                    ))
+                })
+                .count()
+                == 1,
+        "Client release source run does not match the accepted distributor release-tag reference"
+    );
+    Ok(())
+}
+
+fn validate_native_client_package_remote_identity(
+    package: &NativeClientPackageIdentity,
+    repository: &Value,
+    release: &Value,
+    tag_ref: &Value,
+    publisher_run: &Value,
+) -> Result<()> {
+    let assets = release["assets"]
+        .as_array()
+        .context("accepted Client package release assets are missing")?;
+    ensure!(
+        repository["id"].as_u64() == Some(package.distributor_id)
+            && repository["full_name"] == package.distributor_repository
+            && repository["default_branch"] == package.publisher_branch,
+        "accepted Client distributor identity or default branch changed"
+    );
+    ensure!(
+        release["id"].as_u64() == Some(package.release_id)
+            && release["tag_name"] == package.release_tag
+            && release["target_commitish"] == package.binary_source_sha
+            && release["draft"] == false
+            && release["immutable"] == true
+            && release["prerelease"] == false
+            && assets.len() == 1
+            && assets[0]["id"].as_u64() == Some(package.asset_id)
+            && assets[0]["name"] == package.asset_name
+            && assets[0]["state"] == "uploaded"
+            && assets[0]["size"].as_u64() == Some(package.asset_size)
+            && assets[0]["digest"] == format!("sha256:{}", package.asset_sha256),
+        "accepted Client package release or asset identity changed"
+    );
+    ensure!(
+        tag_ref["ref"] == format!("refs/tags/{}", package.release_tag)
+            && tag_ref["object"]["type"] == "commit"
+            && tag_ref["object"]["sha"] == package.binary_source_sha,
+        "accepted Client package tag no longer resolves to its admitted source"
+    );
+    ensure!(
+        publisher_run["id"].as_u64() == Some(package.publisher_run_id)
+            && publisher_run["run_attempt"].as_u64() == Some(package.publisher_run_attempt)
+            && publisher_run["repository"]["id"].as_u64() == Some(package.distributor_id)
+            && publisher_run["repository"]["full_name"] == package.distributor_repository
+            && publisher_run["head_repository"]["id"].as_u64() == Some(package.distributor_id)
+            && publisher_run["path"] == package.publisher_workflow
+            && publisher_run["event"] == "workflow_dispatch"
+            && publisher_run["head_branch"] == package.publisher_branch
+            && publisher_run["head_sha"] == package.binary_source_sha
+            && publisher_run["status"] == "completed"
+            && publisher_run["conclusion"] == "success",
+        "accepted Client package publisher run or attempt changed"
+    );
+    Ok(())
+}
+
+// These are the independently captured identities the native release writer
+// must bind together; grouping them would make the boundary less inspectable.
+#[allow(clippy::too_many_arguments)]
+fn validate_native_release_common(
+    config: &crate::instance_config::InstanceConfig,
+    authority: &NativeAuthoritySnapshot,
+    config_path: &str,
+    config_bytes: &[u8],
+    instance_repository: &str,
+    instance_id: u64,
+    instance_default_branch: &str,
+    config_sha256: &str,
+    repository: &str,
+    repository_id: u64,
+    release_pr_number: u64,
+    release_pr_head_sha: &str,
+    release_pr_merge_sha: &str,
+    tag: &str,
+    source_run_id: u64,
+    source_run_attempt: u64,
+    source_run_sha: &str,
+    source_workflow_sha: &str,
+    client_package: &NativeClientPackageIdentity,
+    assets: &[NativeReleaseAsset],
+    native_assets: &[NativeReleaseAsset],
+) -> Result<()> {
+    validate_instance_config_path(config_path)?;
+    crate::policy::validate_repository(repository)?;
+    crate::policy::validate_sha(release_pr_head_sha)?;
+    crate::policy::validate_sha(release_pr_merge_sha)?;
+    crate::policy::validate_sha(source_run_sha)?;
+    crate::policy::validate_sha(source_workflow_sha)?;
+    validate_release_tag(tag)?;
+    ensure!(
+        instance_repository == config.instance.repository
+            && instance_id == config.instance.id
+            && instance_default_branch == config.instance.default_branch
+            && config_sha256 == crate::hex_encode(sha2::Sha256::digest(config_bytes)),
+        "native Server instance differs from its protected config authority"
+    );
+    ensure!(
+        authority.instance_repository == config.instance.repository
+            && authority.instance_id == config.instance.id
+            && authority.default_branch == config.instance.default_branch
+            && authority.config_path == config_path
+            && authority.config_sha256 == config_sha256,
+        "native Server authority snapshot differs from its protected config"
+    );
+    ensure!(
+        repository_id > 0 && release_pr_number > 0 && source_run_id > 0 && source_run_attempt > 0,
+        "native release target identity is invalid"
+    );
+    ensure!(
+        client_package.distributor_repository == config.acceptable_clients.repository
+            && client_package.distributor_id == config.acceptable_clients.id
+            && source_workflow_sha == client_package.implementation_sha
+            && config
+                .acceptable_clients
+                .version
+                .matches(&semver::Version::parse(
+                    &client_package.implementation_version
+                )?),
+        "native Client package does not match the configured distributor admission"
+    );
+    let configured = config
+        .repositories
+        .iter()
+        .find(|configured| configured.repository == repository && configured.id == repository_id)
+        .context("native release destination is not configured")?;
+    configured
+        .policy()
+        .require(crate::policy::Capability::Release)
+        .context("native release destination lacks the Release capability")?;
+
+    // These pins belong to different repositories: the Server thin wrapper
+    // pins reusable-server-release, while the Client source run references the
+    // accepted distributor's reusable-release-tag workflow.
+    let _server_release_pin = native_server_release_pin(authority)?;
+    ensure!(
+        config.acceptable_clients.id > 0,
+        "accepted Client distributor identity is invalid"
+    );
+    validate_native_release_asset_plan(configured, repository, assets, native_assets)?;
+    Ok(())
+}
+
+fn native_client_package_identity(
+    config: &crate::instance_config::InstanceConfig,
+    client: &crate::package::VerifiedNativeClientPackage,
+) -> Result<NativeClientPackageIdentity> {
+    let release = client.package.release();
+    let (publisher_run_id, publisher_run_attempt) = client.package.publisher_run();
+    validate_native_release_workflow_path(&client.package_publisher_workflow)?;
+    crate::config::validate_branch(&client.package_publisher_branch)?;
+    crate::policy::validate_sha(&client.implementation_sha)?;
+    crate::policy::validate_sha(&client.loader_action_sha)?;
+    crate::policy::validate_sha(&client.binary_source_sha)?;
+    ensure!(
+        release.publisher.repository == config.acceptable_clients.repository
+            && release.publisher.repository_id == config.acceptable_clients.id
+            && release.implementation_sha == client.binary_source_sha
+            && release.source_sha == client.binary_source_sha
+            && release.version == client.binary_version
+            && release.tag == format!("v{}", client.binary_version)
+            && client.binary_version.pre.is_empty()
+            && client.binary_version.build.is_empty()
+            && client.implementation_version.pre.is_empty()
+            && client.implementation_version.build.is_empty()
+            && config
+                .acceptable_clients
+                .version
+                .matches(&client.implementation_version)
+            && client.protocol == "securefix-native-request/v1"
+            && release.release_id > 0
+            && release.asset.id > 0
+            && release.asset.size > 0
+            && publisher_run_id > 0
+            && publisher_run_attempt > 0,
+        "verified Client package does not match its accepted implementation and publisher"
+    );
+    validate_sha256(&release.asset.sha256, "Client package asset digest")?;
+    Ok(NativeClientPackageIdentity {
+        distributor_repository: release.publisher.repository.clone(),
+        distributor_id: release.publisher.repository_id,
+        implementation_sha: client.implementation_sha.clone(),
+        implementation_version: client.implementation_version.to_string(),
+        loader_action_sha: client.loader_action_sha.clone(),
+        binary_source_sha: client.binary_source_sha.clone(),
+        binary_version: client.binary_version.to_string(),
+        protocol: client.protocol.clone(),
+        release_tag: release.tag.clone(),
+        release_id: release.release_id,
+        asset_id: release.asset.id,
+        asset_name: release.asset.name.clone(),
+        asset_size: release.asset.size,
+        asset_sha256: release.asset.sha256.clone(),
+        publisher_workflow: client.package_publisher_workflow.clone(),
+        publisher_branch: client.package_publisher_branch.clone(),
+        publisher_run_id,
+        publisher_run_attempt,
+    })
+}
+
+fn native_server_release_pin(authority: &NativeAuthoritySnapshot) -> Result<String> {
+    let workflow = authority
+        .workflows
+        .iter()
+        .find(|workflow| workflow.role == crate::instance_config::WorkflowRole::Release)
+        .context("Server instance does not configure a Release workflow role")?;
+    let mut pins = Vec::new();
+    for pin in &workflow.pins {
+        let Some((target, sha)) = pin.rsplit_once('@') else {
+            continue;
+        };
+        let Some(repository) =
+            target.strip_suffix("/.github/workflows/reusable-server-release.yml")
+        else {
+            continue;
+        };
+        pins.push((repository, sha));
+    }
+    ensure!(
+        pins.len() == 1,
+        "Server Release wrapper must pin exactly one reusable-server-release workflow"
+    );
+    crate::policy::validate_repository(pins[0].0)?;
+    crate::policy::validate_sha(pins[0].1)?;
+    Ok(pins[0].1.to_owned())
+}
+
+fn validate_native_release_workflow_path(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with(".github/workflows/")
+            && (path.ends_with(".yml") || path.ends_with(".yaml"))
+            && !path.contains(['\\', '%', '?', '#'])
+            && path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        "native release workflow path is invalid"
+    );
+    Ok(())
+}
+
+fn validate_native_release_asset_plan(
+    configured: &crate::instance_config::ConfiguredRepository,
+    repository: &str,
+    assets: &[NativeReleaseAsset],
+    native_assets: &[NativeReleaseAsset],
+) -> Result<()> {
+    ensure!(assets.len() <= 32, "too many native release assets");
+    ensure!(native_assets.len() <= 8, "too many planned native binaries");
+    let mut names = std::collections::BTreeSet::new();
+    for asset in assets {
+        validate_native_release_asset(asset)?;
+        ensure!(
+            names.insert(asset.name.as_str()),
+            "duplicate native release asset"
+        );
+    }
+    let mut native_names = std::collections::BTreeSet::new();
+    for asset in native_assets {
+        validate_native_release_asset(asset)?;
+        ensure!(
+            native_names.insert(asset.name.clone())
+                && assets.iter().any(|planned| planned == asset),
+            "planned native binary is missing from the release asset plan"
+        );
+    }
+    let expected = configured
+        .native_binaries
+        .iter()
+        .map(|binary| {
+            let name = repository.rsplit('/').next().unwrap_or_default();
+            format!("{name}-{}", binary.target)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    ensure!(
+        native_names == expected,
+        "native release plan does not contain exactly the configured binary targets"
+    );
+    Ok(())
+}
+
+fn validate_native_release_asset(asset: &NativeReleaseAsset) -> Result<()> {
+    ensure!(
+        !asset.name.is_empty()
+            && asset.name.len() <= 255
+            && asset.name != "."
+            && asset.name != ".."
+            && asset
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)),
+        "native release asset name is invalid"
+    );
+    ensure!(
+        asset.size > 0 && asset.size <= MAX_NATIVE_RELEASE_ASSET_BYTES,
+        "native release asset size is invalid"
+    );
+    validate_sha256(&asset.sha256, "native release asset digest")?;
+    ensure!(
+        asset.content_type == "application/octet-stream",
+        "native release asset content type is unsupported"
+    );
+    Ok(())
+}
+
+fn validate_release_tag(tag: &str) -> Result<()> {
+    let version = tag
+        .strip_prefix('v')
+        .context("native release tag must start with v")?;
+    let version = semver::Version::parse(version)
+        .context("native release tag must contain canonical SemVer")?;
+    ensure!(
+        version.build.is_empty() && format!("v{version}") == tag,
+        "native release tag must not contain build metadata"
+    );
+    Ok(())
+}
+
+fn native_release_upload_url(write: &NativeReleaseWrite, path: &str) -> Result<String> {
+    let release_id = write
+        .release_id
+        .context("native release identity was not selected")?;
+    let normalized = if path.starts_with("https://") {
+        path.to_owned()
+    } else {
+        format!("https://uploads.github.com{path}")
+    };
+    let url = reqwest::Url::parse(&normalized).context("native release upload URL is invalid")?;
+    ensure!(
+        url.scheme() == "https"
+            && url.host_str() == Some("uploads.github.com")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+            && url.path()
+                == format!(
+                    "/repos/{}/releases/{release_id}/assets",
+                    write.target_repository
+                )
+            && url.query_pairs().count() == 1,
+        "native release upload URL is outside the selected release"
+    );
+    let (key, name) = url
+        .query_pairs()
+        .next()
+        .context("native release upload URL lacks an asset name")?;
+    ensure!(
+        key == "name",
+        "native release upload URL has an unexpected query"
+    );
+    let asset = write
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .context("native release upload asset is not in the verified plan")?;
+    let expected = format!(
+        "https://uploads.github.com/repos/{}/releases/{release_id}/assets?name={}",
+        write.target_repository, asset.name
+    );
+    ensure!(
+        normalized == expected,
+        "native release upload URL is not canonical"
+    );
+    Ok(format!(
+        "/repos/{}/releases/{release_id}/assets?name={}",
+        write.target_repository, asset.name
+    ))
+}
+
+fn validate_native_release_write_body(
+    write: &NativeReleaseWrite,
+    method: &Method,
+    path: &str,
+    body: &Value,
+) -> Result<()> {
+    if *method == Method::POST && path == format!("/repos/{}/releases", write.target_repository) {
+        let version = semver::Version::parse(write.tag.strip_prefix('v').unwrap_or_default())?;
+        ensure!(
+            write.release_id.is_none()
+                && body
+                    == &serde_json::json!({
+                        "tag_name": write.tag,
+                        "name": write.tag,
+                        "generate_release_notes": true,
+                        "prerelease": !version.pre.is_empty(),
+                        "draft": true,
+                        "target_commitish": write.target_default_branch,
+                    }),
+            "native release create request differs from its exact draft plan"
+        );
+        return Ok(());
+    }
+    if *method == Method::PATCH
+        && write
+            .release_id
+            .is_some_and(|id| path == format!("/repos/{}/releases/{id}", write.target_repository))
+    {
+        ensure!(
+            body.as_object()
+                .is_some_and(|fields| fields.len() == 1 && body["draft"] == false),
+            "native release publication may only set draft false"
+        );
+        return Ok(());
+    }
+    bail!("native release write is outside the exact draft lifecycle")
+}
+
+fn validate_native_release_inventory(
+    write: &NativeReleaseWrite,
+    release_id: u64,
+    release: &Value,
+    existing: &[Value],
+    require_complete: bool,
+) -> Result<()> {
+    ensure!(
+        existing.len() <= 100
+            && release["id"].as_u64() == Some(release_id)
+            && release["tag_name"] == write.tag
+            && release["draft"] == true,
+        "native release asset inventory is not the selected draft"
+    );
+    let mut names = std::collections::BTreeSet::new();
+    for asset in existing {
+        let name = asset["name"]
+            .as_str()
+            .context("native release asset lacks a name")?;
+        let planned = write
+            .assets
+            .iter()
+            .find(|planned| planned.name == name)
+            .context("native release contains an unexpected asset")?;
+        ensure!(
+            names.insert(name.to_owned())
+                && asset["state"] == "uploaded"
+                && asset["size"].as_u64() == Some(planned.size)
+                && asset["digest"] == format!("sha256:{}", planned.sha256)
+                && asset["content_type"] == planned.content_type,
+            "native release asset differs from the verified plan or is duplicated"
+        );
+    }
+    if require_complete {
+        ensure!(
+            names.len() == write.assets.len(),
+            "native release is missing a planned asset"
+        );
     }
     Ok(())
 }
@@ -2389,14 +4941,30 @@ pub fn validate_native_server_execution_workflow(
     workflow_sha: &str,
     workflow_bytes: &[u8],
 ) -> Result<()> {
-    validate_native_authority_snapshot(snapshot)?;
-    crate::policy::validate_sha(workflow_sha)?;
     let role = match mode {
         NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
         NativeScratchMode::Approval => crate::instance_config::WorkflowRole::Approve,
         NativeScratchMode::Merge => crate::instance_config::WorkflowRole::Merge,
         NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
     };
+    validate_native_server_execution_workflow_role(
+        snapshot,
+        role,
+        workflow_ref,
+        workflow_sha,
+        workflow_bytes,
+    )
+}
+
+pub fn validate_native_server_execution_workflow_role(
+    snapshot: &NativeAuthoritySnapshot,
+    role: crate::instance_config::WorkflowRole,
+    workflow_ref: &str,
+    workflow_sha: &str,
+    workflow_bytes: &[u8],
+) -> Result<()> {
+    validate_native_authority_snapshot(snapshot)?;
+    crate::policy::validate_sha(workflow_sha)?;
     let workflow = snapshot
         .workflows
         .iter()
@@ -2599,7 +5167,7 @@ fn require_single_repository_installation(
             && repositories.len() == 1
             && repositories[0]["id"].as_u64() == Some(repository_id)
             && repositories[0]["full_name"].as_str() == Some(repository_name),
-        "native request token must be installed only on the configured Client repository"
+        "native request token must be installed only on the configured repository"
     );
     Ok(())
 }
@@ -2644,6 +5212,71 @@ fn validate_native_scratch_check_body(
             && path == format!("/repos/{target_repository}/check-runs")
             && body == &native_policy_check_body(head_sha, request_sha256),
         "native scratch check body does not match the verified request"
+    );
+    Ok(())
+}
+
+fn validate_native_instance_check_body(
+    method: &Method,
+    path: &str,
+    write: &NativeInstanceWrite,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::POST
+            && path == format!("/repos/{}/check-runs", write.target_repository)
+            && body
+                == &native_instance_policy_check_body(
+                    &write.server_authority,
+                    &write.head_sha,
+                    &write.request_sha256,
+                )?,
+        "native instance check body does not match the verified request"
+    );
+    Ok(())
+}
+
+fn validate_native_instance_approval_body(
+    method: &Method,
+    path: &str,
+    write: &NativeInstanceWrite,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::POST
+            && path
+                == format!(
+                    "/repos/{}/pulls/{}/reviews",
+                    write.target_repository, write.pull_number
+                )
+            && body
+                == &native_instance_approval_body(
+                    &write.server_authority,
+                    &write.head_sha,
+                    &write.request_sha256,
+                    write.producer_run_id,
+                    write.producer_run_attempt,
+                )?,
+        "native instance approval body does not match the verified request and Server authority"
+    );
+    Ok(())
+}
+
+fn validate_native_instance_merge_body(
+    method: &Method,
+    path: &str,
+    write: &NativeInstanceWrite,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::PUT
+            && path
+                == format!(
+                    "/repos/{}/pulls/{}/merge",
+                    write.target_repository, write.pull_number
+                )
+            && body == &native_merge_body(&write.head_sha),
+        "native instance merge body does not match the verified exact PR head"
     );
     Ok(())
 }
@@ -2705,13 +5338,92 @@ pub fn native_approval_body(
 ) -> Result<Value> {
     crate::policy::validate_sha(head_sha)?;
     validate_sha256(request_sha256, "native request digest")?;
-    let authority_id = crate::hex_encode(sha2::Sha256::digest(serde_json::to_vec(authority)?));
+    let authority_id = native_authority_sha256(authority)?;
     let marker = format!("<!-- securefix:native-approval:v1:{authority_id}:{request_sha256} -->");
     Ok(serde_json::json!({
         "event": "APPROVE",
         "commit_id": head_sha,
         "body": marker
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeInstanceApprovalMarker {
+    pub authority_sha256: String,
+    pub request_sha256: String,
+    pub producer_run_id: u64,
+    pub producer_run_attempt: u32,
+}
+
+/// Build the durable normal-instance approval marker. The run locator is
+/// copied from the already-verified Client approval proof and remains a hint
+/// until that proof is fetched and independently revalidated by merge.
+pub fn native_instance_approval_body(
+    authority: &NativeAuthoritySnapshot,
+    head_sha: &str,
+    request_sha256: &str,
+    producer_run_id: u64,
+    producer_run_attempt: u32,
+) -> Result<Value> {
+    crate::policy::validate_sha(head_sha)?;
+    validate_sha256(request_sha256, "native request digest")?;
+    ensure!(
+        producer_run_id > 0 && producer_run_attempt > 0,
+        "native approval producer run identity is invalid"
+    );
+    let authority_sha256 = native_authority_sha256(authority)?;
+    let marker = format!(
+        "<!-- securefix:native-approval:v2:{authority_sha256}:{request_sha256}:{producer_run_id}:{producer_run_attempt} -->"
+    );
+    Ok(serde_json::json!({
+        "event": "APPROVE",
+        "commit_id": head_sha,
+        "body": marker
+    }))
+}
+
+/// Parse the single strict normal-instance locator from an approval review.
+/// The caller must treat its run ID as a fetch hint and verify the exact
+/// artifact, attestation, manifest digest, head, and authority before use.
+pub fn parse_native_instance_approval_marker(body: &str) -> Result<NativeInstanceApprovalMarker> {
+    let marker_lines: Vec<_> = body
+        .lines()
+        .filter(|line| line.starts_with("<!-- securefix:native-approval:"))
+        .collect();
+    ensure!(
+        marker_lines.len() == 1,
+        "native instance approval must contain exactly one marker"
+    );
+    let contents = marker_lines[0]
+        .strip_prefix("<!-- securefix:native-approval:v2:")
+        .and_then(|line| line.strip_suffix(" -->"))
+        .context("native instance approval marker has an unsupported version or shape")?;
+    let parts: Vec<_> = contents.split(':').collect();
+    ensure!(
+        parts.len() == 4,
+        "native instance approval marker has an invalid field count"
+    );
+    validate_sha256(parts[0], "native approval authority digest")?;
+    validate_sha256(parts[1], "native approval request digest")?;
+    let producer_run_id = parts[2]
+        .parse::<u64>()
+        .context("native approval producer run ID is invalid")?;
+    let producer_run_attempt = parts[3]
+        .parse::<u32>()
+        .context("native approval producer run attempt is invalid")?;
+    ensure!(
+        producer_run_id > 0
+            && producer_run_attempt > 0
+            && producer_run_id.to_string() == parts[2]
+            && producer_run_attempt.to_string() == parts[3],
+        "native approval producer run locator is not canonical"
+    );
+    Ok(NativeInstanceApprovalMarker {
+        authority_sha256: parts[0].to_owned(),
+        request_sha256: parts[1].to_owned(),
+        producer_run_id,
+        producer_run_attempt,
+    })
 }
 
 pub fn native_policy_check_body(head_sha: &str, request_sha256: &str) -> Value {
@@ -2726,6 +5438,106 @@ pub fn native_policy_check_body(head_sha: &str, request_sha256: &str) -> Value {
             "summary": NATIVE_POLICY_CHECK_SUMMARY
         }
     })
+}
+
+/// Bind a normal-instance policy check to the exact protected Server
+/// configuration/role authority and accepted request. Scratch checks retain
+/// their separate request-only format.
+pub fn native_instance_policy_check_external_id(
+    authority: &NativeAuthoritySnapshot,
+    head_sha: &str,
+    request_sha256: &str,
+) -> Result<String> {
+    crate::policy::validate_sha(head_sha)?;
+    validate_sha256(request_sha256, "native request digest")?;
+    let authority_sha256 = native_authority_sha256(authority)?;
+    Ok(format!(
+        "native:v1:{head_sha}:{authority_sha256}:{request_sha256}"
+    ))
+}
+
+pub fn parse_native_instance_policy_check_external_id(
+    external_id: &str,
+) -> Result<NativeInstancePolicyCheckIdentity> {
+    let parts: Vec<_> = external_id.split(':').collect();
+    ensure!(
+        parts.len() == 5 && parts[0] == "native" && parts[1] == "v1",
+        "native instance policy-check external ID has an unsupported format"
+    );
+    crate::policy::validate_sha(parts[2])?;
+    validate_sha256(parts[3], "native policy-check authority digest")?;
+    validate_sha256(parts[4], "native policy-check request digest")?;
+    Ok(NativeInstancePolicyCheckIdentity {
+        head_sha: parts[2].to_owned(),
+        authority_sha256: parts[3].to_owned(),
+        request_sha256: parts[4].to_owned(),
+    })
+}
+
+pub fn native_authority_sha256(authority: &NativeAuthoritySnapshot) -> Result<String> {
+    Ok(crate::hex_encode(sha2::Sha256::digest(serde_json::to_vec(
+        authority,
+    )?)))
+}
+
+/// Reject a normal Client command comment that predates the current Server
+/// configuration or role authority epoch. The supplied snapshot must already
+/// have been captured and checked against the protected Server default branch.
+pub fn require_native_instance_command_after_authority_epoch(
+    api: &GitHub,
+    authority: &NativeAuthoritySnapshot,
+    comment_created_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    validate_native_authority_snapshot(authority)?;
+    let commit: Value = api.get(&format!(
+        "/repos/{}/commits/{}",
+        authority.instance_repository, authority.epoch
+    ))?;
+    ensure!(
+        commit["sha"].as_str() == Some(authority.epoch.as_str()),
+        "native Server authority epoch commit identity mismatch"
+    );
+    let epoch_time = chrono::DateTime::parse_from_rfc3339(
+        commit["commit"]["committer"]["date"]
+            .as_str()
+            .context("native Server authority epoch has no committer date")?,
+    )?
+    .with_timezone(&chrono::Utc);
+    require_native_instance_command_after_time(comment_created_at, epoch_time)
+}
+
+fn require_native_instance_command_after_time(
+    comment_created_at: chrono::DateTime<chrono::Utc>,
+    authority_epoch_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    ensure!(
+        comment_created_at > authority_epoch_at,
+        "command predates or coincides with the current Server authority epoch"
+    );
+    Ok(())
+}
+
+pub fn native_instance_policy_check_body(
+    authority: &NativeAuthoritySnapshot,
+    head_sha: &str,
+    request_sha256: &str,
+) -> Result<Value> {
+    crate::policy::validate_sha(head_sha)?;
+    Ok(serde_json::json!({
+        "name": NATIVE_POLICY_CHECK_NAME,
+        "head_sha": head_sha,
+        "external_id": native_instance_policy_check_external_id(
+            authority,
+            head_sha,
+            request_sha256
+        )?,
+        "status": "completed",
+        "conclusion": "success",
+        "output": {
+            "title": NATIVE_POLICY_CHECK_TITLE,
+            "summary": NATIVE_POLICY_CHECK_SUMMARY
+        }
+    }))
 }
 
 pub fn validate_native_instance_config_path(path: &str) -> Result<()> {
@@ -2832,6 +5644,51 @@ mod tests {
         assert_eq!(
             git_authorization_header("ghs_test"),
             "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3Rlc3Q="
+        );
+    }
+
+    fn instance_authority_fixture(config_bytes: &[u8]) -> NativeServerInstanceAuthority {
+        let config = crate::instance_config::InstanceConfig::parse(config_bytes).unwrap();
+        NativeServerInstanceAuthority {
+            authority: NativeAuthoritySnapshot {
+                instance_repository: config.instance.repository.clone(),
+                instance_id: config.instance.id,
+                default_branch: config.instance.default_branch.clone(),
+                config_path: TEST_CONFIG_PATH.to_owned(),
+                config_sha256: crate::hex_encode(sha2::Sha256::digest(config_bytes)),
+                epoch: "a".repeat(40),
+                workflows: vec![NativeWorkflowAuthority {
+                    role: crate::instance_config::WorkflowRole::PolicyCheck,
+                    path: config.workflow_roles[&crate::instance_config::WorkflowRole::PolicyCheck]
+                        .clone(),
+                    sha256: "b".repeat(64),
+                    pins: vec![
+                        "example-org/server/.github/workflows/policy.yml@".to_owned()
+                            + &"c".repeat(40),
+                    ],
+                }],
+            },
+            config,
+            config_bytes: config_bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn external_instance_authority_rejects_stale_config_and_role_snapshot() {
+        let config_bytes = include_bytes!("../tests/fixtures/instance-config.toml");
+        let captured = instance_authority_fixture(config_bytes);
+        assert!(require_native_server_instance_authority_unchanged(&captured, &captured).is_ok());
+
+        let changed_config = [config_bytes.as_slice(), b"\n"].concat();
+        let stale_config = instance_authority_fixture(&changed_config);
+        assert!(
+            require_native_server_instance_authority_unchanged(&captured, &stale_config).is_err()
+        );
+
+        let mut changed_role = instance_authority_fixture(config_bytes);
+        changed_role.authority.workflows[0].sha256 = "d".repeat(64);
+        assert!(
+            require_native_server_instance_authority_unchanged(&captured, &changed_role).is_err()
         );
     }
 
@@ -3057,6 +5914,42 @@ mod tests {
         api
     }
 
+    fn native_instance_api(mode: NativeInstanceMode) -> GitHub {
+        let config_bytes = include_bytes!("../tests/fixtures/instance-config.toml");
+        let config = crate::instance_config::InstanceConfig::parse(config_bytes).unwrap();
+        let authority = instance_authority_fixture(config_bytes).authority;
+        let mut api = GitHub::new("https://api.github.com", "reader-token".into()).unwrap();
+        api.write_token = Some("writer-token".into());
+        api.writes = WriteContext::NativeInstance(Box::new(NativeInstanceWrite {
+            mode,
+            instance_repository: config.instance.repository,
+            instance_id: config.instance.id,
+            default_branch: config.instance.default_branch,
+            config_path: TEST_CONFIG_PATH.into(),
+            config_bytes: config_bytes.to_vec(),
+            server_authority: authority,
+            target_repository: "example-org/project".into(),
+            target_id: 987_654,
+            pull_number: 4,
+            head_sha: "b".repeat(40),
+            head_branch: "feature".into(),
+            head_repository_id: 987_654,
+            base_sha: "c".repeat(40),
+            base_ref: "main".into(),
+            author_id: 777,
+            author_login: "contributor".into(),
+            actor_id: 101,
+            actor_login: "maintainer".into(),
+            request_sha256: "d".repeat(64),
+            producer_run_id: 123,
+            producer_run_attempt: 1,
+            producer_workflow_path: ".github/workflows/request-producer.yml".into(),
+            producer_workflow_sha: "e".repeat(40),
+            client_workflow_epoch: "f".repeat(40),
+        }));
+        api
+    }
+
     #[test]
     fn native_merge_policy_control_identity_comes_from_the_configured_target_repository() {
         use crate::fixtures::{Fixture, Route};
@@ -3257,6 +6150,266 @@ mod tests {
                 vec![],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn native_instance_writers_are_scoped_to_the_bound_operation_and_request() {
+        let check_api = native_instance_api(NativeInstanceMode::PolicyCheck);
+        let check_path = "/repos/example-org/project/check-runs";
+        assert!(
+            check_api
+                .require_write_target(&Method::POST, check_path)
+                .is_ok()
+        );
+        assert!(
+            check_api
+                .require_write_target(&Method::POST, "/graphql")
+                .is_err()
+        );
+        assert!(
+            check_api
+                .require_write_target(&Method::PATCH, check_path)
+                .is_err()
+        );
+        let WriteContext::NativeInstance(check_write) = &check_api.writes else {
+            unreachable!();
+        };
+        let check_body = native_instance_policy_check_body(
+            &check_write.server_authority,
+            &check_write.head_sha,
+            &check_write.request_sha256,
+        )
+        .unwrap();
+        assert!(
+            validate_native_instance_check_body(
+                &Method::POST,
+                check_path,
+                check_write,
+                &check_body
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_native_instance_check_body(
+                &Method::POST,
+                check_path,
+                check_write,
+                &serde_json::json!({"head_sha": "f".repeat(40)})
+            )
+            .is_err()
+        );
+
+        let approve_api = native_instance_api(NativeInstanceMode::Approve);
+        let approval_path = "/repos/example-org/project/pulls/4/reviews";
+        assert!(
+            approve_api
+                .require_write_target(&Method::POST, approval_path)
+                .is_ok()
+        );
+        assert!(
+            approve_api
+                .require_write_target(&Method::POST, "/repos/example-org/project/pulls/5/reviews")
+                .is_err()
+        );
+        let WriteContext::NativeInstance(approve_write) = &approve_api.writes else {
+            unreachable!();
+        };
+        let approval_body = native_instance_approval_body(
+            &approve_write.server_authority,
+            &approve_write.head_sha,
+            &approve_write.request_sha256,
+            approve_write.producer_run_id,
+            approve_write.producer_run_attempt,
+        )
+        .unwrap();
+        assert!(
+            validate_native_instance_approval_body(
+                &Method::POST,
+                approval_path,
+                approve_write,
+                &approval_body,
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_native_instance_approval_marker(approval_body["body"].as_str().unwrap()).is_ok()
+        );
+        let mut stale_approval_body = approval_body.clone();
+        stale_approval_body["commit_id"] = serde_json::json!("a".repeat(40));
+        assert!(
+            validate_native_instance_approval_body(
+                &Method::POST,
+                approval_path,
+                approve_write,
+                &stale_approval_body,
+            )
+            .is_err()
+        );
+        let request = approve_api
+            .builder(Method::GET, "/user")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer writer-token"
+        );
+
+        let merge_api = native_instance_api(NativeInstanceMode::Merge);
+        let merge_path = "/repos/example-org/project/pulls/4/merge";
+        assert!(
+            merge_api
+                .require_write_target(&Method::PUT, merge_path)
+                .is_ok()
+        );
+        assert!(
+            merge_api
+                .require_write_target(&Method::POST, merge_path)
+                .is_err()
+        );
+        let WriteContext::NativeInstance(merge_write) = &merge_api.writes else {
+            unreachable!();
+        };
+        let merge_body = native_merge_body(&merge_write.head_sha);
+        assert!(
+            validate_native_instance_merge_body(&Method::PUT, merge_path, merge_write, &merge_body)
+                .is_ok()
+        );
+        let mut stale_merge_body = merge_body.clone();
+        stale_merge_body["sha"] = serde_json::json!("a".repeat(40));
+        assert!(
+            validate_native_instance_merge_body(
+                &Method::PUT,
+                merge_path,
+                merge_write,
+                &stale_merge_body
+            )
+            .is_err()
+        );
+
+        let securefix_api = native_instance_api(NativeInstanceMode::Securefix);
+        let commit_path = "/repos/example-org/project/git/commits";
+        assert!(
+            securefix_api
+                .require_write_target(&Method::POST, commit_path)
+                .is_ok()
+        );
+        assert!(
+            securefix_api
+                .require_write_target(&Method::POST, "/repos/other/project/git/commits")
+                .is_err()
+        );
+        let request = securefix_api
+            .builder(Method::POST, "/graphql")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer writer-token"
+        );
+        let mut additions = BTreeMap::new();
+        additions.insert("file.txt".to_owned(), b"contents".to_vec());
+        assert!(
+            securefix_api
+                .create_commit(
+                    "example-org/project",
+                    "another-branch",
+                    &"b".repeat(40),
+                    "Securefix",
+                    additions,
+                    Vec::new(),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_instance_target_requires_configured_capability_and_same_repo_securefix_head() {
+        let config = crate::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let base = NativeInstanceWriteTarget {
+            mode: NativeInstanceMode::Securefix,
+            config_path: TEST_CONFIG_PATH,
+            repository: "example-org/project",
+            repository_id: 987_654,
+            pull_number: 4,
+            head_sha: &"b".repeat(40),
+            head_branch: "feature",
+            head_repository_id: 987_654,
+            base_sha: &"c".repeat(40),
+            base_ref: "main",
+            author_id: 777,
+            author_login: "contributor",
+            actor_id: 101,
+            actor_login: "maintainer",
+            request_sha256: &"d".repeat(64),
+            producer_run_id: 123,
+            producer_run_attempt: 1,
+            producer_workflow_path: ".github/workflows/request-producer.yml",
+            producer_workflow_sha: &"e".repeat(40),
+            client_workflow_epoch: &"f".repeat(40),
+        };
+        assert!(validate_native_instance_write_target(&config, &base).is_ok());
+
+        let fork_head = NativeInstanceWriteTarget {
+            head_repository_id: 987_655,
+            ..base
+        };
+        assert!(validate_native_instance_write_target(&config, &fork_head).is_err());
+
+        let unconfigured_target = NativeInstanceWriteTarget {
+            repository: "example-org/unconfigured",
+            ..fork_head
+        };
+        assert!(validate_native_instance_write_target(&config, &unconfigured_target).is_err());
+    }
+
+    #[test]
+    fn normal_native_approval_marker_has_a_strict_run_locator() {
+        let authority = NativeAuthoritySnapshot {
+            instance_repository: "example-org/securefix-server".into(),
+            instance_id: 404,
+            default_branch: "main".into(),
+            config_path: TEST_CONFIG_PATH.into(),
+            config_sha256: "a".repeat(64),
+            epoch: "b".repeat(40),
+            workflows: Vec::new(),
+        };
+        let request_sha256 = "c".repeat(64);
+        let body =
+            native_instance_approval_body(&authority, &"d".repeat(40), &request_sha256, 123, 2)
+                .unwrap();
+        let marker = body["body"].as_str().unwrap();
+        let parsed = parse_native_instance_approval_marker(marker).unwrap();
+        assert_eq!(parsed.request_sha256, request_sha256);
+        assert_eq!(parsed.producer_run_id, 123);
+        assert_eq!(parsed.producer_run_attempt, 2);
+
+        for invalid in [
+            format!("{marker}\n{marker}"),
+            marker.replace(":123:2 -->", ":0123:2 -->"),
+            marker.replace(":123:2 -->", ":0:2 -->"),
+            marker.replace("native-approval:v2", "native-approval:v1"),
+            format!("{marker} trailing"),
+        ] {
+            assert!(
+                parse_native_instance_approval_marker(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            native_instance_approval_body(&authority, &"d".repeat(40), &request_sha256, 0, 1)
+                .is_err()
         );
     }
 
@@ -3730,6 +6883,74 @@ mod tests {
     }
 
     #[test]
+    fn native_instance_policy_check_id_binds_authority_and_request() {
+        let request_sha = "c".repeat(64);
+        let authority =
+            instance_authority_fixture(include_bytes!("../tests/fixtures/instance-config.toml"))
+                .authority;
+        let head_sha = "b".repeat(40);
+        let id =
+            native_instance_policy_check_external_id(&authority, &head_sha, &request_sha).unwrap();
+        assert_eq!(
+            id,
+            format!(
+                "native:v1:{head_sha}:{}:{request_sha}",
+                native_authority_sha256(&authority).unwrap()
+            )
+        );
+        let parsed = parse_native_instance_policy_check_external_id(&id).unwrap();
+        assert_eq!(parsed.head_sha, head_sha);
+        assert_eq!(
+            parsed.authority_sha256,
+            native_authority_sha256(&authority).unwrap()
+        );
+        assert_eq!(parsed.request_sha256, request_sha);
+
+        let mut changed_authority = authority.clone();
+        changed_authority.epoch = "f".repeat(40);
+        assert_ne!(
+            native_instance_policy_check_external_id(&changed_authority, &head_sha, &request_sha)
+                .unwrap(),
+            id
+        );
+        assert_ne!(
+            native_instance_policy_check_external_id(&authority, &head_sha, &"d".repeat(64))
+                .unwrap(),
+            id
+        );
+        assert!(
+            native_instance_policy_check_external_id(&authority, &head_sha, "not-a-digest")
+                .is_err()
+        );
+
+        let body = native_instance_policy_check_body(&authority, &head_sha, &request_sha).unwrap();
+        assert_eq!(body["external_id"], id);
+        assert_ne!(
+            native_policy_check_body(&head_sha, &request_sha)["external_id"],
+            body["external_id"]
+        );
+        assert!(parse_native_instance_policy_check_external_id("native:v1:bad:bad:bad").is_err());
+    }
+
+    #[test]
+    fn native_instance_command_must_be_newer_than_its_authority_epoch() {
+        let epoch = chrono::DateTime::parse_from_rfc3339("2026-10-22T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let newer = chrono::DateTime::parse_from_rfc3339("2026-10-22T08:00:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let equal = epoch;
+        let older = chrono::DateTime::parse_from_rfc3339("2026-10-22T07:59:59Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert!(require_native_instance_command_after_time(newer, epoch).is_ok());
+        assert!(require_native_instance_command_after_time(equal, epoch).is_err());
+        assert!(require_native_instance_command_after_time(older, epoch).is_err());
+    }
+
+    #[test]
     fn server_workflow_roles_record_only_full_sha_remote_pins() {
         let sha = "a".repeat(40);
         let workflow =
@@ -4150,6 +7371,812 @@ mod tests {
         );
         fixture.finish();
     }
+
+    fn native_client_label_authority() -> NativeAuthoritySnapshot {
+        NativeAuthoritySnapshot {
+            instance_repository: "example-org/server".to_owned(),
+            instance_id: 404,
+            default_branch: "main".to_owned(),
+            config_path: ".securefix/instance.toml".to_owned(),
+            config_sha256: "a".repeat(64),
+            epoch: "b".repeat(40),
+            workflows: vec![NativeWorkflowAuthority {
+                role: crate::instance_config::WorkflowRole::PolicyCheck,
+                path: ".github/workflows/policy-check.yml".to_owned(),
+                sha256: "c".repeat(64),
+                pins: Vec::new(),
+            }],
+        }
+    }
+
+    fn native_release_write_fixture() -> NativeReleaseWrite {
+        let config_bytes = String::from_utf8(
+            include_bytes!("../tests/fixtures/instance-config.toml").to_vec(),
+        )
+        .unwrap()
+        .replace(
+            "release = \"github-release\"\nprotect_tags = true",
+            "release = \"github-release\"\nnative_binaries = [{ target = \"x86_64-unknown-linux-musl\", runner = \"ubuntu-24.04\" }]\nprotect_tags = true",
+        )
+        .into_bytes();
+        let config = crate::instance_config::InstanceConfig::parse(&config_bytes).unwrap();
+        let mut instance = instance_authority_fixture(&config_bytes);
+        let server_release_sha = "f".repeat(40);
+        let client_release_tag_sha = "1".repeat(40);
+        instance.authority.workflows.push(NativeWorkflowAuthority {
+            role: crate::instance_config::WorkflowRole::Release,
+            path: config.workflow_roles[&crate::instance_config::WorkflowRole::Release].clone(),
+            sha256: "e".repeat(64),
+            pins: vec![format!(
+                "{}/.github/workflows/reusable-server-release.yml@{server_release_sha}",
+                config.acceptable_clients.repository
+            )],
+        });
+        let client_package = crate::package::native_client_package_api_test_fixture();
+        let client_package = native_client_package_identity(&config, &client_package).unwrap();
+        let asset = NativeReleaseAsset {
+            name: "project-x86_64-unknown-linux-musl".to_owned(),
+            size: 16,
+            sha256: "d".repeat(64),
+            content_type: "application/octet-stream".to_owned(),
+        };
+        let release_manifest = crate::release_manifest::ReleaseManifestV2 {
+            schema_version: 2,
+            repository: "example-org/project".to_owned(),
+            source_run_id: crate::release_manifest::RunId(42),
+            source_run_sha: crate::release_manifest::CommitSha::parse(&"c".repeat(40)).unwrap(),
+            run_attempt: 1,
+            source_revision: crate::release_manifest::CommitSha::parse(&client_release_tag_sha)
+                .unwrap(),
+            release_pr_number: 88,
+            release_pr_sha: crate::release_manifest::CommitSha::parse(&"b".repeat(40)).unwrap(),
+            tag: crate::release_manifest::ReleaseTag::parse("v1.2.3").unwrap(),
+            package_version: None,
+            artifact_id: None,
+        };
+        let release_manifest_bytes = serde_json::to_vec(&release_manifest).unwrap();
+        NativeReleaseWrite {
+            instance_repository: config.instance.repository.clone(),
+            instance_id: config.instance.id,
+            default_branch: config.instance.default_branch.clone(),
+            config_path: TEST_CONFIG_PATH.to_owned(),
+            config_bytes,
+            server_authority: instance.authority,
+            target_repository: "example-org/project".to_owned(),
+            target_id: 987_654,
+            target_default_branch: "main".to_owned(),
+            release_pr_number: 88,
+            release_pr_head_sha: "a".repeat(40),
+            release_pr_merge_sha: "b".repeat(40),
+            tag: "v1.2.3".to_owned(),
+            release_source_run_id: 42,
+            release_source_run_attempt: 1,
+            release_source_run_sha: "c".repeat(40),
+            release_source_workflow_sha: client_release_tag_sha,
+            release_manifest_sha256: crate::hex_encode(sha2::Sha256::digest(
+                &release_manifest_bytes,
+            )),
+            release_manifest,
+            release_manifest_bytes,
+            client_package,
+            assets: vec![asset.clone()],
+            native_assets: vec![asset],
+            release_id: None,
+        }
+    }
+
+    #[test]
+    fn native_release_target_requires_configured_capability_and_pinned_producer() {
+        let write = native_release_write_fixture();
+        let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes).unwrap();
+        let instance = NativeServerInstanceAuthority {
+            config: config.clone(),
+            config_bytes: write.config_bytes.clone(),
+            authority: write.server_authority.clone(),
+        };
+        let client_package = crate::package::native_client_package_api_test_fixture();
+        let target = native_release_target(&write, &instance, &client_package);
+        assert!(validate_native_release_target(&config, &write.server_authority, &target).is_ok());
+        assert!(validate_native_release_saved(&config, &write.server_authority, &write).is_ok());
+
+        let mut changed_manifest_bytes = write.clone();
+        changed_manifest_bytes.release_manifest_bytes.push(b' ');
+        assert!(
+            validate_native_release_saved(
+                &config,
+                &write.server_authority,
+                &changed_manifest_bytes
+            )
+            .is_err()
+        );
+
+        let mut unsupported_manifest = write.clone();
+        unsupported_manifest.release_manifest.schema_version = 1;
+        unsupported_manifest.release_manifest_bytes =
+            serde_json::to_vec(&unsupported_manifest.release_manifest).unwrap();
+        unsupported_manifest.release_manifest_sha256 = crate::hex_encode(sha2::Sha256::digest(
+            &unsupported_manifest.release_manifest_bytes,
+        ));
+        assert!(
+            validate_native_release_saved(&config, &write.server_authority, &unsupported_manifest)
+                .is_err()
+        );
+
+        let mut wrong_id = write.clone();
+        wrong_id.target_id += 1;
+        let target = native_release_target(&wrong_id, &instance, &client_package);
+        assert!(validate_native_release_target(&config, &write.server_authority, &target).is_err());
+
+        let mut mismatched_client_revision = write.clone();
+        mismatched_client_revision.release_source_workflow_sha = "9".repeat(40);
+        let target = native_release_target(&mismatched_client_revision, &instance, &client_package);
+        assert!(validate_native_release_target(&config, &write.server_authority, &target).is_err());
+
+        let mut invalid_asset = write.clone();
+        invalid_asset.assets[0].sha256 = "not-a-digest".to_owned();
+        invalid_asset.native_assets[0].sha256 = "not-a-digest".to_owned();
+        let target = native_release_target(&invalid_asset, &instance, &client_package);
+        assert!(validate_native_release_target(&config, &write.server_authority, &target).is_err());
+
+        let mut missing_native_target = write.clone();
+        missing_native_target.assets.clear();
+        missing_native_target.native_assets.clear();
+        let target = native_release_target(&missing_native_target, &instance, &client_package);
+        assert!(validate_native_release_target(&config, &write.server_authority, &target).is_err());
+    }
+
+    #[test]
+    fn native_release_saved_revalidation_keeps_instance_distributor_and_client_revisions_separate()
+    {
+        let write = native_release_write_fixture();
+        let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes).unwrap();
+        assert_ne!(
+            write.instance_repository,
+            write.client_package.distributor_repository
+        );
+        assert_ne!(
+            write.target_repository,
+            write.client_package.distributor_repository
+        );
+        assert_ne!(write.instance_repository, write.target_repository);
+        assert_ne!(
+            native_server_release_pin(&write.server_authority).unwrap(),
+            write.release_source_workflow_sha
+        );
+        assert_eq!(
+            write.release_source_workflow_sha,
+            write.client_package.implementation_sha
+        );
+        assert_ne!(
+            write.client_package.binary_source_sha,
+            write.client_package.implementation_sha
+        );
+        assert!(validate_native_release_saved(&config, &write.server_authority, &write).is_ok());
+
+        let reference = format!(
+            "{}/.github/workflows/reusable-release-tag.yml@{}",
+            config.acceptable_clients.repository, write.release_source_workflow_sha
+        );
+        let source_run = serde_json::json!({
+            "id":write.release_source_run_id,
+            "run_attempt":write.release_source_run_attempt,
+            "status":"completed",
+            "conclusion":"success",
+            "head_sha":write.release_source_run_sha,
+            "repository":{"id":write.target_id,"full_name":write.target_repository},
+            "head_repository":{"id":write.target_id,"full_name":write.target_repository},
+            "referenced_workflows":[{"path":reference,"sha":write.release_source_workflow_sha}]
+        });
+        assert!(validate_native_release_source_run(&config, &write, &source_run).is_ok());
+        let mut wrong_reference = source_run.clone();
+        wrong_reference["referenced_workflows"][0]["path"] = serde_json::json!(format!(
+            "{}/.github/workflows/reusable-release-tag.yml@{}",
+            write.instance_repository, write.release_source_workflow_sha
+        ));
+        assert!(validate_native_release_source_run(&config, &write, &wrong_reference).is_err());
+
+        let package = &write.client_package;
+        let repository = serde_json::json!({
+            "id":package.distributor_id,
+            "full_name":package.distributor_repository,
+            "default_branch":package.publisher_branch
+        });
+        let release = serde_json::json!({
+            "id":package.release_id,
+            "tag_name":package.release_tag,
+            "target_commitish":package.binary_source_sha,
+            "draft":false,
+            "immutable":true,
+            "prerelease":false,
+            "assets":[{
+                "id":package.asset_id,
+                "name":package.asset_name,
+                "state":"uploaded",
+                "size":package.asset_size,
+                "digest":format!("sha256:{}",package.asset_sha256)
+            }]
+        });
+        let tag_ref = serde_json::json!({
+            "ref":format!("refs/tags/{}",package.release_tag),
+            "object":{"type":"commit","sha":package.binary_source_sha}
+        });
+        let publisher_run = serde_json::json!({
+            "id":package.publisher_run_id,
+            "run_attempt":package.publisher_run_attempt,
+            "repository":{"id":package.distributor_id,"full_name":package.distributor_repository},
+            "head_repository":{"id":package.distributor_id},
+            "path":package.publisher_workflow,
+            "event":"workflow_dispatch",
+            "head_branch":package.publisher_branch,
+            "head_sha":package.binary_source_sha,
+            "status":"completed",
+            "conclusion":"success"
+        });
+        assert!(
+            validate_native_client_package_remote_identity(
+                package,
+                &repository,
+                &release,
+                &tag_ref,
+                &publisher_run
+            )
+            .is_ok()
+        );
+        let mut wrong_package_run = publisher_run.clone();
+        wrong_package_run["repository"]["full_name"] = serde_json::json!(write.target_repository);
+        assert!(
+            validate_native_client_package_remote_identity(
+                package,
+                &repository,
+                &release,
+                &tag_ref,
+                &wrong_package_run
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_release_revalidates_distributor_with_server_reader_token() {
+        use crate::fixtures::{Fixture, Route};
+
+        let write = native_release_write_fixture();
+        let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes).unwrap();
+        let package = &write.client_package;
+        let authorization = ("Authorization", "Bearer server-reader-token");
+        let repository_path = format!("/repos/{}", package.distributor_repository);
+        let release_path = format!(
+            "/repos/{}/releases/{}",
+            package.distributor_repository, package.release_id
+        );
+        let tag_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            package.distributor_repository, package.release_tag
+        );
+        let run_path = format!(
+            "/repos/{}/actions/runs/{}/attempts/{}",
+            package.distributor_repository, package.publisher_run_id, package.publisher_run_attempt
+        );
+        let fixture = Fixture::new(vec![
+            Route::get(
+                repository_path,
+                serde_json::json!({
+                    "id":package.distributor_id,
+                    "full_name":package.distributor_repository,
+                    "default_branch":package.publisher_branch
+                }),
+            )
+            .with_request_header(authorization.0, authorization.1),
+            Route::get(
+                release_path,
+                serde_json::json!({
+                    "id":package.release_id,
+                    "tag_name":package.release_tag,
+                    "target_commitish":package.binary_source_sha,
+                    "draft":false,
+                    "immutable":true,
+                    "prerelease":false,
+                    "assets":[{
+                        "id":package.asset_id,
+                        "name":package.asset_name,
+                        "state":"uploaded",
+                        "size":package.asset_size,
+                        "digest":format!("sha256:{}", package.asset_sha256)
+                    }]
+                }),
+            )
+            .with_request_header(authorization.0, authorization.1),
+            Route::get(
+                tag_path,
+                serde_json::json!({
+                    "ref":format!("refs/tags/{}", package.release_tag),
+                    "object":{"type":"commit","sha":package.binary_source_sha}
+                }),
+            )
+            .with_request_header(authorization.0, authorization.1),
+            Route::get(
+                run_path,
+                serde_json::json!({
+                    "id":package.publisher_run_id,
+                    "run_attempt":package.publisher_run_attempt,
+                    "repository":{"id":package.distributor_id,"full_name":package.distributor_repository},
+                    "head_repository":{"id":package.distributor_id},
+                    "path":package.publisher_workflow,
+                    "event":"workflow_dispatch",
+                    "head_branch":package.publisher_branch,
+                    "head_sha":package.binary_source_sha,
+                    "status":"completed",
+                    "conclusion":"success"
+                }),
+            )
+            .with_request_header(authorization.0, authorization.1),
+            Route::get(
+                "/repos/example-org/project",
+                serde_json::json!({"id":write.target_id,"full_name":write.target_repository}),
+            )
+            .with_request_header("Authorization", "Bearer destination-reader-token"),
+        ]);
+        let server_reader = GitHub::new(&fixture.base, "server-reader-token".to_owned()).unwrap();
+        let destination_reader =
+            GitHub::new(&fixture.base, "destination-reader-token".to_owned()).unwrap();
+
+        server_reader
+            .validate_native_client_package_current(&config, package)
+            .unwrap();
+        destination_reader
+            .get_uncached::<Value>("/repos/example-org/project")
+            .unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn native_release_writer_accepts_only_the_exact_draft_lifecycle() {
+        let write = native_release_write_fixture();
+        let create_path = "/repos/example-org/project/releases";
+        let create = serde_json::json!({
+            "tag_name":"v1.2.3",
+            "name":"v1.2.3",
+            "generate_release_notes":true,
+            "prerelease":false,
+            "draft":true,
+            "target_commitish":"main"
+        });
+        assert!(
+            validate_native_release_write_body(&write, &Method::POST, create_path, &create).is_ok()
+        );
+        let mut changed_create = create.clone();
+        changed_create["target_commitish"] = serde_json::json!("other-branch");
+        assert!(
+            validate_native_release_write_body(&write, &Method::POST, create_path, &changed_create)
+                .is_err()
+        );
+
+        let mut selected = write.clone();
+        selected.release_id = Some(77);
+        let release_path = "/repos/example-org/project/releases/77";
+        let publish = serde_json::json!({"draft":false});
+        assert!(
+            validate_native_release_write_body(&selected, &Method::PATCH, release_path, &publish)
+                .is_ok()
+        );
+        assert!(
+            validate_native_release_write_body(
+                &selected,
+                &Method::PATCH,
+                "/repos/example-org/project/releases/78",
+                &publish
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_release_write_body(
+                &selected,
+                &Method::PATCH,
+                release_path,
+                &serde_json::json!({"draft":false,"name":"changed"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_release_write_body(&selected, &Method::POST, create_path, &create)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_release_upload_and_asset_inventory_match_the_verified_plan() {
+        let mut write = native_release_write_fixture();
+        write.release_id = Some(77);
+        let upload_url = "https://uploads.github.com/repos/example-org/project/releases/77/assets?name=project-x86_64-unknown-linux-musl";
+        assert_eq!(
+            native_release_upload_url(&write, upload_url).unwrap(),
+            "/repos/example-org/project/releases/77/assets?name=project-x86_64-unknown-linux-musl"
+        );
+        assert!(native_release_upload_url(
+            &write,
+            "https://api.github.com/repos/example-org/project/releases/77/assets?name=project-x86_64-unknown-linux-musl"
+        )
+        .is_err());
+        assert!(native_release_upload_url(
+            &write,
+            "https://uploads.github.com/repos/example-org/project/releases/78/assets?name=project-x86_64-unknown-linux-musl"
+        )
+        .is_err());
+        assert!(native_release_upload_url(
+            &write,
+            "https://uploads.github.com/repos/example-org/project/releases/77/assets?name=unexpected.zip"
+        )
+        .is_err());
+
+        let release = serde_json::json!({"id":77,"tag_name":"v1.2.3","draft":true});
+        let uploaded = serde_json::json!({
+            "id":1,
+            "name":"project-x86_64-unknown-linux-musl",
+            "state":"uploaded",
+            "size":16,
+            "digest":format!("sha256:{}", "d".repeat(64)),
+            "content_type":"application/octet-stream"
+        });
+        assert!(
+            validate_native_release_inventory(
+                &write,
+                77,
+                &release,
+                std::slice::from_ref(&uploaded),
+                true
+            )
+            .is_ok()
+        );
+        assert!(validate_native_release_inventory(&write, 77, &release, &[], true).is_err());
+        assert!(
+            validate_native_release_inventory(
+                &write,
+                77,
+                &release,
+                &[uploaded.clone(), uploaded.clone()],
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_release_inventory(
+                &write,
+                77,
+                &release,
+                &[serde_json::json!({"name":"unexpected.zip"})],
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_client_label_target_binds_server_authority_operation_and_run() {
+        let authority = native_client_label_authority();
+        let target = NativeClientLabelTarget {
+            server_repository: "example-org/server",
+            server_authority: &authority,
+            client_repository: "example-org/client",
+            operation: "merge",
+            run_id: 123,
+        };
+        assert_eq!(
+            validate_native_client_label_target(&target).unwrap(),
+            (
+                "securefix-native-merge-123".to_owned(),
+                "example-org/client/123".to_owned()
+            )
+        );
+        assert!(native_client_request_label("unknown", 123).is_err());
+        assert!(native_client_request_label("merge", 0).is_err());
+
+        let mismatched_server = NativeClientLabelTarget {
+            server_repository: "other-org/server",
+            ..target
+        };
+        assert!(validate_native_client_label_target(&mismatched_server).is_err());
+
+        let unsupported_operation = NativeClientLabelTarget {
+            operation: "release",
+            ..target
+        };
+        assert!(validate_native_client_label_target(&unsupported_operation).is_err());
+    }
+
+    #[test]
+    fn native_client_label_writer_accepts_only_the_exact_manifest_label() {
+        use crate::fixtures::{Fixture, Route};
+        let server = "example-org/server";
+        let body = serde_json::json!({
+            "name":"securefix-native-merge-123",
+            "color":"1f6feb",
+            "description":"example-org/client/123"
+        });
+        let path = format!("/repos/{server}/labels");
+        let mut fixture = Fixture::new(vec![
+            Route::request("POST", &path, 201, body.clone()).with_request_body(body.clone()),
+        ]);
+        fixture.api.writes = WriteContext::NativeClientLabel {
+            server: server.to_owned(),
+            name: "securefix-native-merge-123".to_owned(),
+            description: "example-org/client/123".to_owned(),
+        };
+        assert_eq!(fixture.api.post::<Value>(&path, &body).unwrap(), body);
+        assert!(
+            fixture
+                .api
+                .post::<Value>(
+                    &path,
+                    &serde_json::json!({
+                        "name":"securefix-native-merge-124",
+                        "color":"1f6feb",
+                        "description":"example-org/client/123"
+                    })
+                )
+                .is_err()
+        );
+        assert!(fixture.api.patch::<Value>(&path, &body).is_err());
+        assert!(
+            fixture
+                .api
+                .post::<Value>("/repos/other-org/server/labels", &body)
+                .is_err()
+        );
+        fixture.finish();
+    }
+    #[test]
+    fn native_client_release_label_binds_external_server_client_run_and_exact_post() {
+        let config_bytes =
+            String::from_utf8(include_bytes!("../tests/fixtures/instance-config.toml").to_vec())
+                .unwrap()
+                .replace(
+                    "release_request_label_prefix = \"\"",
+                    "release_request_label_prefix = \"testing-\"",
+                )
+                .into_bytes();
+        let instance = instance_authority_fixture(&config_bytes);
+        let target = NativeClientReleaseLabelTarget {
+            instance: &instance,
+            config_path: TEST_CONFIG_PATH,
+            release_repository: "example-org/project",
+            release_repository_id: 987_654,
+            source_run_id: 12_345,
+        };
+        let write = validate_native_client_release_label_target(&target).unwrap();
+        assert_eq!(write.server_repository, "example-org/securefix-server");
+        assert_eq!(write.server_repository_id, 404);
+        assert_eq!(write.release_repository, "example-org/project");
+        assert_eq!(write.release_repository_id, 987_654);
+        assert_eq!(
+            instance.config.acceptable_clients.repository,
+            "example-org/securefix-client"
+        );
+        assert_eq!(instance.config.acceptable_clients.id, 654_321);
+        assert_eq!(write.config_path, TEST_CONFIG_PATH);
+        assert_eq!(write.release_request_label_prefix, "testing-");
+        assert_eq!(write.source_run_id, 12_345);
+        assert_eq!(write.name, "testing-securefix-native-release-12345");
+        assert_eq!(write.description, "example-org/project/12345");
+        assert!(validate_native_client_release_label_write(&write).is_ok());
+
+        let path = "/repos/example-org/securefix-server/labels";
+        let body = serde_json::json!({
+            "name":"testing-securefix-native-release-12345",
+            "color":"1f6feb",
+            "description":"example-org/project/12345"
+        });
+        assert!(
+            validate_native_client_release_label_body(&Method::POST, path, &write, &body).is_ok()
+        );
+        assert!(
+            validate_native_client_release_label_body(&Method::PATCH, path, &write, &body).is_err()
+        );
+        assert!(
+            validate_native_client_release_label_body(
+                &Method::POST,
+                "/repos/other-org/server/labels",
+                &write,
+                &body
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_client_release_label_body(
+                &Method::POST,
+                path,
+                &write,
+                &serde_json::json!({
+                    "name":"testing-securefix-native-release-12346",
+                    "color":"1f6feb",
+                    "description":"example-org/project/12345"
+                })
+            )
+            .is_err()
+        );
+
+        let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        api.writes = WriteContext::NativeClientReleaseLabel(Box::new(write.clone()));
+        assert!(api.require_write_target(&Method::POST, path).is_ok());
+        assert!(api.require_write_target(&Method::PATCH, path).is_err());
+        assert!(
+            api.require_write_target(&Method::POST, "/repos/other-org/server/labels")
+                .is_err()
+        );
+
+        let wrong_destination_id = NativeClientReleaseLabelTarget {
+            release_repository_id: 999_999,
+            ..target
+        };
+        assert!(validate_native_client_release_label_target(&wrong_destination_id).is_err());
+        let distributor_is_not_a_release_destination = NativeClientReleaseLabelTarget {
+            release_repository: "example-org/securefix-client",
+            release_repository_id: 654_321,
+            ..target
+        };
+        assert!(
+            validate_native_client_release_label_target(&distributor_is_not_a_release_destination)
+                .is_err()
+        );
+        let wrong_config_path = NativeClientReleaseLabelTarget {
+            config_path: "other.toml",
+            ..target
+        };
+        assert!(validate_native_client_release_label_target(&wrong_config_path).is_err());
+        assert!(native_client_release_label_name("testing-", 0).is_err());
+        assert!(native_client_release_label_name(&"x".repeat(32), 12_345).is_err());
+    }
+
+    #[test]
+    fn native_release_tag_writer_binds_application_pr_and_exact_annotated_object() {
+        let instance =
+            instance_authority_fixture(include_bytes!("../tests/fixtures/instance-config.toml"));
+        let target = NativeReleaseTagWriteTarget {
+            instance: &instance,
+            config_path: TEST_CONFIG_PATH,
+            repository: "example-org/project",
+            repository_id: 987_654,
+            release_pr_number: 88,
+            release_pr_head_sha: &"a".repeat(40),
+            release_pr_merge_sha: &"b".repeat(40),
+            tag: "v1.2.3",
+        };
+        let write = validate_native_release_tag_target(&target, 42).unwrap();
+        assert_eq!(
+            write.instance.config.acceptable_clients.repository,
+            "example-org/securefix-client"
+        );
+        assert_eq!(write.repository, "example-org/project");
+        assert_eq!(write.source_run_id, 42);
+
+        let tag_path = "/repos/example-org/project/git/tags";
+        let tag_body = serde_json::json!({
+            "tag": "v1.2.3",
+            "message": "Release v1.2.3",
+            "object": "b".repeat(40),
+            "type": "commit",
+        });
+        assert!(
+            validate_native_release_tag_body(&write, &Method::POST, tag_path, &tag_body).is_ok()
+        );
+        assert!(
+            validate_native_release_tag_body(
+                &write,
+                &Method::POST,
+                tag_path,
+                &serde_json::json!({
+                    "tag": "v1.2.3",
+                    "message": "Release v1.2.3",
+                    "object": "a".repeat(40),
+                    "type": "commit",
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_release_tag_body(
+                &write,
+                &Method::POST,
+                tag_path,
+                &serde_json::json!({
+                    "tag": "v1.2.3",
+                    "message": "Release v1.2.3",
+                    "object": "b".repeat(40),
+                    "type": "commit",
+                    "extra": true,
+                })
+            )
+            .is_err()
+        );
+
+        let object_sha = "c".repeat(40);
+        let response = serde_json::json!({
+            "tag": "v1.2.3",
+            "message": "Release v1.2.3",
+            "sha": object_sha,
+            "object": {"sha": "b".repeat(40), "type": "commit"},
+        });
+        assert!(record_native_release_tag_created_object(&write, &response).is_ok());
+        assert!(record_native_release_tag_created_object(&write, &response).is_err());
+        assert!(
+            validate_native_release_tag_created_object(
+                &write,
+                &serde_json::json!({
+                    "tag": "v1.2.3",
+                    "message": "Release v1.2.3",
+                    "sha": object_sha,
+                    "object": {"sha": "a".repeat(40), "type": "commit"},
+                })
+            )
+            .is_err()
+        );
+        let ref_path = "/repos/example-org/project/git/refs";
+        let ref_body = serde_json::json!({"ref":"refs/tags/v1.2.3", "sha":object_sha});
+        assert!(
+            validate_native_release_tag_body(&write, &Method::POST, ref_path, &ref_body).is_ok()
+        );
+        assert!(
+            validate_native_release_tag_body(
+                &write,
+                &Method::POST,
+                ref_path,
+                &serde_json::json!({"ref":"refs/tags/v1.2.4", "sha":object_sha})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_native_release_tag_body(
+                &write,
+                &Method::POST,
+                ref_path,
+                &serde_json::json!({"ref":"refs/tags/v1.2.3", "sha":"d".repeat(40)})
+            )
+            .is_err()
+        );
+
+        let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();
+        api.writes = WriteContext::NativeReleaseTag(Box::new(write));
+        assert!(api.require_write_target(&Method::POST, tag_path).is_ok());
+        assert!(api.require_write_target(&Method::POST, ref_path).is_ok());
+        for (method, path) in [
+            (&Method::PATCH, tag_path),
+            (&Method::POST, "/repos/other-org/project/git/tags"),
+            (&Method::POST, "/repos/example-org/project/git/commits"),
+            (&Method::PUT, "/repos/example-org/project/git/refs"),
+        ] {
+            assert!(api.require_write_target(method, path).is_err());
+        }
+
+        let accepted_client_is_not_the_release_destination = NativeReleaseTagWriteTarget {
+            repository: "example-org/securefix-client",
+            repository_id: 654_321,
+            ..target
+        };
+        assert!(
+            validate_native_release_tag_target(&accepted_client_is_not_the_release_destination, 42)
+                .is_err()
+        );
+        let wrong_id = NativeReleaseTagWriteTarget {
+            repository_id: 999_999,
+            ..target
+        };
+        assert!(validate_native_release_tag_target(&wrong_id, 42).is_err());
+        let wrong_config_path = NativeReleaseTagWriteTarget {
+            config_path: "other.toml",
+            ..target
+        };
+        assert!(validate_native_release_tag_target(&wrong_config_path, 42).is_err());
+        let invalid_merge_sha = NativeReleaseTagWriteTarget {
+            release_pr_merge_sha: "not-a-sha",
+            ..target
+        };
+        assert!(validate_native_release_tag_target(&invalid_merge_sha, 42).is_err());
+        let invalid_tag = NativeReleaseTagWriteTarget {
+            tag: "release/latest",
+            ..target
+        };
+        assert!(validate_native_release_tag_target(&invalid_tag, 42).is_err());
+    }
+
     #[test]
     fn scratch_writes_cannot_escape_the_fixed_repository() {
         let mut api = GitHub::new("https://api.github.com", String::new()).unwrap();

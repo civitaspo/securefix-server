@@ -14,9 +14,8 @@ on:
         type: string
       candidate_source_sha:
         description: Exact source SHA represented by the selected candidate artifact
-        required: false
+        required: true
         type: string
-        default: 7b5da5d248078c774d44d54a0e7fd145ddf67fd7
       pull_request_number:
         description: Owner-authored scratch pull request for this probe
         required: true
