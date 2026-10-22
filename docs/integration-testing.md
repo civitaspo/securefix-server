@@ -241,6 +241,16 @@ the installation repository list and each mutation is restricted by the API
 client to the fixed scratch repository. The Client App token is checked the
 same way. These scratch probes require only test-scoped installation tokens; ordinary approved-development workflows continue to use the existing User reviewer PAT where required.
 
+The owner-dispatched `managed-files` phase is a separate reconciliation probe.
+It accepts an explicit candidate source and owner-selected Client repository,
+implementation SHA, and version label. The candidate CLI validates that tuple
+against the configured scratch instance and validates the exact managed-file
+manifest before the workflow mints a Server App token. The writer is limited to
+the `testing-securefix-server` repository and opens a reviewable PR for the
+declared files; it does not run the rendered caller workflows or use the
+repository-settings administrator credential. The Client tuple is a
+scratch-only selection and does not establish formal Client package provenance.
+
 The workflow builds or reuses one source-bound development CLI without secrets and installs it on the runner PATH. The same CLI validates provenance, retrieves fixture state, runs scratch operations/control probes and validates the resulting files. There is no separate trusted-baseline binary, candidate Docker container or verify-run artifact relay. The existing setup-cli main CI artifact reuse still checks source/build identity, producer and digest; control/authority/fixture checks run afresh. A metadata-only baseline job captures signed current main for `SECUREFIX_TEST_BASELINE_SHA`; it does not build another executable. That revision must remain current throughout the test.
 The published test runtime is selected independently from `control/active.json`:
 its source, immutable release/asset IDs, archive digest and canonical tag must
