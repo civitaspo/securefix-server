@@ -244,19 +244,59 @@ pub struct ApiError {
     pub status: StatusCode,
     pub method: Method,
     pub path: String,
+    pub message: Option<String>,
 }
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "GitHub {} {} returned {}",
-            self.method, self.path, self.status
-        )
+        if let Some(message) = &self.message {
+            write!(
+                f,
+                "GitHub {} {} returned {}: {}",
+                self.method, self.path, self.status, message
+            )
+        } else {
+            write!(
+                f,
+                "GitHub {} {} returned {}",
+                self.method, self.path, self.status
+            )
+        }
     }
 }
 
 impl std::error::Error for ApiError {}
+
+fn safe_github_error_message(response: reqwest::blocking::Response) -> Option<String> {
+    const MAX_ERROR_BODY_BYTES: usize = 4096;
+    const MAX_ERROR_MESSAGE_CHARS: usize = 512;
+
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_ERROR_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_ERROR_BODY_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let message = value.get("message")?.as_str()?;
+    let normalized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!normalized.is_empty()).then_some(normalized)
+}
 
 #[derive(Clone)]
 pub struct GitHub {
@@ -916,7 +956,7 @@ impl GitHub {
             .write_token
             .as_deref()
             .context("package writer token is missing")?;
-        Self::new("https://api.github.com", token.to_owned())
+        Self::new(&self.base, token.to_owned())
     }
 
     fn require_package_release_current(&self) -> Result<()> {
@@ -1797,7 +1837,8 @@ impl GitHub {
             )?;
             if method == Method::PATCH {
                 let release_id = write.release_id.context("package release ID is missing")?;
-                let release: Value = self.get_uncached(&format!(
+                let writer_reader = self.package_writer_reader()?;
+                let release: Value = writer_reader.get_uncached(&format!(
                     "/repos/{}/releases/{release_id}",
                     write.destination_repository
                 ))?;
@@ -1815,7 +1856,10 @@ impl GitHub {
                 if rebinding_old_record {
                     validate_package_release_draft_recovery_record(write, &release, release_id)?;
                     validate_package_release_recovery_asset_for_write(
-                        write, self, &release, false,
+                        write,
+                        &writer_reader,
+                        &release,
+                        false,
                     )?;
                 } else {
                     validate_package_release_draft(write, &release, release_id, true)?;
@@ -1868,6 +1912,7 @@ impl GitHub {
                 status,
                 method,
                 path: path.to_string(),
+                message: safe_github_error_message(response),
             }
             .into());
         }
@@ -2498,6 +2543,7 @@ impl GitHub {
                 status: response.status(),
                 method: Method::GET,
                 path: path.to_string(),
+                message: safe_github_error_message(response),
             }
             .into());
         }
@@ -6454,6 +6500,42 @@ mod tests {
             "https://uploads.github.com/repos/civitaspo/securefix-server/103/assets?name=securefix-linux-x86_64"
         )
         .is_err());
+    }
+
+    #[test]
+    fn package_release_patch_reads_private_draft_with_destination_writer_token() {
+        use crate::fixtures::{Fixture, Route};
+        use serde_json::json;
+
+        let mut write = package_release_write_fixture_for(PackageReleaseChannel::Scratch);
+        write.release_id = Some(103);
+        let repository = write.destination_repository.clone();
+        let path = format!("/repos/{repository}/releases/103");
+        let mut fixture = Fixture::new(vec![
+            Route::request(
+                "GET",
+                path.clone(),
+                403,
+                json!({
+                    "message":"Resource not accessible by integration",
+                    "authorization":"do-not-log-this"
+                }),
+            )
+            .with_request_header("Authorization", "Bearer destination-writer-token"),
+        ]);
+        fixture.api.token = "source-read-token".into();
+        fixture.api.write_token = Some("destination-writer-token".into());
+        fixture.api.writes = WriteContext::PackageRelease(Box::new(write));
+
+        let error = fixture
+            .api
+            .request(Method::PATCH, &path, Some(&json!({"draft":false})))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("returned 403"));
+        assert!(error.contains("Resource not accessible by integration"));
+        assert!(!error.contains("do-not-log-this"));
+        fixture.finish();
     }
 
     #[test]

@@ -1235,6 +1235,7 @@ mod tests {
                 status: reqwest::StatusCode::from_u16(status).unwrap(),
                 method: reqwest::Method::PUT,
                 path: "/merge".into(),
+                message: None,
             });
             assert!(retryable_merge_error(&error));
         }
@@ -1242,6 +1243,7 @@ mod tests {
             status: reqwest::StatusCode::CONFLICT,
             method: reqwest::Method::PUT,
             path: "/merge".into(),
+            message: None,
         });
         assert!(!retryable_merge_error(&conflict));
     }
