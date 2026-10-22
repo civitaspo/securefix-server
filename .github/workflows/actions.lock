@@ -74,6 +74,7 @@ workflows:
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
+        - 'civitaspo/securefix-server@fa40fc15f4ac79ad97282b83a44d26f6c747311c'
     '.github/workflows/reusable-merge-request.yml': []
     '.github/workflows/reusable-policy-check.yml': []
     '.github/workflows/reusable-release-pr-sync.yml':
