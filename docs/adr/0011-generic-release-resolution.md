@@ -112,6 +112,16 @@ rechecks the source, asset bytes, release state, and recovery evidence before
 writing. An owner may set `preflight_only` to run the same read-only
 qualification while skipping App-token creation and every release write step.
 
+GitHub may return a newly created draft release before its Git tag ref exists.
+The native publisher accepts that state only for an exact unpublished draft
+whose source, producer, publisher, asset contract, and canonical release record
+still validate. After the exact asset is uploaded, it creates `refs/tags/<tag>`
+only at the validated destination target commit, reads that association back,
+and only then changes the release from draft to published. A draft with an
+existing tag must already point to that exact commit; a published release must
+have the exact tag ref. Recovery remains bound to the existing publisher/source
+identity contract.
+
 This publisher implementation has local contract tests but is not yet
 scratch-qualified. Its presence does not qualify a release, wire a package
 consumer, select a package version, change the active runtime, or activate a
