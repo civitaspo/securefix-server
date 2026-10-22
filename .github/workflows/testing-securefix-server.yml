@@ -8,9 +8,9 @@ on:
         type: string
         default: ''
       phase:
-        description: Prepare/verify Securefix fixtures, run the legacy bootstrap probe, or exercise provider and native release scratch probes
+        description: Prepare/verify Securefix fixtures, reconcile managed scratch files, run the legacy bootstrap probe, or exercise release scratch probes
         type: choice
-        options: [prepare, verify, bootstrap, provider, release-assets]
+        options: [prepare, verify, bootstrap, provider, release-assets, managed-files]
         default: prepare
       fixture_run_id:
         description: Successful prepare run whose exact-source fixture state is reused
@@ -22,6 +22,18 @@ on:
         default: ''
       approval_fixture_head:
         description: Exact signed head of the owner-authored approval fixture
+        type: string
+        default: ''
+      client_repository:
+        description: Owner-selected Client repository for this scratch-only probe; provenance is not qualified here
+        type: string
+        default: ''
+      client_implementation_sha:
+        description: Full owner-selected Client reusable-release-tag SHA for this scratch-only probe
+        type: string
+        default: ''
+      client_version:
+        description: Owner-selected SemVer label for the scratch-only pin comment; provenance is not qualified here
         type: string
         default: ''
 
@@ -228,7 +240,7 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'default branch did not resolve to a full SHA' >&2; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'prepare' || inputs.phase == 'verify' || inputs.phase == 'bootstrap') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'prepare' || inputs.phase == 'verify' || inputs.phase == 'bootstrap' || inputs.phase == 'managed-files') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -417,6 +429,71 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  managed-files-probe:
+    needs: [baseline, build]
+    if: inputs.phase == 'managed-files' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)))
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: civitaspo/securefix-server
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: candidate-runtime
+          merge-multiple: true
+      - uses: $/.github/actions/install-cli
+        with:
+          binary: candidate-runtime/securefix
+      - name: Validate the exact selected candidate before minting a writer token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_TEST_BASELINE_SHA: ${{ needs.baseline.outputs.source-sha }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.candidate_sha }}
+          CLIENT_REPOSITORY: ${{ inputs.client_repository }}
+          CLIENT_IMPLEMENTATION_SHA: ${{ inputs.client_implementation_sha }}
+          CLIENT_VERSION: ${{ inputs.client_version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SOURCE_SHA" ]]; then
+            [[ "$CANDIDATE_SHA" == "$REQUESTED_SOURCE_SHA" ]] || { echo 'candidate binary source differs from the explicitly selected source' >&2; exit 1; }
+          else
+            [[ "$CANDIDATE_SHA" == "$WORKFLOW_SHA" ]] || { echo 'candidate binary source differs from the dispatched workflow revision' >&2; exit 1; }
+          fi
+          securefix integration validate-producer --workflow-sha "$WORKFLOW_SHA"
+          [[ -n "$CLIENT_REPOSITORY" && -n "$CLIENT_IMPLEMENTATION_SHA" && -n "$CLIENT_VERSION" ]] || { echo 'owner-selected Client pin tuple is required for this scratch-only probe' >&2; exit 1; }
+          securefix settings managed-validate-scratch --source-sha "$CANDIDATE_SHA" --client-repository "$CLIENT_REPOSITORY" --client-implementation-sha "$CLIENT_IMPLEMENTATION_SHA" --client-version "$CLIENT_VERSION"
+      # This dedicated managed-file writer only gets repo-scoped permissions required
+      # to create an exact reviewable workflow/config PR; settings administration is separate.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: managed-writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Create the reviewable managed-file PR from the selected source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.managed-writer.outputs.token }}
+          SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          CLIENT_REPOSITORY: ${{ inputs.client_repository }}
+          CLIENT_IMPLEMENTATION_SHA: ${{ inputs.client_implementation_sha }}
+          CLIENT_VERSION: ${{ inputs.client_version }}
+        run: securefix settings managed-reconcile-scratch --source-sha "$SOURCE_SHA" --client-repository "$CLIENT_REPOSITORY" --client-implementation-sha "$CLIENT_IMPLEMENTATION_SHA" --client-version "$CLIENT_VERSION"
+
   provider-release-probe:
     if: inputs.phase == 'provider'
     uses: ./.github/workflows/testing-provider-release.yml
@@ -426,4 +503,13 @@ jobs:
     secrets:
       TERRAFORM_PROVIDER_GPG_PRIVATE_KEY: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
       TERRAFORM_PROVIDER_GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+      SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+
+  native-release-assets-probe:
+    if: inputs.phase == 'release-assets' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && startsWith(github.ref, 'refs/heads/integration/native-') && inputs.candidate_sha == github.sha
+    uses: ./.github/workflows/testing-native-release-assets.yml
+    permissions:
+      actions: read
+      contents: read
+    secrets:
       SECUREFIX_SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}

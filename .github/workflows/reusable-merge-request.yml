@@ -2,6 +2,15 @@ name: Reusable Merge Request
 
 on:
   workflow_call:
+    inputs:
+      server_repository:
+        description: Authenticated Server instance repository locator
+        required: true
+        type: string
+      instance_config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
@@ -9,54 +18,18 @@ on:
 permissions: {}
 
 jobs:
-  build:
-    uses: ./.github/workflows/load-cli.yml
+  request:
+    uses: ./.github/workflows/reusable-client-request.yml
+    with:
+      operation: merge
+      server_repository: ${{ inputs.server_repository }}
+      instance_config_path: ${{ inputs.instance_config_path }}
     permissions:
       actions: read
+      attestations: write
       contents: read
-      attestations: read
-
-  capture:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: ${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}
-    permissions:
-      contents: read
+      id-token: write
       issues: read
       pull-requests: read
-    timeout-minutes: 10
-    env:
-      GITHUB_TOKEN: ${{ github.token }}
-      SECUREFIX_SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
-      SECUREFIX_CONTROL_ID: ${{ needs.build.outputs.control-id }}
-      SECUREFIX_WORKFLOW_SHA: ${{ needs.build.outputs.workflow-sha }}
-    steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
-          merge-multiple: true
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
-      - name: Capture and validate the merge request
-        run: securefix request capture-merge
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: securefix-request-${{ github.run_id }}
-          path: request/manifest.json
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: false
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: client-token
-        with:
-          app-id: ${{ vars.SECUREFIX_CLIENT_APP_ID || '3872492' }}
-          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: securefix-server
-          permission-issues: write
-      - name: Dispatch the request to Securefix Server
-        env:
-          SECUREFIX_APP_TOKEN: ${{ steps.client-token.outputs.token }}
-        run: securefix request dispatch
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

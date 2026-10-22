@@ -279,6 +279,28 @@ The prepare run uploads `fixtures/state.json` as `scratch-fixtures` and uploads
 `control-probe/control-verification.json` separately as `control-probe`. Download both
 artifacts from the completed prepare run:
 
+The separate `managed-files-probe` job in a prepare run opens a reviewable
+managed-files PR from the exact candidate source. It validates the candidate and
+workflow revision before minting a repository-scoped Server App token with only
+`contents`, `workflows`, and `pull-requests` write permissions. Source reads use the
+job's read-only `GITHUB_TOKEN`. `repo-settings/managed-files.json` is constrained to
+the configured scratch repository and branch; its desired targets must be exactly
+`securefix-server.toml` plus every path in that instance's `workflow_roles`. The
+optional `remove` list may name only distinct, direct `.yml` files in
+`.github/workflows/` that are not active managed targets. Reconciliation creates or
+updates only declared desired files and removes only those explicit paths, then
+checks that the PR's complete changed-file set matches that plan. This scratch-only
+file writer is separate from `repo-settings.yml` and its
+administrator-managed repository settings.
+
+Its Client repository, reusable-workflow SHA, and version are explicit owner-selected
+inputs for the scratch probe. The CLI checks their syntax and the protected instance's
+accepted repository/version range; this probe does not verify the Client release,
+source, or publisher provenance. Treat its rendered Client caller as unqualified
+scratch data. Production adoption requires the independently verified distributor,
+revision, immutable release, and package relationship from the existing package
+verification flow.
+
 ```sh
 gh run download <prepare-run-id> --name scratch-fixtures --dir fixtures
 gh run download <prepare-run-id> --name control-probe --dir control-probe
@@ -483,6 +505,35 @@ branch during the rehearsal and is removed afterward. The ignored Rust probe is
 compiled only for tests; the installed runtime retains its normal authorization
 and provenance requirements. This verifies build, signing, and draft recovery;
 Terraform Registry ingestion still requires a published release.
+
+## Native release asset rehearsal
+
+The `release-assets` phase of `testing-securefix-server.yml` calls
+`testing-native-release-assets.yml` from a reviewed, frozen integration branch.
+Its builder compiles the source-bound Rust test executable without credentials.
+The publish job rechecks the frozen branch, then receives only a Server App token
+installed on `civitaspo/testing-securefix-server` with Contents write access.
+
+The probe reads the four target and runner pairs from the configured
+`herdr-linear-agent` release policy and builds pinned Client commit
+`ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00` on those matching runners. The build
+jobs have no credentials. A read-only Rust validator checks the current run and
+attempt, exact artifact names and IDs, archive digests, source commit signature
+and merged PR, `.release-version` at the source commit, runner/version evidence,
+and each binary's size and digest. The writer repeats validation before minting
+its scratch-only token.
+
+The success case passes those same four binary files through the production
+native-bundle validator and shared exact asset publisher. It publishes a unique
+immutable scratch prerelease and rereads its release state plus every asset ID,
+name, size, and digest; the immutable release is retained as evidence. The
+scratch tag is a unique prerelease while the expected binary version remains
+bound to the pinned source's `.release-version`. The rejection case omits one
+configured target from an otherwise verified bundle; validation must reject it
+while the separate scratch release remains a draft with no assets, then remove
+that draft and tag. A failed or incomplete matrix job prevents the writer job
+from starting. The workflow uploads the successful input and release evidence
+artifacts for seven days.
 
 The candidate verify phase exercises receipt reactions on both owner commands and the configured scratch bot's `/merge`. After the scratch merge, it checks the completion comment's squash SHA and Server run URL. The policy feedback probe publishes two failure results, verifies only the latest failure comment is visible, then publishes success and verifies both failure comments are hidden. The comment bodies identify the server CI and target commit. These probes use scratch-scoped Server App credentials.
 

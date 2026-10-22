@@ -18,8 +18,9 @@ or any unknown field at any nesting level returns an error. The parser does not
 read files, environment variables, credentials, or the network.
 
 Only `schema_version = 1` is supported. The root contains the required
-`[instance]`, `[identities]` role tables, `[apps]`, `[policy]`, a
-`repositories` array, `[workflow_roles]`, and `[acceptable_clients]`. The
+`release_request_label_prefix`, `[instance]`, `[identities]` role tables,
+`[apps]`, `[policy]`, a `repositories` array, `[workflow_roles]`, and
+`[acceptable_clients]`. The
 repository array may be empty (`repositories = []`), which grants no repository
 capabilities. The `[branches]` table is optional when no repository grants the
 `release` capability.
@@ -35,6 +36,7 @@ unlisted key is rejected.
 | Field | Requiredness and validation |
 | --- | --- |
 | `schema_version` | Required integer; must equal `1`. |
+| `release_request_label_prefix` | Required string; empty or at most 32 lowercase ASCII letters/digits/hyphens ending in `-`. It namespaces release-request labels for this Server instance; the protected config digest binds it to captured authority. |
 | `[instance].repository` | Required `owner/name`; validated with the existing repository-name validator. |
 | `[instance].id` | Required, nonzero repository ID claim. |
 | `[instance].default_branch` | Required branch name; checked with the existing branch validator. |

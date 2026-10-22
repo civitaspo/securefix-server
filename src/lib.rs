@@ -7,6 +7,7 @@ mod fixtures;
 pub mod instance_config;
 pub mod package;
 pub mod policy;
+pub mod release_manifest;
 pub mod runtime_archive;
 pub mod workflow;
 

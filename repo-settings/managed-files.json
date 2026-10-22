@@ -4,12 +4,40 @@
   "default_branch": "main",
   "files": [
     {
-      "source": "repo-settings/managed-files/policy-check.yml",
-      "target": ".github/workflows/policy-check.yml"
+      "source": "repo-settings/managed-files/server-approve.yml",
+      "target": ".github/workflows/server-approve.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/server-merge.yml",
+      "target": ".github/workflows/server-merge.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/server-policy-check.yml",
+      "target": ".github/workflows/server-policy-check.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/server-release.yml",
+      "target": ".github/workflows/server-release.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/server-securefix.yml",
+      "target": ".github/workflows/server-securefix.yml"
     },
     {
       "source": "repo-settings/managed-files/securefix-server.toml",
       "target": "securefix-server.toml"
+    },
+    {
+      "source": "repo-settings/managed-files/release-tag.yml",
+      "target": ".github/workflows/release-tag.yml"
     }
+  ],
+  "remove": [
+    ".github/workflows/testing-approve-request.yml",
+    ".github/workflows/testing-merge-request.yml",
+    ".github/workflows/testing-policy-check.yml",
+    ".github/workflows/testing-release-pr-sync.yml",
+    ".github/workflows/testing-release-pr.yml",
+    ".github/workflows/testing-release-tag.yml"
   ]
 }

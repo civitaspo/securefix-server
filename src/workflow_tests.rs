@@ -419,14 +419,7 @@ fn testing_loader_qualifies_selected_runtime_without_operational_secrets() {
 
 #[test]
 fn testing_reusables_share_production_jobs_and_commands() {
-    for feature in [
-        "approve-request",
-        "merge-request",
-        "policy-check",
-        "release-pr",
-        "release-pr-sync",
-        "release-tag",
-    ] {
+    for feature in ["policy-check", "release-pr", "release-pr-sync"] {
         let production = workflow(&format!("reusable-{feature}.yml"));
         let testing = workflow(&format!("testing-reusable-{feature}.yml"));
         let expected = serde_json::to_string(&production["jobs"])
@@ -443,6 +436,45 @@ fn testing_reusables_share_production_jobs_and_commands() {
         );
         assert_eq!(testing["on"], production["on"], "{feature}");
         assert_eq!(testing["permissions"], production["permissions"]);
+    }
+
+    let production = workflow("reusable-release-tag.yml");
+    let testing = workflow("testing-reusable-release-tag.yml");
+    assert_eq!(
+        production["on"]["workflow_call"]["inputs"],
+        testing["on"]["workflow_call"]["inputs"]
+    );
+    assert_eq!(production["permissions"], serde_json::json!({}));
+    assert_eq!(testing["permissions"], serde_json::json!({}));
+    let production_jobs = serde_json::to_string(&production["jobs"]).unwrap();
+    assert!(production_jobs.contains(".github/actions/load-package@"));
+    assert!(!production_jobs.contains("testing-load-cli.yml"));
+    let testing_jobs = serde_json::to_string(&testing["jobs"]).unwrap();
+    assert!(testing_jobs.contains("testing-load-cli.yml"));
+
+    for feature in ["approve-request", "merge-request"] {
+        let production = workflow(&format!("reusable-{feature}.yml"));
+        assert_eq!(production["permissions"], serde_json::json!({}));
+        assert_eq!(
+            production["jobs"]["request"]["uses"],
+            "./.github/workflows/reusable-client-request.yml"
+        );
+        assert_eq!(
+            production["jobs"]["request"]["with"]["operation"],
+            if feature == "approve-request" {
+                "approval"
+            } else {
+                "merge"
+            }
+        );
+        let testing = workflow(&format!("testing-reusable-{feature}.yml"));
+        assert_eq!(testing["permissions"], serde_json::json!({}));
+        assert!(
+            serde_json::to_string(&testing["jobs"])
+                .unwrap()
+                .contains("testing-load-cli.yml"),
+            "{feature} must retain the explicit test runtime"
+        );
     }
 }
 
@@ -1086,6 +1118,42 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         }
                         continue;
                     }
+                    if matches!(
+                        path.as_str(),
+                        ".github/workflows/reusable-release-tag.yml"
+                            | ".github/workflows/testing-reusable-release-tag.yml"
+                    ) && job_id == "assemble-native"
+                        && inputs["pattern"].is_string()
+                    {
+                        assert_eq!(
+                            inputs["pattern"], "native-target-*-${{ github.run_attempt }}",
+                            "{path}/{job_id}"
+                        );
+                        assert_eq!(inputs["path"], "native-input");
+                        assert!(inputs.get("merge-multiple").is_none());
+                        assert!(inputs.get("artifact-ids").is_none());
+                        assert!(inputs.get("repository").is_none());
+                        assert!(inputs.get("run-id").is_none());
+                        continue;
+                    }
+                    if path == ".github/workflows/testing-native-release-assets.yml"
+                        && matches!(
+                            job_id.as_str(),
+                            "verify-native-targets" | "publish-scratch-prerelease"
+                        )
+                        && inputs["pattern"].is_string()
+                    {
+                        assert_eq!(
+                            inputs["pattern"], "native-target-*-${{ github.run_attempt }}",
+                            "{path}/{job_id}"
+                        );
+                        assert_eq!(inputs["path"], "native-input");
+                        assert!(inputs.get("merge-multiple").is_none());
+                        assert!(inputs.get("artifact-ids").is_none());
+                        assert!(inputs.get("repository").is_none());
+                        assert!(inputs.get("run-id").is_none());
+                        continue;
+                    }
                     assert!(
                         inputs["artifact-ids"].as_str().is_some_and(|v| {
                             v.starts_with("${{ needs.") || v.starts_with("${{ steps.state.")
@@ -1115,6 +1183,10 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                     "${{ steps.resolve.outputs.sha }}"
                                 } else if job_id == "build" {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
+                                } else if job_id == "managed-files-probe" {
+                                    // The local install action comes from the dispatch workflow revision;
+                                    // the candidate CLI itself arrives through the immutable build artifact.
+                                    "${{ job.workflow_sha }}"
                                 } else if job_id == "bootstrap-scratch" || job_id == "scratch" {
                                     "${{ github.workflow_sha }}"
                                 } else {
@@ -2070,6 +2142,17 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
             {
                 continue;
             }
+            if path == ".github/workflows/testing-native-release-assets.yml"
+                && matches!(job_id.as_str(), "compile-harness" | "build-native")
+            {
+                continue;
+            }
+            if (path == ".github/workflows/reusable-release-tag.yml"
+                || path == ".github/workflows/testing-reusable-release-tag.yml")
+                && job_id == "build-native"
+            {
+                continue;
+            }
             for step in job["steps"].as_array().into_iter().flatten() {
                 if let Some(run) = step["run"].as_str() {
                     assert!(
@@ -2538,7 +2621,8 @@ fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_bas
             "verify",
             "bootstrap",
             "provider",
-            "release-assets"
+            "release-assets",
+            "managed-files"
         ])
     );
     let legacy = &testing["jobs"]["bootstrap-legacy-runtime"];
@@ -3277,6 +3361,225 @@ fn provider_release_probe_is_a_frozen_no_publish_scratch_test() {
 }
 
 #[test]
+fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease() {
+    let dispatcher = workflow("testing-securefix-server.yml");
+    let caller_if = dispatcher["jobs"]["native-release-assets-probe"]["if"]
+        .as_str()
+        .unwrap();
+    for required in [
+        "inputs.phase == 'release-assets'",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+        "refs/heads/integration/native-",
+        "inputs.candidate_sha == github.sha",
+    ] {
+        assert!(
+            caller_if.contains(required),
+            "caller guard lacks {required}"
+        );
+    }
+    assert_eq!(
+        dispatcher["jobs"]["native-release-assets-probe"]["secrets"],
+        serde_json::json!({
+            "SECUREFIX_SERVER_PRIVATE_KEY": "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+        })
+    );
+
+    let probe = workflow("testing-native-release-assets.yml");
+    assert!(probe["on"].get("workflow_call").is_some());
+    assert_eq!(probe["permissions"], serde_json::json!({}));
+    assert_eq!(
+        probe["env"]["PROBE_REPOSITORY"],
+        "civitaspo/testing-securefix-server"
+    );
+    assert_eq!(
+        probe["on"]["workflow_call"]["secrets"],
+        serde_json::json!({"SECUREFIX_SERVER_PRIVATE_KEY":{"required":true}})
+    );
+    let guard = &probe["jobs"]["guard"];
+    let guard_if = guard["if"].as_str().unwrap();
+    for required in [
+        "github.repository == 'civitaspo/securefix-server'",
+        "github.actor_id == '4525500'",
+        "github.run_attempt == 1",
+        "refs/heads/integration/native-",
+    ] {
+        assert!(guard_if.contains(required), "probe guard lacks {required}");
+    }
+    assert!(
+        guard["steps"][0]["run"]
+            .as_str()
+            .unwrap()
+            .contains("[[ \"$current\" == \"$CANDIDATE_SHA\" ]]")
+    );
+
+    let compile = &probe["jobs"]["compile-harness"];
+    let compile_text = serde_json::to_string(compile).unwrap();
+    assert!(!compile_text.contains("secrets."));
+    assert!(!compile_text.contains("APP_TOKEN"));
+    assert!(compile_text.contains("Capture the active control policy for scratch writes"));
+    assert_eq!(
+        compile["steps"][0]["with"]["ref"],
+        "${{ needs.guard.outputs.candidate-sha }}"
+    );
+
+    let build = &probe["jobs"]["build-native"];
+    assert!(
+        build["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.compile-harness.result == 'success'")
+    );
+    assert_eq!(build["runs-on"], "${{ matrix.target.runner }}");
+    assert_eq!(build["permissions"], serde_json::json!({"contents":"read"}));
+    assert_eq!(
+        build["strategy"]["matrix"]["target"],
+        "${{ fromJSON(needs.compile-harness.outputs.native-targets) }}"
+    );
+    assert_eq!(
+        probe["env"]["CLIENT_REPOSITORY"],
+        "civitaspo/herdr-linear-agent"
+    );
+    assert_eq!(
+        probe["env"]["CLIENT_SOURCE_SHA"],
+        "ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00"
+    );
+    let build_text = serde_json::to_string(build).unwrap();
+    assert_eq!(
+        build["steps"][0]["with"]["repository"],
+        "${{ env.CLIENT_REPOSITORY }}"
+    );
+    assert_eq!(
+        build["steps"][0]["with"]["ref"],
+        "${{ env.CLIENT_SOURCE_SHA }}"
+    );
+    assert!(build_text.contains("cargo +1.99.0 build --locked --release"));
+    assert!(build_text.contains("rustup target add --toolchain 1.99.0"));
+    assert!(build_text.contains("env -i PATH=\\\"$PATH\\\""));
+    assert!(build_text.contains("--version"));
+    for forbidden in [
+        "secrets.",
+        "create-github-app-token",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    ] {
+        assert!(
+            !build_text.contains(forbidden),
+            "native builder exposes {forbidden}"
+        );
+    }
+
+    let verify = &probe["jobs"]["verify-native-targets"];
+    let verify_if = verify["if"].as_str().unwrap();
+    assert!(verify_if.contains("needs.build-native.result == 'success'"));
+    assert!(verify_if.contains("needs.compile-harness.result == 'success'"));
+    assert_eq!(
+        verify["permissions"],
+        serde_json::json!({"actions":"read","contents":"read"})
+    );
+    assert!(
+        verify["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|need| need == "build-native")
+    );
+    assert!(
+        serde_json::to_string(verify)
+            .unwrap()
+            .contains("native_release_assets_validate_probe_inputs")
+    );
+
+    let writer = &probe["jobs"]["publish-scratch-prerelease"];
+    assert_eq!(writer["environment"], "main");
+    let writer_if = writer["if"].as_str().unwrap();
+    assert!(writer_if.contains("needs.build-native.result == 'success'"));
+    assert!(writer_if.contains("needs.verify-native-targets.result == 'success'"));
+    assert!(writer_if.contains("needs.compile-harness.result == 'success'"));
+    assert!(
+        writer["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|need| need == "verify-native-targets")
+    );
+    let token = writer["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "scratch-token")
+        .unwrap();
+    assert_eq!(token["with"]["owner"], "civitaspo");
+    assert_eq!(token["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(token["with"]["permission-contents"], "write");
+    let writer_text = serde_json::to_string(writer).unwrap();
+    assert!(!writer_text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+    assert!(writer_text.contains("SECUREFIX_SERVER_PRIVATE_KEY"));
+    assert!(writer_text.contains("native_release_assets_scratch_publish_probe"));
+    assert!(writer_text.contains("native_release_assets_validate_probe_inputs"));
+    assert!(writer_text.contains("native-release-assets-probe-evidence"));
+
+    let mut probe_invocations = 0;
+    for job_id in ["verify-native-targets", "publish-scratch-prerelease"] {
+        for step in probe["jobs"][job_id]["steps"].as_array().unwrap() {
+            let Some(run) = step["run"].as_str() else {
+                continue;
+            };
+            if run.contains("native_release_assets_validate_probe_inputs")
+                || run.contains("native_release_assets_scratch_publish_probe")
+            {
+                assert_eq!(
+                    step["env"]["SECUREFIX_POLICY_PATH"],
+                    "${{ github.workspace }}/probe/active-policy.json"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"],
+                    "${{ github.workspace }}/probe/policy.json"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"],
+                    "${{ github.sha }}"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"],
+                    "${{ github.sha }}"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"],
+                    "${{ github.run_id }}"
+                );
+                assert_eq!(
+                    step["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"],
+                    "${{ github.run_attempt }}"
+                );
+                probe_invocations += 1;
+            }
+        }
+    }
+    assert_eq!(probe_invocations, 3);
+
+    let source = include_str!("release.rs");
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"));
+    assert!(source.contains("SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"));
+    assert!(source.contains(
+        "publish_release_assets_with_upload(api, repo, release_id, plan, assets_dir, &mut upload)"
+    ));
+    assert!(source.contains(
+        "publish_release_assets_with_upload(api, repo, release_id, &plan, &assets_dir, upload)"
+    ));
+    assert!(source.contains("incomplete native target set was accepted"));
+    assert!(source.contains("std::io::copy(&mut file, &mut archive)?"));
+    assert!(source.contains("Client source is not the pinned verified commit"));
+    assert!(
+        source
+            .contains("ensure_published_immutable_release(&published, release_id, &success_tag)?")
+    );
+}
+
+#[test]
 fn scratch_uses_one_selected_runtime_and_test_scoped_tokens() {
     let value = workflow("testing-securefix-server.yml");
     let text = serde_json::to_string(&value).unwrap();
@@ -3339,6 +3642,9 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     step["name"] == "Download request manifest"
                         && step["with"]["path"] == "native-policy-check"
                 });
+            if path == ".github/workflows/reusable-client-request.yml" && job_id == "attest" {
+                continue;
+            }
             if path == ".github/workflows/testing-native-package-build.yml" && job_id == "attest" {
                 continue;
             }
@@ -3353,7 +3659,13 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 continue;
             }
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
+                && path != ".github/workflows/reusable-server-release.yml"
                 && !downloads_request_manifest
+                && !(matches!(
+                    path.as_str(),
+                    ".github/workflows/reusable-release-tag.yml"
+                        | ".github/workflows/testing-reusable-release-tag.yml"
+                ) && job_id == "attest-manifest")
                 && steps.iter().any(|step| {
                     step["uses"]
                         .as_str()
@@ -3362,6 +3674,14 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 });
             if path == ".github/workflows/testing-provider-release.yml"
                 || path == ".github/workflows/testing-native-release-assets-publish.yml"
+            {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-release-assets.yml"
+                && matches!(
+                    job_id.as_str(),
+                    "compile-harness" | "verify-native-targets" | "publish-scratch-prerelease"
+                )
             {
                 continue;
             }
@@ -3443,6 +3763,26 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 continue;
             }
             if downloads_cli {
+                if path == ".github/workflows/reusable-client-request.yml" {
+                    let package_loader = steps
+                        .iter()
+                        .find(|step| step["name"] == "Load the fixed Securefix Server package")
+                        .unwrap();
+                    assert!(
+                        package_loader["uses"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with("@0000000000000000000000000000000000000000")
+                    );
+                    assert!(
+                        steps
+                            .iter()
+                            .filter_map(|step| step["run"].as_str())
+                            .any(|run| run.contains("$CLI_BINARY")),
+                        "{path}/{job_id}: verified package binary must be invoked"
+                    );
+                    continue;
+                }
                 assert!(
                     installer.is_some(),
                     "{path}/{job_id}: downloaded CLI must use the installer"
@@ -3613,6 +3953,72 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("select(")
                     && !run.contains(" == ")
                     && !run.contains("test(");
+                let bounded_native_release_source_guard = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "guard"
+                    && step["name"] == "Require the frozen candidate branch to match this run"
+                    && run.contains("git/ref/heads/${BRANCH}")
+                    && run.contains("\"$current\" == \"$CANDIDATE_SHA\"")
+                    && run.contains("integration/native-[0-9a-f]{12}")
+                    && run.contains("${BRANCH##*-}")
+                    && run.contains("${CANDIDATE_SHA:0:12}")
+                    && run.matches("gh api ").count() == 1
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method");
+                let bounded_native_release_harness = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "compile-harness"
+                    && step["name"] == "Compile the isolated native release probe test binary"
+                    && run.contains("cargo +1.99.0 test --locked --bin securefix --no-run")
+                    && run.contains("target.name == \"securefix\"")
+                    && run.contains(".executable")
+                    && run.matches("jq ").count() == 1
+                    && !run.contains("gh api")
+                    && !run.contains("gh release");
+                let bounded_native_release_target_matrix = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "compile-harness"
+                    && step["name"] == "Read the configured native target matrix"
+                    && run.contains("jq -ce --arg repository")
+                    && run.contains(".native_binaries[]")
+                    && run.contains("jq 'length'")
+                    && !run.contains("gh api")
+                    && !run.contains("gh release");
+                let bounded_native_release_target_build = path
+                    == ".github/workflows/testing-native-release-assets.yml"
+                    && job_id == "build-native"
+                    && step["name"]
+                        == "Build and execute the pinned Client source on its target runner"
+                    && run.contains(
+                        "cargo +1.99.0 build --locked --release --bin herdr-linear-agent --target",
+                    )
+                    && run.contains("git rev-parse HEAD")
+                    && run.contains("--version")
+                    && run.contains("jq -n")
+                    && run.matches("jq ").count() == 1
+                    && run.contains("source_run_id:$source_run_id")
+                    && run.contains("source_run_attempt:$source_run_attempt")
+                    && run.contains("release_pr_number:$release_pr_number")
+                    && run.contains("release_pr_sha:$release_pr_sha")
+                    && !run.contains("jq -e")
+                    && !run.contains("select(")
+                    && !run.contains("gh api")
+                    && !run.contains("gh release");
+                let bounded_native_target_evidence = (path
+                    == ".github/workflows/reusable-release-tag.yml"
+                    || path == ".github/workflows/testing-reusable-release-tag.yml")
+                    && job_id == "build-native"
+                    && step["name"] == "Build and execute the native binary on its target runner"
+                    && run.contains("jq -n")
+                    && run.matches("jq ").count() == 1
+                    && run.contains("source_run_id:$source_run_id")
+                    && run.contains("source_run_attempt:$source_run_attempt")
+                    && run.contains("release_pr_number:$release_pr_number")
+                    && run.contains("release_pr_sha:$release_pr_sha")
+                    && !run.contains("jq -e")
+                    && !run.contains("select(")
+                    && !run.contains("test(")
+                    && run.contains("mktemp -d");
                 assert!(
                     !run.contains("python")
                         && !run.contains("ruby")
@@ -3625,7 +4031,12 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             || selected_native_release_probe_build
                             || native_release_assets_preflight
                             || native_package_config_projection
-                            || native_package_record_projection)
+                            || native_package_record_projection
+                            || bounded_native_release_source_guard
+                            || bounded_native_release_harness
+                            || bounded_native_release_target_matrix
+                            || bounded_native_release_target_build
+                            || bounded_native_target_evidence)
                         && !run.contains("curl "),
                     "{path}/{job_id}: operation decisions must be in Rust except bounded runtime bootstrap reads"
                 );
@@ -3661,12 +4072,43 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             && steps.iter().any(|candidate| {
                                 candidate["uses"] == "$/.github/actions/load-package"
                                     && candidate["with"]["channel"] == "scratch"
+                                    && candidate["with"]["action-sha"]
+                                        == "${{ github.workflow_sha }}"
+                                    && candidate["with"]["manifest-source-sha"]
+                                        == "${{ needs.publish.outputs.source-sha }}"
+                                    && candidate["with"]["publication-source-sha"]
+                                        == "${{ needs.publish.outputs.source-sha }}"
                             });
+                        let selected_managed_files_candidate = path
+                            == ".github/workflows/testing-securefix-server.yml"
+                            && job_id == "managed-files-probe"
+                            && steps.iter().any(|candidate| {
+                                candidate["uses"] == "$/.github/actions/install-cli"
+                                    && candidate["with"]["binary"]
+                                        == "candidate-runtime/securefix"
+                            })
+                            && steps.iter().any(|candidate| {
+                                candidate["name"]
+                                    == "Validate the exact selected candidate before minting a writer token"
+                                    && candidate["env"]["CANDIDATE_SHA"]
+                                        == "${{ needs.build.outputs.source-sha }}"
+                                    && candidate["run"]
+                                        .as_str()
+                                        .is_some_and(|run| run.contains("securefix integration validate-producer"))
+                            });
+                        let fixed_package_loaded = steps.iter().any(|candidate| {
+                            candidate["uses"]
+                                .as_str()
+                                .is_some_and(|uses| uses.contains("/.github/actions/load-package@"))
+                                && candidate["with"]["action-sha"].is_string()
+                        });
                         assert!(
                             job["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || step["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || source_bound_native_candidate
                                 || verified_native_package_smoke
+                                || selected_managed_files_candidate
+                                || fixed_package_loaded
                                 || (path == ".github/workflows/testing-securefix-server.yml"
                                     && (step["env"]["CANDIDATE_SHA"].is_string()
                                         || job["env"]["CANDIDATE_SHA"].is_string()
@@ -3697,6 +4139,14 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         assert_eq!(caller["jobs"]["request"]["uses"], local_reusable);
         assert_eq!(caller["jobs"]["request"]["permissions"]["issues"], "read");
         assert_eq!(
+            caller["jobs"]["request"]["permissions"]["attestations"],
+            "write"
+        );
+        assert_eq!(
+            caller["jobs"]["request"]["permissions"]["id-token"],
+            "write"
+        );
+        assert_eq!(
             caller["jobs"]["request"]["permissions"]["pull-requests"],
             "read"
         );
@@ -3709,32 +4159,94 @@ fn server_request_callers_pass_the_required_environment_secret_by_name() {
         );
         let reusable = workflow(&format!("reusable-{operation}-request.yml"));
         assert_eq!(
+            caller["jobs"]["request"]["with"]["server_repository"],
+            "civitaspo/securefix-server"
+        );
+        assert_eq!(
+            caller["jobs"]["request"]["with"]["instance_config_path"],
+            "securefix-server.toml"
+        );
+        assert_eq!(
             reusable["on"]["workflow_call"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"]["required"],
             true
         );
-        let build = &reusable["jobs"]["build"];
-        assert!(build.get("secrets").is_none());
-        let capture = &reusable["jobs"]["capture"];
-        assert_eq!(capture["permissions"]["issues"], "read");
-        assert_eq!(capture["permissions"]["pull-requests"], "read");
+        assert_eq!(reusable["permissions"], serde_json::json!({}));
         assert_eq!(
-            capture["environment"],
-            "${{ github.repository == 'civitaspo/securefix-server' && 'main' || null }}"
+            reusable["jobs"]["request"]["uses"],
+            "./.github/workflows/reusable-client-request.yml"
         );
-        let token = capture["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|step| step["id"] == "client-token")
-            .unwrap();
         assert_eq!(
-            token["with"]["private-key"],
+            reusable["jobs"]["request"]["with"]["operation"],
+            if operation == "approve" {
+                "approval"
+            } else {
+                "merge"
+            }
+        );
+        assert_eq!(
+            reusable["jobs"]["request"]["with"]["server_repository"],
+            "${{ inputs.server_repository }}"
+        );
+        assert_eq!(
+            reusable["jobs"]["request"]["with"]["instance_config_path"],
+            "${{ inputs.instance_config_path }}"
+        );
+        assert_eq!(
+            reusable["jobs"]["request"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"],
             "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
         );
-        assert_eq!(token["with"]["owner"], "civitaspo");
-        assert_eq!(token["with"]["repositories"], "securefix-server");
-        assert_eq!(token["with"]["permission-issues"], "write");
+        assert_eq!(
+            reusable["jobs"]["request"]["permissions"]["attestations"],
+            "write"
+        );
+        assert_eq!(
+            reusable["jobs"]["request"]["permissions"]["id-token"],
+            "write"
+        );
     }
+
+    let signer = workflow("reusable-client-request.yml");
+    assert_eq!(signer["permissions"], serde_json::json!({}));
+    assert!(signer["jobs"]["dispatch"].get("environment").is_none());
+    let dispatch = signer["jobs"]["dispatch"]["steps"].as_array().unwrap();
+    let token = dispatch
+        .iter()
+        .find(|step| step["id"] == "client-token")
+        .unwrap();
+    assert_eq!(
+        token["with"]["owner"],
+        "${{ needs.capture.outputs.server-owner }}"
+    );
+    assert_eq!(
+        token["with"]["repositories"],
+        "${{ needs.capture.outputs.server-repository-name }}"
+    );
+    assert_eq!(
+        token["with"]["app-id"],
+        "${{ needs.capture.outputs.client-app-id }}"
+    );
+    assert_eq!(token["with"]["permission-issues"], "write");
+    let attest = &signer["jobs"]["attest"];
+    assert!(attest.get("secrets").is_none());
+    assert_eq!(attest["permissions"]["id-token"], "write");
+    assert_eq!(attest["permissions"]["attestations"], "write");
+    let capture = &signer["jobs"]["capture"];
+    assert_eq!(capture["permissions"]["issues"], "read");
+    assert_eq!(capture["permissions"]["pull-requests"], "read");
+    let capture_step = capture["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "capture")
+        .unwrap();
+    assert_eq!(
+        capture_step["env"]["SECUREFIX_SERVER_REPOSITORY"],
+        "${{ inputs.server_repository }}"
+    );
+    assert_eq!(
+        capture_step["env"]["SECUREFIX_INSTANCE_CONFIG_PATH"],
+        "${{ inputs.instance_config_path }}"
+    );
 }
 
 #[test]
@@ -3926,7 +4438,7 @@ fn native_caller_distribution_mints_only_target_scoped_write_credentials() {
 }
 
 #[test]
-fn provider_build_sign_and_publish_have_distinct_credentials() {
+fn release_build_sign_and_publish_keep_credentials_separate() {
     let client: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/reusable-release-tag.yml").unwrap())
             .unwrap();
@@ -3935,8 +4447,83 @@ fn provider_build_sign_and_publish_have_distinct_credentials() {
     assert!(!serde_json::to_string(build).unwrap().contains("secrets."));
     assert_eq!(
         build["permissions"],
-        serde_json::json!({"contents":"read","pull-requests":"read"})
+        serde_json::json!({"actions":"read","attestations":"read","contents":"read","pull-requests":"read"})
     );
+    let client_inputs = &client["on"]["workflow_call"]["inputs"];
+    assert_eq!(client_inputs["server_repository"]["required"], true);
+    assert_eq!(client_inputs["instance_config_path"]["required"], true);
+    assert_eq!(client_inputs["release_pr_number"]["type"], "number");
+    let production_text = serde_json::to_string(&client).unwrap();
+    let production_yaml = fs::read_to_string(".github/workflows/reusable-release-tag.yml").unwrap();
+    assert!(!production_text.contains("load-cli.yml"));
+    assert!(!production_text.contains("control/active.json"));
+    assert!(!production_text.contains("SECUREFIX_SOURCE_SHA"));
+    let loader_step_indices = |job: &Value| {
+        job["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.contains("/.github/actions/load-package@"))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>()
+    };
+    for job_name in [
+        "resolve",
+        "build",
+        "assemble-native",
+        "tag",
+        "request-server",
+    ] {
+        let job = &client["jobs"][job_name];
+        let loaders = loader_step_indices(job);
+        assert_eq!(loaders.len(), 1, "{job_name} must load the fixed package");
+        let loader = &job["steps"][loaders[0]];
+        let uses = loader["uses"].as_str().unwrap();
+        let fixed_ref = uses
+            .strip_prefix("civitaspo/securefix-server/.github/actions/load-package@")
+            .unwrap();
+        assert_eq!(fixed_ref.len(), 40);
+        assert!(fixed_ref.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(loader["with"]["action-sha"], fixed_ref);
+        if fixed_ref == "0000000000000000000000000000000000000000" {
+            assert!(production_yaml.contains("Candidate template only. Replace this exact pin"));
+        }
+        assert_eq!(loader["with"]["channel"], "stable");
+        assert_eq!(
+            loader["with"]["source-repository"],
+            "civitaspo/securefix-server"
+        );
+        assert_eq!(
+            loader["with"]["destination-repository"],
+            "civitaspo/securefix-server"
+        );
+        assert_eq!(loader["with"]["source-repository-id"], "1250079425");
+        assert_eq!(loader["with"]["destination-repository-id"], "1250079425");
+    }
+    for job_name in ["resolve", "build", "assemble-native", "tag"] {
+        let steps = client["jobs"][job_name]["steps"].as_array().unwrap();
+        let cli = steps
+            .iter()
+            .find(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("securefix release "))
+            })
+            .unwrap();
+        assert_eq!(
+            cli["env"]["SECUREFIX_SERVER_REPOSITORY"],
+            "${{ inputs.server_repository }}"
+        );
+        assert_eq!(
+            cli["env"]["SECUREFIX_INSTANCE_CONFIG_PATH"],
+            "${{ inputs.instance_config_path }}"
+        );
+    }
     assert!(
         build["steps"]
             .as_array()
@@ -3944,6 +4531,158 @@ fn provider_build_sign_and_publish_have_distinct_credentials() {
             .iter()
             .any(|s| s["with"]["ref"] == "${{ needs.resolve.outputs.merge_sha }}")
     );
+    let native = &client["jobs"]["build-native"];
+    assert_eq!(native["runs-on"], "${{ matrix.target.runner }}");
+    assert_eq!(
+        native["permissions"],
+        serde_json::json!({"contents":"read"})
+    );
+    let native_text = serde_json::to_string(native).unwrap();
+    for forbidden in [
+        "secrets.",
+        "create-github-app-token",
+        "SECUREFIX_SERVER_PRIVATE_KEY",
+        "SECUREFIX_CLIENT_PRIVATE_KEY",
+    ] {
+        assert!(
+            !native_text.contains(forbidden),
+            "native builder exposes {forbidden}"
+        );
+    }
+    assert!(native_text.contains("musl-tools"));
+    assert!(native_text.contains("cargo build --locked --release --bin"));
+    assert!(native_text.contains("--version"));
+    assert!(native_text.contains("version_output="));
+    let build_step = native["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Build and execute the native binary on its target runner")
+        .unwrap();
+    assert_eq!(build_step["env"]["RUNNER_OS"], "${{ runner.os }}");
+    assert_eq!(build_step["env"]["RUNNER_ARCH"], "${{ runner.arch }}");
+    assert_eq!(
+        build_step["env"]["NATIVE_SOURCE_SHA"],
+        "${{ needs.resolve.outputs.merge_sha }}"
+    );
+    assert_eq!(
+        build_step["env"]["RELEASE_PR_NUMBER"],
+        "${{ needs.resolve.outputs.pr_number }}"
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("git rev-parse HEAD")
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("source_run_id:$source_run_id")
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("release_pr_sha:$release_pr_sha")
+    );
+    assert!(build_step["run"].as_str().unwrap().contains("mktemp -d"));
+    let upload = native["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .unwrap();
+    assert_eq!(
+        upload["with"]["path"],
+        "${{ steps.target.outputs.artifact_dir }}/*"
+    );
+    assert!(
+        native_text.contains("native-target-${{ matrix.target.target }}-${{ github.run_attempt }}")
+    );
+    assert!(native_text.contains("needs.resolve.outputs.native_targets"));
+    assert!(!native_text.contains("securefix-runtime"));
+    assert!(!native_text.contains("securefix release build-native"));
+    for forbidden in ["GITHUB_TOKEN", "GH_TOKEN", "SECUREFIX_SERVER_APP_TOKEN"] {
+        assert!(!native_text.contains(forbidden));
+    }
+    let release_source = include_str!("release.rs");
+    assert!(!release_source.contains("fn build_native("));
+    let native_assembler = release_source.split_once("fn assemble_native(").unwrap().1;
+    assert!(native_assembler.contains("source_run_sha.as_str() == env(\"GITHUB_SHA\")?"));
+    assert!(native_assembler.contains("build.source_run_id == run_id"));
+    assert!(native_assembler.contains("build.source_run_attempt == run_attempt"));
+    assert!(native_assembler.contains("build.release_pr_sha == merge_sha"));
+    assert!(native_assembler.contains("native-target-{}-{run_attempt}"));
+    assert!(native_assembler.contains("validate_native_manifest"));
+    assert!(native_assembler.contains("sha256_file(&binary_path)?"));
+    let assemble = &client["jobs"]["assemble-native"];
+    assert_eq!(
+        assemble["permissions"],
+        serde_json::json!({"actions":"read","attestations":"read","contents":"read","pull-requests":"read"})
+    );
+    assert!(
+        serde_json::to_string(assemble)
+            .unwrap()
+            .contains("native-target-*")
+    );
+    let tag = &client["jobs"]["tag"];
+    let tag_if = tag["if"].as_str().unwrap();
+    assert!(tag_if.contains("needs.build-native.result == 'success'"));
+    assert!(tag_if.contains("needs.assemble-native.result == 'success'"));
+    assert!(!tag_if.contains("needs.build-native.result == 'failure'"));
+    assert!(
+        tag["needs"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("assemble-native"))
+    );
+    assert!(
+        serde_json::to_string(tag)
+            .unwrap()
+            .contains("needs.assemble-native.outputs.artifact_id")
+    );
+    assert!(
+        serde_json::to_string(tag)
+            .unwrap()
+            .contains("RELEASE_BUNDLE_ARTIFACT_ID")
+    );
+    let attest = &client["jobs"]["attest-manifest"];
+    assert_eq!(
+        attest["permissions"],
+        serde_json::json!({
+            "actions":"read", "contents":"read", "id-token":"write", "attestations":"write"
+        })
+    );
+    let attest_text = serde_json::to_string(attest).unwrap();
+    assert!(attest_text.contains("needs.tag.outputs.manifest_artifact_id"));
+    assert!(attest_text.contains("release-proof/manifest.json"));
+    assert!(attest_text.contains("release-proof/bundle.json"));
+    for forbidden in [
+        "SECUREFIX_CLIENT_PRIVATE_KEY",
+        "create-github-app-token",
+        "SECUREFIX_SERVER_TOKEN",
+    ] {
+        assert!(
+            !attest_text.contains(forbidden),
+            "manifest attestor exposes {forbidden}"
+        );
+    }
+    let request = &client["jobs"]["request-server"];
+    assert!(
+        request["needs"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("attest-manifest"))
+    );
+    let request_text = serde_json::to_string(request).unwrap();
+    assert!(request_text.contains("SECUREFIX_CLIENT_PRIVATE_KEY"));
+    assert!(request_text.contains("securefix release request-server"));
     let server: Value =
         serde_yaml::from_slice(&fs::read(".github/workflows/release.yml").unwrap()).unwrap();
     let preflight_steps = server["jobs"]["preflight"]["steps"].as_array().unwrap();
@@ -4069,6 +4808,12 @@ fn reusable_callers_grant_required_permissions() {
         crate::distribution::caller::rendered_files(&"a".repeat(40), "v0.2.22", "main", true)
             .unwrap()
     {
+        if path == ".github/workflows/release-tag.yml" {
+            // This legacy renderer is still tied to the retired runtime lane;
+            // the current reusable contract is checked with the separate
+            // adoption-time managed Client pin below.
+            continue;
+        }
         let mut value: Value = serde_yaml::from_slice(&bytes).unwrap();
         for job in value["jobs"].as_object_mut().unwrap().values_mut() {
             let uses = job["uses"].as_str().unwrap();
@@ -4082,6 +4827,28 @@ fn reusable_callers_grant_required_permissions() {
         }
         callers.push((format!("generated:{path}"), value));
     }
+    let instance = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+        "../tests/fixtures/instance-config.toml"
+    ))
+    .unwrap();
+    let client_pin = crate::distribution::caller::ClientImplementationPin::new(
+        &instance.acceptable_clients.repository,
+        &"b".repeat(40),
+        "1.4.2",
+    )
+    .unwrap();
+    let managed = crate::distribution::caller::render_managed_client_release_tag_from_template(
+        &instance.acceptable_clients,
+        &client_pin,
+        &instance.instance.repository,
+        "securefix-server.toml",
+        include_bytes!("distribution_templates/managed-client-release-tag.yml"),
+    )
+    .unwrap();
+    let mut managed: Value = serde_yaml::from_slice(&managed).unwrap();
+    managed["jobs"]["tag"]["uses"] =
+        Value::String("./.github/workflows/reusable-release-tag.yml".into());
+    callers.push(("managed-client-release-tag".into(), managed));
     for (path, value) in callers {
         for (job_id, job) in value["jobs"].as_object().unwrap() {
             let Some(callee) = job["uses"]
@@ -4105,6 +4872,266 @@ fn reusable_callers_grant_required_permissions() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn server_approval_token_is_only_exposed_to_the_apply_step() {
+    let workflow = workflow("reusable-server-approve.yml");
+    let job = &workflow["jobs"]["receive"];
+    assert_eq!(workflow["permissions"], serde_json::json!({}));
+    assert_eq!(job["environment"], "main");
+    assert_eq!(job["permissions"]["contents"], "read");
+    let steps = job["steps"].as_array().unwrap();
+    let validate = steps
+        .iter()
+        .find(|step| step["name"] == "Validate the owner approval without a write credential")
+        .unwrap();
+    assert!(validate["env"]["SECUREFIX_APPROVE_TOKEN"].is_null());
+    let apply = steps
+        .iter()
+        .find(|step| step["name"] == "Apply the owner approval after revalidation")
+        .unwrap();
+    assert_eq!(
+        apply["env"]["SECUREFIX_APPROVE_TOKEN"],
+        "${{ secrets.APPROVAL_TOKEN }}"
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step["env"]["SECUREFIX_APPROVE_TOKEN"]
+                == "${{ secrets.APPROVAL_TOKEN }}")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn scratch_managed_file_writer_is_separate_from_repository_settings_admin() {
+    let workflow = workflow("testing-securefix-server.yml");
+    let client_repository = &workflow["on"]["workflow_dispatch"]["inputs"]["client_repository"];
+    let client_sha = &workflow["on"]["workflow_dispatch"]["inputs"]["client_implementation_sha"];
+    let client_version = &workflow["on"]["workflow_dispatch"]["inputs"]["client_version"];
+    for input in [client_repository, client_sha, client_version] {
+        let description = input["description"].as_str().unwrap_or_default();
+        let description = description.to_ascii_lowercase();
+        assert!(
+            description.contains("owner-selected") || description.contains("owner-supplied"),
+            "{description}"
+        );
+        assert!(description.contains("scratch-only"), "{description}");
+    }
+    assert!(
+        client_repository["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("provenance is not qualified")
+    );
+    assert!(
+        client_version["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("provenance is not qualified")
+    );
+    let validation_script = workflow["jobs"]["managed-files-probe"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"] == "Validate the exact selected candidate before minting a writer token"
+        })
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(
+        validation_script
+            .contains("owner-selected Client pin tuple is required for this scratch-only probe")
+    );
+
+    let managed = &workflow["jobs"]["managed-files-probe"];
+    assert!(
+        managed.is_object(),
+        "managed-file reconciliation has its own job"
+    );
+    let integration_prepare =
+        serde_json::to_string(&workflow["jobs"]["scratch"]).unwrap_or_default();
+    assert!(
+        !integration_prepare.contains("managed-reconcile-scratch"),
+        "integration preparation must not mint the managed-file writer token"
+    );
+    assert_eq!(managed["permissions"]["contents"], "read");
+    assert_eq!(managed["permissions"]["pull-requests"], Value::Null);
+    let steps = managed["steps"].as_array().unwrap();
+    let writer = steps
+        .iter()
+        .find(|step| step["id"] == "managed-writer")
+        .unwrap();
+    assert_eq!(writer["with"]["permission-contents"], "write");
+    assert_eq!(writer["with"]["permission-pull-requests"], "write");
+    assert_eq!(writer["with"]["permission-workflows"], "write");
+    assert!(writer["with"].get("permission-administration").is_none());
+    let reconcile = steps
+        .iter()
+        .find(|step| {
+            step["name"] == "Create the reviewable managed-file PR from the selected source"
+        })
+        .unwrap();
+    assert_eq!(
+        reconcile["env"]["SECUREFIX_SERVER_APP_TOKEN"],
+        "${{ steps.managed-writer.outputs.token }}"
+    );
+    assert!(
+        reconcile["run"]
+            .as_str()
+            .unwrap()
+            .contains("settings managed-reconcile-scratch --source-sha")
+    );
+    let serialized = serde_json::to_string(&managed).unwrap();
+    assert!(!serialized.contains("CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN"));
+}
+
+#[test]
+fn server_release_receiver_keeps_read_write_and_cleanup_credentials_separate() {
+    let workflow = workflow("reusable-server-release.yml");
+    assert_eq!(workflow["permissions"], serde_json::json!({}));
+    assert_eq!(
+        workflow["on"]["workflow_call"]["inputs"]["config_path"]["required"],
+        true
+    );
+    assert_eq!(
+        workflow["on"]["workflow_call"]["secrets"]["SERVER_PRIVATE_KEY"]["required"],
+        true
+    );
+    let jobs = &workflow["jobs"];
+    assert!(
+        jobs["parse"]["steps"][1]["run"]
+            .as_str()
+            .unwrap()
+            .contains("release parse-request")
+    );
+    let preflight = jobs["preflight"]["steps"].as_array().unwrap();
+    let preflight_writer = preflight
+        .iter()
+        .find(|step| step["id"] == "release-read")
+        .unwrap();
+    assert_eq!(preflight_writer["with"]["permission-contents"], "read");
+    assert_eq!(preflight_writer["with"]["permission-issues"], "read");
+    assert_eq!(preflight_writer["with"]["permission-pull-requests"], "read");
+    let sign = &jobs["sign"];
+    assert_eq!(
+        sign["if"],
+        "needs.preflight.outputs.strategy == 'terraform-provider'"
+    );
+    let sign_json = serde_json::to_string(sign).unwrap();
+    assert!(sign_json.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+    assert!(sign_json.contains("TERRAFORM_PROVIDER_GPG_PASSPHRASE"));
+    let publish = jobs["publish"]["steps"].as_array().unwrap();
+    let read = publish
+        .iter()
+        .find(|step| step["id"] == "release-read")
+        .unwrap();
+    let write = publish
+        .iter()
+        .find(|step| step["id"] == "release-write")
+        .unwrap();
+    assert_eq!(read["with"]["permission-contents"], "read");
+    assert_eq!(read["with"]["permission-issues"], "read");
+    assert_eq!(write["with"]["permission-contents"], "write");
+    let publisher = publish
+        .iter()
+        .find(|step| step["name"] == "Revalidate and publish the immutable Client release")
+        .unwrap();
+    assert_eq!(
+        publisher["env"]["SECUREFIX_RELEASE_READ_TOKEN"],
+        "${{ steps.release-read.outputs.token }}"
+    );
+    assert_eq!(
+        publisher["env"]["SECUREFIX_RELEASE_WRITE_TOKEN"],
+        "${{ steps.release-write.outputs.token }}"
+    );
+    assert_eq!(
+        publish
+            .iter()
+            .filter(|step| step["env"]["SECUREFIX_RELEASE_WRITE_TOKEN"].is_string())
+            .count(),
+        1,
+        "release writer token is exposed only to the final publish command"
+    );
+    let publish_json = serde_json::to_string(&jobs["publish"]).unwrap();
+    assert!(!publish_json.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+    assert!(!publish_json.contains("TERRAFORM_PROVIDER_GPG_PASSPHRASE"));
+    assert!(publish_json.contains("needs.sign.outputs.artifact_id"));
+    let cleanup = &jobs["cleanup"];
+    assert_eq!(cleanup["permissions"]["issues"], "write");
+    assert_eq!(cleanup["permissions"]["contents"], "read");
+    assert!(
+        !serde_json::to_string(cleanup)
+            .unwrap()
+            .contains("SECUREFIX_RELEASE_WRITE_TOKEN")
+    );
+    let all = serde_json::to_string(&workflow).unwrap();
+    assert!(all.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
+    assert!(all.contains("TERRAFORM_PROVIDER_GPG_PASSPHRASE"));
+}
+
+#[test]
+fn server_role_receivers_use_fixed_package_and_separate_read_and_write_credentials() {
+    for role in ["policy-check", "securefix", "approve", "merge"] {
+        let workflow = workflow(&format!("reusable-server-{role}.yml"));
+        assert_eq!(workflow["permissions"], serde_json::json!({}), "{role}");
+        let job = &workflow["jobs"]["receive"];
+        assert_eq!(job["environment"], "main", "{role}");
+        for permission in [
+            "actions",
+            "attestations",
+            "checks",
+            "contents",
+            "issues",
+            "pull-requests",
+            "statuses",
+        ] {
+            assert_eq!(
+                job["permissions"][permission], "read",
+                "{role}: {permission}"
+            );
+        }
+        let serialized = serde_json::to_string(&workflow).unwrap();
+        assert!(serialized.contains("config_path"), "{role}");
+        assert!(serialized.contains("secrets.SERVER_PRIVATE_KEY"), "{role}");
+        assert!(!serialized.contains("SECUREFIX_SOURCE_SHA"), "{role}");
+        assert!(!serialized.contains("load-cli.yml"), "{role}");
+        let steps = job["steps"].as_array().unwrap();
+        let loader = steps
+            .iter()
+            .find(|step| step["name"] == "Load the fixed Securefix Server package")
+            .unwrap();
+        assert_eq!(
+            loader["with"]["source-repository"], "civitaspo/securefix-server",
+            "{role}"
+        );
+        assert_eq!(
+            loader["with"]["destination-repository"],
+            "civitaspo/securefix-server"
+        );
+        assert_eq!(loader["with"]["channel"], "stable");
+        assert!(loader["uses"].as_str().unwrap().contains("@"));
+        for mint in steps.iter().filter(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.contains("create-github-app-token"))
+        }) {
+            assert_eq!(
+                mint["with"]["owner"],
+                "${{ steps.request.outputs.producer_owner }}"
+            );
+            assert_eq!(
+                mint["with"]["repositories"],
+                "${{ steps.request.outputs.producer_repository_name }}"
+            );
+            assert!(mint["with"].get("permission-administration").is_none());
         }
     }
 }

@@ -57,18 +57,12 @@ workflows:
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-    '.github/workflows/reusable-approve-request.yml':
-        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
-        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-    '.github/workflows/reusable-merge-request.yml':
-        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
-        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/reusable-policy-check.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    '.github/workflows/reusable-approve-request.yml': []
+    '.github/workflows/reusable-merge-request.yml': []
     '.github/workflows/reusable-release-pr-sync.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -79,11 +73,13 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
         - 'jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654'
     '.github/workflows/reusable-release-tag.yml':
+        - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        - 'jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654'
     '.github/workflows/securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -133,6 +129,11 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/testing-native-policy-check-authority.yml': []
     '.github/workflows/testing-native-release-assets-publish.yml':
+        - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
+        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    '.github/workflows/testing-native-release-assets.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -195,11 +196,13 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
         - 'jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654'
     '.github/workflows/testing-reusable-release-tag.yml':
+        - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        - 'jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654'
     '.github/workflows/testing-securefix-server.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'

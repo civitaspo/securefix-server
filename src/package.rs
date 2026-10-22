@@ -105,6 +105,554 @@ impl VerifiedPackage {
     }
 }
 
+/// Authenticated identity chain for one fixed Client workflow and its package.
+/// The `package` field is the execution-ready result; the other fields explain
+/// which implementation, loader mapping, binary source, and protocol it binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedNativeClientPackage {
+    pub implementation_sha: String,
+    pub implementation_version: Version,
+    pub loader_action_sha: String,
+    pub binary_source_sha: String,
+    pub binary_version: Version,
+    pub protocol: String,
+    /// Workflow and branch declared by the fixed loader manifest whose
+    /// artifact was attested. These are distinct from the Client request
+    /// capture workflow configured by the instance.
+    pub package_publisher_workflow: String,
+    pub package_publisher_branch: String,
+    pub package: VerifiedPackage,
+}
+
+#[cfg(test)]
+pub(crate) fn native_client_package_api_test_fixture() -> VerifiedNativeClientPackage {
+    let publisher = TrustedPublisher {
+        repository: "example-org/securefix-client".to_owned(),
+        repository_id: 654_321,
+    };
+    let source_sha = "3".repeat(40);
+    let version = Version::parse("1.4.1").unwrap();
+    let asset = ResolvedAsset {
+        component: "securefix".to_owned(),
+        platform: "linux-x86_64".to_owned(),
+        id: 8_766,
+        name: "securefix-linux-x86_64".to_owned(),
+        size: 16,
+        sha256: "d".repeat(64),
+    };
+    let release = ResolvedRelease {
+        publisher,
+        implementation_sha: source_sha.clone(),
+        source_sha: source_sha.clone(),
+        version: version.clone(),
+        tag: format!("v{version}"),
+        release_id: 8_765,
+        asset,
+    };
+    VerifiedNativeClientPackage {
+        implementation_sha: "1".repeat(40),
+        implementation_version: Version::parse("1.4.2").unwrap(),
+        loader_action_sha: "2".repeat(40),
+        binary_source_sha: source_sha,
+        binary_version: version,
+        protocol: NATIVE_CLIENT_PROTOCOL.to_owned(),
+        package_publisher_workflow: ".github/workflows/publish-native-package.yml".to_owned(),
+        package_publisher_branch: "main".to_owned(),
+        package: VerifiedPackage {
+            asset: DownloadedAsset {
+                release,
+                bytes: b"synthetic-test-binary".to_vec(),
+            },
+            publisher_run_id: 8_767,
+            publisher_run_attempt: 1,
+        },
+    }
+}
+
+/// Verify the configured Client implementation release and the separate
+/// binary package selected by the fixed package loader in that implementation.
+///
+/// The Client implementation version is checked against deployment policy at
+/// its authenticated signer SHA. The binary's source revision and version come
+/// from the loader manifest pinned by that workflow. This function accepts
+/// only stable immutable releases; scratch prereleases remain a separate path.
+pub fn verify_native_client_package(
+    api: &GitHub,
+    acceptable: &crate::instance_config::AcceptableClients,
+    signer_sha: &str,
+    loader_action_sha: &str,
+    expected_protocol: &str,
+    source_default_branch: &str,
+) -> Result<VerifiedNativeClientPackage> {
+    crate::policy::validate_repository(&acceptable.repository)?;
+    ensure!(acceptable.id > 0, "Client repository ID is invalid");
+    crate::policy::validate_sha(signer_sha)?;
+    crate::policy::validate_sha(loader_action_sha)?;
+    crate::config::validate_branch(source_default_branch)?;
+    ensure!(
+        expected_protocol == NATIVE_CLIENT_PROTOCOL,
+        "requested Client protocol is not supported by this Server"
+    );
+    validate_package_workflow(&acceptable.producer_workflow)?;
+
+    let publisher = TrustedPublisher {
+        repository: acceptable.repository.clone(),
+        repository_id: acceptable.id,
+    };
+    let implementation_version = resolve_native_client_implementation(
+        api,
+        &publisher,
+        signer_sha,
+        &acceptable.version,
+        source_default_branch,
+    )?;
+
+    let loader_manifest_path = ".github/actions/load-package/package.json";
+    let loader_manifest_response: Value = api.get(&format!(
+        "/repos/{}/contents/{loader_manifest_path}?ref={loader_action_sha}",
+        acceptable.repository
+    ))?;
+    let loader_manifest_bytes = source_file_bytes(&loader_manifest_response, loader_manifest_path)?;
+    let manifest: SourcePackageManifest = serde_json::from_slice(&loader_manifest_bytes)
+        .context("fixed Client package loader manifest is invalid JSON")?;
+    let binary_source_sha = package_source_sha(&manifest, loader_action_sha)?;
+    let binary_version = Version::parse(&manifest.version)
+        .context("fixed Client package version is invalid SemVer")?;
+    ensure!(
+        binary_version.build.is_empty()
+            && binary_version.pre.is_empty()
+            && binary_version.to_string() == manifest.version,
+        "fixed Client package version must be canonical stable SemVer"
+    );
+    manifest.validate(&binary_version, expected_protocol, &binary_source_sha)?;
+
+    let source_manifest_response: Value = api.get(&format!(
+        "/repos/{}/contents/{loader_manifest_path}?ref={binary_source_sha}",
+        acceptable.repository
+    ))?;
+    let source_manifest_bytes = source_file_bytes(&source_manifest_response, loader_manifest_path)?;
+    ensure!(
+        source_manifest_bytes == loader_manifest_bytes,
+        "binary source package manifest differs from the fixed loader mapping"
+    );
+
+    let asset_name = manifest
+        .assets
+        .get("linux-x86_64")
+        .context("fixed Client package has no linux-x86_64 asset")?
+        .clone();
+    let expected_asset = ExpectedAsset {
+        component: manifest.component.clone(),
+        platform: "linux-x86_64".to_owned(),
+        name: asset_name,
+    };
+    let exact_binary_version = VersionReq::parse(&format!("={binary_version}"))
+        .context("fixed Client package version cannot form an exact version requirement")?;
+    let package = download_verified_release_bounded(
+        api,
+        &publisher,
+        &binary_source_sha,
+        &expected_asset,
+        &exact_binary_version,
+        &manifest.producer_workflow,
+        source_default_branch,
+        manifest.max_bytes,
+    )?;
+
+    Ok(VerifiedNativeClientPackage {
+        implementation_sha: signer_sha.to_owned(),
+        implementation_version,
+        loader_action_sha: loader_action_sha.to_owned(),
+        binary_source_sha,
+        binary_version,
+        protocol: manifest.protocol,
+        package_publisher_workflow: manifest.producer_workflow,
+        package_publisher_branch: source_default_branch.to_owned(),
+        package,
+    })
+}
+
+/// Qualify the explicitly owner-dispatched development package published to
+/// the isolated integration repository. This path is gated by the testing
+/// deployment, its configured owner and protected-branch dispatch context, and
+/// a complete `ScratchPackagePublication` record. It deliberately performs no
+/// fallback to stable release resolution and is not an ordinary operation.
+// Preserve separate authority inputs so each boundary is checked explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_native_client_package_scratch(
+    api: &GitHub,
+    instance: &crate::instance_config::InstanceConfig,
+    execution_mode: crate::api::NativeScratchMode,
+    acceptable: &crate::instance_config::AcceptableClients,
+    signer_sha: &str,
+    loader_action_sha: &str,
+    expected_protocol: &str,
+    publication: &ScratchPackagePublication,
+) -> Result<VerifiedNativeClientPackage> {
+    crate::api::validate_native_test_host_context(instance, execution_mode)?;
+    crate::policy::validate_repository(&acceptable.repository)?;
+    ensure!(acceptable.id > 0, "Client repository ID is invalid");
+    crate::policy::validate_sha(signer_sha)?;
+    crate::policy::validate_sha(loader_action_sha)?;
+    ensure!(
+        expected_protocol == NATIVE_CLIENT_PROTOCOL,
+        "requested Client protocol is not supported by this Server"
+    );
+
+    let trusted = crate::config::trusted()?;
+    let deployment = &trusted.deployment;
+    require_scratch_package_deployment(deployment)?;
+    ensure!(
+        instance.instance.repository == deployment.server.repository
+            && instance.instance.id == deployment.server.id
+            && acceptable.repository != deployment.integration.repository,
+        "scratch package verifier is outside the configured testing deployment"
+    );
+
+    let source = TrustedPublisher {
+        repository: acceptable.repository.clone(),
+        repository_id: acceptable.id,
+    };
+    let destination = TrustedPublisher {
+        repository: deployment.integration.repository.clone(),
+        repository_id: deployment.integration.id,
+    };
+    ensure!(
+        publication.source_repository == source.repository
+            && publication.source_repository_id == source.repository_id
+            && publication.destination_repository == destination.repository
+            && publication.destination_repository_id == destination.repository_id,
+        "scratch publication record does not match the configured source and destination"
+    );
+    ensure!(
+        publication.producer_run_id > 0
+            && publication.producer_run_attempt == 1
+            && publication.release_id > 0
+            && publication.asset_id > 0
+            && publication.asset_size > 0
+            && publication.asset_size <= MAX_ASSET_BYTES,
+        "scratch publication record has invalid run or release identity"
+    );
+    crate::config::validate_branch(&publication.source_branch)?;
+    crate::policy::validate_sha(&publication.source_sha)?;
+    ensure!(
+        publication.asset_sha256.len() == 64
+            && publication
+                .asset_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "scratch publication record has an invalid asset digest"
+    );
+
+    let source_repository: Value = api.get(&format!("/repos/{}", source.repository))?;
+    validate_remote_repository_identity(&source_repository, &source)?;
+    let destination_repository: Value = api.get(&format!("/repos/{}", destination.repository))?;
+    validate_remote_repository_identity(&destination_repository, &destination)?;
+    let destination_default_branch = destination_repository["default_branch"]
+        .as_str()
+        .context("scratch destination default branch is missing")?;
+    ensure!(
+        destination_default_branch == deployment.integration.default_branch,
+        "scratch destination default branch differs from the testing policy"
+    );
+
+    // The request attestation and owner-dispatched test context bind this
+    // unreleased implementation SHA. Its version is recorded for diagnostics;
+    // stable deployment ranges remain enforced only by the normal verifier.
+    let signer_cargo: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={signer_sha}",
+        source.repository
+    ))?;
+    let implementation_version = source_version_with_prerelease(&signer_cargo, true)?;
+
+    let loader_manifest_path = ".github/actions/load-package/package.json";
+    let loader_manifest_response: Value = api.get(&format!(
+        "/repos/{}/contents/{loader_manifest_path}?ref={loader_action_sha}",
+        source.repository
+    ))?;
+    let loader_manifest_bytes = source_file_bytes(&loader_manifest_response, loader_manifest_path)?;
+    let manifest: SourcePackageManifest = serde_json::from_slice(&loader_manifest_bytes)
+        .context("fixed Client package loader manifest is invalid JSON")?;
+    let binary_source_sha = package_source_sha(&manifest, loader_action_sha)?;
+    ensure!(
+        binary_source_sha == publication.source_sha,
+        "scratch publication source differs from the fixed loader mapping"
+    );
+    let binary_version =
+        Version::parse(&manifest.version).context("scratch package version is invalid SemVer")?;
+    ensure!(
+        binary_version.build.is_empty()
+            && !binary_version.pre.is_empty()
+            && binary_version.to_string() == manifest.version
+            && publication.tag == format!("v{binary_version}"),
+        "scratch package must use the exact canonical prerelease version and tag"
+    );
+    manifest.validate(&binary_version, expected_protocol, &binary_source_sha)?;
+    ensure!(
+        publication.asset_size <= manifest.max_bytes,
+        "scratch package asset exceeds its fixed source manifest limit"
+    );
+    let source_manifest_response: Value = api.get(&format!(
+        "/repos/{}/contents/{loader_manifest_path}?ref={binary_source_sha}",
+        source.repository
+    ))?;
+    let source_manifest_bytes = source_file_bytes(&source_manifest_response, loader_manifest_path)?;
+    ensure!(
+        source_manifest_bytes == loader_manifest_bytes,
+        "scratch binary source manifest differs from the fixed loader mapping"
+    );
+    let source_cargo: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={binary_source_sha}",
+        source.repository
+    ))?;
+    ensure!(
+        source_version_with_prerelease(&source_cargo, true)? == binary_version,
+        "scratch package version differs from its source Cargo manifest"
+    );
+
+    let asset_name = manifest
+        .assets
+        .get("linux-x86_64")
+        .context("fixed Client package has no linux-x86_64 asset")?;
+    let release: Value = api.get(&format!(
+        "/repos/{}/releases/{}",
+        destination.repository, publication.release_id
+    ))?;
+    ensure!(
+        release["id"].as_u64() == Some(publication.release_id)
+            && release["tag_name"].as_str() == Some(publication.tag.as_str())
+            && release["target_commitish"].as_str() == Some(destination_default_branch)
+            && release["draft"] == false
+            && release["prerelease"] == true
+            && release["immutable"] == true,
+        "scratch package release is not the exact immutable prerelease"
+    );
+    let assets = release["assets"]
+        .as_array()
+        .filter(|assets| assets.len() == 1)
+        .context("scratch package release must contain exactly one asset")?;
+    let asset = &assets[0];
+    ensure!(
+        asset["id"].as_u64() == Some(publication.asset_id)
+            && asset["name"].as_str() == Some(asset_name.as_str())
+            && asset["state"] == "uploaded"
+            && asset["size"].as_u64() == Some(publication.asset_size)
+            && asset["digest"] == format!("sha256:{}", publication.asset_sha256),
+        "scratch package release asset differs from the publication record"
+    );
+    let tag_ref: Value = api.get(&format!(
+        "/repos/{}/git/ref/tags/{}",
+        destination.repository, publication.tag
+    ))?;
+    ensure!(
+        tag_ref["ref"].as_str() == Some(format!("refs/tags/{}", publication.tag).as_str()),
+        "scratch package tag ref identity is invalid"
+    );
+    let tag_commit = match tag_ref["object"]["type"].as_str() {
+        Some("commit") => tag_ref["object"]["sha"]
+            .as_str()
+            .context("scratch package tag commit is missing")?
+            .to_owned(),
+        Some("tag") => {
+            let object_sha = tag_ref["object"]["sha"]
+                .as_str()
+                .context("scratch package annotated tag object is missing")?;
+            crate::policy::validate_sha(object_sha)?;
+            let tag_object: Value = api.get(&format!(
+                "/repos/{}/git/tags/{object_sha}",
+                destination.repository
+            ))?;
+            ensure!(
+                tag_object["object"]["type"] == "commit",
+                "scratch package tag does not point directly to a commit"
+            );
+            tag_object["object"]["sha"]
+                .as_str()
+                .context("scratch package tag commit is missing")?
+                .to_owned()
+        }
+        _ => anyhow::bail!("scratch package tag object type is invalid"),
+    };
+    crate::policy::validate_sha(&tag_commit)?;
+    let compare: Value = api.get(&format!(
+        "/repos/{}/compare/{}...{}",
+        destination.repository, tag_commit, destination_default_branch
+    ))?;
+    ensure!(
+        matches!(compare["status"].as_str(), Some("ahead" | "identical"))
+            && compare["base_commit"]["sha"].as_str() == Some(tag_commit.as_str())
+            && compare["merge_base_commit"]["sha"].as_str() == Some(tag_commit.as_str())
+            && compare["ahead_by"].as_u64().is_some()
+            && compare["behind_by"].as_u64() == Some(0),
+        "scratch package release tag is not reachable from the integration default branch"
+    );
+
+    let resolved = ResolvedRelease {
+        publisher: destination.clone(),
+        implementation_sha: binary_source_sha.clone(),
+        source_sha: binary_source_sha.clone(),
+        version: binary_version.clone(),
+        tag: publication.tag.clone(),
+        release_id: publication.release_id,
+        asset: ResolvedAsset {
+            component: manifest.component.clone(),
+            platform: "linux-x86_64".to_owned(),
+            id: publication.asset_id,
+            name: asset_name.clone(),
+            size: publication.asset_size,
+            sha256: publication.asset_sha256.clone(),
+        },
+    };
+    let bytes = api.download(
+        &format!(
+            "/repos/{}/releases/assets/{}",
+            destination.repository, publication.asset_id
+        ),
+        usize::try_from(publication.asset_size)
+            .context("scratch asset size does not fit this platform")?,
+    )?;
+    ensure!(
+        bytes.len() as u64 == publication.asset_size
+            && crate::hex_encode(Sha256::digest(&bytes)) == publication.asset_sha256,
+        "scratch package bytes differ from the publication record"
+    );
+    let package = verify_downloaded_release_from(
+        api,
+        DownloadedAsset {
+            release: resolved,
+            bytes,
+        },
+        &source,
+        &manifest.producer_workflow,
+        &publication.source_branch,
+    )?;
+    ensure!(
+        package.publisher_run()
+            == (
+                publication.producer_run_id,
+                publication.producer_run_attempt
+            ),
+        "scratch package attestation differs from the exact producer run record"
+    );
+
+    Ok(VerifiedNativeClientPackage {
+        implementation_sha: signer_sha.to_owned(),
+        implementation_version,
+        loader_action_sha: loader_action_sha.to_owned(),
+        binary_source_sha,
+        binary_version,
+        protocol: manifest.protocol,
+        package_publisher_workflow: manifest.producer_workflow,
+        package_publisher_branch: publication.source_branch.clone(),
+        package,
+    })
+}
+
+fn validate_remote_repository_identity(
+    repository: &Value,
+    expected: &TrustedPublisher,
+) -> Result<()> {
+    let expected_owner = expected
+        .repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .context("repository owner is invalid")?;
+    ensure!(
+        repository["id"].as_u64() == Some(expected.repository_id)
+            && repository["full_name"].as_str() == Some(expected.repository.as_str())
+            && repository["owner"]["id"].as_u64().is_some_and(|id| id > 0)
+            && repository["owner"]["login"].as_str() == Some(expected_owner),
+        "repository identity mismatch"
+    );
+    Ok(())
+}
+
+fn package_source_sha(manifest: &SourcePackageManifest, loader_action_sha: &str) -> Result<String> {
+    crate::policy::validate_sha(loader_action_sha)?;
+    let source_sha = manifest.source_sha.as_deref().unwrap_or(loader_action_sha);
+    crate::policy::validate_sha(source_sha)?;
+    Ok(source_sha.to_owned())
+}
+
+const NATIVE_CLIENT_PROTOCOL: &str = "securefix-native-request/v1";
+
+fn resolve_native_client_implementation(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    signer_sha: &str,
+    acceptable_versions: &VersionReq,
+    source_default_branch: &str,
+) -> Result<Version> {
+    crate::policy::validate_repository(&publisher.repository)?;
+    ensure!(
+        publisher.repository_id > 0,
+        "Client repository ID is invalid"
+    );
+    crate::policy::validate_sha(signer_sha)?;
+
+    let repository: Value = api.get(&format!("/repos/{}", publisher.repository))?;
+    let (owner_name, _) = publisher
+        .repository
+        .split_once('/')
+        .context("Client repository owner is invalid")?;
+    ensure!(
+        repository["id"].as_u64() == Some(publisher.repository_id)
+            && repository["full_name"].as_str() == Some(publisher.repository.as_str())
+            && repository["owner"]["id"].as_u64().is_some_and(|id| id > 0)
+            && repository["owner"]["login"].as_str() == Some(owner_name)
+            && repository["default_branch"].as_str() == Some(source_default_branch),
+        "Client repository identity mismatch"
+    );
+    let source: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={signer_sha}",
+        publisher.repository
+    ))?;
+    let version = source_version(&source)?;
+    ensure!(
+        acceptable_versions.matches(&version),
+        "Client implementation version is outside the accepted range"
+    );
+    let tag = format!("v{version}");
+    let tag_ref: Value = api.get(&format!(
+        "/repos/{}/git/ref/tags/{tag}",
+        publisher.repository
+    ))?;
+    ensure!(
+        tag_ref["ref"].as_str() == Some(format!("refs/tags/{tag}").as_str())
+            && tag_ref["object"]["type"] == "commit"
+            && tag_ref["object"]["sha"].as_str() == Some(signer_sha),
+        "Client implementation tag is not a lightweight ref to the attested signer revision"
+    );
+    let release: Value = api.get(&format!(
+        "/repos/{}/releases/tags/{tag}",
+        publisher.repository
+    ))?;
+    ensure!(
+        release["id"].as_u64().is_some_and(|id| id > 0)
+            && release["tag_name"].as_str() == Some(tag.as_str())
+            && release["target_commitish"].as_str() == Some(signer_sha)
+            && release["draft"] == false
+            && release["prerelease"] == false
+            && release["immutable"] == true,
+        "Client implementation release is not published, immutable, and bound to its signer revision"
+    );
+    Ok(version)
+}
+
+fn validate_package_workflow(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with(".github/workflows/")
+            && path.ends_with(".yml")
+            && path.len() <= 200
+            && !path.contains("..")
+            && path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        "Client package producer workflow path is invalid"
+    );
+    Ok(())
+}
+
 /// Resolve the release whose implementation is already selected by a trusted
 /// caller's full-SHA pin. This makes exactly four read-only API requests.
 ///
@@ -251,6 +799,28 @@ pub fn download_release_asset(
     expected_asset: &ExpectedAsset,
     acceptable_versions: &VersionReq,
 ) -> Result<DownloadedAsset> {
+    download_release_asset_bounded(
+        api,
+        publisher,
+        implementation_sha,
+        expected_asset,
+        acceptable_versions,
+        MAX_ASSET_BYTES,
+    )
+}
+
+fn download_release_asset_bounded(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    implementation_sha: &str,
+    expected_asset: &ExpectedAsset,
+    acceptable_versions: &VersionReq,
+    max_asset_bytes: u64,
+) -> Result<DownloadedAsset> {
+    ensure!(
+        max_asset_bytes > 0 && max_asset_bytes <= MAX_ASSET_BYTES,
+        "package asset limit is outside the supported bounds"
+    );
     let release = resolve_release(
         api,
         publisher,
@@ -258,6 +828,10 @@ pub fn download_release_asset(
         expected_asset,
         acceptable_versions,
     )?;
+    ensure!(
+        release.asset.size <= max_asset_bytes,
+        "package asset exceeds the source manifest limit"
+    );
     let max_size = usize::try_from(release.asset.size)
         .context("package asset size does not fit this platform")?;
     let path = format!(
@@ -289,13 +863,38 @@ pub fn download_verified_release(
     publisher_workflow: &str,
     publisher_branch: &str,
 ) -> Result<VerifiedPackage> {
-    crate::config::validate_branch(publisher_branch)?;
-    let downloaded = download_release_asset(
+    download_verified_release_bounded(
         api,
         publisher,
         implementation_sha,
         expected_asset,
         acceptable_versions,
+        publisher_workflow,
+        publisher_branch,
+        MAX_ASSET_BYTES,
+    )
+}
+
+// These independent package and publisher constraints are validated at this boundary.
+#[allow(clippy::too_many_arguments)]
+fn download_verified_release_bounded(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    implementation_sha: &str,
+    expected_asset: &ExpectedAsset,
+    acceptable_versions: &VersionReq,
+    publisher_workflow: &str,
+    publisher_branch: &str,
+    max_asset_bytes: u64,
+) -> Result<VerifiedPackage> {
+    crate::config::validate_branch(publisher_branch)?;
+    let downloaded = download_release_asset_bounded(
+        api,
+        publisher,
+        implementation_sha,
+        expected_asset,
+        acceptable_versions,
+        max_asset_bytes,
     )?;
     verify_downloaded_release(api, downloaded, publisher_workflow, publisher_branch)
 }
@@ -306,14 +905,33 @@ fn verify_downloaded_release(
     publisher_workflow: &str,
     publisher_branch: &str,
 ) -> Result<VerifiedPackage> {
+    let attestation_publisher = downloaded.release().publisher.clone();
+    verify_downloaded_release_from(
+        api,
+        downloaded,
+        &attestation_publisher,
+        publisher_workflow,
+        publisher_branch,
+    )
+}
+
+fn verify_downloaded_release_from(
+    api: &GitHub,
+    downloaded: DownloadedAsset,
+    attestation_publisher: &TrustedPublisher,
+    publisher_workflow: &str,
+    publisher_branch: &str,
+) -> Result<VerifiedPackage> {
     let release = downloaded.release();
-    let repository = &release.publisher.repository;
+    let repository = &attestation_publisher.repository;
     let digest = &release.asset.sha256;
     let attestation_response: Value = api.get(&format!(
         "/repos/{repository}/attestations/sha256:{digest}?per_page=100"
     ))?;
-    let bundle_bytes =
-        crate::attestation::public_bundles(&attestation_response, release.publisher.repository_id)?;
+    let bundle_bytes = crate::attestation::public_bundles(
+        &attestation_response,
+        attestation_publisher.repository_id,
+    )?;
     let mut bundle = tempfile::Builder::new().suffix(".jsonl").tempfile()?;
     std::io::Write::write_all(&mut bundle, &bundle_bytes)?;
     let mut subject = tempfile::NamedTempFile::new()?;
@@ -330,14 +948,20 @@ fn verify_downloaded_release(
             source: Some((&release.source_sha, &source_ref)),
         },
     )?;
-    let (publisher_run_id, publisher_run_attempt, publisher_owner_id) =
-        validate_provenance_result(&verified, release, publisher_workflow, publisher_branch)?;
+    let (publisher_run_id, publisher_run_attempt, publisher_owner_id) = validate_provenance_result(
+        &verified,
+        release,
+        attestation_publisher,
+        publisher_workflow,
+        publisher_branch,
+    )?;
     let run: Value = api.get(&format!(
         "/repos/{repository}/actions/runs/{publisher_run_id}/attempts/{publisher_run_attempt}"
     ))?;
     validate_publisher_run(
         &run,
         release,
+        attestation_publisher,
         publisher_workflow,
         publisher_branch,
         publisher_run_id,
@@ -354,6 +978,7 @@ fn verify_downloaded_release(
 fn validate_provenance_result(
     verified: &Value,
     release: &ResolvedRelease,
+    attestation_publisher: &TrustedPublisher,
     publisher_workflow: &str,
     publisher_branch: &str,
 ) -> Result<(u64, u64, u64)> {
@@ -367,10 +992,9 @@ fn validate_provenance_result(
     let source_ref = format!("refs/heads/{publisher_branch}");
     let signer = format!(
         "https://github.com/{}/{publisher_workflow}@{source_ref}",
-        release.publisher.repository
+        attestation_publisher.repository
     );
-    let owner = release
-        .publisher
+    let owner = attestation_publisher
         .repository
         .split_once('/')
         .context("publisher repository owner is invalid")?
@@ -387,7 +1011,7 @@ fn validate_provenance_result(
             && certificate["subjectAlternativeName"] == signer
             && certificate["buildSignerURI"] == signer
             && certificate["buildSignerDigest"] == release.source_sha
-            && certificate["githubWorkflowRepository"] == release.publisher.repository
+            && certificate["githubWorkflowRepository"] == attestation_publisher.repository
             && certificate["githubWorkflowSHA"] == release.source_sha
             && certificate["githubWorkflowRef"] == source_ref
             && certificate["githubWorkflowTrigger"] == "workflow_dispatch"
@@ -395,13 +1019,13 @@ fn validate_provenance_result(
             && certificate["buildConfigDigest"] == release.source_sha
             && certificate["buildTrigger"] == "workflow_dispatch"
             && certificate["sourceRepositoryURI"]
-                == format!("https://github.com/{}", release.publisher.repository)
+                == format!("https://github.com/{}", attestation_publisher.repository)
             && certificate["sourceRepositoryDigest"] == release.source_sha
             && certificate["sourceRepositoryRef"] == source_ref
             && certificate["sourceRepositoryIdentifier"]
                 .as_str()
                 .and_then(|id| id.parse::<u64>().ok())
-                == Some(release.publisher.repository_id)
+                == Some(attestation_publisher.repository_id)
             && certificate["sourceRepositoryOwnerURI"] == format!("https://github.com/{owner}"),
         "package attestation certificate does not match the configured publisher workflow and source"
     );
@@ -410,7 +1034,8 @@ fn validate_provenance_result(
     let invocation = certificate["runInvocationURI"]
         .as_str()
         .context("package attestation run invocation is missing")?;
-    let (run_id, run_attempt) = parse_run_invocation(invocation, &release.publisher.repository)?;
+    let (run_id, run_attempt) =
+        parse_run_invocation(invocation, &attestation_publisher.repository)?;
     let subject = statement["subject"]
         .as_array()
         .filter(|subjects| subjects.len() == 1)
@@ -467,17 +1092,19 @@ fn parse_positive_decimal(value: &str) -> Result<u64> {
     Ok(parsed)
 }
 
+// Keep run, repository, workflow, and source identities independently bound.
+#[allow(clippy::too_many_arguments)]
 fn validate_publisher_run(
     run: &Value,
     release: &ResolvedRelease,
+    attestation_publisher: &TrustedPublisher,
     publisher_workflow: &str,
     publisher_branch: &str,
     run_id: u64,
     run_attempt: u64,
     publisher_owner_id: u64,
 ) -> Result<()> {
-    let expected_owner = release
-        .publisher
+    let expected_owner = attestation_publisher
         .repository
         .split_once('/')
         .map(|(owner, _)| owner)
@@ -485,10 +1112,10 @@ fn validate_publisher_run(
     ensure!(
         run["id"].as_u64() == Some(run_id)
             && run["run_attempt"].as_u64() == Some(run_attempt)
-            && run["repository"]["id"].as_u64() == Some(release.publisher.repository_id)
+            && run["repository"]["id"].as_u64() == Some(attestation_publisher.repository_id)
             && run["repository"]["owner"]["id"].as_u64() == Some(publisher_owner_id)
             && run["repository"]["owner"]["login"] == expected_owner
-            && run["head_repository"]["id"].as_u64() == Some(release.publisher.repository_id)
+            && run["head_repository"]["id"].as_u64() == Some(attestation_publisher.repository_id)
             && run["path"] == publisher_workflow
             && run["event"] == "workflow_dispatch"
             && run["head_branch"] == publisher_branch
@@ -653,7 +1280,16 @@ pub fn publish_scratch_prerelease(
     )?;
     let package_manifest: SourcePackageManifest = serde_json::from_slice(&manifest_bytes)
         .context("source package manifest is invalid JSON")?;
-    package_manifest.validate(&version, asset_name, PACKAGE_PRODUCER_WORKFLOW)?;
+    package_manifest.validate(&version, NATIVE_CLIENT_PROTOCOL, source_sha)?;
+    ensure!(
+        package_manifest.producer_workflow == PACKAGE_PRODUCER_WORKFLOW
+            && package_manifest
+                .assets
+                .get("linux-x86_64")
+                .map(String::as_str)
+                == Some(asset_name),
+        "source package manifest does not match the scratch publisher contract"
+    );
     let producer_run: Value = source_api.get(&format!(
         "/repos/{}/actions/runs/{producer_run_id}/attempts/1",
         source.repository
@@ -1193,6 +1829,8 @@ struct SourcePackageManifest {
     version: String,
     producer_workflow: String,
     max_bytes: u64,
+    #[serde(default)]
+    source_sha: Option<String>,
     assets: std::collections::BTreeMap<String, String>,
 }
 
@@ -1200,19 +1838,35 @@ impl SourcePackageManifest {
     fn validate(
         &self,
         version: &Version,
-        expected_asset: &str,
-        signer_workflow: &str,
+        expected_protocol: &str,
+        expected_source_sha: &str,
     ) -> Result<()> {
+        let asset = self
+            .assets
+            .get("linux-x86_64")
+            .context("source package manifest has no linux-x86_64 asset")?;
+        validate_expected_asset(&ExpectedAsset {
+            component: self.component.clone(),
+            platform: "linux-x86_64".to_owned(),
+            name: asset.clone(),
+        })?;
+        validate_package_workflow(&self.producer_workflow)?;
+        if let Some(source_sha) = &self.source_sha {
+            crate::policy::validate_sha(source_sha)?;
+            ensure!(
+                source_sha == expected_source_sha,
+                "source package manifest binary source differs from the resolved source revision"
+            );
+        }
         ensure!(
             self.schema_version == 1
                 && self.component == "securefix-server"
-                && self.protocol == "securefix-native-request/v1"
+                && self.protocol == expected_protocol
                 && self.version == version.to_string()
-                && self.producer_workflow == signer_workflow
                 && self.max_bytes > 0
                 && self.max_bytes <= MAX_ASSET_BYTES
                 && self.assets.len() == 1
-                && self.assets.get("linux-x86_64").map(String::as_str) == Some(expected_asset),
+                && !asset.is_empty(),
             "source package manifest does not match the selected executable or Cargo version"
         );
         Ok(())
@@ -1332,7 +1986,54 @@ mod tests {
     }
 
     fn repository() -> Value {
-        json!({"id":42,"full_name":REPOSITORY,"owner":{"id":84,"login":"example-org"}})
+        json!({"id":42,"full_name":REPOSITORY,"default_branch":"main","owner":{"id":84,"login":"example-org"}})
+    }
+
+    fn signer_release() -> Value {
+        json!({
+            "id":11,
+            "tag_name":"v1.2.3",
+            "target_commitish":SOURCE_SHA,
+            "draft":false,
+            "immutable":true,
+            "prerelease":false
+        })
+    }
+
+    fn resolve_signer_fixture(
+        source_response: Value,
+        tag_response: Value,
+        release_response: Value,
+        range: &str,
+        expected_requests: usize,
+    ) -> Result<Version> {
+        let mut routes = vec![
+            Route::get(format!("/repos/{REPOSITORY}"), repository()),
+            Route::get(
+                format!("/repos/{REPOSITORY}/contents/Cargo.toml?ref={SOURCE_SHA}"),
+                source_response,
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/git/ref/tags/v1.2.3"),
+                tag_response,
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/releases/tags/v1.2.3"),
+                release_response,
+            ),
+        ];
+        routes.truncate(expected_requests);
+        let fixture = Fixture::new(routes);
+        let requirement = VersionReq::parse(range).unwrap();
+        let result = resolve_native_client_implementation(
+            &fixture.api,
+            &publisher(),
+            SOURCE_SHA,
+            &requirement,
+            "main",
+        );
+        fixture.finish();
+        result
     }
 
     fn tag_ref() -> Value {
@@ -1465,6 +2166,142 @@ mod tests {
         assert_eq!(resolved.asset.name, "securefix-linux-x86_64");
         assert_eq!(resolved.asset.size, 1234);
         assert_eq!(resolved.asset.sha256, DIGEST);
+    }
+
+    #[test]
+    fn client_package_asset_is_bounded_by_its_source_manifest_before_download() {
+        let fixture = Fixture::new(vec![
+            Route::get(format!("/repos/{REPOSITORY}"), repository()),
+            Route::get(
+                format!("/repos/{REPOSITORY}/contents/Cargo.toml?ref={SOURCE_SHA}"),
+                source_manifest(CARGO_TOML),
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/git/ref/tags/v1.2.3"),
+                tag_ref(),
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/releases/tags/v1.2.3"),
+                release(),
+            ),
+        ]);
+        let result = download_release_asset_bounded(
+            &fixture.api,
+            &publisher(),
+            SOURCE_SHA,
+            &expected_asset(),
+            &VersionReq::parse(">=1.0.0").unwrap(),
+            1233,
+        );
+        assert!(result.is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn client_implementation_must_have_an_accepted_immutable_release_at_signer_sha() {
+        assert_eq!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                tag_ref(),
+                signer_release(),
+                ">=1.2.0",
+                4,
+            )
+            .unwrap(),
+            Version::parse("1.2.3").unwrap()
+        );
+        assert!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                tag_ref(),
+                signer_release(),
+                ">=2.0.0",
+                2,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_signer_fixture(
+                source_manifest("[package]\nname = \"securefix\"\nversion = \"1.2.3-pre.1\"\n"),
+                tag_ref(),
+                signer_release(),
+                ">=1.0.0",
+                2,
+            )
+            .is_err()
+        );
+        let mut wrong_tag = tag_ref();
+        wrong_tag["object"]["sha"] = json!("b".repeat(40));
+        assert!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                wrong_tag,
+                signer_release(),
+                ">=1.0.0",
+                3,
+            )
+            .is_err()
+        );
+        let mut mutable_release = signer_release();
+        mutable_release["immutable"] = json!(false);
+        assert!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                tag_ref(),
+                mutable_release,
+                ">=1.0.0",
+                4,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_client_protocol_mismatch_rejects_before_remote_resolution() {
+        let fixture = Fixture::new(vec![]);
+        let acceptable = crate::instance_config::AcceptableClients {
+            repository: REPOSITORY.into(),
+            id: 42,
+            producer_workflow: ".github/workflows/request-producer.yml".into(),
+            version: VersionReq::parse(">=1.2.0").unwrap(),
+        };
+        let result = verify_native_client_package(
+            &fixture.api,
+            &acceptable,
+            SOURCE_SHA,
+            SOURCE_SHA,
+            "securefix-native-request/v999",
+            "main",
+        );
+        assert!(result.is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn client_package_source_defaults_to_loader_revision_or_uses_explicit_mapping() {
+        const LOADER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const PACKAGE_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
+        let mut manifest: SourcePackageManifest = serde_json::from_value(json!({
+            "schema_version":1,
+            "component":"securefix-server",
+            "protocol":"securefix-native-request/v1",
+            "version":"1.2.3",
+            "producer_workflow":".github/workflows/testing-native-package-build.yml",
+            "max_bytes":134217728,
+            "assets":{"linux-x86_64":"securefix-linux-x86_64"}
+        }))
+        .unwrap();
+        assert_eq!(
+            package_source_sha(&manifest, LOADER_SHA).unwrap(),
+            LOADER_SHA
+        );
+        manifest.source_sha = Some(PACKAGE_SHA.to_owned());
+        assert_eq!(
+            package_source_sha(&manifest, LOADER_SHA).unwrap(),
+            PACKAGE_SHA
+        );
+        manifest.source_sha = Some("mutable".to_owned());
+        assert!(package_source_sha(&manifest, LOADER_SHA).is_err());
     }
 
     #[test]
@@ -1744,11 +2581,13 @@ mod tests {
     #[test]
     fn package_provenance_binds_subject_workflow_source_and_exact_run() {
         let release = valid_resolve(">=1.0.0").unwrap();
+        let provenance_publisher = publisher();
         let verified = valid_provenance_result();
         assert_eq!(
             validate_provenance_result(
                 &verified,
                 &release,
+                &provenance_publisher,
                 ".github/workflows/release.yml",
                 "main"
             )
@@ -1770,6 +2609,7 @@ mod tests {
         validate_publisher_run(
             &run,
             &release,
+            &provenance_publisher,
             ".github/workflows/release.yml",
             "main",
             123,
@@ -1804,6 +2644,7 @@ mod tests {
                 validate_provenance_result(
                     &result,
                     &release,
+                    &provenance_publisher,
                     ".github/workflows/release.yml",
                     "main"
                 )
@@ -1814,6 +2655,7 @@ mod tests {
             validate_publisher_run(
                 &wrong_attempt,
                 &release,
+                &provenance_publisher,
                 ".github/workflows/release.yml",
                 "main",
                 123,
@@ -1827,6 +2669,7 @@ mod tests {
                 validate_publisher_run(
                     wrong_run,
                     &release,
+                    &provenance_publisher,
                     ".github/workflows/release.yml",
                     "main",
                     123,
@@ -2104,6 +2947,7 @@ mod tests {
             version: "1.2.3-pre.4".to_owned(),
             producer_workflow: ".github/workflows/testing-native-package-build.yml".to_owned(),
             max_bytes: 134217728,
+            source_sha: None,
             assets: [(
                 "linux-x86_64".to_owned(),
                 "securefix-linux-x86_64".to_owned(),
@@ -2114,25 +2958,38 @@ mod tests {
         manifest
             .validate(
                 &Version::parse("1.2.3-pre.4").unwrap(),
-                "securefix-linux-x86_64",
-                ".github/workflows/testing-native-package-build.yml",
+                NATIVE_CLIENT_PROTOCOL,
+                SOURCE_SHA,
             )
             .unwrap();
         assert!(
             manifest
                 .validate(
                     &Version::parse("1.2.3").unwrap(),
-                    "securefix-linux-x86_64",
-                    ".github/workflows/testing-native-package-build.yml"
+                    NATIVE_CLIENT_PROTOCOL,
+                    SOURCE_SHA,
                 )
                 .is_err()
         );
+        let mut wrong_protocol = manifest.clone();
+        wrong_protocol.protocol = "other/v1".to_owned();
         assert!(
-            manifest
+            wrong_protocol
                 .validate(
                     &Version::parse("1.2.3-pre.4").unwrap(),
-                    "securefix-linux-x86_64",
-                    ".github/workflows/other.yml"
+                    NATIVE_CLIENT_PROTOCOL,
+                    SOURCE_SHA,
+                )
+                .is_err()
+        );
+        let mut wrong_source = manifest.clone();
+        wrong_source.source_sha = Some("b".repeat(40));
+        assert!(
+            wrong_source
+                .validate(
+                    &Version::parse("1.2.3-pre.4").unwrap(),
+                    NATIVE_CLIENT_PROTOCOL,
+                    SOURCE_SHA,
                 )
                 .is_err()
         );

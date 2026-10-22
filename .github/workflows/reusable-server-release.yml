@@ -1,0 +1,277 @@
+name: Reusable Server release
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
+    secrets:
+      SERVER_PRIVATE_KEY:
+        required: true
+      TERRAFORM_PROVIDER_GPG_PRIVATE_KEY:
+        required: false
+      TERRAFORM_PROVIDER_GPG_PASSPHRASE:
+        required: false
+
+permissions: {}
+
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+    timeout-minutes: 15
+    outputs:
+      repository: ${{ steps.parse.outputs.repository }}
+      repo_owner: ${{ steps.parse.outputs.repo_owner }}
+      repo_name: ${{ steps.parse.outputs.repo_name }}
+      repository_id: ${{ steps.parse.outputs.repository_id }}
+      server_app_id: ${{ steps.parse.outputs.server_app_id }}
+      run_id: ${{ steps.parse.outputs.run_id }}
+    steps:
+      - name: Load the fixed Securefix Server package
+        id: package
+        # Candidate template only. Replace this exact pin and action-sha after package qualification.
+        uses: civitaspo/securefix-server/.github/actions/load-package@0000000000000000000000000000000000000000
+        with:
+          action-sha: 0000000000000000000000000000000000000000
+          source-repository: civitaspo/securefix-server
+          source-repository-id: '1250079425'
+          destination-repository: civitaspo/securefix-server
+          destination-repository-id: '1250079425'
+          source-default-branch: main
+          owner-id: '4525500'
+          channel: stable
+          token: ${{ github.token }}
+      - name: Parse and authenticate the release request locator
+        id: parse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release parse-request
+
+  preflight:
+    needs: parse
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+    timeout-minutes: 20
+    outputs:
+      strategy: ${{ steps.preflight.outputs.strategy }}
+      tag: ${{ steps.preflight.outputs.tag }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Load the fixed Securefix Server package
+        id: package
+        # Candidate template only. Replace this exact pin and action-sha after package qualification.
+        uses: civitaspo/securefix-server/.github/actions/load-package@0000000000000000000000000000000000000000
+        with:
+          action-sha: 0000000000000000000000000000000000000000
+          source-repository: civitaspo/securefix-server
+          source-repository-id: '1250079425'
+          destination-repository: civitaspo/securefix-server
+          destination-repository-id: '1250079425'
+          source-default-branch: main
+          owner-id: '4525500'
+          channel: stable
+          token: ${{ github.token }}
+      - name: Mint a read-only Client release token
+        id: release-read
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ needs.parse.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ needs.parse.outputs.repo_owner }}
+          repositories: ${{ needs.parse.outputs.repo_name }}
+          permission-actions: read
+          permission-attestations: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+      - name: Validate the exact source run and package provenance
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_RELEASE_READ_TOKEN: ${{ steps.release-read.outputs.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release preflight
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: native-release-input
+          path: release-input/
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  sign:
+    needs: [parse, preflight]
+    if: needs.preflight.outputs.strategy == 'terraform-provider'
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    timeout-minutes: 15
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Load the fixed Securefix Server package
+        id: package
+        # Candidate template only. Replace this exact pin and action-sha after package qualification.
+        uses: civitaspo/securefix-server/.github/actions/load-package@0000000000000000000000000000000000000000
+        with:
+          action-sha: 0000000000000000000000000000000000000000
+          source-repository: civitaspo/securefix-server
+          source-repository-id: '1250079425'
+          destination-repository: civitaspo/securefix-server
+          destination-repository-id: '1250079425'
+          source-default-branch: main
+          owner-id: '4525500'
+          channel: stable
+          token: ${{ github.token }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.artifact_id }}
+          path: release-input
+          merge-multiple: true
+      - name: Import the configured provider signing key
+        id: gpg
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        with:
+          gpg_private_key: ${{ secrets.TERRAFORM_PROVIDER_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+      - name: Sign canonical provider checksums
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+          GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release sign
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: native-release-signed-input
+          path: release-input/
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  publish:
+    needs: [parse, preflight, sign]
+    if: always() && needs.preflight.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+    timeout-minutes: 20
+    steps:
+      - name: Load the fixed Securefix Server package
+        id: package
+        # Candidate template only. Replace this exact pin and action-sha after package qualification.
+        uses: civitaspo/securefix-server/.github/actions/load-package@0000000000000000000000000000000000000000
+        with:
+          action-sha: 0000000000000000000000000000000000000000
+          source-repository: civitaspo/securefix-server
+          source-repository-id: '1250079425'
+          destination-repository: civitaspo/securefix-server
+          destination-repository-id: '1250079425'
+          source-default-branch: main
+          owner-id: '4525500'
+          channel: stable
+          token: ${{ github.token }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.strategy == 'terraform-provider' && needs.sign.outputs.artifact_id || needs.preflight.outputs.artifact_id }}
+          path: release-input
+          merge-multiple: true
+      - name: Mint a read-only Client release token
+        id: release-read
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ needs.parse.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ needs.parse.outputs.repo_owner }}
+          repositories: ${{ needs.parse.outputs.repo_name }}
+          permission-actions: read
+          permission-attestations: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+      - name: Mint a write token for the exact Client release repository
+        id: release-write
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ needs.parse.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ needs.parse.outputs.repo_owner }}
+          repositories: ${{ needs.parse.outputs.repo_name }}
+          permission-contents: write
+      - name: Revalidate and publish the immutable Client release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_RELEASE_READ_TOKEN: ${{ steps.release-read.outputs.token }}
+          SECUREFIX_RELEASE_WRITE_TOKEN: ${{ steps.release-write.outputs.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release publish
+
+  cleanup:
+    if: always() && needs.parse.result == 'success'
+    needs: [parse, preflight, publish]
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: write
+    timeout-minutes: 15
+    steps:
+      - name: Load the fixed Securefix Server package
+        id: package
+        # Candidate template only. Replace this exact pin and action-sha after package qualification.
+        uses: civitaspo/securefix-server/.github/actions/load-package@0000000000000000000000000000000000000000
+        with:
+          action-sha: 0000000000000000000000000000000000000000
+          source-repository: civitaspo/securefix-server
+          source-repository-id: '1250079425'
+          destination-repository: civitaspo/securefix-server
+          destination-repository-id: '1250079425'
+          source-default-branch: main
+          owner-id: '4525500'
+          channel: stable
+          token: ${{ github.token }}
+      - name: Remove only the authenticated release request label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release cleanup

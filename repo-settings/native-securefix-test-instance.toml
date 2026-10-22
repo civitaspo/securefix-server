@@ -1,4 +1,5 @@
 schema_version = 1
+release_request_label_prefix = "testing-"
 
 [instance]
 repository = "civitaspo/securefix-server"

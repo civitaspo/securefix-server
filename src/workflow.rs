@@ -87,7 +87,7 @@ pub fn manifest_from_zip<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result
     Ok(serde_json::from_slice(&contents)?)
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ReferencedWorkflow {
     pub path: String,
     pub sha: String,

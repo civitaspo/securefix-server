@@ -1,8 +1,8 @@
-//! Receiver-side validation for the initial native request protocol.
+//! Receiver-side validation for the native request protocol.
 //!
-//! This module accepts only a bounded manifest whose local GitHub artifact
-//! attestation is verified by the official `gh` verifier. It can publish one
-//! narrowly scoped scratch check after current-state fences.
+//! Requests are bounded manifests whose GitHub artifact attestations are verified
+//! by the official `gh` verifier. Scratch and normal instance authority stay on
+//! separate write paths.
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -16,10 +16,18 @@ const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
 const MAX_ARTIFACT_ARCHIVE_BYTES: usize = 2 * 1024 * 1024;
 const SLSA_PREDICATE: &str = "https://slsa.dev/provenance/v1";
 const REQUEST_ARTIFACT_NAME: &str = "native-request-proof";
+const REQUEST_PROTOCOL: &str = "securefix-native-request/v1";
 
 #[derive(clap::Subcommand)]
 pub enum CommandArgs {
-    #[command(about = "Validate one native request and its producer attestation")]
+    #[command(about = "Validate a native request label event and resolve its producer run")]
+    LocateInstanceEvent {
+        #[arg(long, default_value = "securefix-server.toml")]
+        config_path: String,
+        #[arg(long)]
+        operation: String,
+    },
+    #[command(about = "Validate one scratch native request and its producer attestation")]
     PolicyCheck {
         #[arg(long)]
         config: PathBuf,
@@ -33,6 +41,79 @@ pub enum CommandArgs {
         /// Create the scratch-only proof check after all current-state fences pass.
         #[arg(long, default_value_t = false)]
         publish: bool,
+    },
+    #[command(about = "Validate one attested policy-check request selected by producer run")]
+    PolicyCheckRun {
+        /// Explicit path, relative to the authenticated Server repository root.
+        #[arg(long)]
+        config_path: String,
+        /// Client repository that owns the producer run; validated against protected config.
+        #[arg(long)]
+        producer_repository: String,
+        /// Successful Client workflow run containing the request proof artifact.
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long)]
+        pull_request_number: u64,
+        #[arg(long)]
+        expected_head_sha: String,
+        /// Create the scratch-only proof check after all current-state fences pass.
+        #[arg(long, default_value_t = false)]
+        publish: bool,
+    },
+    #[command(about = "Validate and publish a normal instance-bound native policy check")]
+    InstancePolicyCheckRun {
+        #[arg(long, default_value = "securefix-server.toml")]
+        config_path: String,
+        #[arg(long)]
+        producer_repository: String,
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long, default_value_t = false)]
+        publish: bool,
+        /// Owner-dispatched scratch package qualification; still enforces ordinary Client command policy.
+        #[arg(long, default_value_t = false)]
+        owner_selected_test_package: bool,
+    },
+    #[command(about = "Validate and apply a normal instance-bound Securefix request")]
+    InstanceSecurefixApply {
+        #[arg(long, default_value = "securefix-server.toml")]
+        config_path: String,
+        #[arg(long)]
+        producer_repository: String,
+        #[arg(long)]
+        producer_run_id: u64,
+        /// Owner-dispatched scratch package qualification; still enforces ordinary Client request policy.
+        #[arg(long, default_value_t = false)]
+        owner_selected_test_package: bool,
+    },
+    #[command(about = "Validate and apply a normal instance-bound owner approval")]
+    InstanceApproval {
+        #[arg(long, default_value = "securefix-server.toml")]
+        config_path: String,
+        #[arg(long)]
+        producer_repository: String,
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        /// Owner-dispatched scratch package qualification; still requires a real owner command comment.
+        #[arg(long, default_value_t = false)]
+        owner_selected_test_package: bool,
+    },
+    #[command(about = "Validate and apply a normal instance-bound merge request")]
+    InstanceMerge {
+        #[arg(long, default_value = "securefix-server.toml")]
+        config_path: String,
+        #[arg(long)]
+        producer_repository: String,
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        /// Owner-dispatched scratch package qualification; still requires real merge and approval comments.
+        #[arg(long, default_value_t = false)]
+        owner_selected_test_package: bool,
     },
     #[command(about = "Validate a bound Securefix artifact and commit its exact PR changes")]
     SecurefixApply {
@@ -101,15 +182,18 @@ pub enum CommandArgs {
 
 pub fn run(command: CommandArgs) -> Result<()> {
     match command {
+        CommandArgs::LocateInstanceEvent {
+            config_path,
+            operation,
+        } => locate_instance_event(&config_path, &operation),
         CommandArgs::PolicyCheck {
-            config,
+            config: _config,
             config_path,
             manifest,
             bundle,
             publish,
         } => {
             let verified = verify_request(
-                &config,
                 &config_path,
                 &manifest,
                 &bundle,
@@ -118,7 +202,7 @@ pub fn run(command: CommandArgs) -> Result<()> {
                 publish,
             )?;
             if publish {
-                publish_scratch_result(&verified)?;
+                publish_request_proof_check(&verified)?;
             }
             println!(
                 "request_sha256={}",
@@ -136,14 +220,57 @@ pub fn run(command: CommandArgs) -> Result<()> {
             println!("result_published={publish}");
             Ok(())
         }
-        CommandArgs::SecurefixApply {
-            config,
+        CommandArgs::PolicyCheckRun {
             config_path,
             producer_repository,
             producer_run_id,
-        } => apply_securefix_from_run(&config, &config_path, &producer_repository, producer_run_id),
+            pull_request_number,
+            expected_head_sha,
+            publish,
+        } => run_policy_check_from_run(
+            &config_path,
+            &producer_repository,
+            producer_run_id,
+            Some((pull_request_number, expected_head_sha)),
+            publish,
+            true,
+            false,
+        ),
+        CommandArgs::InstancePolicyCheckRun {
+            config_path,
+            producer_repository,
+            producer_run_id,
+            publish,
+            owner_selected_test_package,
+        } => run_policy_check_from_run(
+            &config_path,
+            &producer_repository,
+            producer_run_id,
+            None,
+            publish,
+            false,
+            owner_selected_test_package,
+        ),
+        CommandArgs::SecurefixApply {
+            config: _config,
+            config_path,
+            producer_repository,
+            producer_run_id,
+        } => apply_securefix_from_run(&config_path, &producer_repository, producer_run_id),
+        CommandArgs::InstanceSecurefixApply {
+            config_path,
+            producer_repository,
+            producer_run_id,
+            owner_selected_test_package,
+        } => apply_securefix_from_run_mode(
+            &config_path,
+            &producer_repository,
+            producer_run_id,
+            false,
+            owner_selected_test_package,
+        ),
         CommandArgs::Approval {
-            config,
+            config: _config,
             config_path,
             producer_repository,
             producer_run_id,
@@ -151,16 +278,31 @@ pub fn run(command: CommandArgs) -> Result<()> {
             expected_head_sha,
             apply,
         } => apply_native_approval_from_run(
-            &config,
             &config_path,
             &producer_repository,
             producer_run_id,
-            pull_request_number,
-            &expected_head_sha,
+            Some((pull_request_number, expected_head_sha)),
             apply,
+            true,
+            false,
+        ),
+        CommandArgs::InstanceApproval {
+            config_path,
+            producer_repository,
+            producer_run_id,
+            apply,
+            owner_selected_test_package,
+        } => apply_native_approval_from_run(
+            &config_path,
+            &producer_repository,
+            producer_run_id,
+            None,
+            apply,
+            false,
+            owner_selected_test_package,
         ),
         CommandArgs::Merge {
-            config,
+            config: _config,
             config_path,
             producer_repository,
             producer_run_id,
@@ -169,23 +311,279 @@ pub fn run(command: CommandArgs) -> Result<()> {
             expected_head_sha,
             apply,
         } => apply_native_merge_from_runs(
-            &config,
             &config_path,
             &producer_repository,
             NativeMergeRunIds {
                 merge: producer_run_id,
                 approval: approval_producer_run_id,
             },
-            pull_request_number,
-            &expected_head_sha,
+            Some((pull_request_number, expected_head_sha)),
             apply,
+            true,
+            false,
+        ),
+        CommandArgs::InstanceMerge {
+            config_path,
+            producer_repository,
+            producer_run_id,
+            apply,
+            owner_selected_test_package,
+        } => apply_native_merge_from_runs(
+            &config_path,
+            &producer_repository,
+            NativeMergeRunIds {
+                merge: producer_run_id,
+                approval: 0,
+            },
+            None,
+            apply,
+            false,
+            owner_selected_test_package,
         ),
     }
+}
+
+fn locate_instance_event(config_path: &str, operation: &str) -> Result<()> {
+    let expected_role = native_operation_role(operation)?;
+    let (server_api, captured) = capture_remote_instance_authority(config_path)?;
+    let config = &captured.config;
+    let event_path = std::env::var("GITHUB_EVENT_PATH")
+        .context("missing GITHUB_EVENT_PATH for native request event")?;
+    let payload: Value = serde_json::from_slice(&fs::read(event_path)?)
+        .context("parse native request label event")?;
+    let server_repository = std::env::var("GITHUB_REPOSITORY")
+        .context("missing GITHUB_REPOSITORY for native Server event")?;
+    ensure!(
+        payload["action"] == "created"
+            && payload["repository"]["full_name"].as_str() == Some(server_repository.as_str())
+            && server_repository == config.instance.repository,
+        "native request event is not a newly created label in the authenticated Server instance"
+    );
+    let client_bot = &config.identities.client_bot;
+    ensure!(
+        crate::request::matches_principal(
+            &payload["sender"],
+            client_bot.id,
+            &client_bot.login,
+            "Bot"
+        ),
+        "native request label was not created by the configured Client App"
+    );
+    let (repository, run_id) = native_request_event_locator(&payload, expected_role)?;
+    let capability = match operation {
+        "policy_check" | "approval" | "merge" => securefix::policy::Capability::Merge,
+        "securefix" => securefix::policy::Capability::Securefix,
+        _ => anyhow::bail!("unsupported native request operation"),
+    };
+    config
+        .repositories
+        .iter()
+        .find(|configured| configured.repository == repository)
+        .with_context(|| format!("native request repository {repository} is not configured"))?
+        .policy()
+        .require(capability)?;
+    ensure!(
+        captured.authority.instance_repository == server_repository,
+        "native Server instance authority does not match the event repository"
+    );
+    server_api.require_remote_native_server_instance_authority_unchanged(&captured)?;
+    let (owner, repository_name) = repository
+        .split_once('/')
+        .context("producer repository must contain owner/name")?;
+    securefix::output("producer_repository", &repository)?;
+    securefix::output("producer_owner", owner)?;
+    securefix::output("producer_repository_name", repository_name)?;
+    securefix::output("producer_run_id", run_id.to_string())?;
+    securefix::output("operation", operation)?;
+    securefix::output("server_app_id", config.apps.server_id.to_string())?;
+    securefix::output("client_app_id", config.apps.client_id.to_string())?;
+    securefix::output(
+        "status_check_app_id",
+        config.apps.status_check_id.to_string(),
+    )?;
+    securefix::output(
+        "policy_check_app_id",
+        config.apps.policy_check_id.to_string(),
+    )?;
+    Ok(())
+}
+
+fn native_operation_role(operation: &str) -> Result<&'static str> {
+    match operation {
+        "policy_check" => Ok("policy-check"),
+        "securefix" => Ok("securefix"),
+        "approval" => Ok("approve"),
+        "merge" => Ok("merge"),
+        _ => anyhow::bail!("unsupported native request operation"),
+    }
+}
+
+fn native_request_event_locator(payload: &Value, role: &str) -> Result<(String, u64)> {
+    let label = payload["label"]["name"]
+        .as_str()
+        .context("native label event has no name")?;
+    let prefix = format!("securefix-native-{role}-");
+    let run_id = label
+        .strip_prefix(&prefix)
+        .context("native label event has the wrong operation")?
+        .parse::<u64>()?;
+    ensure!(run_id > 0, "native label has invalid producer run ID");
+    let description = payload["label"]["description"]
+        .as_str()
+        .context("native label event has no producer locator")?;
+    let (repository, described_run_id) = description
+        .rsplit_once('/')
+        .context("native label locator must be owner/repository/run_id")?;
+    securefix::policy::validate_repository(repository)?;
+    ensure!(
+        described_run_id.parse::<u64>()? == run_id,
+        "native label name and producer locator disagree"
+    );
+    Ok((repository.to_owned(), run_id))
+}
+
+fn validate_native_request_event(
+    config: &securefix::instance_config::InstanceConfig,
+    manifest: &RequestManifest,
+) -> Result<()> {
+    ensure!(
+        std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("label"),
+        "normal native requests must be received from a Server label event"
+    );
+    let event_path = std::env::var("GITHUB_EVENT_PATH")
+        .context("missing GITHUB_EVENT_PATH for native request verification")?;
+    let payload: Value = serde_json::from_slice(&fs::read(event_path)?)
+        .context("parse native request label event")?;
+    validate_native_request_event_payload(config, manifest, &payload)
+}
+
+fn validate_native_request_event_payload(
+    config: &securefix::instance_config::InstanceConfig,
+    manifest: &RequestManifest,
+    payload: &Value,
+) -> Result<()> {
+    ensure!(
+        payload["action"] == "created"
+            && payload["repository"]["full_name"].as_str()
+                == Some(config.instance.repository.as_str()),
+        "native request did not originate from a newly created Server label"
+    );
+    let client_bot = &config.identities.client_bot;
+    ensure!(
+        crate::request::matches_principal(
+            &payload["sender"],
+            client_bot.id,
+            &client_bot.login,
+            "Bot"
+        ),
+        "native request label was not created by the configured Client App"
+    );
+    let role = native_operation_role(&manifest.operation)?;
+    let (repository, run_id) = native_request_event_locator(payload, role)?;
+    ensure!(
+        repository == manifest.repository.full_name && run_id == manifest.producer.run_id,
+        "native request manifest does not match the triggering Server label"
+    );
+    Ok(())
+}
+
+fn run_policy_check_from_run(
+    instance_config_path: &str,
+    producer_repository: &str,
+    producer_run_id: u64,
+    expected_target: Option<(u64, String)>,
+    publish: bool,
+    scratch: bool,
+    owner_selected_test_package: bool,
+) -> Result<()> {
+    if let Some((pull_request_number, expected_head_sha)) = &expected_target {
+        securefix::policy::validate_sha(expected_head_sha)?;
+        ensure!(*pull_request_number > 0, "invalid policy-check PR number");
+    }
+    let (manifest_bytes, bundle_bytes) = download_request_from_run(
+        instance_config_path,
+        producer_repository,
+        producer_run_id,
+        securefix::policy::Capability::Merge,
+    )?;
+    let manifest: RequestManifest = serde_json::from_slice(&manifest_bytes)
+        .context("parse downloaded native policy-check request")?;
+    if let Some((pull_request_number, expected_head_sha)) = expected_target.as_ref() {
+        validate_policy_check_request_locator(
+            &manifest,
+            producer_run_id,
+            producer_repository,
+            *pull_request_number,
+            expected_head_sha,
+        )?;
+    } else {
+        ensure!(
+            manifest.operation == "policy_check"
+                && manifest.producer.run_id == producer_run_id
+                && manifest.repository.full_name == producer_repository,
+            "producer request does not match the authenticated policy-check label"
+        );
+    }
+    let directory = tempfile::tempdir()?;
+    let manifest_path = directory.path().join("manifest.json");
+    let bundle_path = directory.path().join("bundle.json");
+    fs::write(&manifest_path, manifest_bytes)?;
+    fs::write(&bundle_path, bundle_bytes)?;
+    let verified = verify_request_with_deployment(
+        instance_config_path,
+        &manifest_path,
+        &bundle_path,
+        securefix::api::NativeScratchMode::PolicyCheck,
+        securefix::api::NativeScratchMode::PolicyCheck,
+        publish,
+        scratch,
+        owner_selected_test_package,
+    )?;
+    if publish {
+        publish_request_proof_check(&verified)?;
+    }
+    println!(
+        "request_sha256={}",
+        securefix::hex_encode(Sha256::digest(&verified.manifest_bytes))
+    );
+    println!("producer_run_id={producer_run_id}");
+    println!("pull_request_number={}", manifest.pull_request.number);
+    println!("request_head_sha={}", manifest.pull_request.head_sha);
+    println!("result_published={publish}");
+    let (target_owner, target_repository) = manifest
+        .repository
+        .full_name
+        .split_once('/')
+        .context("validated Client repository has no owner/name separator")?;
+    securefix::output("target_owner", target_owner)?;
+    securefix::output("target_repository", target_repository)?;
+    securefix::output("target_repository_id", manifest.repository.id.to_string())?;
+    Ok(())
+}
+
+fn validate_policy_check_request_locator(
+    manifest: &RequestManifest,
+    producer_run_id: u64,
+    producer_repository: &str,
+    pull_request_number: u64,
+    expected_head_sha: &str,
+) -> Result<()> {
+    ensure!(
+        manifest.operation == "policy_check"
+            && manifest.producer.run_id == producer_run_id
+            && manifest.repository.full_name == producer_repository
+            && manifest.pull_request.number == pull_request_number
+            && manifest.pull_request.head_sha == expected_head_sha,
+        "producer request does not match the selected policy-check run, PR, and head"
+    );
+    Ok(())
 }
 
 struct VerifiedRequest {
     config: securefix::instance_config::InstanceConfig,
     config_bytes: Vec<u8>,
+    instance_authority: securefix::api::NativeServerInstanceAuthority,
+    instance_config_path: String,
     manifest: RequestManifest,
     manifest_bytes: Vec<u8>,
     target_policy_control_identity: Option<String>,
@@ -195,7 +593,6 @@ struct VerifiedRequest {
 }
 
 fn verify_request(
-    config_path: &std::path::Path,
     instance_config_path: &str,
     manifest_path: &std::path::Path,
     bundle_path: &std::path::Path,
@@ -203,9 +600,39 @@ fn verify_request(
     execution_mode: securefix::api::NativeScratchMode,
     publish: bool,
 ) -> Result<VerifiedRequest> {
-    let config_bytes = read_bounded(config_path, 256 * 1024)?;
-    let config = securefix::instance_config::InstanceConfig::parse(&config_bytes)?;
-    securefix::api::validate_native_instance_config_path(instance_config_path)?;
+    verify_request_with_deployment(
+        instance_config_path,
+        manifest_path,
+        bundle_path,
+        mode,
+        execution_mode,
+        publish,
+        true,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // These flags are the fixed legacy/scratch admission modes.
+fn verify_request_with_deployment(
+    instance_config_path: &str,
+    manifest_path: &std::path::Path,
+    bundle_path: &std::path::Path,
+    mode: securefix::api::NativeScratchMode,
+    execution_mode: securefix::api::NativeScratchMode,
+    publish: bool,
+    scratch: bool,
+    owner_selected_test_package: bool,
+) -> Result<VerifiedRequest> {
+    ensure!(
+        !(scratch && owner_selected_test_package),
+        "native scratch write mode cannot be combined with candidate package qualification"
+    );
+    // The checked-out file is only an execution locator. The policy and its
+    // workflow authority come from the authenticated protected default branch.
+    let (server_api, captured) = capture_remote_instance_authority(instance_config_path)?;
+    let config = captured.config.clone();
+    let config_bytes = captured.config_bytes.clone();
+    let server_authority = captured.authority.clone();
     let manifest_bytes = read_bounded(manifest_path, MAX_REQUEST_BYTES)?;
     let manifest: RequestManifest =
         serde_json::from_slice(&manifest_bytes).context("parse native request manifest")?;
@@ -223,6 +650,9 @@ fn verify_request(
         std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(config.instance.repository.as_str()),
         "native Server config does not match the current job repository"
     );
+    if !scratch && !owner_selected_test_package {
+        validate_native_request_event(&config, &manifest)?;
+    }
     ensure!(
         config.repositories.iter().any(|repository| {
             repository.id == manifest.repository.id
@@ -230,18 +660,11 @@ fn verify_request(
         }),
         "native request repository is not configured"
     );
-    securefix::api::validate_native_test_host_context(&config, execution_mode)?;
+    if scratch || owner_selected_test_package {
+        securefix::api::validate_native_test_host_context(&config, execution_mode)?;
+    }
     validate_request_server_locator(&config, instance_config_path, &manifest.server_authority)?;
-    validate_first_slice_policy(&config, &manifest, mode)?;
-    let token = std::env::var("GITHUB_TOKEN").context("missing GITHUB_TOKEN")?;
-    ensure!(!token.is_empty(), "GITHUB_TOKEN is empty");
-    let server_api = securefix::api::GitHub::new("https://api.github.com", token)?;
-    let (remote_config, server_authority) =
-        server_api.capture_native_server_authority(&config, instance_config_path, &config_bytes)?;
-    ensure!(
-        remote_config == config_bytes,
-        "Server config is not the protected default-branch snapshot"
-    );
+    validate_first_slice_policy(&config, &manifest, mode, scratch)?;
     securefix::api::require_native_authority_unchanged(
         &manifest.server_authority,
         &server_authority,
@@ -278,16 +701,17 @@ fn verify_request(
     let bundle_bytes = read_bounded(bundle_path, MAX_BUNDLE_BYTES)?;
     ensure!(!bundle_bytes.is_empty(), "attestation bundle is empty");
     let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
-    let target_policy_control_identity = if mode == securefix::api::NativeScratchMode::Merge {
-        Some(securefix::api::native_target_policy_control_identity(
-            &api,
-            &manifest.repository.full_name,
-            manifest.repository.id,
-            &manifest.pull_request.base_ref,
-        )?)
-    } else {
-        None
-    };
+    let target_policy_control_identity =
+        if scratch && mode == securefix::api::NativeScratchMode::Merge {
+            Some(securefix::api::native_target_policy_control_identity(
+                &api,
+                &manifest.repository.full_name,
+                manifest.repository.id,
+                &manifest.pull_request.base_ref,
+            )?)
+        } else {
+            None
+        };
     let acceptable_client: Value =
         server_api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
     ensure!(
@@ -302,6 +726,7 @@ fn verify_request(
         manifest.producer.run_id
     ))?;
     verify_run_identity(&run, &manifest)?;
+    validate_native_command_comment(&api, &server_api, &config, &manifest, &run, scratch)?;
     verify_artifact_binding(&api, &manifest, manifest_path, bundle_path)?;
     verify_current_pull_request(&api, &manifest)?;
     crate::request::validate_native_pr_commit_policy(
@@ -330,41 +755,27 @@ fn verify_request(
             .context("source run has no reusable-workflow references")?,
     )
     .context("parse reusable-workflow references")?;
-    let signer_prefix = format!(
-        "{}/{}@",
-        config.acceptable_clients.repository, config.acceptable_clients.producer_workflow
-    );
-    let signer_reference = references
-        .iter()
-        .filter(|reference| reference.path.starts_with(&signer_prefix))
-        .collect::<Vec<_>>();
-    ensure!(
-        signer_reference.len() == 1,
-        "source run does not name exactly one configured Client producer workflow"
-    );
-    let signer_sha = &signer_reference[0].sha;
-    securefix::policy::validate_sha(signer_sha)?;
-    let caller_yaml = api.content(
-        &manifest.repository.full_name,
-        &manifest.producer.workflow_path,
-        &manifest.producer.workflow_sha,
-    )?;
-    securefix::workflow::require_reusable_correspondence(
+    let signer_sha = unique_referenced_workflow_sha(
         &references,
-        &manifest.producer.workflow_sha,
-        &caller_yaml,
         &config.acceptable_clients.repository,
         &config.acceptable_clients.producer_workflow,
-        signer_sha,
     )?;
-
+    let signer_workflow_yaml = server_api.content(
+        &config.acceptable_clients.repository,
+        &config.acceptable_clients.producer_workflow,
+        &signer_sha,
+    )?;
+    let loader_action_sha = native_client_loader_action_sha(
+        &signer_workflow_yaml,
+        &config.acceptable_clients.repository,
+    )?;
     let verified = verify_with_gh(
         manifest_path,
         bundle_path,
         &manifest.repository.full_name,
         &config.acceptable_clients.repository,
         &config.acceptable_clients.producer_workflow,
-        signer_sha,
+        &signer_sha,
     )?;
     verify_certificate(
         &verified,
@@ -372,31 +783,68 @@ fn verify_request(
         &run,
         &config.acceptable_clients.repository,
         &config.acceptable_clients.producer_workflow,
-        signer_sha,
+        &signer_sha,
         &manifest_bytes,
     )?;
+    let verified_client_package = if scratch || owner_selected_test_package {
+        let publication_json =
+            std::env::var("SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON")
+                .context("missing owner-selected native scratch package publication record")?;
+        let publication = scratch_package_publication(&publication_json, &config)?;
+        securefix::package::verify_native_client_package_scratch(
+            &server_api,
+            &config,
+            execution_mode,
+            &config.acceptable_clients,
+            &signer_sha,
+            &loader_action_sha,
+            REQUEST_PROTOCOL,
+            &publication,
+        )?
+    } else {
+        verify_stable_client_package(&server_api, &config, &signer_sha, &loader_action_sha)?
+    };
+    ensure!(
+        verified_client_package.implementation_sha == signer_sha
+            && verified_client_package.loader_action_sha == loader_action_sha
+            && verified_client_package.protocol == REQUEST_PROTOCOL,
+        "verified Client package does not match the accepted producer workflow and request protocol"
+    );
     let writer = if publish
         && matches!(
             mode,
             securefix::api::NativeScratchMode::PolicyCheck
                 | securefix::api::NativeScratchMode::Approval
                 | securefix::api::NativeScratchMode::Merge
+                | securefix::api::NativeScratchMode::Securefix
         ) {
-        Some(native_scratch_writer(
-            &config,
-            &config_bytes,
-            instance_config_path,
-            &manifest,
-            &manifest_bytes,
-            mode,
-            target_policy_control_identity.as_deref(),
-        )?)
+        Some(if scratch {
+            native_scratch_writer(
+                &config,
+                &config_bytes,
+                instance_config_path,
+                &manifest,
+                &manifest_bytes,
+                mode,
+                target_policy_control_identity.as_deref(),
+            )?
+        } else {
+            native_instance_writer(
+                &captured,
+                instance_config_path,
+                &manifest,
+                &manifest_bytes,
+                mode,
+            )?
+        })
     } else {
         None
     };
     Ok(VerifiedRequest {
         config,
         config_bytes,
+        instance_authority: captured,
+        instance_config_path: instance_config_path.to_owned(),
         manifest,
         manifest_bytes,
         target_policy_control_identity,
@@ -404,6 +852,259 @@ fn verify_request(
         client_api: api,
         producer_run: run,
     })
+}
+
+fn native_instance_writer(
+    instance: &securefix::api::NativeServerInstanceAuthority,
+    config_path: &str,
+    manifest: &RequestManifest,
+    manifest_bytes: &[u8],
+    mode: securefix::api::NativeScratchMode,
+) -> Result<securefix::api::GitHub> {
+    let instance_mode = match mode {
+        securefix::api::NativeScratchMode::PolicyCheck => {
+            securefix::api::NativeInstanceMode::PolicyCheck
+        }
+        securefix::api::NativeScratchMode::Securefix => {
+            securefix::api::NativeInstanceMode::Securefix
+        }
+        securefix::api::NativeScratchMode::Approval => securefix::api::NativeInstanceMode::Approve,
+        securefix::api::NativeScratchMode::Merge => securefix::api::NativeInstanceMode::Merge,
+    };
+    let write_token = match mode {
+        securefix::api::NativeScratchMode::PolicyCheck => "SECUREFIX_NATIVE_CHECK_TOKEN",
+        securefix::api::NativeScratchMode::Approval => "SECUREFIX_APPROVE_TOKEN",
+        securefix::api::NativeScratchMode::Merge => "SECUREFIX_NATIVE_MERGE_TOKEN",
+        securefix::api::NativeScratchMode::Securefix => "SECUREFIX_WRITE_TOKEN",
+    };
+    let request_sha256 = securefix::hex_encode(Sha256::digest(manifest_bytes));
+    let target = securefix::api::NativeInstanceWriteTarget {
+        mode: instance_mode,
+        config_path,
+        repository: &manifest.repository.full_name,
+        repository_id: manifest.repository.id,
+        pull_number: manifest.pull_request.number,
+        head_sha: &manifest.pull_request.head_sha,
+        head_branch: &manifest.pull_request.head_branch,
+        head_repository_id: manifest.pull_request.head_repository_id,
+        base_sha: &manifest.pull_request.base_sha,
+        base_ref: &manifest.pull_request.base_ref,
+        author_id: manifest.pull_request.author_id,
+        author_login: &manifest.pull_request.author_login,
+        actor_id: manifest.producer.actor_id,
+        actor_login: &manifest.producer.actor_login,
+        request_sha256: &request_sha256,
+        producer_run_id: manifest.producer.run_id,
+        producer_run_attempt: manifest.producer.run_attempt,
+        producer_workflow_path: &manifest.producer.workflow_path,
+        producer_workflow_sha: &manifest.producer.workflow_sha,
+        client_workflow_epoch: &manifest.client_workflow_epoch,
+    };
+    securefix::api::GitHub::native_instance_from_env(
+        "SECUREFIX_CLIENT_TOKEN",
+        write_token,
+        instance,
+        &target,
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScratchPackagePublicationInput {
+    source_sha: String,
+    source_branch: String,
+    tag: String,
+    release_id: u64,
+    asset_id: u64,
+    asset_sha256: String,
+    asset_size: u64,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
+}
+
+fn scratch_package_publication(
+    json: &str,
+    config: &securefix::instance_config::InstanceConfig,
+) -> Result<securefix::package::ScratchPackagePublication> {
+    let input = parse_scratch_package_publication_input(json)?;
+    let trusted = securefix::config::trusted()?;
+    Ok(securefix::package::ScratchPackagePublication {
+        source_repository: config.acceptable_clients.repository.clone(),
+        source_repository_id: config.acceptable_clients.id,
+        destination_repository: trusted.deployment.integration.repository.clone(),
+        destination_repository_id: trusted.deployment.integration.id,
+        source_sha: input.source_sha,
+        source_branch: input.source_branch,
+        tag: input.tag,
+        release_id: input.release_id,
+        asset_id: input.asset_id,
+        asset_sha256: input.asset_sha256,
+        asset_size: input.asset_size,
+        producer_run_id: input.producer_run_id,
+        producer_run_attempt: input.producer_run_attempt,
+    })
+}
+
+fn parse_scratch_package_publication_input(json: &str) -> Result<ScratchPackagePublicationInput> {
+    ensure!(
+        json.len() <= 4096,
+        "native scratch package publication record exceeds its size limit"
+    );
+    serde_json::from_str(json).context("parse native scratch package publication record")
+}
+
+fn capture_remote_instance_authority(
+    instance_config_path: &str,
+) -> Result<(
+    securefix::api::GitHub,
+    securefix::api::NativeServerInstanceAuthority,
+)> {
+    securefix::api::validate_native_instance_config_path(instance_config_path)?;
+    let repository = std::env::var("GITHUB_REPOSITORY")
+        .context("missing authenticated Server repository context")?;
+    let api = securefix::api::GitHub::from_env("GITHUB_TOKEN")?;
+    let captured =
+        api.capture_remote_native_server_instance_authority(&repository, instance_config_path)?;
+    ensure!(
+        captured.config.instance.repository == repository,
+        "captured Server config does not match the authenticated job repository"
+    );
+    Ok((api, captured))
+}
+
+fn unique_referenced_workflow_sha(
+    references: &[securefix::workflow::ReferencedWorkflow],
+    repository: &str,
+    workflow_path: &str,
+) -> Result<String> {
+    securefix::policy::validate_repository(repository)?;
+    ensure!(
+        workflow_path.starts_with(".github/workflows/")
+            && workflow_path.ends_with(".yml")
+            && !workflow_path.contains(['\\', '%', '?', '#'])
+            && !workflow_path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == ".."),
+        "configured Client producer workflow path is invalid"
+    );
+    let prefix = format!("{repository}/{workflow_path}@");
+    let matching = references
+        .iter()
+        .filter(|reference| reference.path.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    ensure!(
+        matching.len() == 1,
+        "source run does not name exactly one configured Client producer workflow"
+    );
+    let reference = matching[0];
+    securefix::policy::validate_sha(&reference.sha)?;
+    ensure!(
+        reference.path == format!("{prefix}{}", reference.sha),
+        "configured Client producer workflow reference is not an exact immutable pin"
+    );
+    Ok(reference.sha.clone())
+}
+
+pub(crate) fn native_client_loader_action_sha(
+    workflow_yaml: &[u8],
+    repository: &str,
+) -> Result<String> {
+    securefix::policy::validate_repository(repository)?;
+    ensure!(
+        !workflow_yaml.is_empty() && workflow_yaml.len() <= 64 * 1024,
+        "Client producer workflow is empty or exceeds its size limit"
+    );
+    let yaml: serde_yaml::Value = serde_yaml::from_slice(workflow_yaml)
+        .context("parse Client producer workflow for its fixed package loader")?;
+    let prefix = format!("{repository}/.github/actions/load-package@");
+    let mut matches = Vec::new();
+    fn visit<'a>(
+        value: &'a serde_yaml::Value,
+        prefix: &str,
+        matches: &mut Vec<(&'a str, Option<&'a str>)>,
+    ) {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                if let Some(uses) = mapping
+                    .get(serde_yaml::Value::String("uses".to_owned()))
+                    .and_then(serde_yaml::Value::as_str)
+                    && uses.starts_with(prefix)
+                {
+                    let action_sha = mapping
+                        .get(serde_yaml::Value::String("with".to_owned()))
+                        .and_then(serde_yaml::Value::as_mapping)
+                        .and_then(|with| {
+                            with.get(serde_yaml::Value::String("action-sha".to_owned()))
+                        })
+                        .and_then(serde_yaml::Value::as_str);
+                    matches.push((uses, action_sha));
+                }
+                for child in mapping.values() {
+                    visit(child, prefix, matches);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for child in items {
+                    visit(child, prefix, matches);
+                }
+            }
+            _ => {}
+        }
+    }
+    visit(&yaml, &prefix, &mut matches);
+    ensure!(
+        matches.len() == 1,
+        "Client producer workflow must use exactly one configured package loader"
+    );
+    let (uses, action_sha) = matches[0];
+    let sha = uses
+        .strip_prefix(&prefix)
+        .context("Client package loader reference has an invalid repository path")?;
+    securefix::policy::validate_sha(sha)
+        .context("Client package loader must use a full commit SHA")?;
+    ensure!(
+        action_sha == Some(sha),
+        "Client package loader action-sha input must equal its immutable uses pin"
+    );
+    Ok(sha.to_owned())
+}
+
+/// Resolve the source branch for release attestation only after authenticating
+/// the configured Client repository through GitHub's repository API. The
+/// branch is repository metadata, never a request or dispatch claim.
+fn verified_client_default_branch(
+    repository: &Value,
+    acceptable: &securefix::instance_config::AcceptableClients,
+) -> Result<String> {
+    ensure!(
+        repository["id"].as_u64() == Some(acceptable.id)
+            && repository["full_name"].as_str() == Some(acceptable.repository.as_str()),
+        "configured Client repository identity mismatch"
+    );
+    let branch = repository["default_branch"]
+        .as_str()
+        .context("configured Client repository has no default branch")?;
+    securefix::config::validate_branch(branch)?;
+    Ok(branch.to_owned())
+}
+
+fn verify_stable_client_package(
+    server_api: &securefix::api::GitHub,
+    config: &securefix::instance_config::InstanceConfig,
+    signer_sha: &str,
+    loader_action_sha: &str,
+) -> Result<securefix::package::VerifiedNativeClientPackage> {
+    let repository: Value =
+        server_api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
+    let default_branch = verified_client_default_branch(&repository, &config.acceptable_clients)?;
+    securefix::package::verify_native_client_package(
+        server_api,
+        &config.acceptable_clients,
+        signer_sha,
+        loader_action_sha,
+        REQUEST_PROTOCOL,
+        &default_branch,
+    )
 }
 
 fn validate_request_server_locator(
@@ -467,6 +1168,347 @@ fn verify_current_pull_request(
     validate_current_pull_request_state(&repo, &pull, manifest)
 }
 
+fn validate_native_command_comment(
+    api: &securefix::api::GitHub,
+    server_api: &securefix::api::GitHub,
+    config: &securefix::instance_config::InstanceConfig,
+    manifest: &RequestManifest,
+    run: &Value,
+    scratch: bool,
+) -> Result<()> {
+    if !matches!(manifest.operation.as_str(), "approval" | "merge") {
+        ensure!(
+            manifest.command_comment.is_none(),
+            "non-command request contains an owner command locator"
+        );
+        return Ok(());
+    }
+    if scratch {
+        ensure!(
+            manifest.command_comment.is_none(),
+            "owner-dispatched scratch commands must not claim an issue-comment authorization"
+        );
+        return Ok(());
+    }
+    ensure!(
+        manifest.producer.event == "issue_comment" && manifest.producer.run_attempt == 1,
+        "ordinary approval and merge require the original issue-comment workflow run"
+    );
+    let locator = manifest
+        .command_comment
+        .as_ref()
+        .context("ordinary approval and merge require a captured command comment")?;
+    let comment: Value = api.get(&format!(
+        "/repos/{}/issues/comments/{}",
+        manifest.repository.full_name, locator.id
+    ))?;
+    let owner = &config.identities.owner;
+    let is_owner =
+        crate::request::matches_principal(&comment["user"], owner.id, &owner.login, "User")
+            && crate::request::matches_principal(&run["actor"], owner.id, &owner.login, "User");
+    let is_renovate = if manifest.operation == "merge" {
+        config
+            .identities
+            .renovate_merge_bot
+            .as_ref()
+            .is_some_and(|bot| {
+                crate::request::matches_principal(&comment["user"], bot.id, &bot.login, "Bot")
+                    && crate::request::matches_principal(&run["actor"], bot.id, &bot.login, "Bot")
+            })
+    } else {
+        false
+    };
+    let expected_command = if manifest.operation == "approval" {
+        "/approve"
+    } else {
+        "/merge"
+    };
+    let issue_url_suffix = format!(
+        "/repos/{}/issues/{}",
+        manifest.repository.full_name, manifest.pull_request.number
+    );
+    let comment_created = parse_comment_time(&comment["created_at"])?;
+    let comment_updated = parse_comment_time(&comment["updated_at"])?;
+    ensure!(
+        comment["id"].as_u64() == Some(locator.id)
+            && comment["body"]
+                .as_str()
+                .is_some_and(|body| body.trim_ascii() == expected_command)
+            && comment["issue_url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with(&issue_url_suffix))
+            && comment_created == locator.created_at
+            && comment_updated == locator.updated_at
+            && comment_created == comment_updated
+            && (is_owner || is_renovate),
+        "native command comment is missing, changed, edited, or unauthorized"
+    );
+    if is_renovate {
+        let pull: Value = api.get(&format!(
+            "/repos/{}/pulls/{}",
+            manifest.repository.full_name, manifest.pull_request.number
+        ))?;
+        crate::request::require_renovate_author_for_instance(config, &pull)?;
+    }
+    securefix::api::require_native_instance_command_after_authority_epoch(
+        server_api,
+        &manifest.server_authority,
+        locator.created_at,
+    )?;
+    let events = api.paginate(&format!(
+        "/repos/{}/issues/{}/timeline",
+        manifest.repository.full_name, manifest.pull_request.number
+    ))?;
+    ensure!(
+        !crate::merge::has_invalidating_event(&events, locator.created_at),
+        "pull request changed after the owner command was created"
+    );
+    Ok(())
+}
+
+fn parse_comment_time(value: &Value) -> Result<chrono::DateTime<chrono::Utc>> {
+    Ok(chrono::DateTime::parse_from_rfc3339(
+        value.as_str().context("timestamp is missing or invalid")?,
+    )?
+    .with_timezone(&chrono::Utc))
+}
+
+fn native_release_approval_locator(
+    api: &securefix::api::GitHub,
+    config: &securefix::instance_config::InstanceConfig,
+    authority: &securefix::api::NativeAuthoritySnapshot,
+    repository: &str,
+    pull_number: u64,
+    head_sha: &str,
+    merged_at: &chrono::DateTime<chrono::Utc>,
+) -> Result<(u64, u32, String, String, u64)> {
+    let reviews =
+        api.paginate_uncached(&format!("/repos/{repository}/pulls/{pull_number}/reviews"))?;
+    let reviewer = &config.identities.approval_reviewer;
+    let mut decisions = reviews
+        .iter()
+        .filter(|review| {
+            matches!(
+                review["state"].as_str(),
+                Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
+            ) && review["user"]["id"].as_u64() == Some(reviewer.id)
+                && review["user"]["login"].as_str() == Some(reviewer.login.as_str())
+                && review["user"]["type"] == "User"
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        decisions
+            .iter()
+            .all(|review| crate::request::review_order(review).is_some()),
+        "configured reviewer has a malformed review timestamp or ID"
+    );
+    let review = decisions
+        .drain(..)
+        .max_by_key(|review| crate::request::review_order(review))
+        .context("configured reviewer has no approval marker review")?;
+    require_no_later_release_review_decision(&reviews, review)?;
+    let review_at = parse_comment_time(&review["submitted_at"])?;
+    ensure!(
+        review["state"] == "APPROVED"
+            && review["commit_id"].as_str() == Some(head_sha)
+            && review_at < *merged_at,
+        "latest configured approval is not a pre-merge review on the exact release head"
+    );
+    let marker = securefix::api::parse_native_instance_approval_marker(
+        review["body"]
+            .as_str()
+            .context("configured approval review has no native marker")?,
+    )?;
+    let current_authority_sha = securefix::api::native_authority_sha256(authority)?;
+    ensure!(
+        marker.authority_sha256 == current_authority_sha,
+        "approval marker belongs to a different Server authority"
+    );
+    let review_id = review["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("approval marker review ID is missing")?;
+    Ok((
+        marker.producer_run_id,
+        marker.producer_run_attempt,
+        marker.request_sha256,
+        marker.authority_sha256,
+        review_id,
+    ))
+}
+
+fn require_no_later_release_review_decision(reviews: &[Value], marker: &Value) -> Result<()> {
+    let marker_id = marker["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("approval marker review ID is missing")?;
+    let marker_order = crate::request::review_order(marker)
+        .context("configured reviewer marker has no review order")?;
+    ensure!(
+        reviews
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate["state"].as_str(),
+                    Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
+                )
+            })
+            .all(|candidate| {
+                candidate["id"].as_u64() == Some(marker_id)
+                    || crate::request::review_order(candidate)
+                        .is_some_and(|order| order < marker_order)
+            }),
+        "a review decision was submitted after the configured approval marker"
+    );
+    Ok(())
+}
+
+fn validate_native_release_approval_command(
+    client_api: &securefix::api::GitHub,
+    server_api: &securefix::api::GitHub,
+    config: &securefix::instance_config::InstanceConfig,
+    manifest: &RequestManifest,
+    run: &Value,
+    merged_at: &chrono::DateTime<chrono::Utc>,
+    merged_by: &crate::config::Principal,
+) -> Result<()> {
+    ensure!(
+        manifest.producer.event == "issue_comment" && manifest.producer.run_attempt == 1,
+        "release approval must come from the original issue-comment run"
+    );
+    let locator = manifest
+        .command_comment
+        .as_ref()
+        .context("release approval has no captured owner command")?;
+    let comment: Value = client_api.get(&format!(
+        "/repos/{}/issues/comments/{}",
+        manifest.repository.full_name, locator.id
+    ))?;
+    let owner = &config.identities.owner;
+    let issue_url_suffix = format!(
+        "/repos/{}/issues/{}",
+        manifest.repository.full_name, manifest.pull_request.number
+    );
+    let created_at = parse_comment_time(&comment["created_at"])?;
+    let updated_at = parse_comment_time(&comment["updated_at"])?;
+    let run_created_at = parse_comment_time(&run["created_at"])?;
+    ensure!(
+        comment["id"].as_u64() == Some(locator.id)
+            && comment["body"]
+                .as_str()
+                .is_some_and(|body| body.trim_ascii() == "/approve")
+            && comment["issue_url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with(&issue_url_suffix))
+            && crate::request::matches_principal(&comment["user"], owner.id, &owner.login, "User")
+            && crate::request::matches_principal(&run["actor"], owner.id, &owner.login, "User")
+            && created_at == locator.created_at
+            && updated_at == locator.updated_at
+            && created_at == updated_at
+            && created_at <= run_created_at
+            && run_created_at < *merged_at
+            && created_at < *merged_at,
+        "release approval command is edited, unauthorized, or was created after merge"
+    );
+    securefix::api::require_native_instance_command_after_authority_epoch(
+        server_api,
+        &manifest.server_authority,
+        locator.created_at,
+    )?;
+    let events = client_api.paginate(&format!(
+        "/repos/{}/issues/{}/timeline",
+        manifest.repository.full_name, manifest.pull_request.number
+    ))?;
+    validate_native_release_timeline(&events, locator.created_at, merged_at, merged_by)?;
+    Ok(())
+}
+
+fn validate_native_release_timeline(
+    events: &[Value],
+    command_at: chrono::DateTime<chrono::Utc>,
+    merged_at: &chrono::DateTime<chrono::Utc>,
+    merged_by: &crate::config::Principal,
+) -> Result<()> {
+    let mut allowed_merge_events = 0;
+    for event in events {
+        let created_at = parse_comment_time(&event["created_at"])
+            .context("release PR timeline event has no valid timestamp")?;
+        if !crate::merge::has_invalidating_event(std::slice::from_ref(event), command_at) {
+            continue;
+        }
+        let expected_merge_event = matches!(event["event"].as_str(), Some("closed" | "merged"))
+            && event["actor"]["id"].as_u64() == Some(merged_by.id)
+            && event["actor"]["login"].as_str() == Some(merged_by.login.as_str())
+            && created_at == *merged_at;
+        ensure!(
+            expected_merge_event,
+            "release PR has an unexpected post-command timeline transition"
+        );
+        allowed_merge_events += 1;
+    }
+    ensure!(
+        allowed_merge_events == 1,
+        "release PR timeline must contain exactly one configured-merger close/merge transition"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Keep independently authenticated PR, branch, and merger identities explicit.
+fn verify_current_merged_release_pull_request(
+    api: &securefix::api::GitHub,
+    repository: &Value,
+    pull: &Value,
+    manifest: &RequestManifest,
+    head_sha: &str,
+    merge_sha: &str,
+    merged_by: &crate::config::Principal,
+    release_branch: &str,
+    default_branch: &str,
+) -> Result<()> {
+    ensure!(
+        repository["id"].as_u64() == Some(manifest.repository.id)
+            && repository["full_name"].as_str() == Some(manifest.repository.full_name.as_str())
+            && pull["number"].as_u64() == Some(manifest.pull_request.number)
+            && pull["state"] == "closed"
+            && pull["merged"] == true
+            && pull["head"]["sha"].as_str() == Some(head_sha)
+            && pull["merge_commit_sha"].as_str() == Some(merge_sha)
+            && pull["base"]["ref"].as_str() == Some(default_branch)
+            && manifest.pull_request.base_ref == default_branch
+            && pull["head"]["ref"].as_str() == Some(release_branch)
+            && manifest.pull_request.head_branch == release_branch
+            && pull["head"]["repo"]["id"].as_u64() == Some(manifest.repository.id)
+            && pull["base"]["repo"]["id"].as_u64() == Some(manifest.repository.id)
+            && pull["user"]["id"].as_u64() == Some(manifest.pull_request.author_id)
+            && pull["user"]["login"].as_str() == Some(manifest.pull_request.author_login.as_str())
+            && pull["merged_by"]["id"].as_u64() == Some(merged_by.id)
+            && pull["merged_by"]["login"].as_str() == Some(merged_by.login.as_str()),
+        "merged release PR no longer matches the approved repository, head, base, author, or merger"
+    );
+    let comparison: Value = api.get(&format!(
+        "/repos/{}/compare/{merge_sha}...{default_branch}",
+        manifest.repository.full_name
+    ))?;
+    ensure!(
+        matches!(comparison["status"].as_str(), Some("ahead" | "identical"))
+            && comparison["base_commit"]["sha"].as_str() == Some(merge_sha),
+        "approved release merge commit is not contained in the current default branch"
+    );
+    let base_comparison: Value = api.get(&format!(
+        "/repos/{}/compare/{}...{merge_sha}",
+        manifest.repository.full_name, manifest.pull_request.base_sha
+    ))?;
+    ensure!(
+        matches!(
+            base_comparison["status"].as_str(),
+            Some("ahead" | "identical")
+        ) && base_comparison["base_commit"]["sha"].as_str()
+            == Some(manifest.pull_request.base_sha.as_str()),
+        "approved release merge commit does not descend from the pre-merge base SHA"
+    );
+    Ok(())
+}
+
 fn validate_current_pull_request_state(
     repo: &Value,
     pull: &Value,
@@ -487,8 +1529,6 @@ fn validate_current_pull_request_state(
             && pull["head"]["repo"]["id"].as_u64()
                 == Some(manifest.pull_request.head_repository_id)
             && pull["user"]["id"].as_u64() == Some(manifest.pull_request.author_id)
-            && manifest.pull_request.author_id == manifest.producer.actor_id
-            && manifest.pull_request.author_login == manifest.producer.actor_login
             && pull["user"]["login"].as_str() == Some(manifest.pull_request.author_login.as_str()),
         "native request PR is closed, retargeted, or has a different head or identity"
     );
@@ -503,6 +1543,7 @@ fn validate_first_slice_policy(
     config: &securefix::instance_config::InstanceConfig,
     manifest: &RequestManifest,
     mode: securefix::api::NativeScratchMode,
+    scratch: bool,
 ) -> Result<()> {
     let repository = config
         .repositories
@@ -522,13 +1563,20 @@ fn validate_first_slice_policy(
         .policy()
         .require(required_capability)
         .context("native request repository lacks the required capability")?;
-    ensure!(
-        config.identities.owner.id == manifest.producer.actor_id
-            && config.identities.owner.login == manifest.producer.actor_login
-            && config.identities.owner.id == manifest.pull_request.author_id
-            && config.identities.owner.login == manifest.pull_request.author_login,
-        "first-slice policy requires the configured owner as producer actor and PR author"
-    );
+    if scratch {
+        ensure!(
+            config.identities.owner.id == manifest.producer.actor_id
+                && config.identities.owner.login == manifest.producer.actor_login
+                && config.identities.owner.id == manifest.pull_request.author_id
+                && config.identities.owner.login == manifest.pull_request.author_login,
+            "scratch policy requires the configured owner as producer actor and PR author"
+        );
+    } else if matches!(manifest.operation.as_str(), "approval" | "merge") {
+        ensure!(
+            manifest.command_comment.is_some(),
+            "ordinary approval and merge require a validated owner command"
+        );
+    }
     Ok(())
 }
 
@@ -579,12 +1627,12 @@ fn native_scratch_writer(
     )
 }
 
-fn publish_scratch_result(verified: &VerifiedRequest) -> Result<()> {
+fn publish_request_proof_check(verified: &VerifiedRequest) -> Result<()> {
     let manifest = &verified.manifest;
     let api = verified
         .writer
         .as_ref()
-        .context("native scratch writer was not captured before proof validation")?;
+        .context("native request writer was not captured before proof validation")?;
     let checks: Value = api.get(&format!(
         "/repos/{}/commits/{}/check-runs?per_page=100&page=1&filter=latest&check_name={}&app_id={}",
         manifest.repository.full_name,
@@ -600,8 +1648,15 @@ fn publish_scratch_result(verified: &VerifiedRequest) -> Result<()> {
         "native request proof check already exists or check listing is incomplete"
     );
     let request_sha = securefix::hex_encode(Sha256::digest(&verified.manifest_bytes));
-    let body =
-        securefix::api::native_policy_check_body(&manifest.pull_request.head_sha, &request_sha);
+    let body = if verified.target_policy_control_identity.is_some() {
+        securefix::api::native_policy_check_body(&manifest.pull_request.head_sha, &request_sha)
+    } else {
+        securefix::api::native_instance_policy_check_body(
+            &verified.instance_authority.authority,
+            &manifest.pull_request.head_sha,
+            &request_sha,
+        )?
+    };
     let result: Value = api.post(
         &format!("/repos/{}/check-runs", manifest.repository.full_name),
         &body,
@@ -618,20 +1673,22 @@ fn publish_scratch_result(verified: &VerifiedRequest) -> Result<()> {
     Ok(())
 }
 
-fn apply_securefix(
-    config_path: &std::path::Path,
+fn apply_securefix_mode(
     instance_config_path: &str,
     manifest_path: &std::path::Path,
     bundle_path: &std::path::Path,
+    scratch: bool,
+    owner_selected_test_package: bool,
 ) -> Result<()> {
-    let verified = verify_request(
-        config_path,
+    let verified = verify_request_with_deployment(
         instance_config_path,
         manifest_path,
         bundle_path,
         securefix::api::NativeScratchMode::Securefix,
         securefix::api::NativeScratchMode::Securefix,
         true,
+        scratch,
+        owner_selected_test_package,
     )?;
     let manifest = &verified.manifest;
     let artifact_identity = manifest
@@ -677,15 +1734,25 @@ fn apply_securefix(
         destination_branch_exists: true,
         existing_pull_request: Some(manifest.pull_request.number),
     };
-    let writer = native_scratch_writer(
-        &verified.config,
-        &verified.config_bytes,
-        instance_config_path,
-        manifest,
-        &verified.manifest_bytes,
-        securefix::api::NativeScratchMode::Securefix,
-        None,
-    )?;
+    let writer = if scratch {
+        native_scratch_writer(
+            &verified.config,
+            &verified.config_bytes,
+            instance_config_path,
+            manifest,
+            &verified.manifest_bytes,
+            securefix::api::NativeScratchMode::Securefix,
+            None,
+        )?
+    } else {
+        native_instance_writer(
+            &verified.instance_authority,
+            &verified.instance_config_path,
+            manifest,
+            &verified.manifest_bytes,
+            securefix::api::NativeScratchMode::Securefix,
+        )?
+    };
     let server_run = std::env::var("GITHUB_RUN_ID").unwrap_or_default();
     let server_url =
         std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".to_owned());
@@ -745,13 +1812,28 @@ fn validate_securefix_artifact_context(
 }
 
 fn apply_securefix_from_run(
-    config_path: &std::path::Path,
     instance_config_path: &str,
     producer_repository: &str,
     producer_run_id: u64,
 ) -> Result<()> {
+    apply_securefix_from_run_mode(
+        instance_config_path,
+        producer_repository,
+        producer_run_id,
+        true,
+        false,
+    )
+}
+
+fn apply_securefix_from_run_mode(
+    instance_config_path: &str,
+    producer_repository: &str,
+    producer_run_id: u64,
+    scratch: bool,
+    owner_selected_test_package: bool,
+) -> Result<()> {
     let (manifest_bytes, bundle_bytes) = download_request_from_run(
-        config_path,
+        instance_config_path,
         producer_repository,
         producer_run_id,
         securefix::policy::Capability::Securefix,
@@ -761,64 +1843,80 @@ fn apply_securefix_from_run(
     let bundle_path = directory.path().join("bundle.json");
     fs::write(&manifest_path, manifest_bytes)?;
     fs::write(&bundle_path, bundle_bytes)?;
-    apply_securefix(
-        config_path,
+    apply_securefix_mode(
         instance_config_path,
         &manifest_path,
         &bundle_path,
+        scratch,
+        owner_selected_test_package,
     )
 }
 
 fn apply_native_approval_from_run(
-    config_path: &std::path::Path,
     instance_config_path: &str,
     producer_repository: &str,
     producer_run_id: u64,
-    pull_request_number: u64,
-    expected_head_sha: &str,
+    expected_target: Option<(u64, String)>,
     apply: bool,
+    scratch: bool,
+    owner_selected_test_package: bool,
 ) -> Result<()> {
-    securefix::policy::validate_sha(expected_head_sha)?;
-    ensure!(pull_request_number > 0, "invalid approval PR number");
+    if let Some((pull_request_number, expected_head_sha)) = &expected_target {
+        securefix::policy::validate_sha(expected_head_sha)?;
+        ensure!(*pull_request_number > 0, "invalid approval PR number");
+    }
     let (manifest_bytes, bundle_bytes) = download_request_from_run(
-        config_path,
+        instance_config_path,
         producer_repository,
         producer_run_id,
         securefix::policy::Capability::Approve,
     )?;
     let manifest: RequestManifest = serde_json::from_slice(&manifest_bytes)
         .context("parse downloaded native approval request")?;
-    ensure!(
-        manifest.pull_request.number == pull_request_number
-            && manifest.pull_request.head_sha == expected_head_sha,
-        "producer request does not match the owner-selected PR number and head"
-    );
+    if let Some((pull_request_number, expected_head_sha)) = expected_target.as_ref() {
+        ensure!(
+            manifest.pull_request.number == *pull_request_number
+                && manifest.pull_request.head_sha == *expected_head_sha,
+            "producer request does not match the owner-selected PR number and head"
+        );
+    }
     let directory = tempfile::tempdir()?;
     let manifest_path = directory.path().join("manifest.json");
     let bundle_path = directory.path().join("bundle.json");
     fs::write(&manifest_path, manifest_bytes)?;
     fs::write(&bundle_path, bundle_bytes)?;
-    let verified = verify_request(
-        config_path,
+    let verified = verify_request_with_deployment(
         instance_config_path,
         &manifest_path,
         &bundle_path,
         securefix::api::NativeScratchMode::Approval,
         securefix::api::NativeScratchMode::Approval,
         apply,
+        scratch,
+        owner_selected_test_package,
     )?;
     if apply {
         let writer = verified
             .writer
             .as_ref()
             .context("native approval writer was not captured before apply")?;
-        let marker = crate::approval::approve_native_current_head(
-            &verified.client_api,
-            writer,
-            &verified.manifest,
-            &verified.config.identities.approval_reviewer,
-            &verified.manifest_bytes,
-        )?;
+        let marker = if scratch {
+            crate::approval::approve_native_current_head(
+                &verified.client_api,
+                writer,
+                &verified.manifest,
+                &verified.config.identities.approval_reviewer,
+                &verified.manifest_bytes,
+            )?
+        } else {
+            crate::approval::approve_native_instance_current_head(
+                &verified.client_api,
+                writer,
+                &verified.manifest,
+                &verified.config.identities.approval_reviewer,
+                &verified.manifest_bytes,
+            )?
+        };
         println!("approval_marker={marker}");
     }
     println!("approval_validated=true");
@@ -841,46 +1939,86 @@ struct NativeMergeRunIds {
 }
 
 fn apply_native_merge_from_runs(
-    config_path: &std::path::Path,
     instance_config_path: &str,
     producer_repository: &str,
     producer_run_ids: NativeMergeRunIds,
-    pull_request_number: u64,
-    expected_head_sha: &str,
+    expected_target: Option<(u64, String)>,
     apply: bool,
+    scratch: bool,
+    owner_selected_test_package: bool,
 ) -> Result<()> {
-    securefix::policy::validate_sha(expected_head_sha)?;
-    ensure!(pull_request_number > 0, "invalid merge PR number");
-    ensure!(
-        producer_run_ids.merge > 0
-            && producer_run_ids.approval > 0
-            && producer_run_ids.merge != producer_run_ids.approval,
-        "merge and approval proof must come from different successful runs"
-    );
+    if let Some((pull_request_number, expected_head_sha)) = &expected_target {
+        securefix::policy::validate_sha(expected_head_sha)?;
+        ensure!(*pull_request_number > 0, "invalid merge PR number");
+    }
+    ensure!(producer_run_ids.merge > 0, "invalid merge producer run ID");
+    if scratch {
+        ensure!(
+            producer_run_ids.approval > 0 && producer_run_ids.merge != producer_run_ids.approval,
+            "scratch merge and approval proof must come from different successful runs"
+        );
+    }
 
     let (merge_bytes, merge_bundle) = download_request_from_run(
-        config_path,
+        instance_config_path,
         producer_repository,
         producer_run_ids.merge,
         securefix::policy::Capability::Merge,
     )?;
-    let (approval_bytes, approval_bundle) = download_request_from_run(
-        config_path,
-        producer_repository,
-        producer_run_ids.approval,
-        securefix::policy::Capability::Approve,
-    )?;
     let merge_manifest: RequestManifest =
         serde_json::from_slice(&merge_bytes).context("parse downloaded native merge request")?;
+    if let Some((pull_request_number, expected_head_sha)) = expected_target.as_ref() {
+        ensure!(
+            merge_manifest.pull_request.number == *pull_request_number
+                && merge_manifest.pull_request.head_sha == *expected_head_sha,
+            "producer request does not match the selected PR number and head"
+        );
+    }
+
+    let approval_locator = if scratch {
+        ensure!(
+            producer_run_ids.approval > 0,
+            "scratch merge requires the owner-selected approval proof run"
+        );
+        None
+    } else {
+        ensure!(
+            producer_run_ids.approval == 0,
+            "ordinary merge does not accept a caller-selected approval run"
+        );
+        Some(native_instance_approval_locator(
+            instance_config_path,
+            &merge_manifest,
+        )?)
+    };
+    let approval_run_id = approval_locator
+        .as_ref()
+        .map_or(producer_run_ids.approval, |locator| locator.producer_run_id);
+    let (approval_bytes, approval_bundle) = if approval_run_id > 0 {
+        download_request_from_run(
+            instance_config_path,
+            producer_repository,
+            approval_run_id,
+            securefix::policy::Capability::Approve,
+        )?
+    } else {
+        unreachable!("approval locator must be selected for the current merge mode")
+    };
     let approval_manifest: RequestManifest = serde_json::from_slice(&approval_bytes)
         .context("parse downloaded native approval request")?;
-    ensure!(
-        merge_manifest.pull_request.number == pull_request_number
-            && merge_manifest.pull_request.head_sha == expected_head_sha
-            && approval_manifest.pull_request.number == pull_request_number
-            && approval_manifest.pull_request.head_sha == expected_head_sha,
-        "producer proofs do not match the owner-selected PR number and head"
-    );
+    if let Some(locator) = approval_locator.as_ref() {
+        ensure!(
+            approval_manifest.producer.run_id == locator.producer_run_id
+                && approval_manifest.producer.run_attempt == locator.producer_run_attempt
+                && securefix::hex_encode(Sha256::digest(&approval_bytes)) == locator.request_sha256
+                && securefix::api::native_authority_sha256(&approval_manifest.server_authority)?
+                    == locator.authority_sha256
+                && approval_manifest.pull_request.head_sha == merge_manifest.pull_request.head_sha,
+            "approval proof does not match the authenticated current-head review marker"
+        );
+    }
+    let pull_request_number = merge_manifest.pull_request.number;
+    let expected_head_sha = merge_manifest.pull_request.head_sha.clone();
 
     let merge_directory = tempfile::tempdir()?;
     let merge_manifest_path = merge_directory.path().join("manifest.json");
@@ -893,25 +2031,35 @@ fn apply_native_merge_from_runs(
     fs::write(&approval_manifest_path, approval_bytes)?;
     fs::write(&approval_bundle_path, approval_bundle)?;
 
-    let approval = verify_request(
-        config_path,
+    let approval = verify_request_with_deployment(
         instance_config_path,
         &approval_manifest_path,
         &approval_bundle_path,
         securefix::api::NativeScratchMode::Approval,
         securefix::api::NativeScratchMode::Merge,
         false,
+        scratch,
+        owner_selected_test_package,
     )?;
-    let merge = verify_request(
-        config_path,
+    let merge = verify_request_with_deployment(
         instance_config_path,
         &merge_manifest_path,
         &merge_bundle_path,
         securefix::api::NativeScratchMode::Merge,
         securefix::api::NativeScratchMode::Merge,
         apply,
+        scratch,
+        owner_selected_test_package,
     )?;
     validate_native_merge_pair(&merge.manifest, &approval.manifest)?;
+    if !scratch {
+        crate::request::validate_native_instance_merge_policy(
+            &merge.client_api,
+            &merge.config,
+            &merge.manifest,
+            &approval.manifest,
+        )?;
+    }
     validate_native_merge_readiness(&merge, &approval)?;
 
     if apply {
@@ -925,10 +2073,337 @@ fn apply_native_merge_from_runs(
     println!("merge_validated=true");
     println!("merge_applied={apply}");
     println!("producer_run_id={}", producer_run_ids.merge);
-    println!("approval_producer_run_id={}", producer_run_ids.approval);
+    if approval_run_id > 0 {
+        println!("approval_producer_run_id={approval_run_id}");
+    }
     println!("pull_request_number={pull_request_number}");
     println!("request_head_sha={expected_head_sha}");
     Ok(())
+}
+
+struct NativeInstanceApprovalLocator {
+    producer_run_id: u64,
+    producer_run_attempt: u32,
+    request_sha256: String,
+    authority_sha256: String,
+}
+
+pub(crate) struct NativeReleaseApprovalProof {
+    pub(crate) producer_run_id: u64,
+    pub(crate) producer_run_attempt: u32,
+    pub(crate) request_sha256: String,
+    pub(crate) authority_sha256: String,
+    pub(crate) workflow_sha: String,
+    pub(crate) accepted_client_implementation_sha: String,
+    pub(crate) client_workflow_epoch: String,
+    pub(crate) command_comment_id: u64,
+    pub(crate) approval_review_id: u64,
+}
+
+/// Verify the existing native owner-approval proof for a merged release PR.
+/// This adapter is for the Client Release Tag workflow, so it verifies the
+/// same Client request/run/package evidence as the Server lane without
+/// requiring Server-only `GITHUB_REPOSITORY` or reusable-workflow context.
+#[allow(clippy::too_many_arguments)] // The two APIs and each PR identity are independently authenticated inputs.
+pub(crate) fn verify_native_release_approval(
+    server_api: &securefix::api::GitHub,
+    client_api: &securefix::api::GitHub,
+    instance_config_path: &str,
+    expected_instance: &securefix::api::NativeServerInstanceAuthority,
+    client_repository: &str,
+    client_repository_id: u64,
+    pull_request_number: u64,
+    merged_head_sha: &str,
+    merge_sha: &str,
+    merged_by: &crate::config::Principal,
+) -> Result<NativeReleaseApprovalProof> {
+    securefix::api::validate_native_instance_config_path(instance_config_path)?;
+    securefix::policy::validate_repository(client_repository)?;
+    securefix::policy::validate_sha(merged_head_sha)?;
+    securefix::policy::validate_sha(merge_sha)?;
+    ensure!(
+        pull_request_number > 0 && client_repository_id > 0,
+        "invalid release PR identity"
+    );
+    let current = server_api.capture_remote_native_server_instance_authority(
+        &expected_instance.config.instance.repository,
+        instance_config_path,
+    )?;
+    server_api.require_remote_native_server_instance_authority_unchanged(expected_instance)?;
+    ensure!(
+        current.config_bytes == expected_instance.config_bytes
+            && current.authority == expected_instance.authority,
+        "Server instance authority changed during release approval verification"
+    );
+    let config = &current.config;
+    ensure!(
+        config.instance.repository == current.authority.instance_repository
+            && config.instance.id == current.authority.instance_id
+            && config.identities.server_bot == *merged_by,
+        "release merger does not match the authenticated Server instance"
+    );
+    let configured_target = config
+        .repositories
+        .iter()
+        .find(|target| target.repository == client_repository && target.id == client_repository_id)
+        .context("release repository is not configured in the Server instance")?;
+    configured_target
+        .policy()
+        .require(securefix::policy::Capability::Release)
+        .context("configured Client repository lacks the Release capability")?;
+    let release_branch = config
+        .branches
+        .release
+        .as_deref()
+        .context("Server instance has no configured release branch")?;
+
+    let repository: Value = client_api.get(&format!("/repos/{client_repository}"))?;
+    ensure!(
+        repository["id"].as_u64() == Some(client_repository_id)
+            && repository["full_name"].as_str() == Some(client_repository),
+        "release Client repository identity mismatch"
+    );
+    let default_branch = repository["default_branch"]
+        .as_str()
+        .context("release Client repository has no default branch")?;
+    securefix::config::validate_branch(default_branch)?;
+
+    let pull: Value = client_api.get(&format!(
+        "/repos/{client_repository}/pulls/{pull_request_number}"
+    ))?;
+    ensure!(
+        pull["number"].as_u64() == Some(pull_request_number)
+            && pull["state"] == "closed"
+            && pull["merged"] == true
+            && pull["head"]["sha"].as_str() == Some(merged_head_sha)
+            && pull["merge_commit_sha"].as_str() == Some(merge_sha)
+            && pull["base"]["repo"]["id"].as_u64() == Some(client_repository_id)
+            && pull["base"]["repo"]["full_name"].as_str() == Some(client_repository)
+            && pull["base"]["ref"].as_str() == Some(default_branch)
+            && pull["merged_by"]["id"].as_u64() == Some(merged_by.id)
+            && pull["merged_by"]["login"].as_str() == Some(merged_by.login.as_str()),
+        "release PR is not merged by the configured Server identity at the expected head"
+    );
+    let merged_at = parse_comment_time(&pull["merged_at"])?;
+    let (run_id, run_attempt, request_sha256, authority_sha256, review_id) =
+        native_release_approval_locator(
+            client_api,
+            config,
+            &current.authority,
+            client_repository,
+            pull_request_number,
+            merged_head_sha,
+            &merged_at,
+        )?;
+    let (manifest_bytes, bundle_bytes) = download_request_from_run_for_instance(
+        server_api,
+        client_api,
+        &current,
+        client_repository,
+        run_id,
+        securefix::policy::Capability::Approve,
+    )?;
+    ensure!(
+        securefix::hex_encode(Sha256::digest(&manifest_bytes)) == request_sha256,
+        "release approval marker request digest does not match its producer artifact"
+    );
+    let manifest: RequestManifest = serde_json::from_slice(&manifest_bytes)
+        .context("parse native release approval proof manifest")?;
+    ensure!(
+        manifest.operation == "approval"
+            && manifest.producer.run_id == run_id
+            && manifest.producer.run_attempt == run_attempt
+            && manifest.repository.full_name == client_repository
+            && manifest.repository.id == client_repository_id
+            && manifest.pull_request.number == pull_request_number
+            && manifest.pull_request.head_sha == merged_head_sha
+            && manifest.server_authority == current.authority
+            && securefix::api::native_authority_sha256(&manifest.server_authority)?
+                == authority_sha256,
+        "release approval proof does not bind the selected PR, head, and current Server authority"
+    );
+    manifest.validate()?;
+    validate_request_server_locator(config, instance_config_path, &manifest.server_authority)?;
+    validate_first_slice_policy(
+        config,
+        &manifest,
+        securefix::api::NativeScratchMode::Approval,
+        false,
+    )?;
+    let producer_run: Value =
+        client_api.get(&format!("/repos/{client_repository}/actions/runs/{run_id}"))?;
+    verify_run_identity(&producer_run, &manifest)?;
+    ensure!(
+        parse_comment_time(&producer_run["created_at"])? < merged_at,
+        "approval producer run was created after the release PR was merged"
+    );
+    validate_native_release_approval_command(
+        client_api,
+        server_api,
+        config,
+        &manifest,
+        &producer_run,
+        &merged_at,
+        merged_by,
+    )?;
+    verify_current_merged_release_pull_request(
+        client_api,
+        &repository,
+        &pull,
+        &manifest,
+        merged_head_sha,
+        merge_sha,
+        merged_by,
+        release_branch,
+        default_branch,
+    )?;
+    crate::request::validate_native_pr_commit_policy(
+        client_api,
+        client_repository,
+        pull_request_number,
+        merged_head_sha,
+        &config.policy.trusted_committers,
+    )?;
+    let current_client_epoch = securefix::api::capture_native_client_workflow_epoch(
+        client_api,
+        client_repository,
+        client_repository_id,
+        default_branch,
+        &manifest.producer.workflow_path,
+        &manifest.producer.workflow_sha,
+    )?;
+    securefix::api::require_native_client_workflow_epoch_unchanged(
+        &manifest.client_workflow_epoch,
+        &current_client_epoch,
+    )?;
+    let references: Vec<securefix::workflow::ReferencedWorkflow> = serde_json::from_value(
+        producer_run
+            .get("referenced_workflows")
+            .cloned()
+            .context("approval producer run has no reusable-workflow references")?,
+    )
+    .context("parse Client approval reusable-workflow references")?;
+    let signer_sha = unique_referenced_workflow_sha(
+        &references,
+        &config.acceptable_clients.repository,
+        &config.acceptable_clients.producer_workflow,
+    )?;
+    let signer_workflow_yaml = server_api.content(
+        &config.acceptable_clients.repository,
+        &config.acceptable_clients.producer_workflow,
+        &signer_sha,
+    )?;
+    let loader_action_sha = native_client_loader_action_sha(
+        &signer_workflow_yaml,
+        &config.acceptable_clients.repository,
+    )?;
+    let directory = tempfile::tempdir()?;
+    let manifest_path = directory.path().join("manifest.json");
+    let bundle_path = directory.path().join("bundle.json");
+    fs::write(&manifest_path, &manifest_bytes)?;
+    fs::write(&bundle_path, &bundle_bytes)?;
+    let verified = verify_with_gh(
+        &manifest_path,
+        &bundle_path,
+        client_repository,
+        &config.acceptable_clients.repository,
+        &config.acceptable_clients.producer_workflow,
+        &signer_sha,
+    )?;
+    verify_certificate(
+        &verified,
+        &manifest,
+        &producer_run,
+        &config.acceptable_clients.repository,
+        &config.acceptable_clients.producer_workflow,
+        &signer_sha,
+        &manifest_bytes,
+    )?;
+    let package =
+        verify_stable_client_package(server_api, config, &signer_sha, &loader_action_sha)?;
+    ensure!(
+        package.implementation_sha == signer_sha
+            && package.loader_action_sha == loader_action_sha
+            && package.protocol == REQUEST_PROTOCOL,
+        "verified Client package does not match the accepted approval signer and protocol"
+    );
+    server_api.require_remote_native_server_instance_authority_unchanged(&current)?;
+    Ok(NativeReleaseApprovalProof {
+        producer_run_id: run_id,
+        producer_run_attempt: run_attempt,
+        request_sha256,
+        authority_sha256,
+        workflow_sha: manifest.producer.workflow_sha,
+        accepted_client_implementation_sha: package.implementation_sha,
+        client_workflow_epoch: manifest.client_workflow_epoch,
+        command_comment_id: manifest
+            .command_comment
+            .as_ref()
+            .context("verified approval manifest has no command comment")?
+            .id,
+        approval_review_id: review_id,
+    })
+}
+
+fn native_instance_approval_locator(
+    instance_config_path: &str,
+    merge: &RequestManifest,
+) -> Result<NativeInstanceApprovalLocator> {
+    let (_server_api, captured) = capture_remote_instance_authority(instance_config_path)?;
+    securefix::api::require_native_authority_unchanged(
+        &merge.server_authority,
+        &captured.authority,
+    )?;
+    ensure!(
+        captured.config.instance.repository == merge.server_authority.instance_repository,
+        "merge request Server repository differs from current protected instance"
+    );
+    let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
+    let reviews = api.paginate_uncached(&format!(
+        "/repos/{}/pulls/{}/reviews",
+        merge.repository.full_name, merge.pull_request.number
+    ))?;
+    let reviewer = &captured.config.identities.approval_reviewer;
+    let mut decisions = reviews
+        .iter()
+        .filter(|review| {
+            matches!(
+                review["state"].as_str(),
+                Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
+            ) && review["user"]["id"].as_u64() == Some(reviewer.id)
+                && review["user"]["login"].as_str() == Some(reviewer.login.as_str())
+                && review["user"]["type"] == "User"
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        decisions
+            .iter()
+            .all(|review| crate::request::review_order(review).is_some()),
+        "configured reviewer has a malformed review timestamp or ID"
+    );
+    let latest = decisions
+        .drain(..)
+        .max_by_key(|review| crate::request::review_order(review));
+    let review = latest.context("configured reviewer has no approval marker review")?;
+    ensure!(
+        review["state"] == "APPROVED"
+            && review["commit_id"].as_str() == Some(merge.pull_request.head_sha.as_str()),
+        "latest configured reviewer decision is not an approval on the exact merge head"
+    );
+    let body = review["body"]
+        .as_str()
+        .context("latest configured reviewer approval has no body")?;
+    let marker = securefix::api::parse_native_instance_approval_marker(body)?;
+    ensure!(
+        marker.authority_sha256 == securefix::api::native_authority_sha256(&captured.authority)?,
+        "approval marker belongs to a different current Server authority"
+    );
+    Ok(NativeInstanceApprovalLocator {
+        producer_run_id: marker.producer_run_id,
+        producer_run_attempt: marker.producer_run_attempt,
+        request_sha256: marker.request_sha256,
+        authority_sha256: marker.authority_sha256,
+    })
 }
 
 fn validate_native_merge_pair(merge: &RequestManifest, approval: &RequestManifest) -> Result<()> {
@@ -953,21 +2428,29 @@ fn validate_native_merge_readiness(
     let api = &merge.client_api;
     verify_current_pull_request(api, manifest)?;
 
-    let current_policy_control = securefix::api::native_target_policy_control_identity(
-        api,
-        &manifest.repository.full_name,
-        manifest.repository.id,
-        &manifest.pull_request.base_ref,
-    )?;
-    let expected_control = merge
-        .target_policy_control_identity
-        .as_deref()
-        .context("native merge request lacks its target policy control identity")?;
-    ensure!(
-        current_policy_control == expected_control,
-        "native target policy control identity changed during request validation"
-    );
-    let expected_policy_id = format!("{}:{}", manifest.pull_request.head_sha, expected_control);
+    let expected_policy_id =
+        if let Some(expected_control) = merge.target_policy_control_identity.as_deref() {
+            let current_policy_control = securefix::api::native_target_policy_control_identity(
+                api,
+                &manifest.repository.full_name,
+                manifest.repository.id,
+                &manifest.pull_request.base_ref,
+            )?;
+            ensure!(
+                current_policy_control == expected_control,
+                "native target policy control identity changed during request validation"
+            );
+            Some(format!(
+                "{}:{}",
+                manifest.pull_request.head_sha, expected_control
+            ))
+        } else {
+            ensure!(
+                merge.instance_authority.authority == approval.instance_authority.authority,
+                "merge and approval use different current Server instance authorities"
+            );
+            None
+        };
 
     let mut checks = Vec::new();
     for page in 1..=100 {
@@ -988,20 +2471,40 @@ fn validate_native_merge_readiness(
             "native merge check run pagination exceeded limit"
         );
     }
-    let checks_ok = native_merge_checks_ready(
-        &checks,
-        merge.config.apps.status_check_id,
-        merge.config.apps.policy_check_id,
-        &expected_policy_id,
-    )?;
+    let checks_ok = if let Some(expected_policy_id) = expected_policy_id.as_deref() {
+        native_merge_checks_ready(
+            &checks,
+            merge.config.apps.status_check_id,
+            merge.config.apps.policy_check_id,
+            expected_policy_id,
+        )?
+    } else {
+        native_instance_merge_checks_ready(
+            &checks,
+            merge.config.apps.status_check_id,
+            merge.config.apps.policy_check_id,
+            &manifest.pull_request.head_sha,
+            &merge.instance_authority.authority,
+        )?
+    };
 
     let reviewer = &merge.config.identities.approval_reviewer;
     let approval_digest = securefix::hex_encode(Sha256::digest(&approval.manifest_bytes));
-    let expected_marker = securefix::api::native_approval_body(
-        &approval.manifest.server_authority,
-        &approval.manifest.pull_request.head_sha,
-        &approval_digest,
-    )?["body"]
+    let expected_marker = if approval.target_policy_control_identity.is_some() {
+        securefix::api::native_approval_body(
+            &approval.manifest.server_authority,
+            &approval.manifest.pull_request.head_sha,
+            &approval_digest,
+        )?
+    } else {
+        securefix::api::native_instance_approval_body(
+            &approval.manifest.server_authority,
+            &approval.manifest.pull_request.head_sha,
+            &approval_digest,
+            approval.manifest.producer.run_id,
+            approval.manifest.producer.run_attempt,
+        )?
+    }["body"]
         .as_str()
         .context("native approval body has no marker")?
         .to_owned();
@@ -1031,6 +2534,39 @@ fn validate_native_merge_readiness(
         "native merge requires current required checks and the exact native approval marker"
     );
     Ok(())
+}
+
+fn native_instance_merge_checks_ready(
+    checks: &[Value],
+    status_app_id: u64,
+    policy_app_id: u64,
+    expected_head: &str,
+    authority: &securefix::api::NativeAuthoritySnapshot,
+) -> Result<bool> {
+    let ci_ok = native_latest_check(checks, "status-check", status_app_id).is_some_and(|check| {
+        check["status"] == "completed"
+            && (check["conclusion"] == "success" || check["conclusion"] == "skipped")
+    });
+    let policy_check = native_latest_check(
+        checks,
+        securefix::api::NATIVE_POLICY_CHECK_NAME,
+        policy_app_id,
+    );
+    let policy_ok = if let Some(check) = policy_check {
+        let identity = securefix::api::parse_native_instance_policy_check_external_id(
+            check["external_id"]
+                .as_str()
+                .context("native instance policy check has no external identity")?,
+        )?;
+        check["head_sha"].as_str() == Some(expected_head)
+            && identity.head_sha == expected_head
+            && identity.authority_sha256 == securefix::api::native_authority_sha256(authority)?
+            && check["status"] == "completed"
+            && check["conclusion"] == "success"
+    } else {
+        false
+    };
+    Ok(ci_ok && policy_ok)
 }
 
 fn native_latest_check<'a>(checks: &'a [Value], name: &str, app_id: u64) -> Option<&'a Value> {
@@ -1104,15 +2640,36 @@ fn has_native_approval_review(
 }
 
 fn download_request_from_run(
-    config_path: &std::path::Path,
+    instance_config_path: &str,
     producer_repository: &str,
     producer_run_id: u64,
     capability: securefix::policy::Capability,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     securefix::policy::validate_repository(producer_repository)?;
     ensure!(producer_run_id > 0, "invalid producer run ID");
-    let config_bytes = read_bounded(config_path, 256 * 1024)?;
-    let config = securefix::instance_config::InstanceConfig::parse(&config_bytes)?;
+    let (server_api, captured) = capture_remote_instance_authority(instance_config_path)?;
+    let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
+    download_request_from_run_for_instance(
+        &server_api,
+        &api,
+        &captured,
+        producer_repository,
+        producer_run_id,
+        capability,
+    )
+}
+
+fn download_request_from_run_for_instance(
+    server_api: &securefix::api::GitHub,
+    api: &securefix::api::GitHub,
+    captured: &securefix::api::NativeServerInstanceAuthority,
+    producer_repository: &str,
+    producer_run_id: u64,
+    capability: securefix::policy::Capability,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    securefix::policy::validate_repository(producer_repository)?;
+    ensure!(producer_run_id > 0, "invalid producer run ID");
+    let config = &captured.config;
     let target = config
         .repositories
         .iter()
@@ -1122,7 +2679,6 @@ fn download_request_from_run(
         .policy()
         .require(capability)
         .context("producer Client repository lacks the required capability")?;
-    let api = securefix::api::GitHub::from_env("SECUREFIX_CLIENT_TOKEN")?;
     let repository: Value = api.get(&format!("/repos/{producer_repository}"))?;
     ensure!(
         repository["id"].as_u64() == Some(target.id)
@@ -1190,6 +2746,10 @@ fn download_request_from_run(
             && manifest.repository.full_name == producer_repository,
         "downloaded request does not identify the selected producer run and Client repository"
     );
+    // Keep the Server reader explicit in this helper even though its current
+    // checks are already captured above; callers must not substitute a token
+    // scoped only to the Client destination for protected instance reads.
+    server_api.require_remote_native_server_instance_authority_unchanged(captured)?;
     Ok((manifest_bytes, bundle_bytes))
 }
 
@@ -1526,6 +3086,358 @@ fn read_bounded(path: &std::path::Path, max: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_label_event_locator_binds_operation_repository_and_run() {
+        let payload = serde_json::json!({
+            "action": "created",
+            "label": {
+                "name": "securefix-native-merge-123",
+                "description": "owner/client-repo/123"
+            }
+        });
+        assert_eq!(
+            native_request_event_locator(&payload, "merge").unwrap(),
+            ("owner/client-repo".to_owned(), 123)
+        );
+        assert!(native_request_event_locator(&payload, "approve").is_err());
+        let mut wrong_id = payload.clone();
+        wrong_id["label"]["description"] = serde_json::json!("owner/client-repo/124");
+        assert!(native_request_event_locator(&wrong_id, "merge").is_err());
+        let mut bad_repo = payload.clone();
+        bad_repo["label"]["description"] = serde_json::json!("owner/../repo/123");
+        assert!(native_request_event_locator(&bad_repo, "merge").is_err());
+    }
+
+    #[test]
+    fn configured_common_signer_is_unique_without_rejecting_nested_workflows() {
+        let sha = "a".repeat(40);
+        let references = vec![
+            securefix::workflow::ReferencedWorkflow {
+                path: "owner/client/.github/workflows/approve-request.yml@refs/heads/main".into(),
+                sha: "b".repeat(40),
+            },
+            securefix::workflow::ReferencedWorkflow {
+                path: format!("owner/client/.github/workflows/reusable-approve-request.yml@{sha}"),
+                sha: "c".repeat(40),
+            },
+            securefix::workflow::ReferencedWorkflow {
+                path: format!("owner/client/.github/workflows/reusable-client-request.yml@{sha}"),
+                sha: sha.clone(),
+            },
+        ];
+        assert_eq!(
+            unique_referenced_workflow_sha(
+                &references,
+                "owner/client",
+                ".github/workflows/reusable-client-request.yml"
+            )
+            .unwrap(),
+            sha
+        );
+
+        let mut duplicate = references.clone();
+        duplicate.push(references[2].clone());
+        assert!(
+            unique_referenced_workflow_sha(
+                &duplicate,
+                "owner/client",
+                ".github/workflows/reusable-client-request.yml"
+            )
+            .is_err()
+        );
+
+        let mut malformed = references;
+        malformed[2].path.push_str("/suffix");
+        assert!(
+            unique_referenced_workflow_sha(
+                &malformed,
+                "owner/client",
+                ".github/workflows/reusable-client-request.yml"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn normal_request_event_binds_client_app_instance_operation_and_run() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let manifest = RequestManifest {
+            protocol: REQUEST_PROTOCOL.to_owned(),
+            operation: "merge".to_owned(),
+            repository: crate::native_client::RepositoryIdentity {
+                id: 42,
+                full_name: "owner/client".to_owned(),
+            },
+            pull_request: crate::native_client::PullRequestIdentity {
+                number: 9,
+                head_sha: "a".repeat(40),
+                head_branch: "main".to_owned(),
+                head_repository_id: 42,
+                base_sha: "b".repeat(40),
+                base_ref: "main".to_owned(),
+                author_id: 1,
+                author_login: "owner".to_owned(),
+            },
+            command_comment: None,
+            producer: crate::native_client::ProducerIdentity {
+                run_id: 123,
+                run_attempt: 1,
+                event: "issue_comment".to_owned(),
+                context_sha: "b".repeat(40),
+                source_sha: "a".repeat(40),
+                workflow_path: ".github/workflows/client.yml".to_owned(),
+                workflow_ref: "owner/client/.github/workflows/client.yml@refs/heads/main"
+                    .to_owned(),
+                workflow_sha: "c".repeat(40),
+                actor_id: 1,
+                actor_login: "owner".to_owned(),
+            },
+            securefix_artifact: None,
+            client_workflow_epoch: "d".repeat(40),
+            server_authority: securefix::api::NativeAuthoritySnapshot {
+                instance_repository: config.instance.repository.clone(),
+                instance_id: config.instance.id,
+                default_branch: config.instance.default_branch.clone(),
+                config_path: "securefix-server.toml".to_owned(),
+                config_sha256: "e".repeat(64),
+                epoch: "f".repeat(40),
+                workflows: vec![],
+            },
+        };
+        let client_bot = &config.identities.client_bot;
+        let payload = serde_json::json!({
+            "action": "created",
+            "repository": { "full_name": config.instance.repository },
+            "sender": { "id": client_bot.id, "login": client_bot.login, "type": "Bot" },
+            "label": { "name": "securefix-native-merge-123", "description": "owner/client/123" }
+        });
+        assert!(validate_native_request_event_payload(&config, &manifest, &payload).is_ok());
+
+        let mut wrong_action = payload.clone();
+        wrong_action["action"] = serde_json::json!("edited");
+        assert!(validate_native_request_event_payload(&config, &manifest, &wrong_action).is_err());
+        let mut wrong_actor = payload.clone();
+        wrong_actor["sender"]["id"] = serde_json::json!(u64::MAX);
+        assert!(validate_native_request_event_payload(&config, &manifest, &wrong_actor).is_err());
+        let mut wrong_operation = payload.clone();
+        wrong_operation["label"]["name"] = serde_json::json!("securefix-native-approve-123");
+        assert!(
+            validate_native_request_event_payload(&config, &manifest, &wrong_operation).is_err()
+        );
+        let mut wrong_run = payload.clone();
+        wrong_run["label"]["description"] = serde_json::json!("owner/client/124");
+        assert!(validate_native_request_event_payload(&config, &manifest, &wrong_run).is_err());
+    }
+
+    #[test]
+    fn stable_client_branch_requires_authenticated_configured_repository_identity() {
+        let acceptable = securefix::instance_config::AcceptableClients {
+            repository: "owner/client".to_owned(),
+            id: 42,
+            producer_workflow: ".github/workflows/producer.yml".to_owned(),
+            version: semver::VersionReq::parse(">=1.4.0").unwrap(),
+        };
+        let metadata = serde_json::json!({
+            "id": 42,
+            "full_name": "owner/client",
+            "default_branch": "main"
+        });
+        assert_eq!(
+            verified_client_default_branch(&metadata, &acceptable).unwrap(),
+            "main"
+        );
+        let wrong_id = serde_json::json!({
+            "id": 43,
+            "full_name": "owner/client",
+            "default_branch": "main"
+        });
+        assert!(verified_client_default_branch(&wrong_id, &acceptable).is_err());
+        let wrong_name = serde_json::json!({
+            "id": 42,
+            "full_name": "owner/other",
+            "default_branch": "main"
+        });
+        assert!(verified_client_default_branch(&wrong_name, &acceptable).is_err());
+        let invalid_branch = serde_json::json!({
+            "id": 42,
+            "full_name": "owner/client",
+            "default_branch": "../main"
+        });
+        assert!(verified_client_default_branch(&invalid_branch, &acceptable).is_err());
+    }
+
+    #[test]
+    fn instance_merge_requires_current_head_and_authority_bound_policy_check() {
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "owner/server".to_owned(),
+            instance_id: 9,
+            default_branch: "main".to_owned(),
+            config_path: "securefix-server.toml".to_owned(),
+            config_sha256: "a".repeat(64),
+            epoch: "b".repeat(40),
+            workflows: vec![],
+        };
+        let head = "c".repeat(40);
+        let request_sha = "d".repeat(64);
+        let external_id = securefix::api::native_instance_policy_check_external_id(
+            &authority,
+            &head,
+            &request_sha,
+        )
+        .unwrap();
+        let checks = vec![
+            serde_json::json!({
+                "id": 1,
+                "name": "status-check",
+                "app": {"id": 10},
+                "status": "completed",
+                "conclusion": "success"
+            }),
+            serde_json::json!({
+                "id": 2,
+                "name": securefix::api::NATIVE_POLICY_CHECK_NAME,
+                "app": {"id": 11},
+                "head_sha": head,
+                "external_id": external_id,
+                "status": "completed",
+                "conclusion": "success"
+            }),
+        ];
+        assert!(native_instance_merge_checks_ready(&checks, 10, 11, &head, &authority).unwrap());
+        assert!(
+            !native_instance_merge_checks_ready(&checks, 10, 11, &"e".repeat(40), &authority)
+                .unwrap()
+        );
+        let mut changed = authority.clone();
+        changed.config_sha256 = "f".repeat(64);
+        assert!(!native_instance_merge_checks_ready(&checks, 10, 11, &head, &changed).unwrap());
+        let wrong_app = vec![checks[0].clone(), {
+            let mut check = checks[1].clone();
+            check["app"]["id"] = serde_json::json!(99);
+            check
+        }];
+        assert!(
+            !native_instance_merge_checks_ready(&wrong_app, 10, 11, &head, &authority).unwrap()
+        );
+    }
+
+    #[test]
+    fn policy_check_run_locators_must_match_the_attested_request() {
+        let request = manifest();
+        assert!(
+            validate_policy_check_request_locator(
+                &request,
+                42,
+                "owner/project",
+                7,
+                &"d".repeat(40)
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_policy_check_request_locator(
+                &request,
+                43,
+                "owner/project",
+                7,
+                &"d".repeat(40)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_policy_check_request_locator(
+                &request,
+                42,
+                "other/project",
+                7,
+                &"d".repeat(40)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_policy_check_request_locator(
+                &request,
+                42,
+                "owner/project",
+                8,
+                &"d".repeat(40)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_policy_check_request_locator(
+                &request,
+                42,
+                "owner/project",
+                7,
+                &"c".repeat(40)
+            )
+            .is_err()
+        );
+        let mut wrong_operation = request;
+        wrong_operation.operation = "approval".to_owned();
+        assert!(
+            validate_policy_check_request_locator(
+                &wrong_operation,
+                42,
+                "owner/project",
+                7,
+                &"d".repeat(40)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn client_package_loader_must_be_a_single_sha_pinned_matching_action() {
+        let repo = "client-org/securefix-server";
+        let sha = "a".repeat(40);
+        let workflow = format!(
+            "jobs:\n  request:\n    steps:\n      - uses: {repo}/.github/actions/load-package@{sha}\n        with:\n          action-sha: {sha}\n"
+        );
+        assert_eq!(
+            native_client_loader_action_sha(workflow.as_bytes(), repo).unwrap(),
+            sha
+        );
+
+        let wrong_input = workflow.replace(
+            &format!("action-sha: {sha}"),
+            &format!("action-sha: {}", "b".repeat(40)),
+        );
+        assert!(native_client_loader_action_sha(wrong_input.as_bytes(), repo).is_err());
+        let mutable_ref = workflow.replace(&sha, "main");
+        assert!(native_client_loader_action_sha(mutable_ref.as_bytes(), repo).is_err());
+        let duplicate = format!(
+            "{workflow}  second:\n    uses: {repo}/.github/actions/load-package@{sha}\n    with:\n      action-sha: {sha}\n"
+        );
+        assert!(native_client_loader_action_sha(duplicate.as_bytes(), repo).is_err());
+        assert!(native_client_loader_action_sha(workflow.as_bytes(), "other-org/server").is_err());
+    }
+
+    #[test]
+    fn scratch_package_publication_json_is_bounded_and_strict() {
+        let json = format!(
+            r#"{{"source_sha":"{}","source_branch":"main","tag":"v0.2.45-pre.23","release_id":420243090,"asset_id":664424003,"asset_sha256":"{}","asset_size":10893768,"producer_run_id":39710467717,"producer_run_attempt":1}}"#,
+            "a".repeat(40),
+            "b".repeat(64),
+        );
+        let record = parse_scratch_package_publication_input(&json).unwrap();
+        assert_eq!(record.source_sha, "a".repeat(40));
+        assert_eq!(record.producer_run_id, 39710467717);
+        assert!(parse_scratch_package_publication_input(&format!("{json} ")).is_ok());
+        assert!(
+            parse_scratch_package_publication_input(&json.replace(
+                "\"release_id\":420243090,",
+                "\"release_id\":420243090,\"extra\":true,"
+            ))
+            .is_err()
+        );
+        assert!(parse_scratch_package_publication_input(&" ".repeat(4097)).is_err());
+    }
+
     fn manifest() -> RequestManifest {
         RequestManifest {
             protocol: "securefix-native-request/v1".to_owned(),
@@ -1544,6 +3456,7 @@ mod tests {
                 author_id: 11,
                 author_login: "contributor".to_owned(),
             },
+            command_comment: None,
             producer: crate::native_client::ProducerIdentity {
                 run_id: 42,
                 run_attempt: 2,
@@ -1838,6 +3751,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::PolicyCheck,
+                true,
             )
             .is_ok()
         );
@@ -1848,6 +3762,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::PolicyCheck,
+                true,
             )
             .is_err()
         );
@@ -1858,6 +3773,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::PolicyCheck,
+                true,
             )
             .is_err()
         );
@@ -1884,6 +3800,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Securefix,
+                true,
             )
             .is_ok()
         );
@@ -1894,6 +3811,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Securefix,
+                true,
             )
             .is_err()
         );
@@ -1921,6 +3839,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Approval,
+                true,
             )
             .is_ok()
         );
@@ -1933,6 +3852,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Approval,
+                true,
             )
             .is_err()
         );
@@ -1946,6 +3866,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Approval,
+                true,
             )
             .is_err()
         );
@@ -1973,6 +3894,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Merge,
+                true,
             )
             .is_ok()
         );
@@ -1985,6 +3907,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Merge,
+                true,
             )
             .is_err()
         );
@@ -2151,6 +4074,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Securefix,
+                true,
             )
             .is_err()
         );
@@ -2164,6 +4088,7 @@ mod tests {
                 &config,
                 &request,
                 securefix::api::NativeScratchMode::Securefix,
+                true,
             )
             .is_err()
         );
@@ -2245,8 +4170,6 @@ mod tests {
     #[test]
     fn stale_pull_request_head_is_rejected() {
         let mut request = manifest();
-        request.pull_request.author_id = request.producer.actor_id;
-        request.pull_request.author_login = request.producer.actor_login.clone();
         let repo = serde_json::json!({
             "id":10,"full_name":"owner/project","default_branch":"main"
         });
@@ -2254,8 +4177,10 @@ mod tests {
             "number":7,"state":"open",
             "base":{"repo":{"id":10,"full_name":"owner/project"},"ref":"main","sha":request.pull_request.base_sha},
             "head":{"repo":{"id":10},"ref":request.pull_request.head_branch,"sha":request.pull_request.head_sha},
-            "user":{"id":12,"login":"maintainer"}
+            "user":{"id":11,"login":"contributor"}
         });
+        // The producer can be a Server bot running CI after a signed fix;
+        // the PR author remains independently bound to the live PR identity.
         assert!(validate_current_pull_request_state(&repo, &pull, &request).is_ok());
         request.pull_request.head_sha = "e".repeat(40);
         assert!(validate_current_pull_request_state(&repo, &pull, &request).is_err());
@@ -2298,5 +4223,97 @@ mod tests {
         let mut uppercase_digest = artifact;
         uppercase_digest["digest"] = format!("sha256:{}", "B".repeat(64)).into();
         assert!(validate_request_artifact_metadata(&uppercase_digest, &run, 99, 42, 10).is_err());
+    }
+
+    #[test]
+    fn release_timeline_allows_only_configured_merger_close() {
+        let command_at = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let merged_at = chrono::DateTime::parse_from_rfc3339("2026-10-22T11:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let merger = crate::config::Principal {
+            id: 7,
+            login: "server[bot]".to_owned(),
+        };
+        let closed = serde_json::json!({
+            "event": "closed",
+            "created_at": "2026-10-22T11:00:00Z",
+            "actor": { "id": 7, "login": "server[bot]" }
+        });
+        assert!(
+            validate_native_release_timeline(
+                std::slice::from_ref(&closed),
+                command_at,
+                &merged_at,
+                &merger,
+            )
+            .is_ok()
+        );
+
+        let reopened = serde_json::json!({
+            "event": "reopened",
+            "created_at": "2026-10-22T10:30:00Z",
+            "actor": { "id": 7, "login": "server[bot]" }
+        });
+        assert!(
+            validate_native_release_timeline(
+                &[closed.clone(), reopened],
+                command_at,
+                &merged_at,
+                &merger,
+            )
+            .is_err()
+        );
+
+        let impostor_close = serde_json::json!({
+            "event": "closed",
+            "created_at": "2026-10-22T11:00:00Z",
+            "actor": { "id": 8, "login": "other[bot]" }
+        });
+        assert!(
+            validate_native_release_timeline(&[impostor_close], command_at, &merged_at, &merger,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn release_approval_marker_rejects_later_review_decisions() {
+        let marker = serde_json::json!({
+            "id": 9,
+            "state": "APPROVED",
+            "submitted_at": "2026-10-22T10:30:00Z"
+        });
+        let earlier = serde_json::json!({
+            "id": 8,
+            "state": "CHANGES_REQUESTED",
+            "submitted_at": "2026-10-22T10:20:00Z"
+        });
+        assert!(
+            require_no_later_release_review_decision(&[earlier, marker.clone()], &marker).is_ok()
+        );
+
+        let later = serde_json::json!({
+            "id": 10,
+            "state": "CHANGES_REQUESTED",
+            "submitted_at": "2026-10-22T10:40:00Z"
+        });
+        assert!(
+            require_no_later_release_review_decision(&[marker.clone(), later], &marker).is_err()
+        );
+
+        let same_time_later_id = serde_json::json!({
+            "id": 11,
+            "state": "APPROVED",
+            "submitted_at": "2026-10-22T10:30:00Z"
+        });
+        assert!(
+            require_no_later_release_review_decision(
+                &[marker.clone(), same_time_later_id],
+                &marker
+            )
+            .is_err()
+        );
     }
 }

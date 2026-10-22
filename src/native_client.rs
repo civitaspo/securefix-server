@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +32,11 @@ pub enum Command {
     Merge {
         #[command(subcommand)]
         command: MergeCommand,
+    },
+    #[command(about = "Dispatch a captured native request to its authenticated Server instance")]
+    Dispatch {
+        #[arg(long, default_value = "native-policy-check/manifest.json")]
+        manifest: PathBuf,
     },
 }
 
@@ -83,11 +89,23 @@ pub struct RequestManifest {
     pub operation: String,
     pub repository: RepositoryIdentity,
     pub pull_request: PullRequestIdentity,
+    #[serde(default)]
+    pub command_comment: Option<CommandCommentIdentity>,
     pub producer: ProducerIdentity,
     #[serde(default)]
     pub securefix_artifact: Option<SecurefixArtifactIdentity>,
     pub client_workflow_epoch: String,
     pub server_authority: securefix::api::NativeAuthoritySnapshot,
+}
+
+/// Identity of the command comment that triggered an approval or merge run.
+/// This is derived from the GitHub event payload, never a workflow input.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandCommentIdentity {
+    pub id: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -179,6 +197,25 @@ impl RequestManifest {
             }
             _ => anyhow::bail!("unsupported native request operation"),
         }
+        if let Some(comment) = &self.command_comment {
+            ensure!(comment.id > 0, "invalid command comment ID");
+            ensure!(
+                comment.created_at <= comment.updated_at,
+                "command comment timestamps are inconsistent"
+            );
+            ensure!(
+                matches!(self.operation.as_str(), "approval" | "merge"),
+                "non-command request unexpectedly names a command comment"
+            );
+        }
+        if matches!(self.operation.as_str(), "approval" | "merge")
+            && self.producer.event == "issue_comment"
+        {
+            ensure!(
+                self.producer.run_attempt == 1 && self.command_comment.is_some(),
+                "comment command requests require their original first-attempt event identity"
+            );
+        }
         securefix::policy::validate_repository(&self.repository.full_name)?;
         ensure!(self.repository.id > 0, "invalid request repository ID");
         ensure!(
@@ -248,7 +285,74 @@ pub fn run(command: Command) -> Result<()> {
                 output,
             } => capture_request(pull_request_number, "merge", None, &output),
         },
+        Command::Dispatch { manifest } => dispatch_request(&manifest),
     }
+}
+
+fn dispatch_request(manifest_path: &std::path::Path) -> Result<()> {
+    let bytes = read_bounded(manifest_path, MAX_REQUEST_BYTES)?;
+    let manifest: RequestManifest =
+        serde_json::from_slice(&bytes).context("parse captured native request")?;
+    manifest.validate()?;
+
+    let repository = std::env::var("GITHUB_REPOSITORY")
+        .context("missing GITHUB_REPOSITORY for native request dispatch")?;
+    ensure!(
+        repository == manifest.repository.full_name,
+        "captured request belongs to a different Client repository"
+    );
+    ensure!(
+        parse_env::<u64>("GITHUB_RUN_ID")? == manifest.producer.run_id
+            && parse_env::<u32>("GITHUB_RUN_ATTEMPT")? == manifest.producer.run_attempt,
+        "captured request belongs to a different workflow run"
+    );
+    let configured_server = std::env::var("SECUREFIX_SERVER_REPOSITORY")
+        .context("missing SECUREFIX_SERVER_REPOSITORY")?;
+    ensure!(
+        configured_server == manifest.server_authority.instance_repository,
+        "dispatch Server repository differs from the captured protected instance"
+    );
+    securefix::policy::validate_repository(&configured_server)?;
+    let label =
+        securefix::api::native_client_request_label(&manifest.operation, manifest.producer.run_id)?;
+    let target = securefix::api::NativeClientLabelTarget {
+        server_repository: &configured_server,
+        server_authority: &manifest.server_authority,
+        client_repository: &repository,
+        operation: &manifest.operation,
+        run_id: manifest.producer.run_id,
+    };
+    let api = GitHub::native_client_label_from_env("SECUREFIX_CLIENT_TOKEN", &target)?;
+    let _: Value = api.post(
+        &format!("/repos/{configured_server}/labels"),
+        &serde_json::json!({
+            "name": label,
+            "color": "1f6feb",
+            "description": format!("{repository}/{}", manifest.producer.run_id)
+        }),
+    )?;
+    securefix::output("label", &label)?;
+    let (owner, name) = configured_server
+        .split_once('/')
+        .context("Server repository must contain owner/name")?;
+    securefix::output("server_owner", owner)?;
+    securefix::output("server_repository", name)?;
+    securefix::output("producer_run_id", manifest.producer.run_id.to_string())?;
+    Ok(())
+}
+
+fn read_bounded(path: &std::path::Path, max: usize) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_file(),
+        "native request manifest is not a regular file"
+    );
+    let bytes = fs::read(path)?;
+    ensure!(
+        bytes.len() <= max,
+        "native request manifest exceeds size limit"
+    );
+    Ok(bytes)
 }
 
 fn capture_policy_check(pull_request_number: u64, output: &std::path::Path) -> Result<()> {
@@ -314,6 +418,7 @@ fn capture_request(
         .as_str()
         .context("request workflow event is missing")?
         .to_owned();
+    let command_comment = capture_command_comment(&event, operation, pull_request_number)?;
     ensure!(
         run["status"] == "in_progress" || run["status"] == "queued",
         "request capture must run inside its active workflow run"
@@ -422,8 +527,25 @@ fn capture_request(
         .context("missing SECUREFIX_SERVER_REPOSITORY")?;
     let server_config_path = std::env::var("SECUREFIX_INSTANCE_CONFIG_PATH")
         .context("missing SECUREFIX_INSTANCE_CONFIG_PATH")?;
-    let (_, server_authority) =
-        api.capture_remote_native_server_authority(&server_repository, &server_config_path)?;
+    let server_instance = api
+        .capture_remote_native_server_instance_authority(&server_repository, &server_config_path)?;
+    let server_authority = server_instance.authority;
+    let (server_owner, server_repository_name) = server_instance
+        .config
+        .instance
+        .repository
+        .split_once('/')
+        .context("authenticated Server repository must contain owner/name")?;
+    securefix::output(
+        "server_repository",
+        &server_instance.config.instance.repository,
+    )?;
+    securefix::output("server_owner", server_owner)?;
+    securefix::output("server_repository_name", server_repository_name)?;
+    securefix::output(
+        "client_app_id",
+        server_instance.config.apps.client_id.to_string(),
+    )?;
 
     let manifest = RequestManifest {
         protocol: PROTOCOL.to_owned(),
@@ -442,6 +564,7 @@ fn capture_request(
             author_id,
             author_login,
         },
+        command_comment,
         producer: ProducerIdentity {
             run_id,
             run_attempt,
@@ -474,6 +597,68 @@ fn capture_request(
     );
     println!("request_path={}", output.display());
     Ok(())
+}
+
+fn capture_command_comment(
+    event_name: &str,
+    operation: &str,
+    pull_request_number: u64,
+) -> Result<Option<CommandCommentIdentity>> {
+    if !matches!(operation, "approval" | "merge") || event_name != "issue_comment" {
+        return Ok(None);
+    }
+    let event_path = std::env::var("GITHUB_EVENT_PATH").context("missing GITHUB_EVENT_PATH")?;
+    let payload: Value = serde_json::from_slice(&fs::read(&event_path)?)
+        .context("parse triggering issue-comment event")?;
+    command_comment_from_payload(&payload, operation, pull_request_number).map(Some)
+}
+
+fn command_comment_from_payload(
+    payload: &Value,
+    operation: &str,
+    pull_request_number: u64,
+) -> Result<CommandCommentIdentity> {
+    ensure!(
+        payload["action"] == "created"
+            && payload["issue"]["pull_request"].is_object()
+            && payload["issue"]["number"].as_u64() == Some(pull_request_number),
+        "approval and merge requests must come from a newly created comment on the requested pull request"
+    );
+    let comment = &payload["comment"];
+    ensure!(
+        operation_comment_matches(operation, &comment["body"]),
+        "triggering comment does not contain the exact command"
+    );
+    let id = comment["id"].as_u64().context("event comment has no ID")?;
+    let created_at = parse_event_time(&comment["created_at"])?;
+    let updated_at = parse_event_time(&comment["updated_at"])?;
+    ensure!(
+        created_at == updated_at,
+        "triggering command comment was edited"
+    );
+    Ok(CommandCommentIdentity {
+        id,
+        created_at,
+        updated_at,
+    })
+}
+
+fn operation_comment_matches(operation: &str, body: &Value) -> bool {
+    body.as_str().is_some_and(|body| {
+        body.trim_ascii()
+            == match operation {
+                "approval" => "/approve",
+                "merge" => "/merge",
+                _ => return false,
+            }
+    })
+}
+
+fn parse_event_time(value: &Value) -> Result<DateTime<Utc>> {
+    Ok(
+        DateTime::parse_from_rfc3339(value.as_str().context("event comment has no timestamp")?)?
+            .with_timezone(&Utc),
+    )
 }
 
 fn capture_artifact_identity(
@@ -670,6 +855,7 @@ mod tests {
                 author_id: 4525500,
                 author_login: "civitaspo".to_owned(),
             },
+            command_comment: None,
             producer: ProducerIdentity {
                 run_id: 39553607441,
                 run_attempt: 1,
@@ -717,6 +903,23 @@ mod tests {
         let mut json = serde_json::to_value(manifest()).unwrap();
         json["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RequestManifest>(json).is_err());
+    }
+
+    #[test]
+    fn native_request_labels_bind_each_operation_to_a_single_run() {
+        for (operation, role) in [
+            ("policy_check", "policy-check"),
+            ("securefix", "securefix"),
+            ("approval", "approve"),
+            ("merge", "merge"),
+        ] {
+            assert_eq!(
+                securefix::api::native_client_request_label(operation, 123).unwrap(),
+                format!("securefix-native-{role}-123")
+            );
+        }
+        assert!(securefix::api::native_client_request_label("release", 123).is_err());
+        assert!(securefix::api::native_client_request_label("merge", 0).is_err());
     }
 
     #[test]
@@ -785,6 +988,46 @@ mod tests {
             name: "securefix-source".to_owned(),
             digest: format!("sha256:{}", "a".repeat(64)),
         });
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn command_comment_is_taken_from_new_pr_comment_event_and_is_exact() {
+        let payload = serde_json::json!({
+            "action":"created",
+            "issue":{"number":7,"pull_request":{"url":"https://api.github.com/repos/owner/project/pulls/7"}},
+            "comment":{"id":91,"body":" /merge ","created_at":"2026-10-22T01:02:03Z","updated_at":"2026-10-22T01:02:03Z"}
+        });
+        let locator = command_comment_from_payload(&payload, "merge", 7).unwrap();
+        assert_eq!(locator.id, 91);
+        assert!(command_comment_from_payload(&payload, "approval", 7).is_err());
+        assert!(command_comment_from_payload(&payload, "merge", 8).is_err());
+        let mut edited = payload.clone();
+        edited["comment"]["updated_at"] = serde_json::json!("2026-10-22T01:03:03Z");
+        assert!(command_comment_from_payload(&edited, "merge", 7).is_err());
+        let mut non_creation = payload;
+        non_creation["action"] = serde_json::json!("edited");
+        assert!(command_comment_from_payload(&non_creation, "merge", 7).is_err());
+    }
+
+    #[test]
+    fn ordinary_comment_command_requires_first_attempt_event_identity() {
+        let mut value = manifest();
+        value.operation = "merge".to_owned();
+        value.producer.event = "issue_comment".to_owned();
+        value.producer.run_attempt = 1;
+        assert!(value.validate().is_err());
+        value.command_comment = Some(CommandCommentIdentity {
+            id: 91,
+            created_at: DateTime::parse_from_rfc3339("2026-10-22T01:02:03Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339("2026-10-22T01:02:03Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        });
+        value.validate().unwrap();
+        value.producer.run_attempt = 2;
         assert!(value.validate().is_err());
     }
 

@@ -25,6 +25,25 @@ gh workflow run testing-securefix-server.yml --repo civitaspo/securefix-server -
 
 Verification reuses the prepare run's candidate binary. Before minting write credentials it checks the successful owner-triggered producer run, the defining workflow revision, the candidate SHA and the bounded immutable state artifact. It verifies actual signatures, owner authorization, current-head approval, required checks, signed workflow migration files, a successful squash merge, stale-head rejection and replay rejection. Remaining PRs and branches are cleaned up.
 
+The native release-asset bridge uses a separate source-bound rehearsal. Dispatch it
+from the exact frozen candidate branch `integration/native-<candidate SHA prefix>`
+and pass the same full SHA:
+
+```sh
+gh workflow run testing-securefix-server.yml --repo civitaspo/securefix-server --ref "integration/native-${CANDIDATE_SHA:0:12}" -f candidate_sha="$CANDIDATE_SHA" -f phase=release-assets
+```
+
+It builds the four configured targets from Client commit
+`ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00` on their matching GitHub-hosted
+runners, without credentials. A read-only job verifies the current run and attempt,
+the signed Client commit and merged source PR, `.release-version` at that commit,
+each target's runner/version evidence, and the exact artifact IDs, digests, names,
+and bytes. Before minting its scratch-only token, the writer repeats that check.
+It then publishes those same binaries as one unique prerelease to
+`civitaspo/testing-securefix-server`, records the release and asset digests, and
+retains the immutable evidence. An incomplete target set must remain unpublished;
+its separate draft and tag are cleaned up.
+
 The scratch main branch requires a non-author approving review, signed commits, `status-check` from GitHub Actions and `securefix-policy-check` from the Server App. A policy success is published only after the shared production PR validator accepts the current head.
 
 See [the harness contract](integration-testing.md) for the boundary between live functional tests and source-provenance fixtures. Stable runtime publication is a separate protected-main operation after candidate verification and review.
