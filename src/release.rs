@@ -5577,6 +5577,14 @@ mod tests {
                 }),
             )
             .with_request_body(expected_body),
+            Route::get(
+                format!(
+                    "/repos/{}/git/ref/tags/{}",
+                    repo.as_str(),
+                    url_encode(tag.as_str())
+                ),
+                json!({"object":{"type":"commit","sha":target_sha}}),
+            ),
         ]);
         let api = GitHub::new(&fixture.base, "fixture-token".into())
             .unwrap()
@@ -5587,6 +5595,76 @@ mod tests {
             9001
         );
         fixture.finish();
+    }
+
+    #[test]
+    fn native_probe_draft_binds_tag_to_exact_scratch_target() {
+        use crate::fixtures::{Fixture, Route};
+
+        let check_target = |tag_target_sha: &str, expected_success: bool| {
+            let repo = Repository::parse("civitaspo/testing-securefix-server").unwrap();
+            let tag = ReleaseTag::parse("v0.8.1-pre.39728542160.native").unwrap();
+            let tag_path = format!(
+                "/repos/{}/git/ref/tags/{}",
+                repo.as_str(),
+                url_encode(tag.as_str())
+            );
+            let tag_release_path = format!(
+                "/repos/{}/releases/tags/{}",
+                repo.as_str(),
+                url_encode(tag.as_str())
+            );
+            let release_list_path =
+                format!("/repos/{}/releases?per_page=100&page=1", repo.as_str());
+            let release_path = format!("/repos/{}/releases", repo.as_str());
+            let target_sha = "c".repeat(40);
+            let control = Fixture::control_revision();
+            let fixture = Fixture::new(vec![
+                Route::request("GET", &tag_path, 404, json!({})),
+                Route::request("GET", tag_release_path, 404, json!({})),
+                Route::get(release_list_path, json!([])),
+                Route::active_control(&control),
+                Route::request(
+                    "POST",
+                    release_path,
+                    201,
+                    json!({
+                        "id": 9001,
+                        "tag_name": tag.as_str(),
+                        "draft": true,
+                        "prerelease": true,
+                    }),
+                )
+                .with_request_body(json!({
+                    "tag_name": tag.as_str(),
+                    "target_commitish": target_sha,
+                    "name": tag.as_str(),
+                    "draft": true,
+                    "prerelease": true,
+                    "generate_release_notes": false,
+                })),
+                Route::get(
+                    &tag_path,
+                    json!({"object":{"type":"commit","sha":tag_target_sha}}),
+                ),
+            ]);
+            let api = GitHub::new(&fixture.base, "fixture-token".into())
+                .unwrap()
+                .with_control_revision(&control)
+                .unwrap();
+            let result = create_native_probe_draft(&api, &repo, &tag, &target_sha);
+            if expected_success {
+                assert_eq!(result.unwrap(), 9001);
+            } else {
+                assert!(result.is_err(), "mismatched tag target was accepted");
+            }
+            fixture.finish();
+        };
+
+        let target_sha = "c".repeat(40);
+        let other_sha = "d".repeat(40);
+        check_target(&target_sha, true);
+        check_target(&other_sha, false);
     }
 
     #[test]
@@ -5655,6 +5733,10 @@ mod tests {
                 )
                 .with_request_body(body),
             );
+            routes.push(Route::get(
+                &ref_path,
+                json!({"object":{"type":"commit","sha":scratch_sha}}),
+            ));
         };
         push_draft_routes(&mut routes, &missing_tag, 9001);
 
@@ -5694,7 +5776,7 @@ mod tests {
         );
         let tag_ref = json!({"object":{"type":"commit","sha":scratch_sha}});
         routes.push(Route::get(&missing_ref_path, tag_ref.clone()));
-        routes.push(Route::get(&missing_ref_path, tag_ref));
+        routes.push(Route::get(&missing_ref_path, tag_ref.clone()));
         routes.push(Route::active_control(&control));
         routes.push(Route::request(
             "DELETE",
@@ -5774,6 +5856,12 @@ mod tests {
         ));
         routes.push(Route::get(&success_release_path, published_release.clone()));
         routes.push(Route::get(&success_release_path, published_release));
+        let success_ref_path = format!(
+            "/repos/{}/git/ref/tags/{}",
+            repo.as_str(),
+            url_encode(success_tag.as_str())
+        );
+        routes.push(Route::get(&success_ref_path, tag_ref));
 
         let fixture = Fixture::new(routes);
         let api = GitHub::new(&fixture.base, "fixture-token".into())
@@ -6486,6 +6574,10 @@ mod tests {
                 && release["prerelease"] == true,
             "created native probe release is not the expected prerelease draft"
         );
+        ensure!(
+            probe_tag_points_to_commit(api, repo, tag.as_str(), target_sha)?,
+            "created native probe tag does not point to the exact scratch target"
+        );
         Ok(release_id)
     }
 
@@ -6507,6 +6599,10 @@ mod tests {
                 api.delete(&release_path)?;
             } else {
                 ensure_published_immutable_release(&release, release_id, tag)?;
+                ensure!(
+                    probe_tag_points_to_commit(api, repo, tag.as_str(), target_sha)?,
+                    "published native probe tag does not point to the exact scratch target"
+                );
                 return Ok(());
             }
         }
