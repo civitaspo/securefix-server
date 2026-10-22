@@ -98,6 +98,7 @@ workflows:
     '.github/workflows/reusable-server-approve.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
+        - 'civitaspo/securefix-server@119643d5407f97b3589059246d43bd05590a248e'
     '.github/workflows/reusable-server-merge.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'

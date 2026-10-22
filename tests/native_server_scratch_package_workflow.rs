@@ -242,3 +242,100 @@ fn scratch_server_role_receivers_admit_only_their_exact_label_context_before_net
         }
     }
 }
+
+#[test]
+fn server_approval_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() {
+    let workflow: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(format!(
+            "{}/.github/workflows/reusable-server-approve.yml",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
+    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-approve.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
+    let stable = steps
+        .iter()
+        .find(|step| step["id"] == "package-stable")
+        .unwrap();
+    let scratch = steps
+        .iter()
+        .find(|step| step["id"] == "package-scratch")
+        .unwrap();
+    assert!(
+        stable["if"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("!({scratch_context})"))
+    );
+    assert_eq!(stable["with"]["channel"], "stable");
+    assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
+    assert_eq!(
+        scratch["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e"
+    );
+    assert_eq!(
+        scratch["with"]["action-sha"],
+        "119643d5407f97b3589059246d43bd05590a248e"
+    );
+    for (key, expected) in [
+        ("channel", "scratch"),
+        (
+            "manifest-source-sha",
+            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
+        ),
+        (
+            "publication-source-sha",
+            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
+        ),
+        (
+            "publication-source-branch",
+            "integration/native-consumer-pre35-20261023",
+        ),
+        ("publication-tag", "v0.2.45-pre.35"),
+        ("publication-release-id", "421283713"),
+        ("publication-asset-id", "667334470"),
+        (
+            "publication-asset-sha256",
+            "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
+        ),
+        ("publication-asset-size", "12173384"),
+        ("publication-producer-run-id", "39866598474"),
+        ("publication-producer-run-attempt", "1"),
+    ] {
+        assert_eq!(scratch["with"][key], expected, "{key}");
+    }
+    for name in [
+        "Resolve the authenticated Client request label",
+        "Validate the owner approval without a write credential",
+        "Apply the owner approval after revalidation",
+    ] {
+        let step = steps.iter().find(|step| step["name"] == name).unwrap();
+        assert_eq!(
+            step["env"]["CLI_BINARY"],
+            "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
+        );
+    }
+    let validate = steps
+        .iter()
+        .find(|step| step["name"] == "Validate the owner approval without a write credential")
+        .unwrap();
+    let apply = steps
+        .iter()
+        .find(|step| step["name"] == "Apply the owner approval after revalidation")
+        .unwrap();
+    assert!(validate["env"]["SECUREFIX_APPROVE_TOKEN"].is_null());
+    assert_eq!(
+        apply["env"]["SECUREFIX_APPROVE_TOKEN"],
+        "${{ secrets.APPROVAL_TOKEN }}"
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step["env"]["SECUREFIX_APPROVE_TOKEN"]
+                == "${{ secrets.APPROVAL_TOKEN }}")
+            .count(),
+        1
+    );
+}
