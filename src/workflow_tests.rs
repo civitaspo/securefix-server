@@ -2301,7 +2301,13 @@ fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_bas
     let testing = workflow("testing-securefix-server.yml");
     assert_eq!(
         testing["on"]["workflow_dispatch"]["inputs"]["phase"]["options"],
-        serde_json::json!(["prepare", "verify", "bootstrap", "provider"])
+        serde_json::json!([
+            "prepare",
+            "verify",
+            "bootstrap",
+            "provider",
+            "release-assets"
+        ])
     );
     let legacy = &testing["jobs"]["bootstrap-legacy-runtime"];
     let legacy_if = legacy["if"].as_str().unwrap();
