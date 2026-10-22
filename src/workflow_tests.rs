@@ -3173,6 +3173,7 @@ fn native_release_asset_probe_uses_the_shared_publisher_for_a_scratch_prerelease
         "${{ env.CLIENT_SOURCE_SHA }}"
     );
     assert!(build_text.contains("cargo +1.99.0 build --locked --release"));
+    assert!(build_text.contains("rustup target add --toolchain 1.99.0"));
     assert!(build_text.contains("env -i PATH=\\\"$PATH\\\""));
     assert!(build_text.contains("--version"));
     for forbidden in [

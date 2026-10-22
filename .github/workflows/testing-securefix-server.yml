@@ -8,7 +8,7 @@ on:
         type: string
         default: ''
       phase:
-        description: Prepare/verify Securefix fixtures, run the explicit legacy bootstrap probe, or test the no-publish Sigma release flow
+        description: Prepare/verify Securefix fixtures, run the legacy bootstrap probe, or exercise provider and native release scratch probes
         type: choice
         options: [prepare, verify, bootstrap, provider, release-assets]
         default: prepare

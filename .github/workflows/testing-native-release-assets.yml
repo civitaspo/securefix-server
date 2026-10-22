@@ -124,7 +124,7 @@ jobs:
           [[ "$source_before" == "$CLIENT_SOURCE_SHA" ]] || { echo 'native build checkout differs from the pinned Client source' >&2; exit 1; }
           package_version="$(git show "$CLIENT_SOURCE_SHA:.release-version" | tr -d '\r\n')"
           [[ -n "$package_version" ]] || { echo 'pinned Client source package version is missing' >&2; exit 1; }
-          rustup target add "$NATIVE_TARGET"
+          rustup target add --toolchain 1.99.0 "$NATIVE_TARGET"
           cargo +1.99.0 build --locked --release --bin herdr-linear-agent --target "$NATIVE_TARGET"
           source_after="$(git rev-parse HEAD)"
           [[ "$source_after" == "$CLIENT_SOURCE_SHA" ]] || { echo 'native build changed the pinned Client checkout' >&2; exit 1; }
