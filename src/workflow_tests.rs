@@ -46,6 +46,68 @@ fn testing_workflows_have_testing_file_and_display_names() {
 }
 
 #[test]
+fn managed_files_scratch_probe_validates_before_scoped_writer_token() {
+    let value = workflow("testing-securefix-server.yml");
+    let inputs = &value["on"]["workflow_dispatch"]["inputs"];
+    assert!(
+        inputs["phase"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase == "managed-files")
+    );
+    for name in [
+        "client_repository",
+        "client_implementation_sha",
+        "client_version",
+    ] {
+        assert_eq!(inputs[name]["default"], "");
+    }
+
+    let job = &value["jobs"]["managed-files-probe"];
+    assert_eq!(job["needs"], serde_json::json!(["baseline", "build"]));
+    assert_eq!(job["environment"], "main");
+    assert_eq!(
+        job["permissions"],
+        serde_json::json!({"actions":"read", "contents":"read"})
+    );
+    let steps = job["steps"].as_array().unwrap();
+    let validate = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Validate the exact selected candidate before minting a writer token"
+        })
+        .unwrap();
+    let mint = steps
+        .iter()
+        .position(|step| step["id"] == "managed-writer")
+        .unwrap();
+    let write = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Create the reviewable managed-file PR from the selected source"
+        })
+        .unwrap();
+    assert!(validate < mint && mint < write);
+    assert_eq!(
+        steps[mint]["with"]["repositories"],
+        "testing-securefix-server"
+    );
+    assert_eq!(steps[mint]["with"]["permission-contents"], "write");
+    assert_eq!(steps[mint]["with"]["permission-pull-requests"], "write");
+    assert_eq!(steps[mint]["with"]["permission-workflows"], "write");
+    let serialized = serde_json::to_string(job).unwrap();
+    assert!(!serialized.contains("permission-administration"));
+    assert!(!serialized.contains("SECUREFIX_ADMIN"));
+    assert!(
+        steps[write]["run"]
+            .as_str()
+            .unwrap()
+            .contains("securefix settings managed-reconcile-scratch --source-sha")
+    );
+}
+
+#[test]
 fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
     let value = workflow("testing-native-release-assets-publish.yml");
     assert_eq!(value["permissions"], serde_json::json!({}));
@@ -1117,6 +1179,8 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 } else if job_id == "bootstrap-scratch" || job_id == "scratch" {
                                     "${{ github.workflow_sha }}"
+                                } else if job_id == "managed-files-probe" {
+                                    "${{ job.workflow_sha }}"
                                 } else {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 }
@@ -2538,7 +2602,8 @@ fn initial_bootstrap_scratch_uses_a_fixed_host_for_outputs_and_pinned_legacy_bas
             "verify",
             "bootstrap",
             "provider",
-            "release-assets"
+            "release-assets",
+            "managed-files"
         ])
     );
     let legacy = &testing["jobs"]["bootstrap-legacy-runtime"];
@@ -3669,6 +3734,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                                 || verified_native_package_smoke
                                 || (path == ".github/workflows/testing-securefix-server.yml"
                                     && (step["env"]["CANDIDATE_SHA"].is_string()
+                                        || (job_id == "managed-files-probe"
+                                            && step["env"]["SOURCE_SHA"].is_string())
                                         || job["env"]["CANDIDATE_SHA"].is_string()
                                         || (run.starts_with("securefix integration resolve-test-runtime --published-runtime-sha ")
                                             && step["env"]["PUBLISHED_RUNTIME_SHA"].is_string()
