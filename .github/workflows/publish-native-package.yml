@@ -1,0 +1,126 @@
+name: Publish Native Package
+run-name: Publish native package (${{ inputs.channel }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Publication destination and release channel
+        required: true
+        type: choice
+        options:
+          - stable
+          - scratch
+      producer_run_id:
+        description: Exact successful native-package-build workflow run
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: securefix-native-package-release
+  cancel-in-progress: false
+
+env:
+  SECUREFIX_PACKAGE_OWNER_ID: '4525500'
+  SECUREFIX_PACKAGE_DESTINATION_REPOSITORY: civitaspo/testing-securefix-server
+  SECUREFIX_PACKAGE_DESTINATION_REPOSITORY_ID: '1410312556'
+  SECUREFIX_PACKAGE_DESTINATION_DEFAULT_BRANCH: main
+
+jobs:
+  host-build:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the publisher host from the protected workflow source
+        run: cargo +1.99.0 build --locked --release --bin securefix
+      - name: Stage the trusted publisher host
+        run: |
+          mkdir -p publisher
+          install -m 755 target/release/securefix publisher/securefix
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: native-package-publisher-host-${{ github.run_id }}
+          path: publisher/securefix
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: host-build
+    if: needs.host-build.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha && (inputs.channel == 'stable' || inputs.channel == 'scratch')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.host-build.outputs.artifact-id }}
+          path: publisher
+          merge-multiple: true
+      - name: Validate the trusted publisher host and dispatch inputs
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+        run: |
+          set -euo pipefail
+          [[ -f publisher/securefix && ! -L publisher/securefix ]]
+          chmod 700 publisher/securefix
+          [[ "$CHANNEL" == stable || "$CHANNEL" == scratch ]]
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          test -x publisher/securefix
+          test -s publisher/securefix
+      - name: Qualify the exact producer artifact and attestation before minting a writer token
+        id: preflight
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+        run: |
+          set -euo pipefail
+          result="$(publisher/securefix package preflight --producer-run-id "$PRODUCER_RUN_ID" --channel "$CHANNEL")"
+          printf '%s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
+          already_published="$(jq -er '.evidence.release_state.state == "already_published"' <<< "$result")"
+          printf 'already-published=%s\n' "$already_published" >> "$GITHUB_OUTPUT"
+      - name: Record verified immutable package release recovery
+        if: steps.preflight.outputs.already-published == 'true'
+        run: printf '%s\n' 'A matching immutable release from a successful recorded publisher run was verified; no write token was issued.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: writer
+        if: steps.preflight.outputs.already-published != 'true'
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ inputs.channel == 'stable' && 'securefix-server' || 'testing-securefix-server' }}
+          permission-contents: write
+      - name: Publish the exact attested executable
+        if: steps.preflight.outputs.already-published != 'true'
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          GITHUB_ACTOR_ID: ${{ github.actor_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SECUREFIX_PACKAGE_PUBLISH_TOKEN: ${{ inputs.channel == 'stable' && steps.writer.outputs.token || '' }}
+          SECUREFIX_PACKAGE_TOKEN: ${{ inputs.channel == 'scratch' && steps.writer.outputs.token || '' }}
+        run: |
+          set -euo pipefail
+          result="$(publisher/securefix package publish --producer-run-id "$PRODUCER_RUN_ID" --channel "$CHANNEL")"
+          printf '%s\n' "$result" >> "$GITHUB_STEP_SUMMARY"

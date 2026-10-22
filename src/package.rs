@@ -5,6 +5,7 @@
 
 use crate::api::GitHub;
 use anyhow::{Context, Result, ensure};
+use clap::{Subcommand, ValueEnum};
 use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,11 @@ const PACKAGE_BINARY_NAME: &str = "securefix-linux-x86_64";
 const PACKAGE_BUNDLE_NAME: &str = "bundle.json";
 const PACKAGE_PRODUCER_WORKFLOW: &str = ".github/workflows/testing-native-package-build.yml";
 const PACKAGE_PUBLISHER_WORKFLOW: &str = ".github/workflows/testing-publish-native-package.yml";
+const NATIVE_CLIENT_PROTOCOL: &str = "securefix-native-request/v1";
+pub(crate) const NATIVE_PACKAGE_PRODUCER_WORKFLOW: &str =
+    ".github/workflows/native-package-build.yml";
+pub(crate) const NATIVE_PACKAGE_PUBLISHER_WORKFLOW: &str =
+    ".github/workflows/publish-native-package.yml";
 
 /// Publisher identity supplied by authenticated deployment configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1284,6 +1290,814 @@ fn canonical_sha256_digest(value: &str) -> Result<String> {
     Ok(digest.to_owned())
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativePackageReleaseManifest {
+    schema_version: u8,
+    component: String,
+    protocol: String,
+    version: String,
+    producer_workflow: String,
+    publisher_workflow: Option<String>,
+    max_bytes: u64,
+    source_sha: Option<String>,
+    assets: std::collections::BTreeMap<String, String>,
+}
+
+impl NativePackageReleaseManifest {
+    fn validate(&self, version: &Version, source_sha: &str) -> Result<()> {
+        let asset = self
+            .assets
+            .get("linux-x86_64")
+            .context("package release manifest has no linux-x86_64 asset")?;
+        ensure!(
+            self.schema_version == 2
+                && self.component == "securefix-server"
+                && self.protocol == NATIVE_CLIENT_PROTOCOL
+                && self.version == version.to_string()
+                && self.producer_workflow == NATIVE_PACKAGE_PRODUCER_WORKFLOW
+                && self.publisher_workflow.as_deref() == Some(NATIVE_PACKAGE_PUBLISHER_WORKFLOW)
+                && self.max_bytes > 0
+                && self.max_bytes <= MAX_ASSET_BYTES
+                && self.assets.len() == 1
+                && asset == PACKAGE_BINARY_NAME
+                && self
+                    .source_sha
+                    .as_deref()
+                    .is_none_or(|sha| sha == source_sha),
+            "package release manifest does not bind the exact source, workflow, asset, and Cargo version"
+        );
+        crate::policy::validate_sha(source_sha)?;
+        Ok(())
+    }
+}
+
+pub(crate) struct NativePackageReleaseSourceBinding<'a> {
+    pub source_sha: &'a str,
+    pub version: &'a str,
+    pub producer_workflow: &'a str,
+    pub publisher_workflow: &'a str,
+    pub asset_name: &'a str,
+    pub max_asset_bytes: u64,
+    pub stable: bool,
+}
+
+pub(crate) fn validate_native_package_release_source(
+    cargo_bytes: &[u8],
+    manifest_bytes: &[u8],
+    binding: &NativePackageReleaseSourceBinding<'_>,
+) -> Result<()> {
+    ensure!(
+        cargo_bytes.len() <= MAX_CARGO_TOML_BYTES && manifest_bytes.len() <= 16 * 1024,
+        "package source inputs exceed their bounds"
+    );
+    let cargo = std::str::from_utf8(cargo_bytes).context("source Cargo.toml is not UTF-8")?;
+    let document = cargo
+        .parse::<toml_edit::DocumentMut>()
+        .context("source Cargo.toml is invalid TOML")?;
+    let package = document
+        .as_table()
+        .get("package")
+        .and_then(|item| item.as_table())
+        .context("source Cargo.toml package table is missing or invalid")?;
+    ensure!(
+        package.get("name").and_then(|item| item.as_str()) == Some("securefix"),
+        "source Cargo.toml package name is not securefix"
+    );
+    let raw_version = package
+        .get("version")
+        .and_then(|item| item.as_str())
+        .context("source Cargo.toml package.version is missing or invalid")?;
+    let version = Version::parse(raw_version).context("source package version is invalid")?;
+    ensure!(
+        version.to_string() == raw_version
+            && version.build.is_empty()
+            && version.pre.is_empty() == binding.stable
+            && raw_version == binding.version,
+        "source package version differs from the exact release channel or tag"
+    );
+    crate::policy::validate_sha(binding.source_sha)?;
+    ensure!(
+        binding.producer_workflow == NATIVE_PACKAGE_PRODUCER_WORKFLOW
+            && binding.publisher_workflow == NATIVE_PACKAGE_PUBLISHER_WORKFLOW
+            && binding.asset_name == PACKAGE_BINARY_NAME,
+        "package release binding differs from the fixed workflow or asset contract"
+    );
+    let manifest: NativePackageReleaseManifest = serde_json::from_slice(manifest_bytes)
+        .context("package release source manifest is invalid JSON")?;
+    manifest.validate(&version, binding.source_sha)?;
+    ensure!(
+        manifest.producer_workflow == binding.producer_workflow
+            && manifest.publisher_workflow.as_deref() == Some(binding.publisher_workflow)
+            && manifest.assets.get("linux-x86_64").map(String::as_str) == Some(binding.asset_name)
+            && manifest.max_bytes == binding.max_asset_bytes,
+        "package source manifest differs from the selected producer or asset contract"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_package_source_ancestor_comparison(
+    comparison: &Value,
+    source_sha: &str,
+    publisher_sha: &str,
+) -> Result<()> {
+    crate::policy::validate_sha(source_sha)?;
+    crate::policy::validate_sha(publisher_sha)?;
+    ensure!(
+        comparison["base_commit"]["sha"] == source_sha
+            && comparison["merge_base_commit"]["sha"] == source_sha
+            && comparison["behind_by"].as_u64() == Some(0)
+            && matches!(comparison["status"].as_str(), Some("ahead" | "identical")),
+        "stable package source is not an ancestor of the current protected publisher"
+    );
+    Ok(())
+}
+
+fn validate_package_source_ancestor(
+    api: &GitHub,
+    repository: &str,
+    source_sha: &str,
+    publisher_sha: &str,
+) -> Result<()> {
+    let comparison: Value = api.get_uncached(&format!(
+        "/repos/{repository}/compare/{source_sha}...{publisher_sha}"
+    ))?;
+    validate_package_source_ancestor_comparison(&comparison, source_sha, publisher_sha)
+}
+
+fn validate_package_workflow(path: &str) -> Result<()> {
+    ensure!(
+        path == NATIVE_PACKAGE_PRODUCER_WORKFLOW || path == NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
+        "package release workflow path is outside the fixed producer/publisher contract"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PublishChannel {
+    Stable,
+    Scratch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativePackageMode {
+    Preflight,
+    Publish,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    #[command(about = "Validate the exact attested package without a write token")]
+    Preflight {
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long, value_enum)]
+        channel: PublishChannel,
+    },
+    #[command(about = "Publish a source-bound Securefix package release")]
+    Publish {
+        #[arg(long)]
+        producer_run_id: u64,
+        #[arg(long, value_enum)]
+        channel: PublishChannel,
+    },
+}
+
+pub fn run(command: Command) -> Result<()> {
+    match command {
+        Command::Preflight {
+            producer_run_id,
+            channel,
+        } => {
+            let result =
+                publish_native_package(producer_run_id, channel, NativePackageMode::Preflight)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Command::Publish {
+            producer_run_id,
+            channel,
+        } => {
+            let result =
+                publish_native_package(producer_run_id, channel, NativePackageMode::Publish)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", content = "evidence", rename_all = "snake_case")]
+pub enum NativePackageCommandResult {
+    Preflight(NativePackagePreflight),
+    Published(NativePackagePublication),
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NativePackagePreflight {
+    pub channel: String,
+    pub source_repository: String,
+    pub source_repository_id: u64,
+    pub source_sha: String,
+    pub source_branch: String,
+    pub source_manifest_sha256: String,
+    pub destination_repository: String,
+    pub destination_repository_id: u64,
+    pub tag: String,
+    pub producer_run_id: u64,
+    pub producer_run_attempt: u64,
+    pub producer_artifact_id: u64,
+    pub producer_artifact_size: u64,
+    pub producer_artifact_sha256: String,
+    pub publisher_workflow: String,
+    pub publisher_run_id: u64,
+    pub publisher_run_attempt: u64,
+    pub publisher_sha: String,
+    pub asset_name: String,
+    pub asset_size: u64,
+    pub asset_sha256: String,
+    pub release_state: crate::api::PackageReleasePreflightState,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NativePackagePublication {
+    pub channel: String,
+    pub source_repository: String,
+    pub source_repository_id: u64,
+    pub source_sha: String,
+    pub source_branch: String,
+    pub source_manifest_sha256: String,
+    pub tag: String,
+    pub producer_run_id: u64,
+    pub producer_run_attempt: u64,
+    pub producer_artifact_id: u64,
+    pub producer_artifact_size: u64,
+    pub producer_artifact_sha256: String,
+    pub publisher_workflow: String,
+    pub publisher_run_id: u64,
+    pub publisher_run_attempt: u64,
+    pub publisher_sha: String,
+    pub release_id: u64,
+    pub asset_id: u64,
+    pub asset_name: String,
+    pub asset_size: u64,
+    pub asset_sha256: String,
+    pub immutable: bool,
+    pub recovered: bool,
+    pub recovery_run_id: Option<u64>,
+    pub recovery_run_attempt: Option<u64>,
+}
+
+fn native_package_owner_id() -> Result<u64> {
+    let value = std::env::var("SECUREFIX_PACKAGE_OWNER_ID")
+        .context("missing package publisher owner identity")?;
+    let owner_id = parse_positive_decimal(&value)?;
+    ensure!(
+        owner_id.to_string() == value,
+        "package owner ID is not canonical"
+    );
+    Ok(owner_id)
+}
+
+fn native_package_scratch_destination() -> Result<crate::config::Repository> {
+    let repository = std::env::var("SECUREFIX_PACKAGE_DESTINATION_REPOSITORY")
+        .context("missing fixed scratch package destination repository")?;
+    let id = std::env::var("SECUREFIX_PACKAGE_DESTINATION_REPOSITORY_ID")
+        .context("missing fixed scratch package destination ID")?;
+    let default_branch = std::env::var("SECUREFIX_PACKAGE_DESTINATION_DEFAULT_BRANCH")
+        .context("missing fixed scratch package destination branch")?;
+    crate::policy::validate_repository(&repository)?;
+    crate::config::validate_branch(&default_branch)?;
+    Ok(crate::config::Repository {
+        repository,
+        id: parse_positive_decimal(&id)?,
+        default_branch,
+    })
+}
+
+fn native_package_publisher_identity(repository: &str) -> Result<(String, String, String)> {
+    let workflow_ref =
+        std::env::var("GITHUB_WORKFLOW_REF").context("missing package publisher workflow ref")?;
+    let prefix = format!("{repository}/");
+    let workflow_ref = workflow_ref
+        .strip_prefix(&prefix)
+        .context("package publisher workflow belongs to a different repository")?;
+    let (workflow, ref_name) = workflow_ref
+        .split_once('@')
+        .context("package publisher workflow ref is invalid")?;
+    let branch = ref_name
+        .strip_prefix("refs/heads/")
+        .context("package publisher workflow must run from a branch")?;
+    validate_package_workflow(workflow)?;
+    crate::config::validate_branch(branch)?;
+    Ok((
+        workflow.to_owned(),
+        branch.to_owned(),
+        std::env::var("GITHUB_WORKFLOW_SHA")?,
+    ))
+}
+
+fn package_workflow_owner_declaration(bytes: &[u8], description: &str) -> Result<u64> {
+    ensure!(
+        bytes.len() <= 128 * 1024,
+        "{description} workflow exceeds its size bound"
+    );
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(bytes).context("package workflow is invalid YAML")?;
+    let env = workflow
+        .get("env")
+        .and_then(serde_yaml::Value::as_mapping)
+        .context("package workflow has no workflow-level deployment declarations")?;
+    let value = env
+        .get(serde_yaml::Value::String(
+            "SECUREFIX_PACKAGE_OWNER_ID".to_owned(),
+        ))
+        .and_then(serde_yaml::Value::as_str)
+        .context("package workflow owner declaration is missing or invalid")?;
+    let owner_id = parse_positive_decimal(value)?;
+    ensure!(
+        owner_id.to_string() == value,
+        "package workflow owner declaration is not canonical"
+    );
+    Ok(owner_id)
+}
+
+fn validate_native_package_publisher_declaration(
+    bytes: &[u8],
+    owner_id: u64,
+    scratch_destination: &crate::config::Repository,
+) -> Result<()> {
+    ensure!(
+        bytes.len() <= 128 * 1024,
+        "package publisher workflow exceeds its size bound"
+    );
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(bytes).context("package publisher workflow is invalid YAML")?;
+    let env = workflow
+        .get("env")
+        .and_then(serde_yaml::Value::as_mapping)
+        .context("package publisher workflow has no workflow-level deployment declarations")?;
+    let env_string = |name: &str| -> Result<String> {
+        env.get(serde_yaml::Value::String(name.to_owned()))
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::to_owned)
+            .with_context(|| format!("package publisher declaration {name} is missing or invalid"))
+    };
+    ensure!(
+        package_workflow_owner_declaration(bytes, "package publisher")? == owner_id,
+        "package publisher owner declaration differs from the protected workflow context"
+    );
+    ensure!(
+        env_string("SECUREFIX_PACKAGE_DESTINATION_REPOSITORY")? == scratch_destination.repository
+            && env_string("SECUREFIX_PACKAGE_DESTINATION_REPOSITORY_ID")?
+                == scratch_destination.id.to_string()
+            && env_string("SECUREFIX_PACKAGE_DESTINATION_DEFAULT_BRANCH")?
+                == scratch_destination.default_branch,
+        "package scratch destination differs from the protected publisher declaration"
+    );
+    Ok(())
+}
+
+fn publish_native_package(
+    producer_run_id: u64,
+    channel: PublishChannel,
+    mode: NativePackageMode,
+) -> Result<NativePackageCommandResult> {
+    ensure!(producer_run_id > 0, "package producer run ID is invalid");
+    let source_repository =
+        std::env::var("GITHUB_REPOSITORY").context("missing package publisher repository")?;
+    crate::policy::validate_repository(&source_repository)?;
+    let package_channel = match channel {
+        PublishChannel::Stable => crate::api::PackageReleaseChannel::Stable,
+        PublishChannel::Scratch => crate::api::PackageReleaseChannel::Scratch,
+    };
+    let owner_id = native_package_owner_id()?;
+    let read_token = std::env::var("GITHUB_TOKEN").context("missing package read token")?;
+    ensure!(!read_token.is_empty(), "package read token is empty");
+    let source_api = GitHub::new("https://api.github.com", read_token)?;
+    let source_remote: Value = source_api.get_uncached(&format!("/repos/{source_repository}"))?;
+    let source_id = source_remote["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("package source repository ID is invalid")?;
+    let source_default_branch = source_remote["default_branch"]
+        .as_str()
+        .context("package source default branch is missing")?
+        .to_owned();
+    crate::config::validate_branch(&source_default_branch)?;
+    let (source_owner_login, _) = source_repository
+        .split_once('/')
+        .context("package source repository owner is missing")?;
+    let source_owner_id = source_remote["owner"]["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("package source owner ID is invalid")?;
+    ensure!(
+        source_remote["full_name"] == source_repository
+            && source_remote["owner"]["login"] == source_owner_login,
+        "package source repository differs from authenticated GitHub context"
+    );
+    let source = crate::config::Repository {
+        repository: source_repository.clone(),
+        id: source_id,
+        default_branch: source_default_branch,
+    };
+    let scratch_destination = native_package_scratch_destination()?;
+    let destination = match channel {
+        PublishChannel::Stable => source.clone(),
+        PublishChannel::Scratch => scratch_destination.clone(),
+    };
+    ensure!(
+        matches!(channel, PublishChannel::Stable) || destination.repository != source.repository,
+        "scratch package destination must be separate from its source repository"
+    );
+    let (publisher_workflow, publisher_branch, publisher_sha) =
+        native_package_publisher_identity(&source.repository)?;
+    ensure!(
+        publisher_workflow == NATIVE_PACKAGE_PUBLISHER_WORKFLOW
+            && publisher_branch == source.default_branch
+            && std::env::var("GITHUB_REF").as_deref()
+                == Ok(format!("refs/heads/{}", source.default_branch).as_str())
+            && std::env::var("GITHUB_SHA").as_deref() == Ok(publisher_sha.as_str()),
+        "package publisher must run from its fixed protected source workflow"
+    );
+    crate::policy::validate_sha(&publisher_sha)?;
+    let publisher_workflow_bytes =
+        source_api.content_uncached(&source.repository, &publisher_workflow, &publisher_sha)?;
+    validate_native_package_publisher_declaration(
+        &publisher_workflow_bytes,
+        owner_id,
+        &scratch_destination,
+    )?;
+
+    let producer: Value = source_api.get_uncached(&format!(
+        "/repos/{}/actions/runs/{producer_run_id}/attempts/1",
+        source.repository
+    ))?;
+    let source_sha = producer["head_sha"]
+        .as_str()
+        .context("package producer source SHA is missing")?
+        .to_owned();
+    crate::policy::validate_sha(&source_sha)?;
+    let source_branch = producer["head_branch"]
+        .as_str()
+        .context("package producer source branch is missing")?
+        .to_owned();
+    crate::config::validate_branch(&source_branch)?;
+    let producer_workflow_source = source_api.content_uncached(
+        &source.repository,
+        NATIVE_PACKAGE_PRODUCER_WORKFLOW,
+        &source_sha,
+    )?;
+    ensure!(
+        package_workflow_owner_declaration(&producer_workflow_source, "package producer")?
+            == owner_id,
+        "package producer owner declaration differs from the protected publisher workflow"
+    );
+    if matches!(channel, PublishChannel::Stable) {
+        ensure!(
+            source_branch == source.default_branch,
+            "stable package producer must build the protected default branch"
+        );
+        validate_package_source_ancestor(
+            &source_api,
+            &source.repository,
+            &source_sha,
+            &publisher_sha,
+        )?;
+    }
+
+    let cargo_value: Value = source_api.get_uncached(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={source_sha}",
+        source.repository
+    ))?;
+    let version =
+        source_version_with_prerelease(&cargo_value, matches!(channel, PublishChannel::Scratch))?;
+    ensure!(
+        !matches!(channel, PublishChannel::Scratch) || !version.pre.is_empty(),
+        "scratch package publication requires an explicit prerelease version"
+    );
+    let manifest_value: Value = source_api.get_uncached(&format!(
+        "/repos/{}/contents/.github/actions/load-package/package.json?ref={source_sha}",
+        source.repository
+    ))?;
+    let manifest_bytes =
+        source_file_bytes(&manifest_value, ".github/actions/load-package/package.json")?;
+    let manifest: NativePackageReleaseManifest = serde_json::from_slice(&manifest_bytes)
+        .context("source package manifest is invalid JSON")?;
+    let producer_branch = validate_scratch_package_run(
+        &producer,
+        &source,
+        &source_sha,
+        &manifest.producer_workflow,
+        producer_run_id,
+        1,
+        owner_id,
+    )?;
+    ensure!(
+        producer_branch == source_branch,
+        "package producer branch changed during validation"
+    );
+    let cargo_bytes = source_api.content_uncached(&source.repository, "Cargo.toml", &source_sha)?;
+    let asset_name = manifest
+        .assets
+        .get("linux-x86_64")
+        .context("package source manifest has no linux-x86_64 asset")?
+        .clone();
+    ensure!(
+        asset_name == PACKAGE_BINARY_NAME,
+        "package asset name is not canonical"
+    );
+    ensure!(
+        manifest.publisher_workflow.as_deref() == Some(publisher_workflow.as_str()),
+        "package manifest does not select this publisher workflow"
+    );
+    validate_native_package_release_source(
+        &cargo_bytes,
+        &manifest_bytes,
+        &NativePackageReleaseSourceBinding {
+            source_sha: &source_sha,
+            version: &version.to_string(),
+            producer_workflow: &manifest.producer_workflow,
+            publisher_workflow: &publisher_workflow,
+            asset_name: &asset_name,
+            max_asset_bytes: manifest.max_bytes,
+            stable: matches!(channel, PublishChannel::Stable),
+        },
+    )?;
+
+    let artifact_list: Value = source_api.get_uncached(&format!(
+        "/repos/{}/actions/runs/{producer_run_id}/artifacts?per_page=100",
+        source.repository
+    ))?;
+    let (artifact_id, artifact_size, artifact_sha256) =
+        validate_scratch_package_artifact(&artifact_list, &source, &source_sha, producer_run_id)?;
+    let artifacts = artifact_list["artifacts"]
+        .as_array()
+        .context("package producer artifacts are missing")?;
+    let artifact_entry = artifacts
+        .iter()
+        .find(|artifact| artifact["id"].as_u64() == Some(artifact_id))
+        .context("exact package producer artifact is missing")?;
+    ensure!(
+        artifact_entry["workflow_run"]["head_branch"] == source_branch,
+        "package producer artifact branch differs from its exact run"
+    );
+    let artifact = source_api.download(
+        &format!(
+            "/repos/{}/actions/artifacts/{artifact_id}/zip",
+            source.repository
+        ),
+        artifact_size,
+    )?;
+    ensure!(
+        artifact.len() == artifact_size
+            && crate::hex_encode(Sha256::digest(&artifact)) == artifact_sha256,
+        "package producer archive differs from the exact run artifact digest"
+    );
+    let (binary, bundle) =
+        parse_scratch_package_artifact(&artifact, &asset_name, manifest.max_bytes)?;
+    ensure!(
+        !binary.is_empty() && binary.len() as u64 <= manifest.max_bytes,
+        "package producer executable is outside its manifest bound"
+    );
+    let asset_sha256 = crate::hex_encode(Sha256::digest(&binary));
+    let mut binary_file = tempfile::NamedTempFile::new()?;
+    std::io::Write::write_all(&mut binary_file, &binary)?;
+    let mut bundle_file = tempfile::Builder::new().suffix(".json").tempfile()?;
+    std::io::Write::write_all(&mut bundle_file, &bundle)?;
+    let attested = crate::attestation::verify_with_gh(
+        binary_file.path(),
+        bundle_file.path(),
+        crate::attestation::VerifyRequest {
+            repository: &source.repository,
+            signer_repository: &source.repository,
+            signer_workflow: &manifest.producer_workflow,
+            signer_sha: &source_sha,
+            source: Some((&source_sha, &format!("refs/heads/{source_branch}"))),
+        },
+    )?;
+    let (attested_run, attested_attempt, attested_branch) = validate_scratch_package_attestation(
+        &attested,
+        &source,
+        owner_id,
+        &source_sha,
+        &manifest.producer_workflow,
+        &asset_name,
+        &asset_sha256,
+    )?;
+    ensure!(
+        attested_run == producer_run_id
+            && attested_attempt == 1
+            && attested_branch == source_branch,
+        "package attestation does not identify the exact successful producer attempt"
+    );
+
+    let publisher_run_id = parse_positive_decimal(&std::env::var("GITHUB_RUN_ID")?)?;
+    let publisher_run_attempt = parse_positive_decimal(&std::env::var("GITHUB_RUN_ATTEMPT")?)?;
+    ensure!(
+        publisher_run_attempt == 1,
+        "package publisher must run its first attempt"
+    );
+    let writer_token_name = match channel {
+        PublishChannel::Stable => "SECUREFIX_PACKAGE_PUBLISH_TOKEN",
+        PublishChannel::Scratch => "SECUREFIX_PACKAGE_TOKEN",
+    };
+    let destination_remote: Value =
+        source_api.get_uncached(&format!("/repos/{}", destination.repository))?;
+    ensure!(
+        destination_remote["id"].as_u64() == Some(destination.id)
+            && destination_remote["full_name"] == destination.repository
+            && destination_remote["default_branch"] == destination.default_branch
+            && destination_remote["owner"]["id"].as_u64() == Some(source_owner_id),
+        "package destination differs from the protected publisher declaration"
+    );
+    let destination_target_sha = if matches!(channel, PublishChannel::Stable) {
+        source_sha.clone()
+    } else {
+        source_api.branch_head(&destination.repository, &destination.default_branch)?
+    };
+    let destination_branch_sha = if matches!(channel, PublishChannel::Stable) {
+        publisher_sha.clone()
+    } else {
+        destination_target_sha.clone()
+    };
+    let tag = format!("v{version}");
+    let version_string = version.to_string();
+    let source_manifest_sha256 = crate::hex_encode(Sha256::digest(&manifest_bytes));
+    let target = crate::api::PackageReleaseWriteTarget {
+        channel: package_channel,
+        source_repository: &source.repository,
+        source_repository_id: source.id,
+        source_owner_id,
+        source_branch: &source_branch,
+        source_default_branch: &source.default_branch,
+        source_sha: &source_sha,
+        source_manifest_sha256: &source_manifest_sha256,
+        destination_repository: &destination.repository,
+        destination_repository_id: destination.id,
+        destination_default_branch: &destination.default_branch,
+        destination_branch_sha: &destination_branch_sha,
+        destination_target_sha: &destination_target_sha,
+        version: &version_string,
+        tag: &tag,
+        asset_name: &asset_name,
+        asset_size: binary.len() as u64,
+        asset_sha256: &asset_sha256,
+        max_asset_bytes: manifest.max_bytes,
+        producer_workflow: &manifest.producer_workflow,
+        producer_run_id,
+        producer_run_attempt: 1,
+        producer_artifact_id: artifact_id,
+        producer_artifact_size: artifact_size as u64,
+        producer_artifact_sha256: &artifact_sha256,
+        publisher_workflow: &publisher_workflow,
+        publisher_sha: &publisher_sha,
+        publisher_branch: &publisher_branch,
+        publisher_run_id,
+        publisher_run_attempt,
+        owner_id,
+        release_id: None,
+    };
+    let release_state = GitHub::package_release_preflight_from_env("GITHUB_TOKEN", &target)?;
+    let preflight = NativePackagePreflight {
+        channel: match channel {
+            PublishChannel::Stable => "stable".to_owned(),
+            PublishChannel::Scratch => "scratch".to_owned(),
+        },
+        source_repository: source.repository.clone(),
+        source_repository_id: source.id,
+        source_sha: source_sha.clone(),
+        source_branch: source_branch.clone(),
+        source_manifest_sha256: source_manifest_sha256.clone(),
+        destination_repository: destination.repository.clone(),
+        destination_repository_id: destination.id,
+        tag: tag.clone(),
+        producer_run_id,
+        producer_run_attempt: 1,
+        producer_artifact_id: artifact_id,
+        producer_artifact_size: artifact_size as u64,
+        producer_artifact_sha256: artifact_sha256.clone(),
+        publisher_workflow: publisher_workflow.clone(),
+        publisher_run_id,
+        publisher_run_attempt,
+        publisher_sha: publisher_sha.clone(),
+        asset_name: asset_name.clone(),
+        asset_size: binary.len() as u64,
+        asset_sha256: asset_sha256.clone(),
+        release_state,
+    };
+    if mode == NativePackageMode::Preflight {
+        return Ok(NativePackageCommandResult::Preflight(preflight));
+    }
+    if let crate::api::PackageReleasePreflightState::AlreadyPublished {
+        release_id,
+        asset_id,
+        publisher_run_id: recorded_publisher_run_id,
+        publisher_run_attempt: recorded_publisher_run_attempt,
+    } = release_state
+    {
+        return Ok(NativePackageCommandResult::Published(
+            NativePackagePublication {
+                channel: match channel {
+                    PublishChannel::Stable => "stable".to_owned(),
+                    PublishChannel::Scratch => "scratch".to_owned(),
+                },
+                source_repository: source.repository.clone(),
+                source_repository_id: source.id,
+                source_sha,
+                source_branch,
+                source_manifest_sha256,
+                tag,
+                producer_run_id,
+                producer_run_attempt: 1,
+                producer_artifact_id: artifact_id,
+                producer_artifact_size: artifact_size as u64,
+                producer_artifact_sha256: artifact_sha256,
+                publisher_workflow,
+                publisher_run_id: recorded_publisher_run_id,
+                publisher_run_attempt: recorded_publisher_run_attempt,
+                publisher_sha,
+                release_id,
+                asset_id,
+                asset_name,
+                asset_size: binary.len() as u64,
+                asset_sha256,
+                immutable: true,
+                recovered: true,
+                recovery_run_id: Some(publisher_run_id),
+                recovery_run_attempt: Some(publisher_run_attempt),
+            },
+        ));
+    }
+    let mut writer = GitHub::package_release_from_env("GITHUB_TOKEN", writer_token_name, &target)?;
+    let release_id = writer.package_release_create_draft()?;
+    let asset_uploaded = writer.package_release_select(release_id)?;
+    if !asset_uploaded {
+        writer.upload(
+            &writer.package_release_asset_upload_endpoint()?,
+            binary.clone(),
+            "application/octet-stream",
+        )?;
+    }
+    writer.package_release_publish_draft()?;
+    let published = writer.package_release_verify_published()?;
+    let assets = published["assets"]
+        .as_array()
+        .filter(|assets| assets.len() == 1)
+        .context("published package release does not have exactly one asset")?;
+    let asset = &assets[0];
+    let asset_id = asset["id"]
+        .as_u64()
+        .context("published package asset has no ID")?;
+    let downloaded = writer.download(
+        &format!(
+            "/repos/{}/releases/assets/{asset_id}",
+            destination.repository
+        ),
+        binary.len(),
+    )?;
+    ensure!(
+        downloaded == binary,
+        "published package asset bytes differ from the attested producer binary"
+    );
+    Ok(NativePackageCommandResult::Published(
+        NativePackagePublication {
+            channel: match channel {
+                PublishChannel::Stable => "stable".to_owned(),
+                PublishChannel::Scratch => "scratch".to_owned(),
+            },
+            source_repository: source.repository.clone(),
+            source_repository_id: source.id,
+            source_sha,
+            source_branch,
+            source_manifest_sha256,
+            tag,
+            producer_run_id,
+            producer_run_attempt: 1,
+            producer_artifact_id: artifact_id,
+            producer_artifact_size: artifact_size as u64,
+            producer_artifact_sha256: artifact_sha256,
+            publisher_workflow,
+            publisher_run_id,
+            publisher_run_attempt,
+            publisher_sha,
+            release_id,
+            asset_id,
+            asset_name,
+            asset_size: binary.len() as u64,
+            asset_sha256,
+            immutable: published["immutable"] == true,
+            recovered: matches!(
+                release_state,
+                crate::api::PackageReleasePreflightState::ResumeDraft { .. }
+            ),
+            recovery_run_id: None,
+            recovery_run_attempt: None,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2093,6 +2907,37 @@ mod tests {
             (PACKAGE_BUNDLE_NAME, b"{}"),
         ]);
         assert!(parse_scratch_package_artifact(&too_large, PACKAGE_BINARY_NAME, 5).is_err());
+    }
+
+    #[test]
+    fn native_package_release_manifest_binds_exact_workflows_and_source() {
+        let cargo = b"[package]\nname = \"securefix\"\nversion = \"1.2.3-pre.4\"\n";
+        let manifest = serde_json::json!({
+            "schema_version": 2,
+            "component": "securefix-server",
+            "protocol": NATIVE_CLIENT_PROTOCOL,
+            "version": "1.2.3-pre.4",
+            "producer_workflow": NATIVE_PACKAGE_PRODUCER_WORKFLOW,
+            "publisher_workflow": NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
+            "max_bytes": 1024,
+            "assets": {"linux-x86_64": PACKAGE_BINARY_NAME}
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let binding = NativePackageReleaseSourceBinding {
+            source_sha: SOURCE_SHA,
+            version: "1.2.3-pre.4",
+            producer_workflow: NATIVE_PACKAGE_PRODUCER_WORKFLOW,
+            publisher_workflow: NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
+            asset_name: PACKAGE_BINARY_NAME,
+            max_asset_bytes: 1024,
+            stable: false,
+        };
+        validate_native_package_release_source(cargo, &bytes, &binding).unwrap();
+
+        let mut changed = manifest.clone();
+        changed["publisher_workflow"] = serde_json::json!(".github/workflows/other.yml");
+        let changed = serde_json::to_vec(&changed).unwrap();
+        assert!(validate_native_package_release_source(cargo, &changed, &binding).is_err());
     }
 
     #[test]

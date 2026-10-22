@@ -70,6 +70,11 @@ enum Command {
         #[command(subcommand)]
         command: runtime::Command,
     },
+    #[command(about = "Publish a verified Securefix executable package")]
+    Package {
+        #[command(subcommand)]
+        command: securefix::package::Command,
+    },
     #[command(about = "Prepare and propose a protected control revision activation")]
     Control {
         #[command(subcommand)]
@@ -121,6 +126,7 @@ fn main() -> Result<()> {
         Command::Merge { command } => merge::run(command),
         Command::Release { command } => release::run(command),
         Command::Runtime { command } => runtime::run(command),
+        Command::Package { command } => securefix::package::run(command),
         Command::Control { command } => control_commands::run(command),
         Command::Distribute { command } => distribution::run(command),
         Command::CallerMigration { command } => distribution::reviewed::run(command),
