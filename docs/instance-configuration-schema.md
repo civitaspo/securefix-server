@@ -35,6 +35,7 @@ unlisted key is rejected.
 | Field | Requiredness and validation |
 | --- | --- |
 | `schema_version` | Required integer; must equal `1`. |
+| `release_request_label_prefix` | Required string. Empty disables the label namespace. Otherwise it must be at most 32 bytes, start with a lowercase ASCII letter, contain only lowercase ASCII letters, digits, or `-`, and end with `-`. |
 | `[instance].repository` | Required `owner/name`; validated with the existing repository-name validator. |
 | `[instance].id` | Required, nonzero repository ID claim. |
 | `[instance].default_branch` | Required branch name; checked with the existing branch validator. |
@@ -102,9 +103,10 @@ default to empty and never add a principal to `trusted_committers`.
 There is no `[runtime]` table or implementation-version `[server]` table. The
 YAML workflow/action pin remains the proposed implementation selector. The
 parser has no legacy `integration`, `control_repository`,
-`runtime_update_branch`, or workflow-prefix fields. These and any other unknown
-keys reject. The parser does not invent a scratch repository, legacy branch, or
-control identity.
+`runtime_update_branch`, or `workflow_prefix` field. These and any other unknown
+keys reject. `release_request_label_prefix` only namespaces release-request
+labels; it does not select workflow paths. The parser does not invent a scratch
+repository, legacy branch, or control identity.
 
 Workflow-role paths are claims only. Parsing does not check whether a mapped
 file exists, is regular, or avoids symlinks. It does not inspect the wrapper,
