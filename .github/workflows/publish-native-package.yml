@@ -102,7 +102,7 @@ jobs:
           set -euo pipefail
           result="$(publisher/securefix package preflight --producer-run-id "$PRODUCER_RUN_ID" --channel "$CHANNEL")"
           printf '%s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
-          already_published="$(jq -er '.evidence.release_state.state == "already_published"' <<< "$result")"
+          already_published="$(jq -r '.evidence.release_state.state == "already_published"' <<< "$result")"
           printf 'already-published=%s\n' "$already_published" >> "$GITHUB_OUTPUT"
       - name: Record the read-only package preflight
         if: inputs.preflight_only == true
