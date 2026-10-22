@@ -1,0 +1,388 @@
+name: testing-native-release-assets-publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      harness_sha:
+        description: Exact signed owner PR head that contains the producer-tuple-aware probe harness
+        required: true
+        type: string
+      producer_source_sha:
+        description: Exact frozen Server source used for the native asset build
+        required: true
+        type: string
+      producer_run_id:
+        description: Exact successful native build and verifier run
+        required: true
+        type: string
+      producer_run_attempt:
+        description: Exact producer attempt
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: native-release-assets-scratch-publish
+  cancel-in-progress: false
+
+env:
+  SERVER_REPOSITORY: civitaspo/securefix-server
+  SCRATCH_REPOSITORY: civitaspo/testing-securefix-server
+  CLIENT_SOURCE_SHA: ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00
+
+jobs:
+  host-build:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Validate the selected source and producer tuple
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARNESS_SHA: ${{ inputs.harness_sha }}
+          PRODUCER_SOURCE_SHA: ${{ inputs.producer_source_sha }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRODUCER_SOURCE_SHA" == 93e16ba0c8b41617889cff557ee20fb19d9ce5ef ]]
+          [[ "$PRODUCER_RUN_ID" == 39728542160 ]]
+          [[ "$PRODUCER_RUN_ATTEMPT" == 1 ]]
+          commit="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA")"
+          jq -e --arg sha "$HARNESS_SHA" '.sha == $sha and .commit.verification.verified == true' <<<"$commit" >/dev/null
+          prs="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA/pulls?per_page=100")"
+          jq -e --arg sha "$HARNESS_SHA" '[.[] | select(.state == "open" and .base.ref == "main" and .base.repo.full_name == "civitaspo/securefix-server" and .head.repo.full_name == "civitaspo/securefix-server" and .head.sha == $sha and .user.id == 4525500)] | length == 1' <<<"$prs" >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.harness_sha }}
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the selected-source native release probe harness
+        env:
+          HARNESS_SHA: ${{ inputs.harness_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$HARNESS_SHA" ]]
+          cargo +1.99.0 test --locked --bin securefix --no-run --message-format=json > "$RUNNER_TEMP/cargo-test.json"
+          binary="$(jq -er 'select(.reason == "compiler-artifact" and .target.name == "securefix" and .profile.test == true and (.target.kind | index("bin")) != null) | .executable' "$RUNNER_TEMP/cargo-test.json")"
+          [[ -x "$binary" ]]
+          mkdir -p probe
+          install -m 755 "$binary" probe/release-probe-tests
+          install -m 644 policy.json probe/policy.json
+          jq -n --arg harness_sha "$HARNESS_SHA" '{harness_sha:$harness_sha}' > probe/source.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: native-release-assets-probe-host-${{ github.run_id }}
+          path: probe/
+          if-no-files-found: error
+          retention-days: 1
+
+  qualify:
+    needs: host-build
+    if: needs.host-build.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      artifact-ids: ${{ steps.qualify.outputs.artifact-ids }}
+      verification-artifact-id: ${{ steps.qualify.outputs.verification-artifact-id }}
+      scratch-sha: ${{ steps.qualify.outputs.scratch-sha }}
+    steps:
+      - name: Qualify the frozen source, producer jobs, artifacts, and scratch target
+        id: qualify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARNESS_SHA: ${{ inputs.harness_sha }}
+          PRODUCER_SOURCE_SHA: ${{ inputs.producer_source_sha }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRODUCER_SOURCE_SHA" == 93e16ba0c8b41617889cff557ee20fb19d9ce5ef ]]
+          [[ "$PRODUCER_RUN_ID" == 39728542160 ]]
+          [[ "$PRODUCER_RUN_ATTEMPT" == 1 ]]
+          [[ "$WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          producer_branch="integration/native-${PRODUCER_SOURCE_SHA:0:12}"
+
+          main_sha="$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_sha" == "$WORKFLOW_SHA" ]]
+          main_commit="$(gh api "repos/$SERVER_REPOSITORY/commits/$main_sha")"
+          jq -e --arg sha "$main_sha" '.sha == $sha and .commit.verification.verified == true' <<<"$main_commit" >/dev/null
+
+          producer_source_commit="$(gh api "repos/$SERVER_REPOSITORY/commits/$PRODUCER_SOURCE_SHA")"
+          jq -e --arg sha "$PRODUCER_SOURCE_SHA" '.sha == $sha and .commit.verification.verified == true' <<<"$producer_source_commit" >/dev/null
+          producer_source_ref="$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/$producer_branch" --jq .object.sha)"
+          [[ "$producer_source_ref" == "$PRODUCER_SOURCE_SHA" ]]
+
+          harness_commit="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA")"
+          jq -e --arg sha "$HARNESS_SHA" '.sha == $sha and .commit.verification.verified == true' <<<"$harness_commit" >/dev/null
+          harness_prs="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA/pulls?per_page=100")"
+          jq -e --arg sha "$HARNESS_SHA" '
+            [.[] | select(
+              .state == "open"
+              and .base.ref == "main"
+              and .base.repo.full_name == "civitaspo/securefix-server"
+              and .head.repo.full_name == "civitaspo/securefix-server"
+              and .head.sha == $sha
+              and .user.id == 4525500
+            )] | length == 1
+          ' <<<"$harness_prs" >/dev/null
+          harness_branch="$(jq -er --arg sha "$HARNESS_SHA" '[.[] | select(.state == "open" and .base.ref == "main" and .head.sha == $sha and .user.id == 4525500)][0].head.ref' <<<"$harness_prs")"
+          [[ "$harness_branch" == integration/native-* ]]
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/$harness_branch" --jq .object.sha)" == "$HARNESS_SHA" ]]
+          ancestry="$(gh api "repos/$SERVER_REPOSITORY/compare/$PRODUCER_SOURCE_SHA...$HARNESS_SHA")"
+          jq -e --arg sha "$PRODUCER_SOURCE_SHA" '.status == "ahead" and .merge_base_commit.sha == $sha' <<<"$ancestry" >/dev/null
+
+          source_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
+          harness_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$HARNESS_SHA" --jq .sha)"
+          main_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$WORKFLOW_SHA" --jq .sha)"
+          [[ "$source_control" == "$main_control" && "$harness_control" == "$main_control" ]]
+          source_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
+          harness_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$HARNESS_SHA" --jq .sha)"
+          [[ "$source_policy" == "$harness_policy" ]]
+
+          producer="$(gh api "repos/$SERVER_REPOSITORY/actions/runs/$PRODUCER_RUN_ID")"
+          jq -e --argjson id "$PRODUCER_RUN_ID" --arg sha "$PRODUCER_SOURCE_SHA" --arg branch "$producer_branch" --argjson attempt "$PRODUCER_RUN_ATTEMPT" '
+            .id == $id
+            and .path == ".github/workflows/testing-securefix-server.yml"
+            and .event == "workflow_dispatch"
+            and .head_repository.full_name == "civitaspo/securefix-server"
+            and .head_branch == $branch
+            and .head_sha == $sha
+            and .run_attempt == $attempt
+            and .actor.id == 4525500
+            and .status == "completed"
+            and .conclusion == "failure"
+          ' <<<"$producer" >/dev/null
+
+          jobs="$(gh api "repos/$SERVER_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/jobs?per_page=100")"
+          jq -e '
+            def successes($name): [.jobs[] | select(.name == $name and .conclusion == "success")] | length == 1;
+            successes("native-release-assets-probe / guard")
+            and successes("native-release-assets-probe / compile-harness")
+            and successes("native-release-assets-probe / build-native (aarch64-apple-darwin, macos-15)")
+            and successes("native-release-assets-probe / build-native (x86_64-apple-darwin, macos-15-intel)")
+            and successes("native-release-assets-probe / build-native (aarch64-unknown-linux-musl, ubuntu-24.04-arm)")
+            and successes("native-release-assets-probe / build-native (x86_64-unknown-linux-musl, ubuntu-24.04)")
+            and successes("native-release-assets-probe / verify-native-targets")
+            and ([.jobs[] | select(.name == "native-release-assets-probe / publish-scratch-prerelease")] | length == 1)
+            and ([.jobs[] | select(.name == "native-release-assets-probe / publish-scratch-prerelease" and .conclusion == "failure" and .runner_name == "" and (.steps | length) == 0)] | length == 1)
+            and ([.jobs[] | select(.conclusion == "failure") | .name] == ["native-release-assets-probe / publish-scratch-prerelease"])
+          ' <<<"$jobs" >/dev/null
+
+          expected='[
+            {"id":12403514103,"name":"native-target-aarch64-apple-darwin-1","size_in_bytes":7166777,"digest":"sha256:7f1e66b5a7deb48d92cda66ab0ced18249bb50476b758ee6f63ee001492e5c9e","expired":false},
+            {"id":12403799531,"name":"native-target-aarch64-unknown-linux-musl-1","size_in_bytes":9207659,"digest":"sha256:50a73ccbb088427af0010f680e3514d3e0ba489b90eb79da77ed4563690cbae4","expired":false},
+            {"id":12404720358,"name":"native-target-x86_64-apple-darwin-1","size_in_bytes":7328499,"digest":"sha256:8e6f33e6d8560872a2c907035bd76d98f496f83c98c06db6a5f793c63ff21a71","expired":false},
+            {"id":12403759658,"name":"native-target-x86_64-unknown-linux-musl-1","size_in_bytes":9313938,"digest":"sha256:c633c557e2df699a548e8ab4b56db53d524b10b0a4dc39c49da34315136ba8c5","expired":false},
+            {"id":12404825172,"name":"native-release-assets-input-evidence-39728542160","size_in_bytes":1021,"digest":"sha256:0f770a876d04a161a8eba43c34ffc32fbbd13b296221ed8d7ae330a4d3a1991a","expired":false},
+            {"id":12403594699,"name":"native-release-probe-harness-39728542160","size_in_bytes":37860853,"digest":"sha256:8b0c1849fb88d348017342fd75c7fe00a59367df726ba662353f096f20b89531","expired":false}
+          ]'
+          artifacts="$(gh api "repos/$SERVER_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/artifacts?per_page=100" --jq '[.artifacts[] | {id,name,size_in_bytes,digest,expired}] | sort_by(.id)')"
+          jq -e --argjson expected "$expected" 'sort_by(.id) == ($expected | sort_by(.id))' <<<"$artifacts" >/dev/null
+          artifact_ids="$(jq -r '[.[] | select(.name | startswith("native-target-")) | .id] | join(",")' <<<"$artifacts")"
+          verification_id="$(jq -r '.[] | select(.id == 12404825172) | .id' <<<"$artifacts")"
+          [[ "$(tr ',' '\n' <<<"$artifact_ids" | wc -l | tr -d ' ')" == 4 ]]
+          [[ "$verification_id" == 12404825172 ]]
+
+          scratch="$(gh api "repos/$SCRATCH_REPOSITORY")"
+          jq -e '.id == 1410312556 and .full_name == "civitaspo/testing-securefix-server" and .default_branch == "main"' <<<"$scratch" >/dev/null
+          scratch_sha="$(gh api "repos/$SCRATCH_REPOSITORY/commits/main" --jq .sha)"
+          [[ "$scratch_sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "artifact-ids=$artifact_ids" >> "$GITHUB_OUTPUT"
+          echo "verification-artifact-id=$verification_id" >> "$GITHUB_OUTPUT"
+          echo "scratch-sha=$scratch_sha" >> "$GITHUB_OUTPUT"
+
+  publish-scratch:
+    needs: [host-build, qualify]
+    if: needs.host-build.result == 'success' && needs.qualify.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.host-build.outputs.artifact-id }}
+          path: probe
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.qualify.outputs.artifact-ids }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.producer_run_id }}
+          github-token: ${{ github.token }}
+          path: native-input
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.qualify.outputs.verification-artifact-id }}
+          repository: civitaspo/securefix-server
+          run-id: ${{ inputs.producer_run_id }}
+          github-token: ${{ github.token }}
+          path: verification-evidence
+          merge-multiple: true
+      - name: Recheck the selected source and target before minting a scratch token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARNESS_SHA: ${{ inputs.harness_sha }}
+          PRODUCER_SOURCE_SHA: ${{ inputs.producer_source_sha }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EXPECTED_SCRATCH_SHA: ${{ needs.qualify.outputs.scratch-sha }}
+        run: |
+          set -euo pipefail
+          producer_branch="integration/native-${PRODUCER_SOURCE_SHA:0:12}"
+          [[ "$HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRODUCER_SOURCE_SHA" == 93e16ba0c8b41617889cff557ee20fb19d9ce5ef ]]
+          [[ "$PRODUCER_RUN_ID" == 39728542160 && "$PRODUCER_RUN_ATTEMPT" == 1 ]]
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$WORKFLOW_SHA" ]]
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/$producer_branch" --jq .object.sha)" == "$PRODUCER_SOURCE_SHA" ]]
+          producer_source_commit="$(gh api "repos/$SERVER_REPOSITORY/commits/$PRODUCER_SOURCE_SHA")"
+          jq -e --arg sha "$PRODUCER_SOURCE_SHA" '.sha == $sha and .commit.verification.verified == true' <<<"$producer_source_commit" >/dev/null
+          harness_commit="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA")"
+          jq -e --arg sha "$HARNESS_SHA" '.sha == $sha and .commit.verification.verified == true' <<<"$harness_commit" >/dev/null
+          harness_prs="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA/pulls?per_page=100")"
+          jq -e --arg sha "$HARNESS_SHA" '[.[] | select(.state == "open" and .base.ref == "main" and .base.repo.full_name == "civitaspo/securefix-server" and .head.repo.full_name == "civitaspo/securefix-server" and .head.sha == $sha and .user.id == 4525500)] | length == 1' <<<"$harness_prs" >/dev/null
+          harness_branch="$(jq -er --arg sha "$HARNESS_SHA" '[.[] | select(.state == "open" and .base.ref == "main" and .head.sha == $sha and .user.id == 4525500)][0].head.ref' <<<"$harness_prs")"
+          [[ "$harness_branch" == integration/native-* ]]
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/$harness_branch" --jq .object.sha)" == "$HARNESS_SHA" ]]
+          ancestry="$(gh api "repos/$SERVER_REPOSITORY/compare/$PRODUCER_SOURCE_SHA...$HARNESS_SHA")"
+          jq -e --arg sha "$PRODUCER_SOURCE_SHA" '.status == "ahead" and .merge_base_commit.sha == $sha' <<<"$ancestry" >/dev/null
+          source_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
+          harness_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$HARNESS_SHA" --jq .sha)"
+          main_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$WORKFLOW_SHA" --jq .sha)"
+          [[ "$source_control" == "$main_control" && "$harness_control" == "$main_control" ]]
+          source_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
+          harness_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$HARNESS_SHA" --jq .sha)"
+          [[ "$source_policy" == "$harness_policy" ]]
+          source_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
+          harness_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$HARNESS_SHA" --jq .sha)"
+          main_policy="$(gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$WORKFLOW_SHA" --jq .sha)"
+          [[ "$source_policy" == "$main_policy" && "$harness_policy" == "$main_policy" ]]
+
+          [[ -f probe/source.json && ! -L probe/source.json ]]
+          jq -e --arg sha "$HARNESS_SHA" '.harness_sha == $sha' probe/source.json >/dev/null
+
+          jq -e '
+            .owner_id == 4525500
+            and .deployment.server.repository == "civitaspo/securefix-server"
+            and .deployment.server.id == 1250079425
+            and .deployment.integration.repository == "civitaspo/testing-securefix-server"
+            and .deployment.integration.id == 1410312556
+            and .deployment.integration.default_branch == "main"
+          ' probe/policy.json >/dev/null
+
+          evidence_file=verification-evidence/native-release-assets-inputs.json
+          [[ -f "$evidence_file" && ! -L "$evidence_file" ]]
+          echo '2e97206422df911f4352875e3f3109c664a7ad9719a34b4534bea0272492ec91  verification-evidence/native-release-assets-inputs.json' | sha256sum --check
+          jq -e '
+            .schema_version == 1
+            and .server_repository == "civitaspo/securefix-server"
+            and .server_source_sha == "93e16ba0c8b41617889cff557ee20fb19d9ce5ef"
+            and .server_run_id == 39728542160
+            and .server_run_attempt == 1
+            and .client_repository == "civitaspo/herdr-linear-agent"
+            and .client_source_sha == "ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00"
+            and .client_source_pr_number == 187
+            and .client_package_version == "0.8.1"
+            and (.binaries | length == 4)
+            and (.artifacts | length == 4)
+          ' "$evidence_file" >/dev/null
+
+          scratch="$(gh api "repos/$SCRATCH_REPOSITORY")"
+          jq -e '.id == 1410312556 and .full_name == "civitaspo/testing-securefix-server" and .default_branch == "main"' <<<"$scratch" >/dev/null
+          scratch_sha="$(gh api "repos/$SCRATCH_REPOSITORY/commits/main" --jq .sha)"
+          [[ "$scratch_sha" == "$EXPECTED_SCRATCH_SHA" ]]
+
+      - name: Revalidate the exact native artifacts before minting a scratch token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_POLICY_PATH: probe/policy.json
+          SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA: ${{ inputs.harness_sha }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA: ${{ inputs.producer_source_sha }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_INPUT_DIR: native-input
+          SECUREFIX_NATIVE_RELEASE_PROBE_OUTPUT_DIR: ${{ runner.temp }}/native-release-probe/prewrite-evidence
+        run: |
+          set -euo pipefail
+          [[ -f probe/release-probe-tests && ! -L probe/release-probe-tests ]]
+          chmod 755 probe/release-probe-tests
+          probe/release-probe-tests --ignored --exact release::tests::native_release_assets_validate_probe_inputs --nocapture
+
+      - name: Create a scratch-only Server App token
+        id: scratch-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-contents: write
+
+      - name: Recheck current main and target immediately before scratch publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARNESS_SHA: ${{ inputs.harness_sha }}
+          PRODUCER_SOURCE_SHA: ${{ inputs.producer_source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EXPECTED_SCRATCH_SHA: ${{ needs.qualify.outputs.scratch-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$WORKFLOW_SHA" ]]
+          producer_branch="integration/native-${PRODUCER_SOURCE_SHA:0:12}"
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/$producer_branch" --jq .object.sha)" == "$PRODUCER_SOURCE_SHA" ]]
+          harness_prs="$(gh api "repos/$SERVER_REPOSITORY/commits/$HARNESS_SHA/pulls?per_page=100")"
+          jq -e --arg sha "$HARNESS_SHA" '[.[] | select(.state == "open" and .base.ref == "main" and .base.repo.full_name == "civitaspo/securefix-server" and .head.repo.full_name == "civitaspo/securefix-server" and .head.sha == $sha and .user.id == 4525500)] | length == 1' <<<"$harness_prs" >/dev/null
+          harness_branch="$(jq -er --arg sha "$HARNESS_SHA" '[.[] | select(.state == "open" and .base.ref == "main" and .head.sha == $sha and .user.id == 4525500)][0].head.ref' <<<"$harness_prs")"
+          [[ "$(gh api "repos/$SERVER_REPOSITORY/git/ref/heads/$harness_branch" --jq .object.sha)" == "$HARNESS_SHA" ]]
+          scratch="$(gh api "repos/$SCRATCH_REPOSITORY")"
+          jq -e '.id == 1410312556 and .full_name == "civitaspo/testing-securefix-server" and .default_branch == "main"' <<<"$scratch" >/dev/null
+          [[ "$(gh api "repos/$SCRATCH_REPOSITORY/commits/main" --jq .sha)" == "$EXPECTED_SCRATCH_SHA" ]]
+          source_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$PRODUCER_SOURCE_SHA" --jq .sha)"
+          harness_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$HARNESS_SHA" --jq .sha)"
+          main_control="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$WORKFLOW_SHA" --jq .sha)"
+          [[ "$source_control" == "$main_control" && "$harness_control" == "$main_control" ]]
+
+      - name: Run the source-bound native scratch release probe
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_POLICY_PATH: probe/policy.json
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY: ${{ env.SCRATCH_REPOSITORY }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA: ${{ inputs.harness_sha }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA: ${{ inputs.producer_source_sha }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+          SECUREFIX_NATIVE_RELEASE_PROBE_INPUT_DIR: native-input
+          SECUREFIX_NATIVE_RELEASE_PROBE_ASSET_DIR: ${{ runner.temp }}/native-release-probe/assets
+          SECUREFIX_NATIVE_RELEASE_PROBE_OUTPUT_DIR: ${{ runner.temp }}/native-release-probe/publish-evidence
+        run: |
+          set -euo pipefail
+          chmod 755 probe/release-probe-tests
+          probe/release-probe-tests --ignored --exact release::tests::native_release_assets_scratch_publish_probe --nocapture
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-release-assets-publish-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-release-probe/publish-evidence/native-release-assets-probe.json
+          if-no-files-found: warn
+          retention-days: 7
