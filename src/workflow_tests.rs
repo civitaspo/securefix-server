@@ -1003,7 +1003,7 @@ fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
 }
 
 #[test]
-fn native_approval_host_keeps_the_existing_user_token_in_one_protected_step() {
+fn native_approval_uses_the_fixed_package_and_keeps_the_user_token_in_one_protected_step() {
     const CONFIG_PATH: &str = "repo-settings/native-securefix-test-instance.toml";
     const WORKFLOW_PATH: &str = ".github/workflows/testing-native-approve.yml";
 
@@ -1030,6 +1030,8 @@ fn native_approval_host_keeps_the_existing_user_token_in_one_protected_step() {
     let wrapper = workflow("testing-native-approve.yml");
     assert!(wrapper["on"]["workflow_dispatch"].is_object());
     let jobs = wrapper["jobs"].as_object().unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert!(!jobs.contains_key("build-host"));
     for (name, job) in jobs {
         let guard = job["if"].as_str().unwrap();
         for condition in [
@@ -1037,47 +1039,50 @@ fn native_approval_host_keeps_the_existing_user_token_in_one_protected_step() {
             "github.ref == 'refs/heads/main'",
             "github.actor_id == '4525500'",
             "github.run_attempt == 1",
+            "github.sha == github.workflow_sha",
         ] {
             assert!(guard.contains(condition), "{name}: missing {condition}");
         }
-        if name != "build-host" {
-            assert_eq!(job["environment"], "main", "{name}");
-        }
+        assert_eq!(job["environment"], "main", "{name}");
     }
-
-    let build_steps = jobs["build-host"]["steps"].as_array().unwrap();
-    assert!(build_steps.iter().any(|step| {
-        step["with"]["ref"] == "${{ github.workflow_sha }}"
-            && step["with"]["persist-credentials"] == false
-    }));
-    assert!(build_steps.iter().any(|step| {
-        step["name"] == "Build the protected approval host without secrets"
-            && step["run"] == "cargo +1.99.0 build --locked --bin securefix"
-    }));
-    assert!(
-        build_steps
-            .iter()
-            .all(|step| step["env"]["SECUREFIX_APPROVE_TOKEN"].is_null())
-    );
 
     for job_name in ["validate-request", "apply-approval"] {
         let steps = jobs[job_name]["steps"].as_array().unwrap();
-        assert!(steps.iter().any(|step| {
+        let package = steps
+            .iter()
+            .find(|step| step["uses"] == "$/.github/actions/load-package")
+            .unwrap();
+        assert_eq!(package["name"], "Load the fixed immutable scratch package");
+        assert_eq!(package["with"]["action-sha"], "${{ github.workflow_sha }}");
+        assert_eq!(package["with"]["channel"], "scratch");
+        assert_eq!(
+            package["with"]["publication-source-sha"],
+            "c6aa3110bb31d5ca5bae452d291870066f0147ef"
+        );
+        assert_eq!(package["with"]["publication-source-branch"], "main");
+        assert_eq!(package["with"]["publication-tag"], "v0.2.45-pre.12");
+        assert_eq!(package["with"]["publication-release-id"], "420243090");
+        assert_eq!(package["with"]["publication-asset-id"], "664424003");
+        assert_eq!(
+            package["with"]["publication-asset-sha256"],
+            "a01165f2204b51f99f1cc37d922858d7941475b4193e9e066d6352e575c28083"
+        );
+        assert_eq!(package["with"]["publication-asset-size"], "10893768");
+        assert_eq!(
+            package["with"]["publication-producer-run-id"],
+            "39710467717"
+        );
+        assert_eq!(package["with"]["publication-producer-run-attempt"], "1");
+        assert_eq!(package["with"]["token"], "${{ github.token }}");
+        assert!(!steps.iter().any(|step| {
             step["uses"]
                 .as_str()
                 .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
-                && step["with"]["artifact-ids"] == "${{ needs.build-host.outputs.artifact-id }}"
-        }));
-        assert!(steps.iter().any(|step| {
-            step["name"] == "Verify the protected host handoff"
-                && step["run"]
-                    .as_str()
-                    .is_some_and(|run| run.contains("sha256sum --check"))
         }));
         assert!(steps.iter().any(|step| {
             step["run"]
                 .as_str()
-                .is_some_and(|run| run.contains("$RUNNER_TEMP/native-approval-host/securefix"))
+                .is_some_and(|run| run.contains("securefix new-server approval"))
         }));
     }
 
