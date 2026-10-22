@@ -186,7 +186,10 @@ impl Fixture {
                                 })
                         })
                         .collect::<Vec<_>>();
-                    assert_eq!(values, [value], "expected exactly one {name} header");
+                    assert!(
+                        values == [value],
+                        "expected exactly one matching {name} header"
+                    );
                 }
                 let length = header
                     .lines()
