@@ -283,6 +283,16 @@ jobs:
             and .deployment.integration.default_branch == "main"
           ' probe/policy.json >/dev/null
 
+          active_control_content="$(gh api "repos/$SERVER_REPOSITORY/contents/control/active.json?ref=$WORKFLOW_SHA" --jq .content)"
+          printf '%s' "$active_control_content" | base64 --decode > probe/active-control.json
+          active_source_sha="$(jq -er .source_sha probe/active-control.json)"
+          active_policy_sha="$(jq -er .policy_sha256 probe/active-control.json)"
+          [[ "$active_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$active_policy_sha" =~ ^[0-9a-f]{64}$ ]]
+          gh api "repos/$SERVER_REPOSITORY/contents/policy.json?ref=$active_source_sha" --jq .content \
+            | base64 --decode > probe/active-policy.json
+          printf '%s  %s\n' "$active_policy_sha" probe/active-policy.json | sha256sum --check
+
           evidence_file=verification-evidence/native-release-assets-inputs.json
           [[ -f "$evidence_file" && ! -L "$evidence_file" ]]
           echo '2e97206422df911f4352875e3f3109c664a7ad9719a34b4534bea0272492ec91  verification-evidence/native-release-assets-inputs.json' | sha256sum --check
@@ -308,7 +318,8 @@ jobs:
       - name: Revalidate the exact native artifacts before minting a scratch token
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_POLICY_PATH: probe/policy.json
+          SECUREFIX_POLICY_PATH: probe/active-policy.json
+          SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH: probe/policy.json
           SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}
           SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA: ${{ inputs.harness_sha }}
           SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA: ${{ inputs.producer_source_sha }}
@@ -359,7 +370,8 @@ jobs:
       - name: Run the source-bound native scratch release probe
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_POLICY_PATH: probe/policy.json
+          SECUREFIX_POLICY_PATH: probe/active-policy.json
+          SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH: probe/policy.json
           SECUREFIX_SERVER_APP_TOKEN: ${{ steps.scratch-token.outputs.token }}
           SECUREFIX_NATIVE_RELEASE_PROBE_REPOSITORY: ${{ env.SCRATCH_REPOSITORY }}
           SECUREFIX_NATIVE_RELEASE_PROBE_CLIENT_SHA: ${{ env.CLIENT_SOURCE_SHA }}

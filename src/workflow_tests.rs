@@ -140,6 +140,10 @@ fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
     assert!(publish_source_recheck_run.contains("\"$source_policy\" == \"$harness_policy\""));
     assert!(publish_source_recheck_run.contains("\"$source_control\" == \"$main_control\""));
     assert!(publish_source_recheck_run.contains("\"$harness_control\" == \"$main_control\""));
+    assert!(publish_source_recheck_run.contains("active_source_sha"));
+    assert!(publish_source_recheck_run.contains("active_policy_sha"));
+    assert!(publish_source_recheck_run.contains("policy.json?ref=$active_source_sha"));
+    assert!(publish_source_recheck_run.contains("sha256sum --check"));
     assert!(!publish_source_recheck_run.contains("main_policy"));
     assert!(!publish_source_recheck_run.contains("policy.json?ref=$WORKFLOW_SHA"));
 
@@ -178,6 +182,14 @@ fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
     let prewrite_run = steps[prewrite]["run"].as_str().unwrap();
     assert!(prewrite_run.contains("release::tests::native_release_assets_validate_probe_inputs"));
     assert!(!prewrite_run.contains("GITHUB_SHA=") && !prewrite_run.contains("GITHUB_RUN_ID="));
+    assert_eq!(
+        steps[prewrite]["env"]["SECUREFIX_POLICY_PATH"],
+        "probe/active-policy.json"
+    );
+    assert_eq!(
+        steps[prewrite]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"],
+        "probe/policy.json"
+    );
     let token = steps
         .iter()
         .position(|step| step["id"] == "scratch-token")
@@ -212,6 +224,14 @@ fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
     assert_eq!(
         steps[writer]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"],
         "${{ inputs.producer_run_attempt }}"
+    );
+    assert_eq!(
+        steps[writer]["env"]["SECUREFIX_POLICY_PATH"],
+        "probe/active-policy.json"
+    );
+    assert_eq!(
+        steps[writer]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_TARGET_POLICY_PATH"],
+        "probe/policy.json"
     );
     assert_eq!(
         steps[prewrite]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"],

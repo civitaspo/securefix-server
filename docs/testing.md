@@ -47,7 +47,11 @@ active control matches current main, and the producer's expected jobs and artifa
 IDs, digests, and sizes are unchanged. The workflow rebuilds the harness without write credentials, checks
 the artifacts before token creation, then uses a Server App token scoped only to
 `testing-securefix-server` and records the scratch release and immutable asset
-digests. It does not publish a Client release.
+digests. The release probe reads its active operational policy from the source
+revision named by `control/active.json` and verifies that policy against the
+descriptor digest. The candidate policy supplies only the four native target
+definitions used to validate the preserved build artifacts; it is not used as
+control or write authority. It does not publish a Client release.
 
 ## Development pre-release publication
 
