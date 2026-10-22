@@ -59,9 +59,11 @@ and behavior tests; hosted scratch qualification remains pending.
 The separate `testing-native-merge.yml` workflow is a test-only owner-dispatched
 probe for one configured scratch PR. It requires independently attested merge and
 approval requests that bind the same exact PR head and captured Server authority.
-Before writing, the source-built host revalidates the current control-bound policy
-check, required `status-check`, and the latest configured User approval carrying
-the full marker derived from the approval manifest. Its scratch-only Server App
+Before writing, the source-built host revalidates the policy check against the
+active control descriptor of the configured scratch repository, the required
+`status-check`, and the latest configured User approval carrying the full marker
+derived from the approval manifest. The Server execution authority remains bound
+separately by both producer proofs. Its scratch-only Server App
 writer is restricted to GitHub's squash merge endpoint with the expected head SHA;
 the workflow uses the existing scratch Contents and pull-request write permissions
 and performs an independent merged-state readback. It does not replace the
