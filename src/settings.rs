@@ -262,6 +262,51 @@ fn validate_managed_removals(
     Ok(())
 }
 
+fn validate_managed_pr_files(files: &[Value], expected_changed: &BTreeSet<String>) -> Result<()> {
+    let mut changed = BTreeSet::new();
+    for file in files {
+        let filename = file["filename"]
+            .as_str()
+            .context("managed-files PR response has no filename")?;
+        ensure!(
+            safe_relative_path(filename),
+            "managed-files PR response contains an unsafe filename"
+        );
+        let status = file["status"]
+            .as_str()
+            .context("managed-files PR response has no status")?;
+        ensure!(
+            changed.insert(filename.to_owned()),
+            "managed-files PR response contains duplicate paths"
+        );
+        match status {
+            "added" | "modified" | "removed" => {
+                ensure!(
+                    file.get("previous_filename").is_none(),
+                    "non-renamed managed file has a previous filename"
+                );
+            }
+            "renamed" => {
+                let previous_filename = file["previous_filename"]
+                    .as_str()
+                    .context("renamed managed file has no previous filename")?;
+                ensure!(
+                    safe_relative_path(previous_filename)
+                        && previous_filename != filename
+                        && changed.insert(previous_filename.to_owned()),
+                    "managed-files PR response contains an invalid or duplicate rename source"
+                );
+            }
+            _ => bail!("managed-files PR response has an unsupported file status"),
+        }
+    }
+    ensure!(
+        &changed == expected_changed,
+        "managed-files PR contains files outside the exact desired-state set"
+    );
+    Ok(())
+}
+
 fn workflow_role_slug(role: securefix::instance_config::WorkflowRole) -> &'static str {
     use securefix::instance_config::WorkflowRole;
     match role {
@@ -776,17 +821,7 @@ pub(crate) fn managed_reconcile_scratch(
         "/repos/{}/pulls/{number}/files?per_page=100",
         manifest.repository
     ))?;
-    let changed = files
-        .iter()
-        .map(|file| file["filename"].as_str().unwrap_or_default())
-        .collect::<BTreeSet<_>>();
-    ensure!(
-        changed.len() == expected_changed.len()
-            && expected_changed
-                .iter()
-                .all(|path| changed.contains(path.as_str())),
-        "managed-files PR contains files outside the exact desired-state set"
-    );
+    validate_managed_pr_files(&files, &expected_changed)?;
     println!("created reviewable managed-files PR #{number} at {head_sha} from base {base_sha}");
     Ok(())
 }
@@ -2008,6 +2043,27 @@ mod tests {
         let mut unexpected = managed_role_entries();
         unexpected.push(managed_entry(".github/workflows/unmanaged.yml"));
         assert!(validate_managed_targets(&unexpected, &instance_config).is_err());
+    }
+
+    #[test]
+    fn managed_pr_file_validation_accounts_for_github_rename_rows() {
+        let previous = ".github/workflows/testing-release-tag.yml".to_owned();
+        let current = ".github/workflows/release-tag.yml".to_owned();
+        let expected = BTreeSet::from([previous.clone(), current.clone()]);
+        let files = vec![json!({
+            "filename": current,
+            "previous_filename": previous,
+            "status": "renamed"
+        })];
+
+        assert!(validate_managed_pr_files(&files, &expected).is_ok());
+
+        let unexpected_rename = vec![json!({
+            "filename": ".github/workflows/release-tag.yml",
+            "previous_filename": ".github/workflows/unmanaged.yml",
+            "status": "renamed"
+        })];
+        assert!(validate_managed_pr_files(&unexpected_rename, &expected).is_err());
     }
 
     #[test]
