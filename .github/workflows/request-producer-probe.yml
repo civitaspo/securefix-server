@@ -109,6 +109,19 @@ jobs:
           securefix new-client approve capture \
             --pull-request-number "$PULL_REQUEST_NUMBER" \
             --output native-policy-check/manifest.json
+      - name: Capture the exact pull request merge request
+        if: inputs.operation == 'merge'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          securefix new-client merge capture \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --output native-policy-check/manifest.json
       - name: Capture the exact pull request Securefix request
         if: inputs.operation == 'securefix'
         env:

@@ -46,6 +46,7 @@ pub struct NativeScratchTarget<'a> {
     pub caller_workflow_path: &'a str,
     pub caller_workflow_sha: &'a str,
     pub client_workflow_epoch: &'a str,
+    pub control_identity: Option<&'a str>,
     pub destination_branch: Option<&'a str>,
 }
 
@@ -53,6 +54,7 @@ pub struct NativeScratchTarget<'a> {
 pub enum NativeScratchMode {
     PolicyCheck,
     Approval,
+    Merge,
     Securefix,
 }
 
@@ -126,6 +128,7 @@ struct NativeScratchWrite {
     caller_workflow_path: String,
     caller_workflow_sha: String,
     client_workflow_epoch: String,
+    control_identity: Option<String>,
     destination_branch: Option<String>,
 }
 
@@ -366,6 +369,16 @@ impl GitHub {
             config_bytes.len() <= 256 * 1024,
             "instance config exceeds size limit"
         );
+        match (request.mode, request.control_identity) {
+            (NativeScratchMode::Merge, Some(identity)) => {
+                validate_sha256(identity, "native merge control identity")?;
+            }
+            (NativeScratchMode::Merge, None) => {
+                anyhow::bail!("native merge lacks its current control identity")
+            }
+            (_, None) => {}
+            (_, Some(_)) => anyhow::bail!("control identity is only valid for native merge"),
+        }
         let configured_target = config
             .repositories
             .iter()
@@ -380,6 +393,7 @@ impl GitHub {
                 .require(match request.mode {
                     NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
                     NativeScratchMode::Approval => crate::policy::Capability::Approve,
+                    NativeScratchMode::Merge => crate::policy::Capability::Merge,
                     NativeScratchMode::Securefix => crate::policy::Capability::Securefix,
                 })
                 .is_ok(),
@@ -389,6 +403,7 @@ impl GitHub {
             match request.mode {
                 NativeScratchMode::PolicyCheck => request.destination_branch.is_none(),
                 NativeScratchMode::Approval => request.destination_branch.is_none(),
+                NativeScratchMode::Merge => request.destination_branch.is_none(),
                 NativeScratchMode::Securefix => request
                     .destination_branch
                     .is_some_and(|branch| !branch.is_empty()),
@@ -468,6 +483,7 @@ impl GitHub {
             caller_workflow_path: request.caller_workflow_path.to_owned(),
             caller_workflow_sha: request.caller_workflow_sha.to_owned(),
             client_workflow_epoch: request.client_workflow_epoch.to_owned(),
+            control_identity: request.control_identity.map(str::to_owned),
             destination_branch: request.destination_branch.map(str::to_owned),
         }));
         Ok(api)
@@ -683,6 +699,15 @@ impl GitHub {
                             ),
                     "native approval may only submit the exact PR review"
                 ),
+                NativeScratchMode::Merge => ensure!(
+                    *method == Method::PUT
+                        && path
+                            == format!(
+                                "/repos/{}/pulls/{}/merge",
+                                write.target_repository, write.pull_number
+                            ),
+                    "native merge may only merge the exact PR"
+                ),
             }
         }
         let isolated = matches!(
@@ -772,8 +797,16 @@ impl GitHub {
                                 write.target_repository, write.pull_number
                             )
                         }
+                        NativeScratchMode::Merge => false,
                         NativeScratchMode::Securefix => path == "/graphql",
                     })
+                    || (method == Method::PUT
+                        && write.mode == NativeScratchMode::Merge
+                        && path
+                            == format!(
+                                "/repos/{}/pulls/{}/merge",
+                                write.target_repository, write.pull_number
+                            ))
                     || (method == Method::GET
                         && write.mode == NativeScratchMode::Approval
                         && path == "/user") =>
@@ -829,6 +862,12 @@ impl GitHub {
                     path,
                     write,
                     body.context("native approval body is missing")?,
+                )?,
+                NativeScratchMode::Merge => validate_native_merge_body(
+                    &method,
+                    path,
+                    write,
+                    body.context("native merge body is missing")?,
                 )?,
                 NativeScratchMode::Securefix => {
                     bail!("Securefix writes must use the validated signed-commit path")
@@ -1004,6 +1043,7 @@ impl GitHub {
             caller_workflow_path,
             caller_workflow_sha,
             client_workflow_epoch,
+            control_identity,
             destination_branch,
         } = write.as_ref();
 
@@ -1053,6 +1093,7 @@ impl GitHub {
                             .require(match mode {
                                 NativeScratchMode::PolicyCheck => crate::policy::Capability::Merge,
                                 NativeScratchMode::Approval => crate::policy::Capability::Approve,
+                                NativeScratchMode::Merge => crate::policy::Capability::Merge,
                                 NativeScratchMode::Securefix => {
                                     crate::policy::Capability::Securefix
                                 }
@@ -1073,6 +1114,20 @@ impl GitHub {
         );
         require_native_authority_unchanged(server_authority, &current_authority)
             .context("native Server deployment authority changed before write")?;
+        if *mode == NativeScratchMode::Merge {
+            let expected = control_identity
+                .as_deref()
+                .context("native merge control identity is missing")?;
+            let current = native_current_control_identity(
+                &server_reader,
+                instance_repository,
+                default_branch,
+            )?;
+            ensure!(
+                current == expected,
+                "native merge control identity changed before write"
+            );
+        }
         let current_client_epoch = capture_native_client_workflow_epoch(
             self,
             target_repository,
@@ -1103,6 +1158,7 @@ impl GitHub {
                 && match mode {
                     NativeScratchMode::PolicyCheck => destination_branch.is_none(),
                     NativeScratchMode::Approval => destination_branch.is_none(),
+                    NativeScratchMode::Merge => destination_branch.is_none(),
                     NativeScratchMode::Securefix => {
                         pull["head"]["ref"].as_str() == destination_branch.as_deref()
                     }
@@ -1170,6 +1226,30 @@ impl GitHub {
             .get("data")
             .cloned()
             .context("missing GraphQL data")
+    }
+
+    pub fn merge_native_pull_request(&self) -> Result<String> {
+        let WriteContext::NativeScratch(write) = &self.writes else {
+            bail!("native scratch merge writer context is missing");
+        };
+        ensure!(
+            write.mode == NativeScratchMode::Merge,
+            "native scratch writer is not authorized to merge"
+        );
+        let path = format!(
+            "/repos/{}/pulls/{}/merge",
+            write.target_repository, write.pull_number
+        );
+        let result: Value = self.put(&path, &native_merge_body(&write.head_sha))?;
+        ensure!(
+            result["merged"] == true,
+            "GitHub did not merge the exact native scratch pull request"
+        );
+        let merge_sha = result["sha"]
+            .as_str()
+            .context("GitHub native merge response has no merge commit SHA")?;
+        crate::policy::validate_sha(merge_sha)?;
+        Ok(merge_sha.to_owned())
     }
 
     pub fn minimize_policy_comment(
@@ -1572,10 +1652,32 @@ impl GitHub {
         Ok(response.json()?)
     }
     pub fn content(&self, repository: &str, path: &str, revision: &str) -> Result<Vec<u8>> {
+        self.content_with_cache_control(repository, path, revision, false)
+    }
+
+    pub fn content_uncached(
+        &self,
+        repository: &str,
+        path: &str,
+        revision: &str,
+    ) -> Result<Vec<u8>> {
+        self.content_with_cache_control(repository, path, revision, true)
+    }
+
+    fn content_with_cache_control(
+        &self,
+        repository: &str,
+        path: &str,
+        revision: &str,
+        no_cache: bool,
+    ) -> Result<Vec<u8>> {
         use base64::Engine;
-        let value: Value = self.get(&format!(
-            "/repos/{repository}/contents/{path}?ref={revision}"
-        ))?;
+        let content_path = format!("/repos/{repository}/contents/{path}?ref={revision}");
+        let value: Value = if no_cache {
+            self.get_uncached(&content_path)?
+        } else {
+            self.get(&content_path)?
+        };
         ensure!(value["encoding"] == "base64", "unexpected content encoding");
         let content = value["content"]
             .as_str()
@@ -2195,6 +2297,7 @@ pub fn validate_native_test_host_context(
     let role = match mode {
         NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
         NativeScratchMode::Approval => crate::instance_config::WorkflowRole::Approve,
+        NativeScratchMode::Merge => crate::instance_config::WorkflowRole::Merge,
         NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
     };
     let actor_id = std::env::var("GITHUB_ACTOR_ID")
@@ -2219,6 +2322,23 @@ pub fn validate_native_test_host_context(
     Ok(())
 }
 
+pub fn native_current_control_identity(
+    api: &GitHub,
+    repository: &str,
+    default_branch: &str,
+) -> Result<String> {
+    crate::policy::validate_repository(repository)?;
+    crate::config::validate_branch(default_branch)?;
+    let bytes = api.content_uncached(repository, "control/active.json", default_branch)?;
+    ensure!(
+        bytes.len() <= 16 * 1024,
+        "native control descriptor exceeds size limit"
+    );
+    let control: crate::control::ControlRevision =
+        serde_json::from_slice(&bytes).context("parse native current control descriptor")?;
+    control.identity()
+}
+
 pub fn validate_native_server_execution_workflow(
     snapshot: &NativeAuthoritySnapshot,
     mode: NativeScratchMode,
@@ -2231,6 +2351,7 @@ pub fn validate_native_server_execution_workflow(
     let role = match mode {
         NativeScratchMode::PolicyCheck => crate::instance_config::WorkflowRole::PolicyCheck,
         NativeScratchMode::Approval => crate::instance_config::WorkflowRole::Approve,
+        NativeScratchMode::Merge => crate::instance_config::WorkflowRole::Merge,
         NativeScratchMode::Securefix => crate::instance_config::WorkflowRole::Securefix,
     };
     let workflow = snapshot
@@ -2506,6 +2627,32 @@ fn validate_native_approval_body(
         "native approval body does not match the verified request and Server authority"
     );
     Ok(())
+}
+
+fn validate_native_merge_body(
+    method: &Method,
+    path: &str,
+    write: &NativeScratchWrite,
+    body: &Value,
+) -> Result<()> {
+    ensure!(
+        *method == Method::PUT
+            && path
+                == format!(
+                    "/repos/{}/pulls/{}/merge",
+                    write.target_repository, write.pull_number
+                )
+            && body == &native_merge_body(&write.head_sha),
+        "native merge body does not match the verified exact PR head"
+    );
+    Ok(())
+}
+
+pub fn native_merge_body(head_sha: &str) -> Value {
+    serde_json::json!({
+        "sha": head_sha,
+        "merge_method": "squash"
+    })
 }
 
 pub fn native_approval_body(
@@ -2861,6 +3008,7 @@ mod tests {
             caller_workflow_path: ".github/workflows/policy-check.yml".into(),
             caller_workflow_sha: "2".repeat(40),
             client_workflow_epoch: "3".repeat(40),
+            control_identity: None,
             destination_branch: None,
         }));
         api
@@ -2930,6 +3078,17 @@ mod tests {
         };
         let mut write = write.as_ref().clone();
         write.mode = NativeScratchMode::Approval;
+        api.writes = WriteContext::NativeScratch(Box::new(write));
+        api
+    }
+
+    fn native_merge_api() -> GitHub {
+        let mut api = native_scratch_api();
+        let WriteContext::NativeScratch(write) = &api.writes else {
+            unreachable!();
+        };
+        let mut write = write.as_ref().clone();
+        write.mode = NativeScratchMode::Merge;
         api.writes = WriteContext::NativeScratch(Box::new(write));
         api
     }
@@ -3050,6 +3209,49 @@ mod tests {
         assert_eq!(
             post.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
             "Bearer review-user-token"
+        );
+    }
+
+    #[test]
+    fn native_merge_writer_allows_only_a_squash_merge_of_the_bound_head() {
+        let mut api = native_merge_api();
+        api.token = "client-read-token".into();
+        api.write_token = Some("scratch-installation-token".into());
+        let path = format!("/repos/{SCRATCH_REPOSITORY}/pulls/4/merge");
+        assert!(api.require_write_target(&Method::PUT, &path).is_ok());
+        assert!(api.require_write_target(&Method::POST, &path).is_err());
+        assert!(
+            api.require_write_target(&Method::PUT, "/repos/other/repo/pulls/4/merge")
+                .is_err()
+        );
+        assert!(
+            api.require_write_target(
+                &Method::PUT,
+                "/repos/civitaspo/testing-securefix-server/pulls/5/merge"
+            )
+            .is_err()
+        );
+
+        let WriteContext::NativeScratch(write) = &api.writes else {
+            unreachable!();
+        };
+        let body = native_merge_body(&write.head_sha);
+        assert!(validate_native_merge_body(&Method::PUT, &path, write, &body).is_ok());
+        let mut stale_body = body.clone();
+        stale_body["sha"] = serde_json::json!("f".repeat(40));
+        assert!(validate_native_merge_body(&Method::PUT, &path, write, &stale_body).is_err());
+        let mut merge_method = body.clone();
+        merge_method["merge_method"] = serde_json::json!("merge");
+        assert!(validate_native_merge_body(&Method::PUT, &path, write, &merge_method).is_err());
+        assert!(validate_native_merge_body(&Method::POST, &path, write, &body).is_err());
+
+        let request = api.builder(Method::PUT, &path).unwrap().build().unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer scratch-installation-token"
         );
     }
 

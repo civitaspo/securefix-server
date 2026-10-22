@@ -1,0 +1,252 @@
+name: testing-Native scratch merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      producer_run_id:
+        description: Exact successful scratch Client run containing the attested merge request
+        required: true
+        type: string
+      approval_producer_run_id:
+        description: Exact successful scratch Client run containing the attested approval request
+        required: true
+        type: string
+      pull_request_number:
+        description: Exact owner-authored scratch PR selected for merge
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact owner-authored scratch PR head selected for merge
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: native-merge-${{ inputs.pull_request_number }}
+  cancel-in-progress: false
+
+jobs:
+  build-host:
+    if: github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.host.outputs.artifact-id }}
+      binary-sha256: ${{ steps.host-sha.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Require the exact protected workflow source
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.workflow_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the protected merge host without secrets
+        run: cargo +1.99.0 build --locked --bin securefix
+      - name: Record the protected host digest
+        id: host-sha
+        run: echo "sha256=$(sha256sum target/debug/securefix | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: host
+        with:
+          name: native-merge-host-${{ github.run_id }}
+          path: target/debug/securefix
+          if-no-files-found: error
+          retention-days: 1
+
+  validate-request:
+    needs: build-host
+    if: needs.build-host.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build-host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/native-merge-host
+          merge-multiple: true
+      - name: Verify the protected host handoff
+        env:
+          EXPECTED_SHA256: ${{ needs.build-host.outputs.binary-sha256 }}
+        run: |
+          set -euo pipefail
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/native-merge-host/securefix" | sha256sum --check
+          chmod 755 "$RUNNER_TEMP/native-merge-host/securefix"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch-reader
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Validate both exact-head proofs without merge credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          APPROVAL_PRODUCER_RUN_ID: ${{ inputs.approval_producer_run_id }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$APPROVAL_PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PRODUCER_RUN_ID" != "$APPROVAL_PRODUCER_RUN_ID" ]]
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          "$RUNNER_TEMP/native-merge-host/securefix" new-server merge \
+            --config repo-settings/native-securefix-test-instance.toml \
+            --config-path repo-settings/native-securefix-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID" \
+            --approval-producer-run-id "$APPROVAL_PRODUCER_RUN_ID" \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --expected-head-sha "$EXPECTED_HEAD_SHA"
+
+  apply-merge:
+    needs: [build-host, validate-request]
+    if: needs.build-host.result == 'success' && needs.validate-request.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.actor_id == '4525500' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 15
+    outputs:
+      merge-commit-sha: ${{ steps.merge.outputs.merge_commit_sha }}
+      command-status: ${{ steps.merge.outputs.command_status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build-host.outputs.artifact-id }}
+          path: ${{ runner.temp }}/native-merge-host
+          merge-multiple: true
+      - name: Verify the protected host handoff
+        env:
+          EXPECTED_SHA256: ${{ needs.build-host.outputs.binary-sha256 }}
+        run: |
+          set -euo pipefail
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/native-merge-host/securefix" | sha256sum --check
+          chmod 755 "$RUNNER_TEMP/native-merge-host/securefix"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch-reader
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scratch-merge-writer
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Apply the attested current-head merge with the scratch Server App
+        id: merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          SECUREFIX_NATIVE_MERGE_TOKEN: ${{ steps.scratch-merge-writer.outputs.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          APPROVAL_PRODUCER_RUN_ID: ${{ inputs.approval_producer_run_id }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          command_log="$RUNNER_TEMP/native-merge-apply.log"
+          if "$RUNNER_TEMP/native-merge-host/securefix" new-server merge \
+            --config repo-settings/native-securefix-test-instance.toml \
+            --config-path repo-settings/native-securefix-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID" \
+            --approval-producer-run-id "$APPROVAL_PRODUCER_RUN_ID" \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --expected-head-sha "$EXPECTED_HEAD_SHA" \
+            --apply >"$command_log" 2>&1; then
+            command_status=0
+          else
+            command_status=$?
+          fi
+          printf 'command_status=%s\n' "$command_status" >> "$GITHUB_OUTPUT"
+          cat "$command_log"
+          if [[ "$command_status" == 0 ]]; then
+            grep '^merge_commit_sha=' "$command_log" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            printf 'command_status=%s\n' "$command_status"
+            tail -c 8192 "$command_log" | sed -E \
+              -e 's/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+)/[REDACTED_TOKEN]/g' \
+              -e 's/(Bearer[[:space:]]+)[^[:space:]" ]+/\1[REDACTED]/Ig'
+          } > native-merge-result.txt
+      - name: Independently read back the merged PR state
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.scratch-reader.outputs.token }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_MERGE_SHA: ${{ steps.merge.outputs.merge_commit_sha }}
+          COMMAND_STATUS: ${{ steps.merge.outputs.command_status }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$COMMAND_STATUS" == 0 ]]; then
+            [[ "$EXPECTED_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
+          pull="$(gh api -H 'Cache-Control: no-cache' \
+            "repos/civitaspo/testing-securefix-server/pulls/$PULL_REQUEST_NUMBER")"
+          jq -n \
+            --argjson pull "$pull" \
+            --arg head "$EXPECTED_HEAD_SHA" \
+            --arg merge "$EXPECTED_MERGE_SHA" \
+            --arg status "$COMMAND_STATUS" \
+            '{command_status:$status,expected_head:$head,expected_merge_commit:$merge,state:$pull.state,merged:$pull.merged,head:$pull.head.sha,base:$pull.base.ref,merge_commit:$pull.merge_commit_sha,repository_id:$pull.base.repo.id,author_id:$pull.user.id}' \
+            > native-merge-readback.json
+          jq -e --arg head "$EXPECTED_HEAD_SHA" --arg merge "$EXPECTED_MERGE_SHA" '
+            .state == "closed" and .merged == true and .base == "main" and
+            .head == $head and .merge_commit == $merge and
+            .repository_id == 1410312556 and .author_id == 4525500
+          ' native-merge-readback.json >/dev/null
+          [[ "$COMMAND_STATUS" == 0 ]]
+          printf 'Native scratch PR #%s merged at %s; readback confirmed merge commit %s.\n' \
+            "$PULL_REQUEST_NUMBER" "$EXPECTED_HEAD_SHA" "$EXPECTED_MERGE_SHA" \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-merge-result-${{ github.run_id }}
+          path: |
+            native-merge-result.txt
+            native-merge-readback.json
+          if-no-files-found: warn
+          retention-days: 7

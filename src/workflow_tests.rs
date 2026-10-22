@@ -985,6 +985,21 @@ fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
             .unwrap()
             .contains("securefix new-client approve capture")
     );
+    let capture_merge = steps
+        .iter()
+        .find(|step| step["name"] == "Capture the exact pull request merge request")
+        .unwrap();
+    assert_eq!(capture_merge["if"], "inputs.operation == 'merge'");
+    assert_eq!(
+        capture_merge["env"]["SECUREFIX_CALLER_WORKFLOW_SHA"],
+        "${{ github.workflow_sha }}"
+    );
+    assert!(
+        capture_merge["run"]
+            .as_str()
+            .unwrap()
+            .contains("securefix new-client merge capture")
+    );
 }
 
 #[test]
@@ -1103,6 +1118,148 @@ fn native_approval_host_keeps_the_existing_user_token_in_one_protected_step() {
         apply_steps
             .iter()
             .all(|step| { step["with"]["permission-pull-requests"] != "write" })
+    );
+}
+
+#[test]
+fn native_merge_host_pairs_proofs_and_limits_writes_to_one_scratch_merge() {
+    const CONFIG_PATH: &str = "repo-settings/native-securefix-test-instance.toml";
+    const WORKFLOW_PATH: &str = ".github/workflows/testing-native-merge.yml";
+
+    let config =
+        securefix::instance_config::InstanceConfig::parse(&fs::read(CONFIG_PATH).unwrap()).unwrap();
+    assert_eq!(
+        config
+            .workflow_roles
+            .get(&securefix::instance_config::WorkflowRole::Merge)
+            .map(String::as_str),
+        Some(WORKFLOW_PATH)
+    );
+    assert_eq!(
+        config
+            .workflow_roles
+            .get(&securefix::instance_config::WorkflowRole::PolicyCheck)
+            .map(String::as_str),
+        Some(".github/workflows/testing-native-policy-check-authority.yml")
+    );
+    let scratch = config
+        .repositories
+        .iter()
+        .find(|repository| repository.repository == "civitaspo/testing-securefix-server")
+        .unwrap();
+    assert!(
+        scratch
+            .capabilities
+            .contains(&crate::policy::Capability::Merge)
+    );
+
+    let wrapper = workflow("testing-native-merge.yml");
+    assert!(wrapper["on"]["workflow_dispatch"].is_object());
+    let jobs = wrapper["jobs"].as_object().unwrap();
+    for (name, job) in jobs {
+        let guard = job["if"].as_str().unwrap();
+        for condition in [
+            "github.repository == 'civitaspo/securefix-server'",
+            "github.ref == 'refs/heads/main'",
+            "github.actor_id == '4525500'",
+            "github.run_attempt == 1",
+        ] {
+            assert!(guard.contains(condition), "{name}: missing {condition}");
+        }
+        if name != "build-host" {
+            assert_eq!(job["environment"], "main", "{name}");
+        }
+    }
+
+    let build_steps = jobs["build-host"]["steps"].as_array().unwrap();
+    assert!(build_steps.iter().any(|step| {
+        step["with"]["ref"] == "${{ github.workflow_sha }}"
+            && step["with"]["persist-credentials"] == false
+    }));
+    assert!(build_steps.iter().any(|step| {
+        step["name"] == "Build the protected merge host without secrets"
+            && step["run"] == "cargo +1.99.0 build --locked --bin securefix"
+    }));
+    assert!(build_steps.iter().any(|step| {
+        step["id"] == "host"
+            && step["with"]["path"] == "target/debug/securefix"
+            && step["with"]["retention-days"] == 1
+    }));
+    for job_name in ["validate-request", "apply-merge"] {
+        let steps = jobs[job_name]["steps"].as_array().unwrap();
+        assert!(steps.iter().any(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+                && step["with"]["artifact-ids"] == "${{ needs.build-host.outputs.artifact-id }}"
+        }));
+        assert!(steps.iter().any(|step| {
+            step["name"] == "Verify the protected host handoff"
+                && step["env"]["EXPECTED_SHA256"] == "${{ needs.build-host.outputs.binary-sha256 }}"
+                && step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("sha256sum --check"))
+        }));
+        assert!(steps.iter().any(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("$RUNNER_TEMP/native-merge-host/securefix"))
+        }));
+    }
+
+    let validate_steps = jobs["validate-request"]["steps"].as_array().unwrap();
+    let validate = validate_steps
+        .iter()
+        .find(|step| step["name"] == "Validate both exact-head proofs without merge credentials")
+        .unwrap();
+    assert!(
+        validate["run"]
+            .as_str()
+            .unwrap()
+            .contains("--approval-producer-run-id")
+    );
+    assert!(!validate["run"].as_str().unwrap().contains("--apply"));
+    assert!(
+        validate_steps
+            .iter()
+            .all(|step| { step["env"]["SECUREFIX_NATIVE_MERGE_TOKEN"].is_null() })
+    );
+
+    let apply_steps = jobs["apply-merge"]["steps"].as_array().unwrap();
+    let write_credentials = apply_steps
+        .iter()
+        .filter(|step| {
+            step["id"] == "scratch-merge-writer"
+                && step["with"]["permission-contents"] == "write"
+                && step["with"]["permission-pull-requests"] == "write"
+                && step["with"]["repositories"] == "testing-securefix-server"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(write_credentials.len(), 1);
+    let apply = apply_steps
+        .iter()
+        .find(|step| {
+            step["name"] == "Apply the attested current-head merge with the scratch Server App"
+        })
+        .unwrap();
+    assert_eq!(
+        apply["env"]["SECUREFIX_NATIVE_MERGE_TOKEN"],
+        "${{ steps.scratch-merge-writer.outputs.token }}"
+    );
+    assert!(apply["run"].as_str().unwrap().contains("--apply"));
+    assert!(apply_steps.iter().any(|step| {
+        step["name"] == "Independently read back the merged PR state"
+            && step["run"].as_str().is_some_and(|run| {
+                run.contains("Cache-Control: no-cache")
+                    && run.contains(".merged == true")
+                    && run.contains(".head == $head")
+                    && run.contains(".merge_commit == $merge")
+            })
+    }));
+    assert!(
+        !serde_yaml::to_string(&wrapper)
+            .unwrap()
+            .contains("Administration")
     );
 }
 
@@ -1649,6 +1806,9 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
                 continue;
             }
             if path == ".github/workflows/testing-native-approve.yml" && job_id == "build-host" {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-merge.yml" && job_id == "build-host" {
                 continue;
             }
             if path == ".github/workflows/testing-native-package-build.yml" && job_id == "build" {
@@ -2923,6 +3083,9 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 continue;
             }
             if path == ".github/workflows/testing-native-approve.yml" {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-merge.yml" {
                 continue;
             }
             if path == ".github/workflows/testing-publish-native-package.yml" && job_id == "publish"

@@ -27,6 +27,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ApprovalCommand,
     },
+    #[command(about = "Capture one exact pull request head for a native merge request")]
+    Merge {
+        #[command(subcommand)]
+        command: MergeCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -53,6 +58,16 @@ pub enum SecurefixCommand {
 
 #[derive(clap::Subcommand)]
 pub enum ApprovalCommand {
+    Capture {
+        #[arg(long)]
+        pull_request_number: u64,
+        #[arg(long, default_value = "native-policy-check/manifest.json")]
+        output: PathBuf,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub enum MergeCommand {
     Capture {
         #[arg(long)]
         pull_request_number: u64,
@@ -138,6 +153,10 @@ impl RequestManifest {
                 self.securefix_artifact.is_none(),
                 "approval request unexpectedly names a Securefix artifact"
             ),
+            "merge" => ensure!(
+                self.securefix_artifact.is_none(),
+                "merge request unexpectedly names a Securefix artifact"
+            ),
             "securefix" => {
                 let artifact = self
                     .securefix_artifact
@@ -222,6 +241,12 @@ pub fn run(command: Command) -> Result<()> {
                 pull_request_number,
                 output,
             } => capture_request(pull_request_number, "approval", None, &output),
+        },
+        Command::Merge { command } => match command {
+            MergeCommand::Capture {
+                pull_request_number,
+                output,
+            } => capture_request(pull_request_number, "merge", None, &output),
         },
     }
 }
@@ -741,6 +766,19 @@ mod tests {
     fn approval_request_is_an_artifact_free_exact_head_request() {
         let mut value = manifest();
         value.operation = "approval".to_owned();
+        value.validate().unwrap();
+        value.securefix_artifact = Some(SecurefixArtifactIdentity {
+            id: 1,
+            name: "securefix-source".to_owned(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+        });
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn merge_request_is_an_artifact_free_exact_head_request() {
+        let mut value = manifest();
+        value.operation = "merge".to_owned();
         value.validate().unwrap();
         value.securefix_artifact = Some(SecurefixArtifactIdentity {
             id: 1,
