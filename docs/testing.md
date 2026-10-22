@@ -33,6 +33,22 @@ The same source-bound CLI prepares fixtures, runs the scratch operations and val
 
 The former PAT-based live merge test has been replaced by the candidate integration workflow. Live writes use only repository-scoped installation tokens and clean up their fixtures. The optional known signed-commit regression remains read-only.
 
+## Native release-asset scratch verification
+
+`testing-native-release-assets-publish.yml` consumes one previously successful
+four-target build and verifier run when its producer cannot enter the protected
+`main` environment. Dispatch it on Server `main` with distinct `harness_sha` and
+`producer_source_sha` values plus the exact producer run ID and attempt. The
+harness SHA must be the current signed head of an open owner PR containing the
+producer-tuple-aware Rust probe; the producer SHA remains bound to the frozen
+source branch and original build run. The qualifier checks that the harness
+descends from that producer source, both revisions carry the same policy, their
+active control matches current main, and the producer's expected jobs and artifact
+IDs, digests, and sizes are unchanged. The workflow rebuilds the harness without write credentials, checks
+the artifacts before token creation, then uses a Server App token scoped only to
+`testing-securefix-server` and records the scratch release and immutable asset
+digests. It does not publish a Client release.
+
 ## Development pre-release publication
 
 `testing-publish-runtime.yml` publishes the exact reviewed protected-main source

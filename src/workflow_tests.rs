@@ -46,6 +46,187 @@ fn testing_workflows_have_testing_file_and_display_names() {
 }
 
 #[test]
+fn testing_native_release_assets_publish_is_source_bound_and_scratch_scoped() {
+    let value = workflow("testing-native-release-assets-publish.yml");
+    assert_eq!(value["permissions"], serde_json::json!({}));
+    assert_eq!(
+        value["on"]["workflow_dispatch"]["inputs"]["harness_sha"]["required"],
+        true
+    );
+    assert_eq!(
+        value["on"]["workflow_dispatch"]["inputs"]["producer_source_sha"]["required"],
+        true
+    );
+    assert_eq!(
+        value["on"]["workflow_dispatch"]["inputs"]["producer_run_id"]["required"],
+        true
+    );
+    assert_eq!(
+        value["on"]["workflow_dispatch"]["inputs"]["producer_run_attempt"]["required"],
+        true
+    );
+
+    let host = &value["jobs"]["host-build"];
+    assert_eq!(host["permissions"], serde_json::json!({"contents":"read"}));
+    assert!(!serde_json::to_string(host).unwrap().contains("secrets."));
+    let host_steps = host["steps"].as_array().unwrap();
+    let checkout = host_steps
+        .iter()
+        .find(|step| step["uses"] == "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
+        .unwrap();
+    assert_eq!(checkout["with"]["ref"], "${{ inputs.harness_sha }}");
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    let build = host_steps
+        .iter()
+        .find(|step| step["name"] == "Build the selected-source native release probe harness")
+        .unwrap();
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("cargo +1.99.0 test --locked --bin securefix --no-run")
+    );
+
+    let qualify = &value["jobs"]["qualify"];
+    assert_eq!(
+        qualify["permissions"],
+        serde_json::json!({"actions":"read","contents":"read"})
+    );
+    assert!(!serde_json::to_string(qualify).unwrap().contains("secrets."));
+    let qualify_run = qualify["steps"][0]["run"].as_str().unwrap();
+    assert_eq!(
+        qualify["steps"][0]["env"]["HARNESS_SHA"],
+        "${{ inputs.harness_sha }}"
+    );
+    assert_eq!(
+        qualify["steps"][0]["env"]["PRODUCER_SOURCE_SHA"],
+        "${{ inputs.producer_source_sha }}"
+    );
+    for binding in [
+        "93e16ba0c8b41617889cff557ee20fb19d9ce5ef",
+        "39728542160",
+        "native-release-assets-probe / verify-native-targets",
+        "runner_name == \"\"",
+        "12403514103",
+        "sha256:7f1e66b5a7deb48d92cda66ab0ced18249bb50476b758ee6f63ee001492e5c9e",
+        "12403799531",
+        "sha256:50a73ccbb088427af0010f680e3514d3e0ba489b90eb79da77ed4563690cbae4",
+        "12404720358",
+        "sha256:8e6f33e6d8560872a2c907035bd76d98f496f83c98c06db6a5f793c63ff21a71",
+        "12403759658",
+        "sha256:c633c557e2df699a548e8ab4b56db53d524b10b0a4dc39c49da34315136ba8c5",
+        "12404825172",
+        "sha256:0f770a876d04a161a8eba43c34ffc32fbbd13b296221ed8d7ae330a4d3a1991a",
+        "12403594699",
+        "sha256:8b0c1849fb88d348017342fd75c7fe00a59367df726ba662353f096f20b89531",
+        "ancestry",
+        "merge_base_commit.sha",
+        "\"$source_policy\" == \"$harness_policy\"",
+    ] {
+        assert!(
+            qualify_run.contains(binding),
+            "missing producer binding: {binding}"
+        );
+    }
+
+    let publish = &value["jobs"]["publish-scratch"];
+    assert_eq!(publish["environment"], "main");
+    assert_eq!(
+        publish["permissions"],
+        serde_json::json!({"actions":"read","contents":"read"})
+    );
+    let steps = publish["steps"].as_array().unwrap();
+    let downloads: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["uses"] == "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        })
+        .collect();
+    assert_eq!(downloads.len(), 3);
+    assert_eq!(
+        downloads[1]["with"]["artifact-ids"],
+        "${{ needs.qualify.outputs.artifact-ids }}"
+    );
+    assert_eq!(
+        downloads[1]["with"]["run-id"],
+        "${{ inputs.producer_run_id }}"
+    );
+    assert_eq!(
+        downloads[2]["with"]["artifact-ids"],
+        "${{ needs.qualify.outputs.verification-artifact-id }}"
+    );
+    let prewrite = steps
+        .iter()
+        .position(|step| {
+            step["name"] == "Revalidate the exact native artifacts before minting a scratch token"
+        })
+        .unwrap();
+    let prewrite_run = steps[prewrite]["run"].as_str().unwrap();
+    assert!(prewrite_run.contains("release::tests::native_release_assets_validate_probe_inputs"));
+    assert!(!prewrite_run.contains("GITHUB_SHA=") && !prewrite_run.contains("GITHUB_RUN_ID="));
+    let token = steps
+        .iter()
+        .position(|step| step["id"] == "scratch-token")
+        .unwrap();
+    let writer = steps
+        .iter()
+        .position(|step| step["name"] == "Run the source-bound native scratch release probe")
+        .unwrap();
+    assert!(prewrite < token && token < writer);
+    let app = &steps[token];
+    assert_eq!(app["with"]["owner"], "civitaspo");
+    assert_eq!(app["with"]["repositories"], "testing-securefix-server");
+    assert_eq!(app["with"]["app-id"], "3872533");
+    assert_eq!(app["with"]["permission-contents"], "write");
+    assert!(app["with"].get("permission-administration").is_none());
+    assert!(app["with"].get("permission-workflows").is_none());
+    let writer_run = steps[writer]["run"].as_str().unwrap();
+    assert!(writer_run.contains("release::tests::native_release_assets_scratch_publish_probe"));
+    assert!(!writer_run.contains("GITHUB_SHA=") && !writer_run.contains("GITHUB_RUN_ID="));
+    assert_eq!(
+        steps[writer]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"],
+        "${{ inputs.harness_sha }}"
+    );
+    assert_eq!(
+        steps[writer]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"],
+        "${{ inputs.producer_source_sha }}"
+    );
+    assert_eq!(
+        steps[writer]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"],
+        "${{ inputs.producer_run_id }}"
+    );
+    assert_eq!(
+        steps[writer]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"],
+        "${{ inputs.producer_run_attempt }}"
+    );
+    assert_eq!(
+        steps[prewrite]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_HARNESS_SHA"],
+        "${{ inputs.harness_sha }}"
+    );
+    assert_eq!(
+        steps[prewrite]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_SERVER_SHA"],
+        "${{ inputs.producer_source_sha }}"
+    );
+    assert_eq!(
+        steps[prewrite]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ID"],
+        "${{ inputs.producer_run_id }}"
+    );
+    assert_eq!(
+        steps[prewrite]["env"]["SECUREFIX_NATIVE_RELEASE_PROBE_PRODUCER_RUN_ATTEMPT"],
+        "${{ inputs.producer_run_attempt }}"
+    );
+    assert!(steps.iter().any(|step| {
+        step["uses"] == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+            && step["if"] == "always()"
+    }));
+    assert!(
+        !serde_json::to_string(publish)
+            .unwrap()
+            .contains("Administration")
+    );
+}
+
+#[test]
 fn testing_publication_executes_only_trusted_qualification_and_stable_publisher() {
     let value = workflow("testing-publish-runtime.yml");
     for job in value["jobs"].as_object().unwrap().values() {
@@ -822,6 +1003,18 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         assert!(inputs.get("artifact-ids").is_none());
                         assert!(inputs.get("repository").is_none());
                         assert!(inputs.get("run-id").is_none());
+                        continue;
+                    }
+                    if path == ".github/workflows/testing-native-release-assets-publish.yml"
+                        && job_id == "publish-scratch"
+                        && inputs["artifact-ids"] == "${{ needs.qualify.outputs.artifact-ids }}"
+                    {
+                        assert_eq!(inputs["repository"], "civitaspo/securefix-server");
+                        assert_eq!(inputs["run-id"], "${{ inputs.producer_run_id }}");
+                        assert_eq!(inputs["github-token"], "${{ github.token }}");
+                        assert_eq!(inputs["path"], "native-input");
+                        assert!(inputs.get("merge-multiple").is_none());
+                        assert!(inputs.get("name").is_none() && inputs.get("pattern").is_none());
                         continue;
                     }
                     if path == ".github/workflows/testing-release-pr.yml" && job_id == "execute" {
@@ -1826,6 +2019,11 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
                 continue;
             }
             if path == ".github/workflows/testing-publish-native-package.yml"
+                && job_id == "host-build"
+            {
+                continue;
+            }
+            if path == ".github/workflows/testing-native-release-assets-publish.yml"
                 && job_id == "host-build"
             {
                 continue;
@@ -3117,7 +3315,9 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         .is_some_and(|u| u.starts_with("actions/download-artifact@"))
                         && step["with"]["artifact-ids"].is_string()
                 });
-            if path == ".github/workflows/testing-provider-release.yml" {
+            if path == ".github/workflows/testing-provider-release.yml"
+                || path == ".github/workflows/testing-native-release-assets-publish.yml"
+            {
                 continue;
             }
             let installer = steps.iter().position(|step| {
@@ -3305,6 +3505,33 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     && !run.contains("--field")
                     && !run.contains(" -f ")
                     && !run.contains(" -F ");
+                let selected_native_release_probe_build = path
+                    == ".github/workflows/testing-native-release-assets-publish.yml"
+                    && job_id == "host-build"
+                    && step["name"] == "Build the selected-source native release probe harness"
+                    && run.contains("cargo +1.99.0 test --locked --bin securefix --no-run")
+                    && run.contains("jq -er");
+                let native_release_assets_preflight = path
+                    == ".github/workflows/testing-native-release-assets-publish.yml"
+                    && ((job_id == "qualify"
+                        && step["name"]
+                            == "Qualify the frozen source, producer jobs, artifacts, and scratch target")
+                        || (job_id == "publish-scratch"
+                            && matches!(
+                                step["name"].as_str(),
+                                Some(
+                                    "Recheck the selected source and target before minting a scratch token"
+                                        | "Recheck current main and target immediately before scratch publication"
+                                )
+                            )))
+                    && run.contains("gh api ")
+                    && !run.contains("gh api -X")
+                    && !run.contains("--method")
+                    && !run.contains("--input")
+                    && !run.contains("--raw-field")
+                    && !run.contains("--field")
+                    && !run.contains(" -f ")
+                    && !run.contains(" -F ");
                 let native_package_config_projection = path
                     == ".github/workflows/testing-publish-native-package.yml"
                     && job_id == "verify"
@@ -3350,6 +3577,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             || bounded_legacy_runtime_reads
                             || bounded_release_artifact_lookup
                             || bounded_native_test_assertion
+                            || selected_native_release_probe_build
+                            || native_release_assets_preflight
                             || native_package_config_projection
                             || native_package_record_projection)
                         && !run.contains("curl "),
