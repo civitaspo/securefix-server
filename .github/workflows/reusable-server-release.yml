@@ -35,51 +35,17 @@ jobs:
       server_app_id: ${{ steps.parse.outputs.server_app_id }}
       run_id: ${{ steps.parse.outputs.run_id }}
     steps:
-      - name: Load the fixed Securefix Server package
-        id: package-stable
-        if: ${{ !(github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the exact scratch release receiver
-        id: package-scratch
-        if: ${{ github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e # v0.2.45-pre.35
-        with:
-          action-sha: 119643d5407f97b3589059246d43bd05590a248e
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Parse and authenticate the release request locator
         id: parse
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" release parse-request
@@ -99,44 +65,10 @@ jobs:
       tag: ${{ steps.preflight.outputs.tag }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Load the fixed Securefix Server package
-        id: package-stable
-        if: ${{ !(github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the exact scratch release receiver
-        id: package-scratch
-        if: ${{ github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e # v0.2.45-pre.35
-        with:
-          action-sha: 119643d5407f97b3589059246d43bd05590a248e
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Mint a read-only Client release token
         id: release-read
@@ -157,7 +89,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_RELEASE_READ_TOKEN: ${{ steps.release-read.outputs.token }}
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" release preflight
@@ -183,44 +115,10 @@ jobs:
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Load the fixed Securefix Server package
-        id: package-stable
-        if: ${{ !(github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the exact scratch release receiver
-        id: package-scratch
-        if: ${{ github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e # v0.2.45-pre.35
-        with:
-          action-sha: 119643d5407f97b3589059246d43bd05590a248e
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -239,7 +137,7 @@ jobs:
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
           GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
           GPG_PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" release sign
@@ -264,44 +162,10 @@ jobs:
       issues: read
     timeout-minutes: 20
     steps:
-      - name: Load the fixed Securefix Server package
-        id: package-stable
-        if: ${{ !(github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the exact scratch release receiver
-        id: package-scratch
-        if: ${{ github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e # v0.2.45-pre.35
-        with:
-          action-sha: 119643d5407f97b3589059246d43bd05590a248e
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -336,7 +200,7 @@ jobs:
           SECUREFIX_RELEASE_READ_TOKEN: ${{ steps.release-read.outputs.token }}
           SECUREFIX_RELEASE_WRITE_TOKEN: ${{ steps.release-write.outputs.token }}
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" release publish
@@ -353,50 +217,16 @@ jobs:
       issues: write
     timeout-minutes: 15
     steps:
-      - name: Load the fixed Securefix Server package
-        id: package-stable
-        if: ${{ !(github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the exact scratch release receiver
-        id: package-scratch
-        if: ${{ github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e # v0.2.45-pre.35
-        with:
-          action-sha: 119643d5407f97b3589059246d43bd05590a248e
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Remove only the authenticated release request label
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" release cleanup

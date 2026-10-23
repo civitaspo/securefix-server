@@ -39,19 +39,10 @@ jobs:
       server_repository_name: ${{ steps.resolve.outputs.server_repository_name }}
       client_app_id: ${{ steps.resolve.outputs.client_app_id }}
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        # Candidate-source CI only: pre12 lacks the Release Tag CLI contract; this workflow is not qualified for dispatch.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
           token: ${{ github.token }}
       - name: Validate merged release PR
         id: resolve
@@ -76,19 +67,10 @@ jobs:
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        # Candidate-source CI only: pre12 lacks the Release Tag CLI contract; this workflow is not qualified for dispatch.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
           token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -203,19 +185,10 @@ jobs:
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        # Candidate-source CI only: pre12 lacks the Release Tag CLI contract; this workflow is not qualified for dispatch.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
           token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -252,19 +225,10 @@ jobs:
     outputs:
       manifest_artifact_id: ${{ steps.upload-manifest.outputs.artifact-id }}
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        # Candidate-source CI only: pre12 lacks the Release Tag CLI contract; this workflow is not qualified for dispatch.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
           token: ${{ github.token }}
       - name: Create and verify release tag manifest
         id: manifest
@@ -332,19 +296,10 @@ jobs:
       contents: read
       issues: read
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        # Candidate-source CI only: pre12 lacks the Release Tag CLI contract; this workflow is not qualified for dispatch.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
           token: ${{ github.token }}
       - name: Create server-only request token
         id: server-token

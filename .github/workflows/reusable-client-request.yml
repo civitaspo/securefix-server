@@ -37,45 +37,10 @@ jobs:
       server-repository-name: ${{ steps.capture.outputs.server_repository_name }}
       client-app-id: ${{ steps.capture.outputs.client_app_id }}
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        if: ${{ !(inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          # The stable package remains the default; the matching scratch context is handled by the separate pinned pre35 step.
-          channel: ${{ inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1 && 'scratch' || 'stable' }}
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the immutable policy-check test caller
-        id: scratch-package
-        if: ${{ inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@fa40fc15f4ac79ad97282b83a44d26f6c747311c # v0.2.45-pre.35
-        with:
-          action-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Capture the exact event and authenticated instance authority
         id: capture
@@ -86,7 +51,7 @@ jobs:
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           PULL_REQUEST_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           OPERATION: ${{ inputs.operation }}
-          CLI_BINARY: ${{ steps.scratch-package.outputs.binary || steps.package.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
@@ -153,45 +118,10 @@ jobs:
       contents: read
     timeout-minutes: 10
     steps:
-      - name: Load the fixed Securefix Server package
+      - name: Load the fixed Securefix package
         id: package
-        if: ${{ !(inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          # The stable package remains the default; the matching scratch context is handled by the separate pinned pre35 step.
-          channel: ${{ inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1 && 'scratch' || 'stable' }}
-          token: ${{ github.token }}
-      - name: Load the fixed pre35 package for the immutable policy-check test caller
-        id: scratch-package
-        if: ${{ inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@fa40fc15f4ac79ad97282b83a44d26f6c747311c # v0.2.45-pre.35
-        with:
-          action-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -211,7 +141,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CLIENT_TOKEN: ${{ steps.client-token.outputs.token }}
           SECUREFIX_SERVER_REPOSITORY: ${{ needs.capture.outputs.server-owner }}/${{ needs.capture.outputs.server-repository-name }}
-          CLI_BINARY: ${{ steps.scratch-package.outputs.binary || steps.package.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" new-client dispatch --manifest native-request/manifest.json

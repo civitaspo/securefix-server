@@ -3724,6 +3724,28 @@ mod tests {
 
     #[test]
     fn pull_request_target_binds_run_head_and_context_sha_to_separate_pr_facts() {
+        let snapshots: Vec<Value> = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/native-client-base-snapshots.json"
+        ))
+        .unwrap();
+        for snapshot in snapshots {
+            let accepted = crate::native_client::validate_pull_request_target_identity(
+                "pull_request_target",
+                snapshot["source_sha"].as_str().unwrap(),
+                snapshot["context_sha"].as_str().unwrap(),
+                snapshot["head_branch"].as_str().unwrap(),
+                snapshot["source_sha"].as_str().unwrap(),
+                snapshot["head_branch"].as_str().unwrap(),
+                snapshot["base_sha"].as_str().unwrap(),
+            )
+            .is_ok();
+            assert_eq!(
+                accepted,
+                snapshot["accepted"].as_bool().unwrap(),
+                "PR {}",
+                snapshot["pull_request"]
+            );
+        }
         let mut manifest = manifest();
         manifest.producer.event = "pull_request_target".to_owned();
         manifest.producer.source_sha = "a499b4ede1752c1ddb83e0651d74d1ce73faa76d".to_owned();

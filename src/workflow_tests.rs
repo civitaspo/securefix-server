@@ -4425,15 +4425,12 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
             }
             if downloads_cli {
                 if path == ".github/workflows/reusable-client-request.yml" {
-                    let package_loader = steps
-                        .iter()
-                        .find(|step| step["name"] == "Load the fixed Securefix Server package")
-                        .unwrap();
+                    let package_loader = steps.iter().find(|step| step["id"] == "package").unwrap();
                     assert!(
                         package_loader["uses"]
                             .as_str()
                             .unwrap()
-                            .ends_with("@c6aa3110bb31d5ca5bae452d291870066f0147ef")
+                            .ends_with("@6756eaa1a229b9febd0476023b00ebdc0acd2231")
                     );
                     assert!(
                         steps
@@ -4755,11 +4752,17 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
                                         .as_str()
                                         .is_some_and(|run| run.contains("securefix integration validate-producer"))
                             });
-                        let fixed_package_loaded = steps.iter().any(|candidate| {
-                            candidate["uses"]
-                                .as_str()
-                                .is_some_and(|uses| uses.contains("/.github/actions/load-package@"))
-                                && candidate["with"]["action-sha"].is_string()
+                        let fixed_package_loaded = steps[..index].iter().any(|candidate| {
+                            candidate["uses"].as_str().is_some_and(|uses| {
+                                uses.strip_prefix(
+                                    "civitaspo/securefix-server/.github/actions/load-package@",
+                                )
+                                .is_some_and(|sha| {
+                                    sha.len() == 40
+                                        && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                })
+                            }) && candidate["with"]
+                                == serde_json::json!({"token": "${{ github.token }}"})
                         });
                         assert!(
                             job["env"]["SECUREFIX_SOURCE_SHA"].is_string()
@@ -4977,17 +4980,19 @@ fn client_policy_check_caller_uses_the_native_request_signer() {
         "policy_check"
     );
     let signer = workflow("reusable-client-request.yml");
-    let channel_expression = "${{ inputs.operation == 'policy_check' && github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main' && github.event_name == 'pull_request_target' && github.run_attempt == 1 && 'scratch' || 'stable' }}";
     let loader_steps = signer["jobs"]
         .as_object()
         .unwrap()
         .values()
         .flat_map(|job| job["steps"].as_array().into_iter().flatten())
-        .filter(|step| step["name"] == "Load the fixed Securefix Server package")
+        .filter(|step| step["id"] == "package")
         .collect::<Vec<_>>();
     assert_eq!(loader_steps.len(), 2);
     for step in loader_steps {
-        assert_eq!(step["with"]["channel"], channel_expression);
+        assert_eq!(
+            step["with"],
+            serde_json::json!({"token":"${{ github.token }}"})
+        );
     }
     assert!(
         signer["on"]["workflow_call"]["inputs"]
@@ -5215,7 +5220,6 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
     assert_eq!(client_inputs["instance_config_path"]["required"], true);
     assert_eq!(client_inputs["release_pr_number"]["type"], "number");
     let production_text = serde_json::to_string(&client).unwrap();
-    let production_yaml = fs::read_to_string(".github/workflows/reusable-release-tag.yml").unwrap();
     assert!(!production_text.contains("load-cli.yml"));
     assert!(!production_text.contains("control/active.json"));
     assert!(!production_text.contains("SECUREFIX_SOURCE_SHA"));
@@ -5250,23 +5254,11 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
             .unwrap();
         assert_eq!(fixed_ref.len(), 40);
         assert!(fixed_ref.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(loader["with"]["action-sha"], fixed_ref);
-        assert_eq!(fixed_ref, "c6aa3110bb31d5ca5bae452d291870066f0147ef");
-        assert!(
-            production_yaml
-                .contains("Candidate-source CI only: pre12 lacks the Release Tag CLI contract")
-        );
-        assert_eq!(loader["with"]["channel"], "stable");
+        assert_eq!(fixed_ref, "6756eaa1a229b9febd0476023b00ebdc0acd2231");
         assert_eq!(
-            loader["with"]["source-repository"],
-            "civitaspo/securefix-server"
+            loader["with"],
+            serde_json::json!({"token":"${{ github.token }}"})
         );
-        assert_eq!(
-            loader["with"]["destination-repository"],
-            "civitaspo/securefix-server"
-        );
-        assert_eq!(loader["with"]["source-repository-id"], "1250079425");
-        assert_eq!(loader["with"]["destination-repository-id"], "1250079425");
     }
     for job_name in ["resolve", "build", "assemble-native", "tag"] {
         let steps = client["jobs"][job_name]["steps"].as_array().unwrap();
@@ -5873,26 +5865,11 @@ fn server_role_receivers_use_fixed_package_and_separate_read_and_write_credentia
         assert!(!serialized.contains("SECUREFIX_SOURCE_SHA"), "{role}");
         assert!(!serialized.contains("load-cli.yml"), "{role}");
         let steps = job["steps"].as_array().unwrap();
-        let loader = steps
-            .iter()
-            .find(|step| step["name"] == "Load the fixed Securefix Server package")
-            .unwrap();
-        if role == "securefix" {
-            assert_eq!(
-                loader["with"],
-                serde_json::json!({"token": "${{ github.token }}"})
-            );
-        } else {
-            assert_eq!(
-                loader["with"]["source-repository"], "civitaspo/securefix-server",
-                "{role}"
-            );
-            assert_eq!(
-                loader["with"]["destination-repository"],
-                "civitaspo/securefix-server"
-            );
-            assert_eq!(loader["with"]["channel"], "stable");
-        }
+        let loader = steps.iter().find(|step| step["id"] == "package").unwrap();
+        assert_eq!(
+            loader["with"],
+            serde_json::json!({"token":"${{ github.token }}"})
+        );
         assert!(loader["uses"].as_str().unwrap().contains("@"));
         for mint in steps.iter().filter(|step| {
             step["uses"]

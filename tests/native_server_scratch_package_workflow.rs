@@ -1,7 +1,28 @@
 use std::fs;
 
+fn assert_fixed_package(steps: &[serde_yaml::Value]) {
+    let loaders: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.contains("/.github/actions/load-package@"))
+        })
+        .collect();
+    assert_eq!(loaders.len(), 1);
+    let package = loaders[0];
+    assert_eq!(package["id"], "package");
+    assert!(package["if"].is_null());
+    assert_eq!(
+        package["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231"
+    );
+    assert_eq!(package["with"].as_mapping().unwrap().len(), 1);
+    assert_eq!(package["with"]["token"], "${{ github.token }}");
+}
+
 #[test]
-fn server_policy_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() {
+fn server_policy_receiver_uses_a_fixed_package() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-server-policy-check.yml",
@@ -11,62 +32,7 @@ fn server_policy_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow()
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-policy-check.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
-    let stable = steps
-        .iter()
-        .find(|step| step["id"] == "package-stable")
-        .unwrap();
-    let scratch = steps
-        .iter()
-        .find(|step| step["id"] == "package-scratch")
-        .unwrap();
-    assert!(
-        stable["if"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("!({scratch_context})"))
-    );
-    assert_eq!(
-        stable["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef"
-    );
-    assert_eq!(stable["with"]["channel"], "stable");
-    assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
-    assert_eq!(
-        scratch["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@7d04df0755f857d45897c4df53ce51d2c14fe0a4"
-    );
-    assert_eq!(
-        scratch["with"]["action-sha"],
-        "7d04df0755f857d45897c4df53ce51d2c14fe0a4"
-    );
-    for (key, expected) in [
-        ("channel", "scratch"),
-        (
-            "manifest-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-        ),
-        (
-            "publication-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-        ),
-        (
-            "publication-source-branch",
-            "integration/native-consumer-pre35-20261023",
-        ),
-        ("publication-tag", "v0.2.45-pre.35"),
-        ("publication-release-id", "421283713"),
-        ("publication-asset-id", "667334470"),
-        (
-            "publication-asset-sha256",
-            "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
-        ),
-        ("publication-asset-size", "12173384"),
-        ("publication-producer-run-id", "39866598474"),
-        ("publication-producer-run-attempt", "1"),
-    ] {
-        assert_eq!(scratch["with"][key], expected, "{key}");
-    }
+    assert_fixed_package(steps);
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the exact-head policy check without a writer token",
@@ -75,13 +41,13 @@ fn server_policy_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow()
         let step = steps.iter().find(|step| step["name"] == name).unwrap();
         assert_eq!(
             step["env"]["CLI_BINARY"],
-            "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
+            "${{ steps.package.outputs.binary }}"
         );
     }
 }
 
 #[test]
-fn server_approval_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() {
+fn server_approval_receiver_uses_a_fixed_package() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-server-approve.yml",
@@ -91,58 +57,7 @@ fn server_approval_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-approve.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
-    let stable = steps
-        .iter()
-        .find(|step| step["id"] == "package-stable")
-        .unwrap();
-    let scratch = steps
-        .iter()
-        .find(|step| step["id"] == "package-scratch")
-        .unwrap();
-    assert!(
-        stable["if"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("!({scratch_context})"))
-    );
-    assert_eq!(stable["with"]["channel"], "stable");
-    assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
-    assert_eq!(
-        scratch["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e"
-    );
-    assert_eq!(
-        scratch["with"]["action-sha"],
-        "119643d5407f97b3589059246d43bd05590a248e"
-    );
-    for (key, expected) in [
-        ("channel", "scratch"),
-        (
-            "manifest-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-        ),
-        (
-            "publication-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-        ),
-        (
-            "publication-source-branch",
-            "integration/native-consumer-pre35-20261023",
-        ),
-        ("publication-tag", "v0.2.45-pre.35"),
-        ("publication-release-id", "421283713"),
-        ("publication-asset-id", "667334470"),
-        (
-            "publication-asset-sha256",
-            "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
-        ),
-        ("publication-asset-size", "12173384"),
-        ("publication-producer-run-id", "39866598474"),
-        ("publication-producer-run-attempt", "1"),
-    ] {
-        assert_eq!(scratch["with"][key], expected, "{key}");
-    }
+    assert_fixed_package(steps);
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the owner approval without a write credential",
@@ -151,7 +66,7 @@ fn server_approval_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow
         let step = steps.iter().find(|step| step["name"] == name).unwrap();
         assert_eq!(
             step["env"]["CLI_BINARY"],
-            "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
+            "${{ steps.package.outputs.binary }}"
         );
     }
     let validate = steps
@@ -178,7 +93,7 @@ fn server_approval_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow
 }
 
 #[test]
-fn server_merge_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() {
+fn server_merge_receiver_uses_a_fixed_package() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-server-merge.yml",
@@ -188,58 +103,7 @@ fn server_merge_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() 
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-merge.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
-    let stable = steps
-        .iter()
-        .find(|step| step["id"] == "package-stable")
-        .unwrap();
-    let scratch = steps
-        .iter()
-        .find(|step| step["id"] == "package-scratch")
-        .unwrap();
-    assert!(
-        stable["if"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("!({scratch_context})"))
-    );
-    assert_eq!(stable["with"]["channel"], "stable");
-    assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
-    assert_eq!(
-        scratch["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e"
-    );
-    assert_eq!(
-        scratch["with"]["action-sha"],
-        "119643d5407f97b3589059246d43bd05590a248e"
-    );
-    for (key, expected) in [
-        ("channel", "scratch"),
-        (
-            "manifest-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-        ),
-        (
-            "publication-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-        ),
-        (
-            "publication-source-branch",
-            "integration/native-consumer-pre35-20261023",
-        ),
-        ("publication-tag", "v0.2.45-pre.35"),
-        ("publication-release-id", "421283713"),
-        ("publication-asset-id", "667334470"),
-        (
-            "publication-asset-sha256",
-            "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
-        ),
-        ("publication-asset-size", "12173384"),
-        ("publication-producer-run-id", "39866598474"),
-        ("publication-producer-run-attempt", "1"),
-    ] {
-        assert_eq!(scratch["with"][key], expected, "{key}");
-    }
+    assert_fixed_package(steps);
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the merge request and paired approval without a writer token",
@@ -248,7 +112,7 @@ fn server_merge_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() 
         let step = steps.iter().find(|step| step["name"] == name).unwrap();
         assert_eq!(
             step["env"]["CLI_BINARY"],
-            "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
+            "${{ steps.package.outputs.binary }}"
         );
     }
     let validate = steps
@@ -331,7 +195,7 @@ fn server_securefix_receiver_uses_a_fixed_package_with_scoped_writer() {
 }
 
 #[test]
-fn server_release_receiver_selects_pre35_only_for_its_exact_scratch_label_workflow() {
+fn server_release_receiver_uses_a_fixed_package_in_each_credential_domain() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-server-release.yml",
@@ -340,67 +204,15 @@ fn server_release_receiver_selects_pre35_only_for_its_exact_scratch_label_workfl
         .unwrap(),
     )
     .unwrap();
-    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
     let jobs = workflow["jobs"].as_mapping().unwrap();
     assert_eq!(jobs.len(), 5);
     for (job_id, job) in jobs {
         let steps = job["steps"].as_sequence().unwrap();
-        let stable = steps
-            .iter()
-            .find(|step| step["id"] == "package-stable")
-            .unwrap_or_else(|| panic!("{job_id:?} lacks stable package loader"));
-        let scratch = steps
-            .iter()
-            .find(|step| step["id"] == "package-scratch")
-            .unwrap_or_else(|| panic!("{job_id:?} lacks scratch package loader"));
-        assert!(
-            stable["if"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("!({scratch_context})"))
-        );
-        assert_eq!(stable["with"]["channel"], "stable");
-        assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
-        assert_eq!(
-            scratch["uses"],
-            "civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e"
-        );
-        assert_eq!(
-            scratch["with"]["action-sha"],
-            "119643d5407f97b3589059246d43bd05590a248e"
-        );
-        for (key, expected) in [
-            ("channel", "scratch"),
-            (
-                "manifest-source-sha",
-                "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-            ),
-            (
-                "publication-source-sha",
-                "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-            ),
-            (
-                "publication-source-branch",
-                "integration/native-consumer-pre35-20261023",
-            ),
-            ("publication-tag", "v0.2.45-pre.35"),
-            ("publication-release-id", "421283713"),
-            ("publication-asset-id", "667334470"),
-            (
-                "publication-asset-sha256",
-                "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
-            ),
-            ("publication-asset-size", "12173384"),
-            ("publication-producer-run-id", "39866598474"),
-            ("publication-producer-run-attempt", "1"),
-        ] {
-            assert_eq!(scratch["with"][key], expected, "{job_id:?} {key}");
-        }
+        assert_fixed_package(steps);
         for step in steps {
             if step["env"]["CLI_BINARY"].is_string() {
                 assert_eq!(
-                    step["env"]["CLI_BINARY"],
-                    "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}",
+                    step["env"]["CLI_BINARY"], "${{ steps.package.outputs.binary }}",
                     "{job_id:?} {:?}",
                     step["name"]
                 );
