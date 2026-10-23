@@ -3840,11 +3840,11 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
             .unwrap();
     assert_eq!(
         manifest["producer_workflow"],
-        ".github/workflows/native-package-build.yml"
+        ".github/workflows/testing-native-package-build.yml"
     );
     assert_eq!(
         manifest["publisher_workflow"],
-        ".github/workflows/publish-native-package.yml"
+        ".github/workflows/testing-publish-native-package.yml"
     );
     assert_eq!(manifest["assets"]["linux-x86_64"], "securefix-linux-x86_64");
 }

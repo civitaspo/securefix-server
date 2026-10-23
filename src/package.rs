@@ -1641,18 +1641,8 @@ pub fn publish_scratch_prerelease(
         &source_package_manifest,
         ".github/actions/load-package/package.json",
     )?;
-    let package_manifest: SourcePackageManifest = serde_json::from_slice(&manifest_bytes)
-        .context("source package manifest is invalid JSON")?;
-    package_manifest.validate(&version, NATIVE_CLIENT_PROTOCOL, source_sha)?;
-    ensure!(
-        package_manifest.producer_workflow == PACKAGE_PRODUCER_WORKFLOW
-            && package_manifest
-                .assets
-                .get("linux-x86_64")
-                .map(String::as_str)
-                == Some(asset_name),
-        "source package manifest does not match the scratch publisher contract"
-    );
+    let package_manifest =
+        validate_scratch_package_manifest(&manifest_bytes, &version, source_sha)?;
     let producer_run: Value = source_api.get(&format!(
         "/repos/{}/actions/runs/{producer_run_id}/attempts/1",
         source.repository
@@ -2364,6 +2354,23 @@ impl SourcePackageManifest {
         );
         Ok(())
     }
+}
+
+fn validate_scratch_package_manifest(
+    manifest_bytes: &[u8],
+    version: &Version,
+    source_sha: &str,
+) -> Result<SourcePackageManifest> {
+    let manifest: SourcePackageManifest = serde_json::from_slice(manifest_bytes)
+        .context("source package manifest is invalid JSON")?;
+    manifest.validate(version, NATIVE_CLIENT_PROTOCOL, source_sha)?;
+    ensure!(
+        manifest.producer_workflow == PACKAGE_PRODUCER_WORKFLOW
+            && manifest.publisher_workflow.as_deref() == Some(PACKAGE_PUBLISHER_WORKFLOW)
+            && manifest.assets.get("linux-x86_64").map(String::as_str) == Some(PACKAGE_BINARY_NAME),
+        "source package manifest does not match the scratch publisher contract"
+    );
+    Ok(manifest)
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -4592,9 +4599,18 @@ jobs:
     }
 
     #[test]
-    fn checked_in_package_manifest_passes_the_release_source_validator() {
+    fn checked_in_package_manifest_uses_the_scratch_producer_and_preserves_release_contract() {
         let cargo = include_bytes!("../Cargo.toml");
-        let manifest = include_bytes!("../.github/actions/load-package/package.json");
+        let manifest_bytes = include_bytes!("../.github/actions/load-package/package.json");
+        let version = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let manifest =
+            validate_scratch_package_manifest(manifest_bytes, &version, SOURCE_SHA).unwrap();
+        assert_eq!(manifest.producer_workflow, PACKAGE_PRODUCER_WORKFLOW);
+        assert_eq!(
+            manifest.publisher_workflow.as_deref(),
+            Some(PACKAGE_PUBLISHER_WORKFLOW)
+        );
+
         let binding = NativePackageReleaseSourceBinding {
             source_sha: SOURCE_SHA,
             version: env!("CARGO_PKG_VERSION"),
@@ -4604,14 +4620,27 @@ jobs:
             max_asset_bytes: 134217728,
             stable: false,
         };
-        validate_native_package_release_source(cargo, manifest, &binding).unwrap();
+        assert!(validate_native_package_release_source(cargo, manifest_bytes, &binding).is_err());
+
+        let mut production_manifest: serde_json::Value =
+            serde_json::from_slice(manifest_bytes).unwrap();
+        production_manifest["producer_workflow"] =
+            serde_json::json!(NATIVE_PACKAGE_PRODUCER_WORKFLOW);
+        production_manifest["publisher_workflow"] =
+            serde_json::json!(NATIVE_PACKAGE_PUBLISHER_WORKFLOW);
+        validate_native_package_release_source(
+            cargo,
+            &serde_json::to_vec(&production_manifest).unwrap(),
+            &binding,
+        )
+        .unwrap();
 
         let mut explicit_wrong_source: serde_json::Value =
-            serde_json::from_slice(manifest).unwrap();
+            serde_json::from_slice(manifest_bytes).unwrap();
         explicit_wrong_source["source_sha"] = serde_json::json!("b".repeat(40));
         let explicit_wrong_source = serde_json::to_vec(&explicit_wrong_source).unwrap();
         assert!(
-            validate_native_package_release_source(cargo, &explicit_wrong_source, &binding)
+            validate_scratch_package_manifest(&explicit_wrong_source, &version, SOURCE_SHA)
                 .is_err()
         );
     }
