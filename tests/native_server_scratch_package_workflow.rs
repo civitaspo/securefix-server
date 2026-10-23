@@ -32,7 +32,7 @@ fn server_policy_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
+    assert_fixed_package(steps, "5c4effcaefca77e8c3750bc82ff82156f60cd74b");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the exact-head policy check without a writer token",
@@ -57,7 +57,7 @@ fn server_approval_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
+    assert_fixed_package(steps, "5c4effcaefca77e8c3750bc82ff82156f60cd74b");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the owner approval without a write credential",
@@ -103,7 +103,7 @@ fn server_merge_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
+    assert_fixed_package(steps, "5c4effcaefca77e8c3750bc82ff82156f60cd74b");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the merge request and paired approval without a writer token",
@@ -158,7 +158,7 @@ fn server_securefix_receiver_uses_a_fixed_package_with_scoped_writer() {
     assert_eq!(package["with"]["token"], "${{ github.token }}");
     assert_eq!(
         package["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@69dd93cd89596fbaff30b6d03c2c4b9507ce914e"
+        "civitaspo/securefix-server/.github/actions/load-package@5c4effcaefca77e8c3750bc82ff82156f60cd74b"
     );
     assert!(package["if"].is_null());
     for name in [
@@ -208,7 +208,7 @@ fn server_release_receiver_uses_a_fixed_package_in_each_credential_domain() {
     assert_eq!(jobs.len(), 6);
     for (job_id, job) in jobs {
         let steps = job["steps"].as_sequence().unwrap();
-        assert_fixed_package(steps, "81f79f0893f44344289a82b525bd8d186fb6cd93");
+        assert_fixed_package(steps, "5c4effcaefca77e8c3750bc82ff82156f60cd74b");
         for step in steps {
             assert!(step["with"]["permission-attestations"].is_null());
             if step["env"]["CLI_BINARY"].is_string() {

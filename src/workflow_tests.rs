@@ -5911,7 +5911,10 @@ fn server_role_receivers_use_fixed_package_and_separate_read_and_write_credentia
             loader["with"],
             serde_json::json!({"token":"${{ github.token }}"})
         );
-        assert!(loader["uses"].as_str().unwrap().contains("@"));
+        assert_eq!(
+            loader["uses"],
+            "civitaspo/securefix-server/.github/actions/load-package@5c4effcaefca77e8c3750bc82ff82156f60cd74b"
+        );
         for mint in steps.iter().filter(|step| {
             step["uses"]
                 .as_str()
