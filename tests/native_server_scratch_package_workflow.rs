@@ -32,7 +32,7 @@ fn server_policy_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d");
+    assert_fixed_package(steps, "d39821591200073b7513a01d6d7d721683ba5b7a");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the exact-head policy check without a writer token",
@@ -103,7 +103,7 @@ fn server_merge_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "69dd93cd89596fbaff30b6d03c2c4b9507ce914e");
+    assert_fixed_package(steps, "d39821591200073b7513a01d6d7d721683ba5b7a");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the merge request and paired approval without a writer token",
