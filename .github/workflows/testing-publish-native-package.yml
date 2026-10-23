@@ -114,6 +114,8 @@ jobs:
     if: needs.publish.result == 'success' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && github.sha == github.workflow_sha
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
+      attestations: read
       contents: read
     timeout-minutes: 15
     steps:

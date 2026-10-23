@@ -8,6 +8,10 @@ permissions: {}
 
 jobs:
   handler:
+    concurrency:
+      group: securefix-testing-native-control
+      cancel-in-progress: false
+      queue: max
     if: startsWith(github.event.label.name, 'securefix-native-merge-')
     permissions:
       actions: read

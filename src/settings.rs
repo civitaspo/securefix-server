@@ -484,7 +484,7 @@ fn validate_rendered_managed_role_workflow(
     if role == securefix::instance_config::WorkflowRole::Approve {
         secrets["APPROVAL_TOKEN"] = json!("${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}");
     }
-    let expected: serde_yaml::Value = serde_yaml::to_value(json!({
+    let mut expected: serde_yaml::Value = serde_yaml::to_value(json!({
         "name": format!("Securefix server {}", workflow_role_name(role)),
         "on": {"label": {"types": ["created"]}},
         "permissions": {},
@@ -504,6 +504,16 @@ fn validate_rendered_managed_role_workflow(
             "secrets": secrets
         }}
     }))?;
+    if matches!(
+        role,
+        securefix::instance_config::WorkflowRole::Approve
+            | securefix::instance_config::WorkflowRole::Merge
+            | securefix::instance_config::WorkflowRole::Securefix
+    ) {
+        expected["jobs"]["handler"]["concurrency"] = serde_yaml::to_value(json!({
+            "group": "securefix-control", "cancel-in-progress": false, "queue": "max"
+        }))?;
+    }
     let actual: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
     ensure!(
         actual == expected,
@@ -3089,6 +3099,22 @@ mod tests {
         let expected_uses = uses.iter().next().unwrap();
         let mut workflow: serde_yaml::Value =
             serde_yaml::from_slice(desired.get(path).unwrap()).unwrap();
+        for group in [
+            serde_yaml::Value::Null,
+            serde_yaml::Value::String("other".to_owned()),
+        ] {
+            let mut altered = workflow.clone();
+            altered["jobs"]["handler"]["concurrency"]["group"] = group;
+            assert!(
+                validate_rendered_managed_role_workflow(
+                    role,
+                    expected_uses,
+                    &instance_config,
+                    serde_yaml::to_string(&altered).unwrap().as_bytes()
+                )
+                .is_err()
+            );
+        }
         workflow["jobs"]["handler"]["permissions"]["contents"] =
             serde_yaml::Value::String("write".to_owned());
         assert!(

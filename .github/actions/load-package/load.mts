@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,7 @@ export interface GitHubScriptArguments {
   context: unknown;
   core: ActionsCore;
   exec: ActionsExec;
+  runtime: { platform: string; arch: string };
 }
 
 interface Octokit {
@@ -412,6 +413,9 @@ export async function loadPackage(args: GitHubScriptArguments): Promise<void> {
     throw new Error('bundled package mapping is invalid JSON');
   }
   const mapping = parseMapping(rawMapping);
+  if (args.runtime.platform !== 'linux' || args.runtime.arch !== 'x64') {
+    throw new Error('package supports only the linux-x86_64 runner platform');
+  }
   const source = ownerAndName(mapping.sourceRepository);
   const destination = ownerAndName(mapping.destinationRepository);
   const sourceRepository = await apiData(args.github, 'GET /repos/{owner}/{repo}', source);
@@ -462,7 +466,9 @@ export async function loadPackage(args: GitHubScriptArguments): Promise<void> {
   if (!Array.isArray(assetsValue) || assetsValue.length === 0 || assetsValue.length >= 100) {
     throw new Error('package release assets are missing or exceed the bounded listing');
   }
-  const asset = assetsValue.find((candidate) => isRecord(candidate) && candidate.id === mapping.assetId);
+  const matchingAssets = assetsValue.filter((candidate) => isRecord(candidate) && candidate.id === mapping.assetId);
+  if (matchingAssets.length !== 1) throw new Error('package release must contain exactly one selected asset');
+  const asset = matchingAssets[0];
   if (!isRecord(asset) || asset.name !== mapping.assetName || asset.size !== mapping.assetSize || asset.state !== 'uploaded') {
     throw new Error('package release asset differs from the bundled mapping');
   }
@@ -538,11 +544,13 @@ export async function loadPackage(args: GitHubScriptArguments): Promise<void> {
     });
     if (verification.exitCode !== 0) throw new Error('package attestation verification failed');
     validateAttestationOutput(verification.stdout, mapping, sourceRepository.owner.id, producer.event);
-    await chmod(binaryPath, 0o755);
+    const installedPath = join(workspace, 'securefix');
+    await rename(binaryPath, installedPath);
+    await chmod(installedPath, 0o755);
 
     await rm(bundlePath, { force: true });
     args.core.addPath(workspace);
-    args.core.setOutput('binary', binaryPath);
+    args.core.setOutput('binary', installedPath);
     args.core.setOutput('version', mapping.version);
     args.core.setOutput('asset-id', mapping.assetId);
     args.core.setOutput('release-id', mapping.releaseId);

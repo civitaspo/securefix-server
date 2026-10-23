@@ -1,0 +1,175 @@
+{
+  "approval": {
+    "protocol": "securefix-native-request/v1",
+    "operation": "approval",
+    "repository": {
+      "id": 1410312556,
+      "full_name": "civitaspo/testing-securefix-server"
+    },
+    "pull_request": {
+      "number": 435,
+      "head_sha": "2e78e5eafc700e501009ba861f649b051a475dae",
+      "head_branch": "testing/native-role-events-pre43",
+      "head_repository_id": 1410312556,
+      "base_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "base_ref": "main",
+      "author_id": 4525500,
+      "author_login": "civitaspo"
+    },
+    "command_comment": {
+      "id": 6358363203,
+      "created_at": "2026-10-23T05:47:09Z",
+      "updated_at": "2026-10-23T05:47:09Z"
+    },
+    "producer": {
+      "run_id": 39907689869,
+      "run_attempt": 1,
+      "event": "issue_comment",
+      "context_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "source_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "workflow_path": ".github/workflows/approve-request.yml",
+      "workflow_ref": "refs/heads/main",
+      "workflow_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "actor_id": 4525500,
+      "actor_login": "civitaspo"
+    },
+    "securefix_artifact": null,
+    "client_workflow_epoch": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+    "server_authority": {
+      "instance_repository": "civitaspo/securefix-server",
+      "instance_id": 1250079425,
+      "default_branch": "main",
+      "config_path": "repo-settings/native-role-events-test-instance.toml",
+      "config_sha256": "6f29872c9f416e2633a0be230e7435f7d1b93265e85ae25d8f83052addc6c615",
+      "epoch": "526677ff31174088d2bd7206eede4ab4aa176636",
+      "workflows": [
+        {
+          "role": "approve",
+          "path": ".github/workflows/testing-native-approve-event.yml",
+          "sha256": "c69dd23c0f5596f7767b37551c02fd1a46a783a4782e2fe2fba71a546ac21662",
+          "pins": [
+            "civitaspo/securefix-server/.github/workflows/reusable-server-approve.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+          ]
+        },
+        {
+          "role": "merge",
+          "path": ".github/workflows/testing-native-merge-event.yml",
+          "sha256": "a3262bd2173711d13ea62b5256cf0c7246ba51f538e3e68b47ddd6fef86b4025",
+          "pins": [
+            "civitaspo/securefix-server/.github/workflows/reusable-server-merge.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+          ]
+        },
+        {
+          "role": "policy_check",
+          "path": ".github/workflows/testing-native-policy-check-event.yml",
+          "sha256": "bfbdac7ce171ba214ea5f127ee2cdc49d9793e9bc40e2442a3bbe144ea2692c6",
+          "pins": [
+            "civitaspo/securefix-server/.github/workflows/reusable-server-policy-check.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+          ]
+        }
+      ]
+    }
+  },
+  "merge": {
+    "protocol": "securefix-native-request/v1",
+    "operation": "merge",
+    "repository": {
+      "id": 1410312556,
+      "full_name": "civitaspo/testing-securefix-server"
+    },
+    "pull_request": {
+      "number": 435,
+      "head_sha": "2e78e5eafc700e501009ba861f649b051a475dae",
+      "head_branch": "testing/native-role-events-pre43",
+      "head_repository_id": 1410312556,
+      "base_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "base_ref": "main",
+      "author_id": 4525500,
+      "author_login": "civitaspo"
+    },
+    "command_comment": {
+      "id": 6358398681,
+      "created_at": "2026-10-23T05:49:57Z",
+      "updated_at": "2026-10-23T05:49:57Z"
+    },
+    "producer": {
+      "run_id": 39907944260,
+      "run_attempt": 1,
+      "event": "issue_comment",
+      "context_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "source_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "workflow_path": ".github/workflows/merge-request.yml",
+      "workflow_ref": "refs/heads/main",
+      "workflow_sha": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+      "actor_id": 4525500,
+      "actor_login": "civitaspo"
+    },
+    "securefix_artifact": null,
+    "client_workflow_epoch": "1fc4b51e5ac70c18b137e6a6341bc1a5c44546bd",
+    "server_authority": {
+      "instance_repository": "civitaspo/securefix-server",
+      "instance_id": 1250079425,
+      "default_branch": "main",
+      "config_path": "repo-settings/native-role-events-test-instance.toml",
+      "config_sha256": "6f29872c9f416e2633a0be230e7435f7d1b93265e85ae25d8f83052addc6c615",
+      "epoch": "526677ff31174088d2bd7206eede4ab4aa176636",
+      "workflows": [
+        {
+          "role": "approve",
+          "path": ".github/workflows/testing-native-approve-event.yml",
+          "sha256": "c69dd23c0f5596f7767b37551c02fd1a46a783a4782e2fe2fba71a546ac21662",
+          "pins": [
+            "civitaspo/securefix-server/.github/workflows/reusable-server-approve.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+          ]
+        },
+        {
+          "role": "merge",
+          "path": ".github/workflows/testing-native-merge-event.yml",
+          "sha256": "a3262bd2173711d13ea62b5256cf0c7246ba51f538e3e68b47ddd6fef86b4025",
+          "pins": [
+            "civitaspo/securefix-server/.github/workflows/reusable-server-merge.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+          ]
+        },
+        {
+          "role": "policy_check",
+          "path": ".github/workflows/testing-native-policy-check-event.yml",
+          "sha256": "bfbdac7ce171ba214ea5f127ee2cdc49d9793e9bc40e2442a3bbe144ea2692c6",
+          "pins": [
+            "civitaspo/securefix-server/.github/workflows/reusable-server-policy-check.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+          ]
+        }
+      ]
+    }
+  },
+  "event": {
+    "action": "created",
+    "repository": {
+      "full_name": "civitaspo/securefix-server"
+    },
+    "sender": {
+      "login": "civitaspo-securefix-client[bot]",
+      "id": 288068203,
+      "node_id": "BOT_kgDOESuSaw",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3872492?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D",
+      "html_url": "https://github.com/apps/civitaspo-securefix-client",
+      "followers_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/civitaspo-securefix-client%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "label": {
+      "name": "securefix-native-merge-39907944260",
+      "description": "civitaspo/testing-securefix-server/39907944260"
+    }
+  }
+}

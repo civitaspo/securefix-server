@@ -39,7 +39,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
           token: ${{ github.token }}
       - name: Capture the exact event and authenticated instance authority
@@ -120,7 +120,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0

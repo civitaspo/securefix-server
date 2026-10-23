@@ -5528,16 +5528,33 @@ jobs:
         assert!(publish_yaml.contains("SECUREFIX_PACKAGE_PUBLISH_TOKEN"));
         assert!(publish_yaml.contains("SECUREFIX_PACKAGE_TOKEN"));
         assert!(publish_yaml.contains("steps.writer.outputs.token"));
-        let approval_yaml = std::str::from_utf8(include_bytes!(
+        let approval: serde_yaml::Value = serde_yaml::from_slice(include_bytes!(
             "../.github/workflows/testing-native-approve.yml"
         ))
         .unwrap();
-        let merge_yaml = std::str::from_utf8(include_bytes!(
-            "../.github/workflows/testing-native-merge.yml"
-        ))
-        .unwrap();
-        let expected_scratch_projection = "Exact 9-field package publication JSON accepted by the qualified pre23 host (source_sha, source_branch, tag, release_id, asset_id, asset_sha256, asset_size, producer_run_id, producer_run_attempt).";
-        assert!(approval_yaml.contains(expected_scratch_projection));
-        assert!(merge_yaml.contains(expected_scratch_projection));
+        assert!(
+            approval["on"]["workflow_dispatch"]["inputs"]
+                .get("package_publication_json")
+                .is_none()
+        );
+        for job in ["validate-request", "apply-approval"] {
+            let loaders: Vec<_> = approval["jobs"][job]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.contains("/.github/actions/load-package@"))
+                })
+                .collect();
+            assert!(!loaders.is_empty());
+            for loader in loaders {
+                assert_eq!(
+                    serde_json::to_value(&loader["with"]).unwrap(),
+                    serde_json::json!({"token":"${{ github.token }}"})
+                );
+            }
+        }
     }
 }

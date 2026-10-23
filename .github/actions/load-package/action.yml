@@ -36,9 +36,13 @@ runs:
       uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
       env:
         GITHUB_ACTION_PATH: ${{ github.action_path }}
+        LOAD_PACKAGE_TOKEN: ${{ inputs.token }}
       with:
         github-token: ${{ inputs.token }}
         script: |
+          if (!process.env.LOAD_PACKAGE_TOKEN?.trim()) {
+            throw new Error('load-package requires a nonempty token');
+          }
           const { join } = await import('node:path');
           const { pathToFileURL } = await import('node:url');
           const actionPath = process.env.GITHUB_ACTION_PATH;
@@ -47,4 +51,4 @@ runs:
           }
           const entryUrl = pathToFileURL(join(actionPath, 'entry.mts')).href;
           const entry = await import(entryUrl);
-          await entry.run({ github, context, core, exec });
+          await entry.run({ github, context, core, exec, runtime: { platform: process.platform, arch: process.arch } });

@@ -371,7 +371,8 @@ fn locate_instance_event(config_path: &str, operation: &str) -> Result<()> {
     );
     let (repository, run_id) = native_request_event_locator(&payload, expected_role)?;
     let capability = match operation {
-        "policy_check" | "approval" | "merge" => securefix::policy::Capability::Merge,
+        "policy_check" | "merge" => securefix::policy::Capability::Merge,
+        "approval" => securefix::policy::Capability::Approve,
         "securefix" => securefix::policy::Capability::Securefix,
         _ => anyhow::bail!("unsupported native request operation"),
     };
@@ -445,6 +446,7 @@ fn native_request_event_locator(payload: &Value, role: &str) -> Result<(String, 
 fn validate_native_request_event(
     config: &securefix::instance_config::InstanceConfig,
     manifest: &RequestManifest,
+    execution_mode: securefix::api::NativeScratchMode,
 ) -> Result<()> {
     ensure!(
         std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("label"),
@@ -454,13 +456,14 @@ fn validate_native_request_event(
         .context("missing GITHUB_EVENT_PATH for native request verification")?;
     let payload: Value = serde_json::from_slice(&fs::read(event_path)?)
         .context("parse native request label event")?;
-    validate_native_request_event_payload(config, manifest, &payload)
+    validate_native_request_event_payload(config, manifest, &payload, execution_mode)
 }
 
 fn validate_native_request_event_payload(
     config: &securefix::instance_config::InstanceConfig,
     manifest: &RequestManifest,
     payload: &Value,
+    execution_mode: securefix::api::NativeScratchMode,
 ) -> Result<()> {
     ensure!(
         payload["action"] == "created"
@@ -478,10 +481,22 @@ fn validate_native_request_event_payload(
         ),
         "native request label was not created by the configured Client App"
     );
-    let role = native_operation_role(&manifest.operation)?;
+    let paired_approval = execution_mode == securefix::api::NativeScratchMode::Merge
+        && manifest.operation == "approval";
+    // The merge request owns the event; its approval is bound by the review marker and pair check.
+    let role = native_operation_role(if paired_approval {
+        "merge"
+    } else {
+        &manifest.operation
+    })?;
     let (repository, run_id) = native_request_event_locator(payload, role)?;
     ensure!(
-        repository == manifest.repository.full_name && run_id == manifest.producer.run_id,
+        repository == manifest.repository.full_name
+            && if paired_approval {
+                run_id != manifest.producer.run_id
+            } else {
+                run_id == manifest.producer.run_id
+            },
         "native request manifest does not match the triggering Server label"
     );
     if config.scratch_package_repository.is_some() {
@@ -663,7 +678,7 @@ fn verify_request_with_deployment(
         "native Server config does not match the current job repository"
     );
     if !scratch && !owner_selected_test_package {
-        validate_native_request_event(&config, &manifest)?;
+        validate_native_request_event(&config, &manifest, execution_mode)?;
     }
     if owner_selected_test_package {
         validate_owner_selected_request_caller(&config, &manifest)?;
@@ -3247,22 +3262,151 @@ mod tests {
             "sender": { "id": client_bot.id, "login": client_bot.login, "type": "Bot" },
             "label": { "name": "securefix-native-merge-123", "description": "owner/client/123" }
         });
-        assert!(validate_native_request_event_payload(&config, &manifest, &payload).is_ok());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &manifest,
+                &payload,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_ok()
+        );
+
+        let mut approval = manifest.clone();
+        approval.operation = "approval".to_owned();
+        approval.producer.run_id = 122;
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &approval,
+                &payload,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_ok()
+        );
+        validate_native_merge_pair(&manifest, &approval).unwrap();
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &approval,
+                &payload,
+                securefix::api::NativeScratchMode::Approval
+            )
+            .is_err()
+        );
+        let mut other_client = payload.clone();
+        other_client["label"]["description"] = serde_json::json!("owner/other/123");
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &approval,
+                &other_client,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_err()
+        );
+        let mut same_run = approval.clone();
+        same_run.producer.run_id = manifest.producer.run_id;
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &same_run,
+                &payload,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_err()
+        );
+        for proof in [&manifest, &approval] {
+            let mut forged = payload.clone();
+            forged["sender"]["id"] = serde_json::json!(u64::MAX);
+            assert!(
+                validate_native_request_event_payload(
+                    &config,
+                    proof,
+                    &forged,
+                    securefix::api::NativeScratchMode::Merge
+                )
+                .is_err()
+            );
+        }
 
         let mut wrong_action = payload.clone();
         wrong_action["action"] = serde_json::json!("edited");
-        assert!(validate_native_request_event_payload(&config, &manifest, &wrong_action).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &manifest,
+                &wrong_action,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_err()
+        );
         let mut wrong_actor = payload.clone();
         wrong_actor["sender"]["id"] = serde_json::json!(u64::MAX);
-        assert!(validate_native_request_event_payload(&config, &manifest, &wrong_actor).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &manifest,
+                &wrong_actor,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_err()
+        );
         let mut wrong_operation = payload.clone();
         wrong_operation["label"]["name"] = serde_json::json!("securefix-native-approve-123");
         assert!(
-            validate_native_request_event_payload(&config, &manifest, &wrong_operation).is_err()
+            validate_native_request_event_payload(
+                &config,
+                &manifest,
+                &wrong_operation,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_err()
         );
         let mut wrong_run = payload.clone();
         wrong_run["label"]["description"] = serde_json::json!("owner/client/124");
-        assert!(validate_native_request_event_payload(&config, &manifest, &wrong_run).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &manifest,
+                &wrong_run,
+                securefix::api::NativeScratchMode::Merge
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn observed_normal_merge_event_authenticates_both_request_proofs() {
+        let fixture: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/native-merge-event-pair.json"
+        ))
+        .unwrap();
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-role-events-test-instance.toml"
+        ))
+        .unwrap();
+        let merge: RequestManifest = serde_json::from_value(fixture["merge"].clone()).unwrap();
+        let approval: RequestManifest =
+            serde_json::from_value(fixture["approval"].clone()).unwrap();
+        merge.validate().unwrap();
+        approval.validate().unwrap();
+        for request in [&merge, &approval] {
+            validate_native_request_event_payload(
+                &config,
+                request,
+                &fixture["event"],
+                securefix::api::NativeScratchMode::Merge,
+            )
+            .unwrap();
+        }
+        validate_native_merge_pair(&merge, &approval).unwrap();
+        let mut other_head = approval.clone();
+        other_head.pull_request.head_sha = "a".repeat(40);
+        assert!(validate_native_merge_pair(&merge, &other_head).is_err());
+        let mut stale_authority = approval.clone();
+        stale_authority.server_authority.epoch = "a".repeat(40);
+        assert!(validate_native_merge_pair(&merge, &stale_authority).is_err());
     }
 
     #[test]
@@ -3289,18 +3433,58 @@ mod tests {
             "label": {"name": format!("securefix-native-securefix-{}", request.producer.run_id),
                 "description": format!("{}/{}", request.repository.full_name, request.producer.run_id)}
         });
-        assert!(validate_native_request_event_payload(&config, &request, &payload).is_ok());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &request,
+                &payload,
+                securefix::api::NativeScratchMode::Securefix
+            )
+            .is_ok()
+        );
         let mut forged = payload.clone();
         forged["sender"]["id"] = serde_json::json!(config.identities.owner.id);
-        assert!(validate_native_request_event_payload(&config, &request, &forged).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &request,
+                &forged,
+                securefix::api::NativeScratchMode::Securefix
+            )
+            .is_err()
+        );
         request.producer.actor_id += 1;
-        assert!(validate_native_request_event_payload(&config, &request, &payload).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &request,
+                &payload,
+                securefix::api::NativeScratchMode::Securefix
+            )
+            .is_err()
+        );
         request.producer.actor_id = config.identities.owner.id;
         request.pull_request.author_id += 1;
-        assert!(validate_native_request_event_payload(&config, &request, &payload).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &request,
+                &payload,
+                securefix::api::NativeScratchMode::Securefix
+            )
+            .is_err()
+        );
         request.pull_request.author_id = config.identities.owner.id;
         config.scratch_request_callers.clear();
-        assert!(validate_native_request_event_payload(&config, &request, &payload).is_err());
+        assert!(
+            validate_native_request_event_payload(
+                &config,
+                &request,
+                &payload,
+                securefix::api::NativeScratchMode::Securefix
+            )
+            .is_err()
+        );
     }
 
     #[test]

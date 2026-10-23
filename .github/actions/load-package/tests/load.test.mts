@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
@@ -35,7 +35,7 @@ const MAPPING = {
   source_sha: SOURCE_SHA,
   source_branch: 'integration/native-server-approve-pre35-20261023',
   source_default_branch: 'main',
-  source_manifest_path: '.github/actions/load-package/package.json',
+  source_manifest_path: '.github/actions/load-package/source-package.json',
   source_manifest_sha256: createHash('sha256').update(SOURCE_MANIFEST).digest('hex'),
   destination_repository: DESTINATION,
   destination_repository_id: 1410312556,
@@ -148,6 +148,13 @@ interface FixtureOptions {
   targetCommitish?: string;
   verifierOverrides?: Record<string, unknown>;
   verifierFailure?: boolean;
+  verifierThrows?: boolean;
+  token?: string;
+  platform?: string;
+  arch?: string;
+  duplicateAsset?: boolean;
+  producerOverrides?: Record<string, unknown>;
+  publisherOverrides?: Record<string, unknown>;
   apiFailure?: string;
 }
 
@@ -160,13 +167,10 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
   error: unknown;
 }> {
   const root = await mkdtemp(join(tmpdir(), 'securefix loader test with spaces '));
-  const actionDirectory = join(root, 'copy of action', '.github', 'actions', 'load-package');
-  await mkdir(actionDirectory, { recursive: true });
+  const actionDirectory = join(root, 'different nesting', 'renamed action with spaces');
+  await mkdir(dirname(actionDirectory), { recursive: true });
   const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
-  await Promise.all([
-    copyFile(join(originalDirectory, 'load.mts'), join(actionDirectory, 'load.mts')),
-    copyFile(join(originalDirectory, 'entry.mts'), join(actionDirectory, 'entry.mts')),
-  ]);
+  await cp(originalDirectory, actionDirectory, { recursive: true, filter: (source) => basename(source) !== 'node_modules' });
   await writeFile(join(actionDirectory, 'package.json'), JSON.stringify({
     ...MAPPING,
     source_manifest_path: options.sourceManifestPath ?? MAPPING.source_manifest_path,
@@ -212,16 +216,19 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
         } };
       }
       if (route === 'GET /repos/{owner}/{repo}/releases/{release_id}/assets') {
-        return { data: [{
+        const asset = {
           id: MAPPING.asset_id,
           name: MAPPING.asset_name,
           size: MAPPING.asset_size,
           state: 'uploaded',
           digest: 'sha256:' + ASSET_SHA,
-        }] };
+        };
+        return { data: options.duplicateAsset ? [asset, asset] : [asset] };
       }
       if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}') {
-        return { data: parameters.run_id === MAPPING.producer_run_id ? SOURCE_RUN : PUBLISHER_RUN };
+        return { data: parameters.run_id === MAPPING.producer_run_id
+          ? { ...SOURCE_RUN, ...options.producerOverrides }
+          : { ...PUBLISHER_RUN, ...options.publisherOverrides } };
       }
       if (route === 'GET /repos/{owner}/{repo}/attestations/{subject_digest}') {
         return { data: { attestations: [{ repository_id: MAPPING.source_repository_id, bundle: { fixture: true } }] } };
@@ -246,6 +253,7 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
       assert.equal('GH_TOKEN' in execOptions.env, false);
       assert.equal('GITHUB_TOKEN' in execOptions.env, false);
       assert.equal('INPUT_GITHUB_TOKEN' in execOptions.env, false);
+      if (options.verifierThrows) throw new Error('fixture command invocation failure');
       if (options.verifierFailure) return { exitCode: 1, stdout: '', stderr: 'verification rejected' };
       const binaryPath = args[2];
       if (binaryPath === undefined) throw new Error('attestation command has no subject path');
@@ -264,12 +272,15 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
   process.env.SSL_CERT_FILE = '/runner/certs/ca-bundle.pem';
   try {
     const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
-    const action = await readFile(join(originalDirectory, 'action.yml'), 'utf8');
+    const action = await readFile(join(actionDirectory, 'action.yml'), 'utf8');
     const script = extractCompositeScript(action);
     const previousActionPath = process.env.GITHUB_ACTION_PATH;
     process.env.GITHUB_ACTION_PATH = actionDirectory;
     try {
-      await runCompositeScript(script, github, {}, core, exec);
+      await runCompositeScript(script, github, { repository: 'arbitrary/caller', eventName: 'push', actor: 'any-reader', runAttempt: 3 }, core, exec, {
+        env: { ...process.env, LOAD_PACKAGE_TOKEN: options.token ?? 'fixture-read-only-token' },
+        platform: options.platform ?? 'linux', arch: options.arch ?? 'x64',
+      });
     } finally {
       if (previousActionPath === undefined) delete process.env.GITHUB_ACTION_PATH;
       else process.env.GITHUB_ACTION_PATH = previousActionPath;
@@ -314,6 +325,7 @@ test('verified package is added to PATH and outputs without executing the candid
     const binary = result.outputs.get('binary');
     assert.ok(binary);
     assert.equal(result.paths[0], dirname(binary));
+    assert.equal(basename(binary), 'securefix', 'PATH exposes the CLI under its documented command name');
     assert.equal(result.outputs.get('version'), MAPPING.version);
     assert.equal(result.outputs.get('source-sha'), SOURCE_SHA);
     assert.equal(result.outputs.get('producer-run-id'), String(MAPPING.producer_run_id));
@@ -433,23 +445,23 @@ test('attestation command failure never publishes the package', async () => {
   }
 });
 
-test('bundled mapping matches the immutable pre38 package receipt', async () => {
+test('bundled mapping matches the immutable pre42 package receipt', async () => {
   const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
   const parsed: unknown = JSON.parse(await readFile(join(originalDirectory, 'package.json'), 'utf8'));
   assert.ok(isRecord(parsed));
   const mapping = parsed;
   assert.equal(mapping.schema_version, 3);
   assert.equal(mapping.channel, 'scratch');
-  assert.equal(mapping.source_sha, '95520b982c915e8a7c20d6a8464aa9d926216573');
-  assert.equal(mapping.source_manifest_sha256, '50e82142873327376901436a7ff417113c67ecf240691fe79b180ca777fbbf25');
-  assert.equal(mapping.tag, 'v0.2.45-pre.38');
-  assert.equal(mapping.release_id, 421371928);
-  assert.equal(mapping.asset_id, 667664206);
-  assert.equal(mapping.asset_size, 12147624);
-  assert.equal(mapping.asset_sha256, 'b06fc4c5dc4062c8ab7c49d35052407823c38d297c9ad31767fc574468e01daa');
-  assert.equal(mapping.producer_run_id, 39885673712);
-  assert.equal(mapping.publisher_run_id, 39886040299);
-  assert.equal(mapping.publisher_sha, '39e7cd4bc3a9988f20357704ba00a7746750e522');
+  assert.equal(mapping.source_sha, 'd84c178ac49ffb21bdc49e816a1285ff873fe259');
+  assert.equal(mapping.source_manifest_sha256, '204152c788f6d6e922b26649cb2bff7133df99c71b647f25518a3dddfca2d98e');
+  assert.equal(mapping.tag, 'v0.2.45-pre.42');
+  assert.equal(mapping.release_id, 421458267);
+  assert.equal(mapping.asset_id, 667986180);
+  assert.equal(mapping.asset_size, 12227416);
+  assert.equal(mapping.asset_sha256, 'a9b90725a751b8a18f67af39fe6e5831c610f5ea56ae1acdbf4f4c2f4990cada');
+  assert.equal(mapping.producer_run_id, 39901232125);
+  assert.equal(mapping.publisher_run_id, 39901637756);
+  assert.equal(mapping.publisher_sha, '439d8b12784aef749e539158ac308f50a448fa3a');
 });
 
 test('composite metadata exposes only token and invokes the tested Node 24 entry module', async () => {
@@ -462,6 +474,32 @@ test('composite metadata exposes only token and invokes the tested Node 24 entry
     'inputs:\n  token:\n    description: Read-only token for the package source and destination repositories\n    required: true\n');
   assert.match(action, /actions\/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8\.0\.0/);
   assert.match(action, /join\(actionPath, 'entry\.mts'\)/);
-  assert.match(action, /entry\.run\(\{ github, context, core, exec \}\)/);
+  assert.match(action, /entry\.run\(\{ github, context, core, exec, runtime:/);
   assert.doesNotMatch(action, /load\.sh|validate\.sh|action-sha|manifest-source-sha|publication-source-sha/);
 });
+
+for (const [name, options, message] of [
+  ['missing token', { token: '' }, /requires a nonempty token/],
+  ['blank token', { token: '  ' }, /requires a nonempty token/],
+  ['unsupported OS', { platform: 'darwin' }, /runner platform/],
+  ['unsupported architecture', { arch: 'arm64' }, /runner platform/],
+  ['duplicate selected asset', { duplicateAsset: true }, /exactly one selected asset/],
+  ['wrong producer source', { producerOverrides: { head_sha: 'a'.repeat(40) } }, /producer workflow run differs/],
+  ['wrong publisher source', { publisherOverrides: { head_sha: 'a'.repeat(40) } }, /publisher workflow run differs/],
+  ['external command exception', { verifierThrows: true }, /fixture command invocation failure/],
+] satisfies [string, FixtureOptions, RegExp][]) {
+  test(`${name} rejects without executing or publishing a binary`, async () => {
+    const result = await invokeCopiedAction(options);
+    try {
+      assert.match(String(result.error), message);
+      assert.deepEqual(result.paths, []);
+      assert.equal(result.outputs.size, 0);
+      assert.ok(result.ghCalls.every((args) => args[0] === 'gh' && args[1] === 'attestation'));
+      if (options.token !== undefined || options.platform !== undefined || options.arch !== undefined) {
+        assert.deepEqual(result.apiRoutes, []);
+      }
+    } finally {
+      await rm(result.root, { recursive: true, force: true });
+    }
+  });
+}
