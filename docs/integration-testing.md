@@ -531,3 +531,11 @@ verify its exact failure reason and a fresh after state. Revoked owner reviews
 and edited commands are made by the owner controller outside candidate execution.
 The consumed-command case must retain an open PR after accepted authorization
 and failing required CI, then reject the same IDs in a new first-attempt run.
+
+The generic `publish-native-package.yml` publisher reads the build specification
+from `.github/actions/load-package/source-package.json` at the exact producer
+source SHA. It does not read the Action acquisition manifest (`package.json`)
+as build input or fall back to it. This keeps a loader revision's fixed package
+mapping independent from the source being built. The specification digest
+remains bound into the immutable publication record. Existing published
+packages and the legacy scratch publisher are unchanged.

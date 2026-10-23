@@ -1778,11 +1778,13 @@ fn publish_native_package(
         "scratch package publication requires an explicit prerelease version"
     );
     let manifest_value: Value = source_api.get_uncached(&format!(
-        "/repos/{}/contents/.github/actions/load-package/package.json?ref={source_sha}",
+        "/repos/{}/contents/.github/actions/load-package/source-package.json?ref={source_sha}",
         source.repository
     ))?;
-    let manifest_bytes =
-        source_file_bytes(&manifest_value, ".github/actions/load-package/package.json")?;
+    let manifest_bytes = source_file_bytes(
+        &manifest_value,
+        ".github/actions/load-package/source-package.json",
+    )?;
     let manifest: NativePackageReleaseManifest = serde_json::from_slice(&manifest_bytes)
         .context("source package manifest is invalid JSON")?;
     let producer_branch = validate_scratch_package_run(
