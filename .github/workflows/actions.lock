@@ -85,7 +85,7 @@ workflows:
     '.github/workflows/reusable-policy-check.yml': []
     '.github/workflows/reusable-release-pr-sync.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-        - 'civitaspo/securefix-server@b00b2080d5be9fe35ece19ee63d064f45997c1ca'
+        - 'civitaspo/securefix-server@57a221b621c89b0df9471f389a86a87d1fb3a03c'
     '.github/workflows/reusable-release-pr.yml':
         - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -237,7 +237,7 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/testing-reusable-release-pr-sync.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-        - 'civitaspo/securefix-server@b00b2080d5be9fe35ece19ee63d064f45997c1ca'
+        - 'civitaspo/securefix-server@57a221b621c89b0df9471f389a86a87d1fb3a03c'
     '.github/workflows/testing-reusable-release-pr.yml':
         - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -302,6 +302,13 @@ dependencies:
     'civitaspo/securefix-server@0b4bc206f60c822ffb1ca58d918547f53eac0764':
         ref: 'integration/native-server-approve-pre35-20261023'
         commit: 'sha1-0b4bc206f60c822ffb1ca58d918547f53eac0764'
+        owner_id: 4525500
+        repo_id: 1250079425
+        uses:
+            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
+    'civitaspo/securefix-server@57a221b621c89b0df9471f389a86a87d1fb3a03c':
+        ref: 'integration/native-server-approve-pre35-20261023'
+        commit: 'sha1-57a221b621c89b0df9471f389a86a87d1fb3a03c'
         owner_id: 4525500
         repo_id: 1250079425
         uses:

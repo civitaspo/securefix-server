@@ -24,7 +24,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@b00b2080d5be9fe35ece19ee63d064f45997c1ca # v0.2.45-pre.85
+        uses: civitaspo/securefix-server/.github/actions/load-package@57a221b621c89b0df9471f389a86a87d1fb3a03c # v0.2.45-pre.89
         with:
           token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
