@@ -545,7 +545,7 @@ fn server_merge_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() 
 }
 
 #[test]
-fn server_securefix_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() {
+fn server_securefix_receiver_uses_pre38_only_for_its_exact_scratch_label_workflow() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-server-securefix.yml",
@@ -584,25 +584,25 @@ fn server_securefix_receiver_uses_pre35_only_for_its_exact_scratch_label_workflo
         ("channel", "scratch"),
         (
             "manifest-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
+            "95520b982c915e8a7c20d6a8464aa9d926216573",
         ),
         (
             "publication-source-sha",
-            "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
+            "95520b982c915e8a7c20d6a8464aa9d926216573",
         ),
         (
             "publication-source-branch",
-            "integration/native-consumer-pre35-20261023",
+            "integration/native-server-approve-pre35-20261023",
         ),
-        ("publication-tag", "v0.2.45-pre.35"),
-        ("publication-release-id", "421283713"),
-        ("publication-asset-id", "667334470"),
+        ("publication-tag", "v0.2.45-pre.38"),
+        ("publication-release-id", "421371928"),
+        ("publication-asset-id", "667664206"),
         (
             "publication-asset-sha256",
-            "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
+            "b06fc4c5dc4062c8ab7c49d35052407823c38d297c9ad31767fc574468e01daa",
         ),
-        ("publication-asset-size", "12173384"),
-        ("publication-producer-run-id", "39866598474"),
+        ("publication-asset-size", "12147624"),
+        ("publication-producer-run-id", "39885673712"),
         ("publication-producer-run-attempt", "1"),
     ] {
         assert_eq!(scratch["with"][key], expected, "{key}");
