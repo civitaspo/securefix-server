@@ -1,6 +1,6 @@
 use std::fs;
 
-fn assert_fixed_package(steps: &[serde_yaml::Value]) {
+fn assert_fixed_package(steps: &[serde_yaml::Value], revision: &str) {
     let loaders: Vec<_> = steps
         .iter()
         .filter(|step| {
@@ -15,7 +15,7 @@ fn assert_fixed_package(steps: &[serde_yaml::Value]) {
     assert!(package["if"].is_null());
     assert_eq!(
         package["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
+        format!("civitaspo/securefix-server/.github/actions/load-package@{revision}")
     );
     assert_eq!(package["with"].as_mapping().unwrap().len(), 1);
     assert_eq!(package["with"]["token"], "${{ github.token }}");
@@ -32,7 +32,7 @@ fn server_policy_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps);
+    assert_fixed_package(steps, "61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the exact-head policy check without a writer token",
@@ -57,7 +57,7 @@ fn server_approval_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps);
+    assert_fixed_package(steps, "61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the owner approval without a write credential",
@@ -103,7 +103,7 @@ fn server_merge_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps);
+    assert_fixed_package(steps, "ca149202236c91d1920b244a66d28c11e62039f3");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the merge request and paired approval without a writer token",
@@ -208,7 +208,7 @@ fn server_release_receiver_uses_a_fixed_package_in_each_credential_domain() {
     assert_eq!(jobs.len(), 5);
     for (job_id, job) in jobs {
         let steps = job["steps"].as_sequence().unwrap();
-        assert_fixed_package(steps);
+        assert_fixed_package(steps, "61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d");
         for step in steps {
             if step["env"]["CLI_BINARY"].is_string() {
                 assert_eq!(

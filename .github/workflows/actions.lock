@@ -106,7 +106,7 @@ workflows:
         - 'civitaspo/securefix-server@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d'
     '.github/workflows/reusable-server-merge.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d'
+        - 'civitaspo/securefix-server@ca149202236c91d1920b244a66d28c11e62039f3'
     '.github/workflows/reusable-server-policy-check.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'civitaspo/securefix-server@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d'
@@ -304,6 +304,13 @@ dependencies:
     'civitaspo/securefix-server@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97':
         ref: 'integration/native-server-approve-pre35-20261023'
         commit: 'sha1-9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97'
+        owner_id: 4525500
+        repo_id: 1250079425
+        uses:
+            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
+    'civitaspo/securefix-server@ca149202236c91d1920b244a66d28c11e62039f3':
+        ref: 'integration/native-server-approve-pre35-20261023'
+        commit: 'sha1-ca149202236c91d1920b244a66d28c11e62039f3'
         owner_id: 4525500
         repo_id: 1250079425
         uses:
