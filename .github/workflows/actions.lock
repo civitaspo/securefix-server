@@ -202,7 +202,7 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
         - 'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460'
     '.github/workflows/testing-native-settings.yml':
-        - 'civitaspo/securefix-server@e78897bdbf15e7abd0135a879b2774fcbb932091'
+        - 'civitaspo/securefix-server@84f939b68b82de70554f98c429d65e077ef4a771'
     '.github/workflows/testing-policy-check.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -319,6 +319,13 @@ dependencies:
         repo_id: 1250079425
         uses:
             - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
+    'civitaspo/securefix-server@84f939b68b82de70554f98c429d65e077ef4a771':
+        ref: 'source/native-pull-request-adoption-pre115-20261024'
+        commit: 'sha1-84f939b68b82de70554f98c429d65e077ef4a771'
+        owner_id: 4525500
+        repo_id: 1250079425
+        uses:
+            - 'civitaspo/securefix-server@acbb9eded335037dc7be51d1f49113043153cb2c'
     'civitaspo/securefix-server@acbb9eded335037dc7be51d1f49113043153cb2c':
         ref: 'source/native-pull-request-adoption-pre115-20261024'
         commit: 'sha1-acbb9eded335037dc7be51d1f49113043153cb2c'
@@ -333,25 +340,11 @@ dependencies:
         repo_id: 1250079425
         uses:
             - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
-    'civitaspo/securefix-server@e78897bdbf15e7abd0135a879b2774fcbb932091':
-        ref: 'integration/native-client-adoption-pre111-20261024'
-        commit: 'sha1-e78897bdbf15e7abd0135a879b2774fcbb932091'
-        owner_id: 4525500
-        repo_id: 1250079425
-        uses:
-            - 'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a'
     'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460':
         ref: 'integration/native-managed-files-c80e'
         commit: 'sha1-ee98f4f12f3c32855c95feb3fe75bc2870b88460'
         owner_id: 4525500
         repo_id: 1250079425
-    'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a':
-        ref: 'integration/native-client-adoption-pre111-20261024'
-        commit: 'sha1-f704d9ce91629b0a2094191dbcd3cb0ae591c93a'
-        owner_id: 4525500
-        repo_id: 1250079425
-        uses:
-            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
     'civitaspo/securefix-server@fa2fa8318a9e76c7c51748355620a014661d6f47':
         ref: 'integration/native-server-approve-pre35-20261023'
         commit: 'sha1-fa2fa8318a9e76c7c51748355620a014661d6f47'

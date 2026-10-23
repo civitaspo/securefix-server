@@ -27,7 +27,7 @@ jobs:
       id-token: write
       issues: write
       pull-requests: read
-    uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@e78897bdbf15e7abd0135a879b2774fcbb932091 # v0.2.45-pre.112
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@84f939b68b82de70554f98c429d65e077ef4a771 # v0.2.45-pre.116
     with:
       release_pr_number: ${{ fromJSON(format('{0}', inputs.release_pr_number || github.event.pull_request.number || 0)) }}
       server_repository: "civitaspo/securefix-server"
