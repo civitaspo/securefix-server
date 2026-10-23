@@ -243,7 +243,8 @@ same way. These scratch probes require only test-scoped installation tokens; ord
 
 The owner-dispatched `managed-files` phase is a separate reconciliation probe.
 It accepts an explicit candidate source and owner-selected Client repository,
-implementation SHA, and version label. The candidate CLI validates that tuple
+implementation SHA, and version label. Its fixed package Action supplies the
+verified controller independently of the desired-file source. The controller validates that tuple
 against the configured scratch instance and validates the exact managed-file
 manifest before the workflow mints a Server App token. The writer is limited to
 the `testing-securefix-server` repository and opens a reviewable PR for the
@@ -289,14 +290,14 @@ The prepare run uploads `fixtures/state.json` as `scratch-fixtures` and uploads
 `control-probe/control-verification.json` separately as `control-probe`. Download both
 artifacts from the completed prepare run:
 
-The separate `managed-files-probe` job in a prepare run opens a reviewable
+The separate `managed-files-probe` job in a `managed-files` run opens a reviewable
 managed-files PR from the exact candidate source. It validates the candidate and
 workflow revision before minting a repository-scoped Server App token with only
 `contents`, `workflows`, and `pull-requests` write permissions. Source reads use the
 job's read-only `GITHUB_TOKEN`. `repo-settings/managed-files.json` is constrained to
 the configured scratch repository and branch. Its exact desired targets are
 `securefix-server.toml`, every path in that instance's `workflow_roles`, and the
-capability-specific Client callers: `release-tag.yml` for a Release target and
+capability-specific Client callers: `release-pr.yml`, `release-pr-sync.yml`, and `release-tag.yml` for a Release target and
 `policy-check.yml` for a Merge target. The policy-check caller is validated against
 `repo-settings/native-securefix-test-instance.toml` read from the same protected
 Server source revision; that Server instance config is not copied into the scratch

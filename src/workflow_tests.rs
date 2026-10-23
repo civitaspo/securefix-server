@@ -65,13 +65,30 @@ fn managed_files_scratch_probe_validates_before_scoped_writer_token() {
     }
 
     let job = &value["jobs"]["managed-files-probe"];
-    assert_eq!(job["needs"], serde_json::json!(["baseline", "build"]));
+    assert_eq!(job["needs"], serde_json::json!(["baseline"]));
     assert_eq!(job["environment"], "main");
     assert_eq!(
         job["permissions"],
-        serde_json::json!({"actions":"read", "contents":"read"})
+        serde_json::json!({"actions":"read", "attestations":"read", "contents":"read"})
     );
     let steps = job["steps"].as_array().unwrap();
+    assert!(
+        !steps
+            .iter()
+            .any(|step| step["with"]["binary"] == "candidate-runtime/securefix")
+    );
+    let loader = steps
+        .iter()
+        .find(|step| step["name"] == "Load the verified managed-file controller")
+        .unwrap();
+    assert_eq!(
+        loader["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@fa2fa8318a9e76c7c51748355620a014661d6f47"
+    );
+    assert_eq!(
+        loader["with"],
+        serde_json::json!({"token":"${{ github.token }}"})
+    );
     let validate = steps
         .iter()
         .position(|step| {
@@ -1385,8 +1402,6 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                 } else if job_id == "build" {
                                     "${{ inputs.candidate_sha || job.workflow_sha }}"
                                 } else if job_id == "managed-files-probe" {
-                                    // The local install action comes from the dispatch workflow revision;
-                                    // the candidate CLI itself arrives through the immutable build artifact.
                                     "${{ job.workflow_sha }}"
                                 } else if job_id == "bootstrap-scratch" || job_id == "scratch" {
                                     "${{ github.workflow_sha }}"
@@ -4692,23 +4707,6 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
                                                 == Some("${{ github.token }}")
                                     })
                             });
-                        let selected_managed_files_candidate = path
-                            == ".github/workflows/testing-securefix-server.yml"
-                            && job_id == "managed-files-probe"
-                            && steps.iter().any(|candidate| {
-                                candidate["uses"] == "$/.github/actions/install-cli"
-                                    && candidate["with"]["binary"]
-                                        == "candidate-runtime/securefix"
-                            })
-                            && steps.iter().any(|candidate| {
-                                candidate["name"]
-                                    == "Validate the exact selected candidate before minting a writer token"
-                                    && candidate["env"]["CANDIDATE_SHA"]
-                                        == "${{ needs.build.outputs.source-sha }}"
-                                    && candidate["run"]
-                                        .as_str()
-                                        .is_some_and(|run| run.contains("securefix integration validate-producer"))
-                            });
                         let fixed_package_loaded = steps[..index].iter().any(|candidate| {
                             candidate["uses"].as_str().is_some_and(|uses| {
                                 uses.strip_prefix(
@@ -4726,7 +4724,6 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
                                 || step["env"]["SECUREFIX_SOURCE_SHA"].is_string()
                                 || source_bound_native_candidate
                                 || verified_native_package_smoke
-                                || selected_managed_files_candidate
                                 || fixed_package_loaded
                                 || (path == ".github/workflows/testing-securefix-server.yml"
                                     && (step["env"]["CANDIDATE_SHA"].is_string()
