@@ -453,4 +453,13 @@ fn scratch_client_signer_uses_one_fixed_action_across_isolated_jobs() {
         assert_eq!(package["with"]["token"], "${{ github.token }}", "{job_id}");
     }
     assert_eq!(package_steps, 3);
+    let prepare = jobs["prepare-source"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "source")
+        .unwrap();
+    let script = prepare["run"].as_str().unwrap();
+    assert!(script.contains("new-client securefix prepare"));
+    assert!(!script.contains("securefix client-prepare"));
 }

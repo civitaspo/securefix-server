@@ -4299,7 +4299,7 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
                     package["uses"]
                         .as_str()
                         .unwrap()
-                        .ends_with("@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97")
+                        .ends_with("@6756eaa1a229b9febd0476023b00ebdc0acd2231")
                 );
                 assert_eq!(
                     package["with"],
