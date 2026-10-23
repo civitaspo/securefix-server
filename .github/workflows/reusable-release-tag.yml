@@ -252,6 +252,7 @@ jobs:
 
   attest-manifest:
     needs: tag
+    if: always() && needs.tag.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -292,6 +293,7 @@ jobs:
 
   request-server:
     needs: [resolve, tag, attest-manifest]
+    if: always() && needs.resolve.result == 'success' && needs.tag.result == 'success' && needs.attest-manifest.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: read

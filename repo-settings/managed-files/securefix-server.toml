@@ -65,6 +65,12 @@ repository = "civitaspo/testing-securefix-server"
 id = 1410312556
 capabilities = ["approve", "merge", "release", "securefix"]
 release = "github-release"
+native_binaries = [
+  { target = "aarch64-apple-darwin", runner = "macos-15" },
+  { target = "x86_64-apple-darwin", runner = "macos-15-intel" },
+  { target = "aarch64-unknown-linux-musl", runner = "ubuntu-24.04-arm" },
+  { target = "x86_64-unknown-linux-musl", runner = "ubuntu-24.04" },
+]
 protect_tags = false
 
 [acceptable_clients]

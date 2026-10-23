@@ -5337,6 +5337,7 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
             .contains("RELEASE_BUNDLE_ARTIFACT_ID")
     );
     let attest = &client["jobs"]["attest-manifest"];
+    assert_eq!(attest["if"], "always() && needs.tag.result == 'success'");
     assert_eq!(
         attest["permissions"],
         serde_json::json!({
@@ -5358,6 +5359,10 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
         );
     }
     let request = &client["jobs"]["request-server"];
+    assert_eq!(
+        request["if"],
+        "always() && needs.resolve.result == 'success' && needs.tag.result == 'success' && needs.attest-manifest.result == 'success'"
+    );
     assert!(
         request["needs"]
             .as_array()

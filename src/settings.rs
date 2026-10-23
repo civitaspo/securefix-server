@@ -1114,8 +1114,9 @@ fn managed_desired_files_from_source(
     let instance_config = validate_managed_instance_config(&manifest, &desired)?;
     validate_managed_targets(&manifest.files, &instance_config)?;
     validate_managed_removals(&manifest.remove, &instance_config)?;
-    let policy_check_instance_config_bytes = if expected_managed_targets(&instance_config)
-        .contains(MANAGED_CLIENT_POLICY_CHECK_TARGET)
+    let targets = expected_managed_targets(&instance_config);
+    let policy_check_instance_config_bytes = if targets.contains(MANAGED_CLIENT_POLICY_CHECK_TARGET)
+        || targets.contains(MANAGED_CLIENT_RELEASE_TAG_TARGET)
     {
         Some(read_managed_source_file(
             &source_api,
@@ -1195,15 +1196,45 @@ fn managed_desired_files_from_source(
         let template = desired
             .get_mut(MANAGED_CLIENT_RELEASE_TAG_TARGET)
             .context("managed Client release caller is missing")?;
-        *template = crate::distribution::caller::render_managed_client_release_tag_from_template(
-            &instance_config.acceptable_clients,
-            client_pin,
-            &instance_config.instance.repository,
-            MANAGED_INSTANCE_CONFIG_TARGET,
-            template,
+        let server_config = securefix::instance_config::InstanceConfig::parse(
+            policy_check_instance_config_bytes
+                .as_deref()
+                .context("managed Release Tag approval authority config is missing")?,
         )?;
+        *template = render_managed_release_tag(&manifest, &server_config, client_pin, template)?;
     }
     Ok((manifest, desired))
+}
+
+fn render_managed_release_tag(
+    manifest: &ManagedFilesManifest,
+    server_config: &securefix::instance_config::InstanceConfig,
+    pin: &crate::distribution::caller::ClientImplementationPin,
+    template: &[u8],
+) -> Result<Vec<u8>> {
+    let server = &config::trusted()?.deployment.server;
+    ensure!(
+        server_config.instance.repository == server.repository
+            && server_config.instance.id == server.id
+            && server_config.instance.default_branch == server.default_branch,
+        "managed Release Tag must use the protected approval Server instance"
+    );
+    server_config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == manifest.repository && repository.id == manifest.repository_id
+        })
+        .context("managed Release Tag target is not configured in its approval Server")?
+        .policy()
+        .require(Capability::Release)?;
+    crate::distribution::caller::render_managed_client_release_tag_from_template(
+        &server_config.acceptable_clients,
+        pin,
+        &server_config.instance.repository,
+        MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH,
+        template,
+    )
 }
 
 fn managed_validate_scratch(
@@ -3147,7 +3178,12 @@ mod tests {
 
     #[test]
     fn managed_client_release_tag_uses_its_own_accepted_full_sha_pin() {
-        let instance_config = managed_instance_config();
+        let manifest: ManagedFilesManifest =
+            serde_json::from_slice(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let instance_config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-role-events-test-instance.toml"
+        ))
+        .unwrap();
         let pin_sha = "c".repeat(40);
         let pin = crate::distribution::caller::ClientImplementationPin::new(
             "civitaspo/securefix-server",
@@ -3161,14 +3197,7 @@ mod tests {
             include_bytes!("distribution_templates/managed-client-release-tag.yml")
         );
         let rendered =
-            crate::distribution::caller::render_managed_client_release_tag_from_template(
-                &instance_config.acceptable_clients,
-                &pin,
-                &instance_config.instance.repository,
-                MANAGED_INSTANCE_CONFIG_TARGET,
-                template,
-            )
-            .unwrap();
+            render_managed_release_tag(&manifest, &instance_config, &pin, template).unwrap();
         let workflow: serde_yaml::Value = serde_yaml::from_slice(&rendered).unwrap();
         assert_eq!(
             workflow["permissions"],
@@ -3194,11 +3223,11 @@ mod tests {
         );
         assert_eq!(
             workflow["jobs"]["tag"]["with"]["server_repository"],
-            "civitaspo/testing-securefix-server"
+            "civitaspo/securefix-server"
         );
         assert_eq!(
             workflow["jobs"]["tag"]["with"]["instance_config_path"],
-            "securefix-server.toml"
+            MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH
         );
         assert!(String::from_utf8_lossy(&rendered).contains("# v0.2.45"));
         assert_eq!(
@@ -3213,14 +3242,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            crate::distribution::caller::render_managed_client_release_tag_from_template(
-                &instance_config.acceptable_clients,
-                &wrong_repository,
-                &instance_config.instance.repository,
-                MANAGED_INSTANCE_CONFIG_TARGET,
-                template,
-            )
-            .is_err()
+            render_managed_release_tag(&manifest, &instance_config, &wrong_repository, template,)
+                .is_err()
         );
         let wrong_version = crate::distribution::caller::ClientImplementationPin::new(
             "civitaspo/securefix-server",
@@ -3229,15 +3252,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            crate::distribution::caller::render_managed_client_release_tag_from_template(
-                &instance_config.acceptable_clients,
-                &wrong_version,
-                &instance_config.instance.repository,
-                MANAGED_INSTANCE_CONFIG_TARGET,
-                template,
-            )
-            .is_err()
+            render_managed_release_tag(&manifest, &instance_config, &wrong_version, template,)
+                .is_err()
         );
+
+        let mut wrong_authority = instance_config.clone();
+        wrong_authority.instance.repository = manifest.repository.clone();
+        wrong_authority.instance.id = manifest.repository_id;
+        assert!(render_managed_release_tag(&manifest, &wrong_authority, &pin, template).is_err());
     }
 
     #[test]
@@ -3297,6 +3319,9 @@ mod tests {
 
         let actual = manifest.remove.into_iter().collect::<BTreeSet<_>>();
         let expected = [
+            ".github/workflows/native-securefix-producer.yml",
+            ".github/workflows/native-approval-producer.yml",
+            ".github/workflows/native-merge-producer.yml",
             ".github/workflows/testing-approve-request.yml",
             ".github/workflows/testing-merge-request.yml",
             ".github/workflows/testing-policy-check.yml",
