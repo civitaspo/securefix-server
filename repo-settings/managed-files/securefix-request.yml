@@ -1,0 +1,24 @@
+name: testing-Native Securefix request
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  request:
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1
+    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request-scratch.yml@@SECUREFIX_SOURCE_SHA@ # @RUNTIME_VERSION@
+    with:
+      server_repository: civitaspo/testing-securefix-server
+      instance_config_path: securefix-server.toml
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      issues: read
+      pull-requests: read
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

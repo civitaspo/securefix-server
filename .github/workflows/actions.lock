@@ -68,6 +68,12 @@ workflows:
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/reusable-approve-request.yml': []
+    '.github/workflows/reusable-client-request-scratch.yml':
+        - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
+        - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
+        - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        - 'civitaspo/securefix-server@bfa7b7f5356df03546b97cd254a57a596405a91a'
     '.github/workflows/reusable-client-request.yml':
         - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
@@ -97,23 +103,26 @@ workflows:
         - 'jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654'
     '.github/workflows/reusable-server-approve.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
         - 'civitaspo/securefix-server@119643d5407f97b3589059246d43bd05590a248e'
+        - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
     '.github/workflows/reusable-server-merge.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
+        - 'civitaspo/securefix-server@119643d5407f97b3589059246d43bd05590a248e'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
     '.github/workflows/reusable-server-policy-check.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
         - 'civitaspo/securefix-server@7d04df0755f857d45897c4df53ce51d2c14fe0a4'
+        - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
     '.github/workflows/reusable-server-release.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        - 'civitaspo/securefix-server@119643d5407f97b3589059246d43bd05590a248e'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
         - 'crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd'
     '.github/workflows/reusable-server-securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
+        - 'civitaspo/securefix-server@119643d5407f97b3589059246d43bd05590a248e'
         - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
     '.github/workflows/securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
@@ -282,6 +291,11 @@ dependencies:
     'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a':
         ref: 'main'
         commit: 'sha1-6be9fb42e14770a9162301787e158f7db3ab918a'
+        owner_id: 4525500
+        repo_id: 1250079425
+    'civitaspo/securefix-server@bfa7b7f5356df03546b97cd254a57a596405a91a':
+        ref: 'integration/native-server-approve-pre35-20261023'
+        commit: 'sha1-bfa7b7f5356df03546b97cd254a57a596405a91a'
         owner_id: 4525500
         repo_id: 1250079425
     'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460':

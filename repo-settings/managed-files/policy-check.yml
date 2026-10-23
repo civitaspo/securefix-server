@@ -1,4 +1,4 @@
-name: testing-Policy Check Request Producer
+name: testing-Policy Check
 
 on:
   pull_request_target:
@@ -7,16 +7,12 @@ on:
 permissions: {}
 
 jobs:
-  produce:
+  check:
     if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.run_attempt == 1
-    uses: civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@bf200655844cd60003b8cd612715db6b6d025310 # reviewed helper workflow source commit
+    uses: civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@119643d5407f97b3589059246d43bd05590a248e # Admit exact scratch Server role receiver contexts
     with:
-      operation: policy_check
-      candidate_run_id: "39803448159"
-      candidate_source_sha: 5cca7b5f28c5f08750525347b5b81f0869380e9d
-      pull_request_number: ${{ format('{0}', github.event.pull_request.number) }}
       server_repository: civitaspo/securefix-server
-      instance_config_path: repo-settings/native-securefix-test-instance.toml
+      instance_config_path: securefix-server.toml
     permissions:
       actions: read
       attestations: write
@@ -24,3 +20,5 @@ jobs:
       id-token: write
       issues: read
       pull-requests: read
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

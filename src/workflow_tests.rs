@@ -3731,6 +3731,7 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
         "civitaspo/testing-securefix-server",
         "1410312556",
         "civitaspo/testing-securefix-server/.github/workflows/policy-check.yml@refs/heads/main",
+        "civitaspo/testing-securefix-server/.github/workflows/securefix-request.yml@refs/heads/main",
         "pull_request_target",
     ] {
         assert!(
@@ -3750,7 +3751,7 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
         );
     }
     assert!(load_script.contains(
-        "scratch package loading is restricted to the owner test host or immutable policy-check test caller"
+        "scratch package loading is restricted to an exact owner test host or approved immutable test workflow"
     ));
     for caller_input in [
         "caller-repository",
@@ -4211,6 +4212,25 @@ esac
     );
     assert_eq!(fs::read_to_string(&network_log).unwrap(), "curl\n");
 
+    const SCRATCH_SECUREFIX_WORKFLOW_REF: &str = "civitaspo/testing-securefix-server/.github/workflows/securefix-request.yml@refs/heads/main";
+    fs::write(&network_log, "").unwrap();
+    let admitted_securefix = run_loader(
+        "scratch",
+        SCRATCH_REPOSITORY,
+        SCRATCH_REPOSITORY_ID,
+        SCRATCH_SECUREFIX_WORKFLOW_REF,
+        "pull_request_target",
+        PUBLISHER_ACTOR_ID_TEXT,
+        "1",
+    );
+    assert!(!admitted_securefix.status.success());
+    assert!(
+        String::from_utf8_lossy(&admitted_securefix.stderr).contains("unexpected package URL"),
+        "the exact Securefix caller did not pass admission before the fixture's later network stub rejected the request: {}",
+        String::from_utf8_lossy(&admitted_securefix.stderr)
+    );
+    assert_eq!(fs::read_to_string(&network_log).unwrap(), "curl\n");
+
     fs::write(&network_log, "").unwrap();
     let admitted = run_loader(
         "scratch",
@@ -4276,6 +4296,33 @@ esac
             "2",
         ),
         (
+            "Securefix caller with wrong actor",
+            SCRATCH_REPOSITORY,
+            SCRATCH_REPOSITORY_ID,
+            SCRATCH_SECUREFIX_WORKFLOW_REF,
+            "pull_request_target",
+            "778",
+            "1",
+        ),
+        (
+            "Securefix caller with wrong event",
+            SCRATCH_REPOSITORY,
+            SCRATCH_REPOSITORY_ID,
+            SCRATCH_SECUREFIX_WORKFLOW_REF,
+            "workflow_dispatch",
+            PUBLISHER_ACTOR_ID_TEXT,
+            "1",
+        ),
+        (
+            "Securefix caller replay",
+            SCRATCH_REPOSITORY,
+            SCRATCH_REPOSITORY_ID,
+            SCRATCH_SECUREFIX_WORKFLOW_REF,
+            "pull_request_target",
+            PUBLISHER_ACTOR_ID_TEXT,
+            "2",
+        ),
+        (
             "owner package probe with wrong actor",
             REPOSITORY,
             REPOSITORY_ID_TEXT,
@@ -4334,9 +4381,9 @@ esac
         assert!(!rejected.status.success(), "{label} unexpectedly passed");
         assert!(
             String::from_utf8_lossy(&rejected.stderr).contains(
-                "scratch package loading is restricted to the owner test host or immutable policy-check test caller"
+                "scratch package loading is restricted to an exact owner test host or approved immutable test workflow"
             ),
-            "{label} failed after passing the caller guard: {}",
+            "{label} was not rejected by the caller guard before network access: {}",
             String::from_utf8_lossy(&rejected.stderr)
         );
         assert_eq!(
@@ -5096,6 +5143,32 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
             if path == ".github/workflows/reusable-client-request.yml" && job_id == "attest" {
                 continue;
             }
+            if path == ".github/workflows/reusable-client-request-scratch.yml" && job_id == "attest"
+            {
+                let manifest_download = steps
+                    .iter()
+                    .find(|step| {
+                        step["uses"]
+                            .as_str()
+                            .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+                    })
+                    .unwrap();
+                assert_eq!(
+                    manifest_download["with"]["artifact-ids"],
+                    "${{ needs.capture.outputs.artifact-id }}"
+                );
+                assert!(steps.iter().any(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.starts_with("actions/attest@"))
+                }));
+                assert!(!steps.iter().any(|step| {
+                    step["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("$CLI_BINARY"))
+                }));
+                continue;
+            }
             if path == ".github/workflows/testing-native-package-build.yml" && job_id == "attest" {
                 continue;
             }
@@ -5139,6 +5212,34 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
             }
             if path == ".github/workflows/testing-publish-native-package.yml" && job_id == "publish"
             {
+                continue;
+            }
+            if path == ".github/workflows/reusable-client-request-scratch.yml"
+                && job_id == "dispatch"
+            {
+                let package = steps.iter().find(|step| step["id"] == "package").unwrap();
+                assert!(
+                    package["uses"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("@bfa7b7f5356df03546b97cd254a57a596405a91a")
+                );
+                assert_eq!(
+                    package["with"]["action-sha"],
+                    "bfa7b7f5356df03546b97cd254a57a596405a91a"
+                );
+                let invocation = steps
+                    .iter()
+                    .find(|step| {
+                        step["run"].as_str().is_some_and(|run| {
+                            run.contains("new-client dispatch") && run.contains("$CLI_BINARY")
+                        })
+                    })
+                    .unwrap();
+                assert_eq!(
+                    invocation["env"]["CLI_BINARY"],
+                    "${{ steps.package.outputs.binary }}"
+                );
                 continue;
             }
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
@@ -6593,8 +6694,14 @@ fn server_release_receiver_keeps_read_write_and_cleanup_credentials_separate() {
         true
     );
     let jobs = &workflow["jobs"];
+    let parse = jobs["parse"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "parse")
+        .unwrap();
     assert!(
-        jobs["parse"]["steps"][1]["run"]
+        parse["run"]
             .as_str()
             .unwrap()
             .contains("release parse-request")

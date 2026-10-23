@@ -1047,51 +1047,71 @@ pub(crate) fn native_client_loader_action_sha(
         value: &'a serde_yaml::Value,
         prefix: &str,
         matches: &mut Vec<(&'a str, Option<&'a str>)>,
+        unexpected_loader: &mut bool,
     ) {
         match value {
             serde_yaml::Value::Mapping(mapping) => {
                 if let Some(uses) = mapping
                     .get(serde_yaml::Value::String("uses".to_owned()))
                     .and_then(serde_yaml::Value::as_str)
-                    && uses.starts_with(prefix)
+                    && uses.contains(".github/actions/load-package@")
                 {
-                    let action_sha = mapping
-                        .get(serde_yaml::Value::String("with".to_owned()))
-                        .and_then(serde_yaml::Value::as_mapping)
-                        .and_then(|with| {
-                            with.get(serde_yaml::Value::String("action-sha".to_owned()))
-                        })
-                        .and_then(serde_yaml::Value::as_str);
-                    matches.push((uses, action_sha));
+                    if uses.starts_with(prefix) {
+                        let action_sha = mapping
+                            .get(serde_yaml::Value::String("with".to_owned()))
+                            .and_then(serde_yaml::Value::as_mapping)
+                            .and_then(|with| {
+                                with.get(serde_yaml::Value::String("action-sha".to_owned()))
+                            })
+                            .and_then(serde_yaml::Value::as_str);
+                        matches.push((uses, action_sha));
+                    } else {
+                        *unexpected_loader = true;
+                    }
                 }
                 for child in mapping.values() {
-                    visit(child, prefix, matches);
+                    visit(child, prefix, matches, unexpected_loader);
                 }
             }
             serde_yaml::Value::Sequence(items) => {
                 for child in items {
-                    visit(child, prefix, matches);
+                    visit(child, prefix, matches, unexpected_loader);
                 }
             }
             _ => {}
         }
     }
-    visit(&yaml, &prefix, &mut matches);
+    let mut unexpected_loader = false;
+    visit(&yaml, &prefix, &mut matches, &mut unexpected_loader);
     ensure!(
-        matches.len() == 1,
-        "Client producer workflow must use exactly one configured package loader"
+        !unexpected_loader,
+        "Client producer workflow uses an unconfigured package loader"
     );
-    let (uses, action_sha) = matches[0];
-    let sha = uses
-        .strip_prefix(&prefix)
-        .context("Client package loader reference has an invalid repository path")?;
-    securefix::policy::validate_sha(sha)
-        .context("Client package loader must use a full commit SHA")?;
     ensure!(
-        action_sha == Some(sha),
-        "Client package loader action-sha input must equal its immutable uses pin"
+        !matches.is_empty(),
+        "Client producer workflow has no configured package loader"
     );
-    Ok(sha.to_owned())
+    let mut expected_sha = None;
+    for (uses, action_sha) in matches {
+        let sha = uses
+            .strip_prefix(&prefix)
+            .context("Client package loader reference has an invalid repository path")?;
+        securefix::policy::validate_sha(sha)
+            .context("Client package loader must use a full commit SHA")?;
+        ensure!(
+            action_sha == Some(sha),
+            "Client package loader action-sha input must equal its immutable uses pin"
+        );
+        if let Some(expected) = expected_sha.as_deref() {
+            ensure!(
+                sha == expected,
+                "Client producer workflow mixes package loader bindings"
+            );
+        } else {
+            expected_sha = Some(sha.to_owned());
+        }
+    }
+    expected_sha.context("Client producer workflow package loader binding is missing")
 }
 
 /// Resolve the source branch for release attestation only after authenticating
@@ -3356,7 +3376,7 @@ mod tests {
     }
 
     #[test]
-    fn client_package_loader_must_be_a_single_sha_pinned_matching_action() {
+    fn client_package_loader_repeated_bindings_must_be_identical_immutable_pins() {
         let repo = "client-org/securefix-server";
         let sha = "a".repeat(40);
         let workflow = format!(
@@ -3377,8 +3397,36 @@ mod tests {
         let duplicate = format!(
             "{workflow}  second:\n    uses: {repo}/.github/actions/load-package@{sha}\n    with:\n      action-sha: {sha}\n"
         );
-        assert!(native_client_loader_action_sha(duplicate.as_bytes(), repo).is_err());
+        assert_eq!(
+            native_client_loader_action_sha(duplicate.as_bytes(), repo).unwrap(),
+            sha
+        );
+
+        let mixed = duplicate.replacen(&sha, &"b".repeat(40), 1);
+        assert!(native_client_loader_action_sha(mixed.as_bytes(), repo).is_err());
+
+        let missing_input =
+            workflow.replace(&format!("        with:\n          action-sha: {sha}\n"), "");
+        assert!(native_client_loader_action_sha(missing_input.as_bytes(), repo).is_err());
+
+        let other_repository = workflow.replace(
+            &format!("{repo}/.github/actions/load-package@"),
+            "attacker/securefix-server/.github/actions/load-package@",
+        );
+        assert!(native_client_loader_action_sha(other_repository.as_bytes(), repo).is_err());
+
+        let absent = b"jobs:\n  request:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n";
+        assert!(native_client_loader_action_sha(absent, repo).is_err());
         assert!(native_client_loader_action_sha(workflow.as_bytes(), "other-org/server").is_err());
+    }
+
+    #[test]
+    fn scratch_client_signer_uses_one_repeated_immutable_loader_binding() {
+        let workflow = include_bytes!("../.github/workflows/reusable-client-request-scratch.yml");
+        assert_eq!(
+            native_client_loader_action_sha(workflow, "civitaspo/securefix-server").unwrap(),
+            "bfa7b7f5356df03546b97cd254a57a596405a91a"
+        );
     }
 
     #[test]

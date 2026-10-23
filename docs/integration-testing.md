@@ -307,6 +307,16 @@ checks that the PR's complete changed-file set matches that plan. This scratch-o
 file writer is separate from `repo-settings.yml` and its
 administrator-managed repository settings.
 
+The managed `policy-check.yml` caller exercises the normal Client request
+chain. It is limited to the configured owner opening or updating a scratch PR,
+pins the reviewed `reusable-policy-check.yml` source, and passes the managed
+`securefix-server.toml` plus the Client App key. The reusable workflow captures
+and attests the request before its separate dispatch job creates the Server
+label with a repository-scoped Client App token. The scratch Server config
+accepts the exact `reusable-client-request.yml` signer. The earlier
+read-only `request-producer-probe` path could not create that label and does
+not qualify this normal request route.
+
 Its Client repository, reusable-workflow SHA, and version are explicit owner-selected
 inputs for the scratch probe. The CLI checks their syntax and the protected instance's
 accepted repository/version range; this probe does not verify the Client release,

@@ -8,6 +8,10 @@
       "target": ".github/workflows/policy-check.yml"
     },
     {
+      "source": "repo-settings/managed-files/securefix-request.yml",
+      "target": ".github/workflows/securefix-request.yml"
+    },
+    {
       "source": "repo-settings/managed-files/server-approve.yml",
       "target": ".github/workflows/server-approve.yml"
     },

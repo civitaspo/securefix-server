@@ -65,7 +65,7 @@ protect_tags = false
 [acceptable_clients]
 repository = "civitaspo/securefix-server"
 id = 1250079425
-producer_workflow = ".github/workflows/request-producer-probe.yml"
+producer_workflow = ".github/workflows/reusable-client-request.yml"
 version = ">=0.2.45-pre.23"
 
 [[scratch_request_callers]]
