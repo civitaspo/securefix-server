@@ -150,7 +150,9 @@ pub fn run(command: Command) -> Result<()> {
         Command::Prepare { plan } => prepare(&plan.unwrap_or_else(default_plan_path)),
         Command::Apply { plan } => apply(&plan.unwrap_or_else(default_plan_path)),
         Command::Cleanup => cleanup(),
-        Command::ClientPrepare(args) => client_prepare(*args),
+        Command::ClientPrepare(args) => {
+            client_prepare(*args, &crate::config::trusted()?.deployment.workflow_prefix)
+        }
         Command::ClientDispatch {
             artifact_name,
             server_repository,
@@ -165,7 +167,7 @@ fn default_plan_path() -> PathBuf {
         .join("securefix-apply-plan.json")
 }
 
-fn client_prepare(args: ClientPrepareArgs) -> Result<()> {
+pub(crate) fn client_prepare(args: ClientPrepareArgs, artifact_prefix: &str) -> Result<()> {
     let ClientPrepareArgs {
         root_dir,
         files: files_arg,
@@ -329,10 +331,7 @@ fn client_prepare(args: ClientPrepareArgs) -> Result<()> {
         .take(6)
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let artifact_name = format!(
-        "{}securefix-{run_id}-{suffix}",
-        crate::config::trusted()?.deployment.workflow_prefix
-    );
+    let artifact_name = format!("{artifact_prefix}securefix-{run_id}-{suffix}");
     let stage = output_dir.join(&artifact_name);
     let cwd = std::env::current_dir()?;
     ensure_no_symlink_components(&cwd, &output_dir)?;

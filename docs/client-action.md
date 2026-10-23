@@ -55,3 +55,9 @@ cancelled, or is skipped. This lets activation verify real checks on the exact
 new default-branch commit rather than relying on pre-merge PR checks.
 
 The generated Merge Request wrapper permits the configured owner and the exact configured Renovate Bot on its own PRs. The runtime records bot requests separately from owner authorization and revalidates their provenance and accepted head. See [Renovate requests](merging.md#renovate-requests); changing a wrapper alone cannot authorize a bot in an older active runtime.
+
+The native package prepares source artifacts with `securefix new-client securefix prepare`.
+It reuses the bounded file staging and metadata validation of the legacy Client,
+but uses the protocol artifact prefix without loading deployment policy.
+The subsequent capture and Server verification bind the artifact to the run,
+exact PR head and protected instance configuration; staging does not authorize a write.

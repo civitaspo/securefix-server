@@ -52,6 +52,8 @@ pub enum PolicyCheckCommand {
 
 #[derive(Subcommand)]
 pub enum SecurefixCommand {
+    #[command(about = "Prepare a bounded Securefix source artifact without deployment policy")]
+    Prepare(Box<crate::securefix_gate::ClientPrepareArgs>),
     Capture {
         #[arg(long)]
         pull_request_number: u64,
@@ -267,6 +269,7 @@ pub fn run(command: Command) -> Result<()> {
             } => capture_policy_check(pull_request_number, &output),
         },
         Command::Securefix { command } => match command {
+            SecurefixCommand::Prepare(args) => crate::securefix_gate::client_prepare(*args, ""),
             SecurefixCommand::Capture {
                 pull_request_number,
                 artifact_name,
