@@ -704,16 +704,7 @@ fn resolve_pr_command(number: u64) -> Result<()> {
             .context("release strategy is not configured")?;
         let (pr, merge_sha, _proof) =
             verify_native_release_pr(&api, &config_path, &instance, &repo, repository_id, number)?;
-        verify_current_native_release_tag_package(
-            &api,
-            &repo,
-            repository_id,
-            &instance,
-            number,
-            pr["head"]["sha"]
-                .as_str()
-                .context("release PR lacks a head SHA")?,
-        )?;
+        verify_current_native_release_tag_package(&api, &repo, repository_id, &instance, &pr)?;
         let head_sha = pr["head"]["sha"]
             .as_str()
             .context("release PR lacks a head SHA")?;
@@ -1136,16 +1127,7 @@ fn build_provider(release_pr_number: u64) -> Result<()> {
             repository_id,
             release_pr_number,
         )?;
-        verify_current_native_release_tag_package(
-            &api,
-            &repo,
-            repository_id,
-            &instance,
-            release_pr_number,
-            pull["head"]["sha"]
-                .as_str()
-                .context("release PR lacks a head SHA")?,
-        )?;
+        verify_current_native_release_tag_package(&api, &repo, repository_id, &instance, &pull)?;
         (configured.policy(), merge_sha)
     } else {
         let policy = current_policy(&api)?;
@@ -1238,16 +1220,12 @@ fn assemble_native(release_pr_number: u64) -> Result<()> {
                 repository_id,
                 release_pr_number,
             )?;
-            let head_sha = pull["head"]["sha"]
-                .as_str()
-                .context("release PR lacks a head SHA")?;
             let source_revision = verify_current_native_release_tag_package(
                 &api,
                 &repo,
                 repository_id,
                 &instance,
-                release_pr_number,
-                head_sha,
+                &pull,
             )?;
             (configured.policy(), merge_sha, source_revision)
         } else {
@@ -1821,16 +1799,7 @@ fn tag_configured_release_pr(
     )?;
     match run["event"].as_str() {
         Some("pull_request") => {
-            let associated = run["pull_requests"]
-                .as_array()
-                .context("pull request release run lacks its associated PR identity")?;
-            ensure!(
-                associated.iter().any(|candidate| {
-                    candidate["number"].as_u64() == Some(release_pr_number)
-                        && candidate["head"]["sha"].as_str() == Some(head_sha.as_str())
-                }),
-                "release tag source run is not associated with the exact merged release PR head"
-            );
+            validate_native_source_pr_association(api, &instance.config, repo, &run, &pull)?;
         }
         Some("workflow_dispatch") => {
             let owner = &instance.config.identities.owner;
@@ -2174,8 +2143,7 @@ fn verify_current_native_release_tag_package(
     repository: &Repository,
     repository_id: u64,
     instance: &NativeServerInstanceAuthority,
-    pull_request_number: u64,
-    pull_request_head_sha: &str,
+    pull: &Value,
 ) -> Result<CommitSha> {
     let run_id = RunId(env("GITHUB_RUN_ID")?.parse()?);
     let attempt = env("GITHUB_RUN_ATTEMPT")?.parse::<u64>()?;
@@ -2203,16 +2171,7 @@ fn verify_current_native_release_tag_package(
     );
     match run["event"].as_str() {
         Some("pull_request") => {
-            let associated = run["pull_requests"]
-                .as_array()
-                .context("Release Tag pull request run lacks PR association")?;
-            ensure!(
-                associated.iter().any(|candidate| {
-                    candidate["number"].as_u64() == Some(pull_request_number)
-                        && candidate["head"]["sha"].as_str() == Some(pull_request_head_sha)
-                }),
-                "Release Tag run is not associated with the exact merged PR head"
-            );
+            validate_native_source_pr_association(api, &instance.config, repository, &run, pull)?;
         }
         Some("workflow_dispatch") => {
             let owner = &instance.config.identities.owner;
@@ -3025,6 +2984,59 @@ fn validate_source_pr_association(
     repo: &Repository,
     source: SourcePrAssociation<'_>,
 ) -> Result<()> {
+    validate_source_pr_association_for_instance(
+        api,
+        policy.server_bot_id,
+        &crate::config::trusted()?.deployment.release_branch,
+        repo,
+        source,
+    )
+}
+
+fn validate_native_source_pr_association(
+    api: &GitHub,
+    config: &securefix::instance_config::InstanceConfig,
+    repo: &Repository,
+    run: &Value,
+    pull: &Value,
+) -> Result<()> {
+    let pr: PullRequest = serde_json::from_value(pull.clone())?;
+    let head = CommitSha::parse(&pr.head.sha)?;
+    let merge = CommitSha::parse(
+        pr.merge_commit_sha
+            .as_deref()
+            .context("merged release PR lacks merge SHA")?,
+    )?;
+    ensure!(
+        run["head_sha"] == head.as_str(),
+        "Release Tag run head differs from the merged PR"
+    );
+    validate_source_pr_association_for_instance(
+        api,
+        config.identities.server_bot.id,
+        config
+            .branches
+            .release
+            .as_deref()
+            .context("release branch is not configured")?,
+        repo,
+        SourcePrAssociation {
+            run,
+            source_run_sha: &head,
+            release_pr_number: pr.number,
+            pr: &pr,
+            merge_sha: &merge,
+        },
+    )
+}
+
+fn validate_source_pr_association_for_instance(
+    api: &GitHub,
+    server_bot_id: u64,
+    release_branch: &str,
+    repo: &Repository,
+    source: SourcePrAssociation<'_>,
+) -> Result<()> {
     let SourcePrAssociation {
         run,
         source_run_sha,
@@ -3048,13 +3060,12 @@ fn validate_source_pr_association(
         return Ok(());
     }
 
-    let trusted = crate::config::trusted()?;
     ensure!(
         run["head_branch"] == pr.head.name,
         "source PR associations do not match the release branch"
     );
     ensure!(
-        run["actor"]["id"].as_u64() == Some(policy.server_bot_id) && run["actor"]["type"] == "Bot",
+        run["actor"]["id"].as_u64() == Some(server_bot_id) && run["actor"]["type"] == "Bot",
         "source PR association fallback is only accepted for a Server App run"
     );
     ensure!(
@@ -3062,7 +3073,7 @@ fn validate_source_pr_association(
             && pr.merged == Some(true)
             && pr.merged_at.is_some()
             && pr.merge_commit_sha.as_deref() == Some(merge_sha.as_str())
-            && pr.head.name == trusted.deployment.release_branch,
+            && pr.head.name == release_branch,
         "fallback release PR is not the authorized merged release"
     );
     let associated_prs = api.paginate(&format!(
@@ -3091,7 +3102,7 @@ fn validate_source_pr_association(
             && pr.merged_at.as_ref() == Some(&candidate_merged_at)
             && candidate["merge_commit_sha"] == merge_sha.as_str()
             && candidate["head"]["sha"] == pr.head.sha
-            && candidate["head"]["ref"] == trusted.deployment.release_branch
+            && candidate["head"]["ref"] == release_branch
             && candidate["head"]["repo"]["full_name"] == repo.as_str()
             && candidate["base"]["ref"] == pr.base.name
             && candidate["base"]["repo"]["full_name"] == repo.as_str(),
@@ -3211,43 +3222,7 @@ fn validated_native_source(
     );
     match run["event"].as_str() {
         Some("pull_request") => {
-            ensure!(
-                run["head_sha"] == pull["head"]["sha"],
-                "release source run does not match the exact merged PR head"
-            );
-            let associated = run["pull_requests"]
-                .as_array()
-                .context("release run lacks PR associations")?;
-            if !associated
-                .iter()
-                .any(|candidate| candidate["number"].as_u64() == Some(manifest.release_pr_number))
-            {
-                let bot = &instance.config.identities.server_bot;
-                ensure!(
-                    crate::request::matches_principal(&run["actor"], bot.id, &bot.login, "Bot")
-                        && run["head_branch"] == pull["head"]["ref"],
-                    "release source association fallback is not the configured Server App branch"
-                );
-                let associated: Vec<Value> = client_api.paginate(&format!(
-                    "/repos/{}/commits/{}/pulls",
-                    repo.as_str(),
-                    manifest.source_run_sha.as_str(),
-                ))?;
-                let matching: Vec<_> = associated
-                    .iter()
-                    .filter(|candidate| {
-                        candidate["number"].as_u64() == Some(manifest.release_pr_number)
-                    })
-                    .collect();
-                ensure!(
-                    matching.len() == 1
-                        && matching[0]["head"]["sha"] == pull["head"]["sha"]
-                        && matching[0]["merge_commit_sha"] == pull["merge_commit_sha"]
-                        && matching[0]["base"]["repo"]["full_name"] == repo.as_str()
-                        && matching[0]["state"] == "closed",
-                    "release source commit does not identify its exact merged PR"
-                );
-            }
+            validate_native_source_pr_association(client_api, &instance.config, repo, &run, &pull)?;
         }
         Some("workflow_dispatch") => {
             let owner = &instance.config.identities.owner;
@@ -8110,6 +8085,52 @@ mod tests {
             "pull_requests":[],
             "actor":{"id":crate::config::trusted().unwrap().server_bot_id,"type":"Bot"}
         })
+    }
+
+    #[test]
+    fn native_release_source_accepts_saved_app_merge_association_without_legacy_policy() {
+        use crate::fixtures::{Fixture, Route};
+        let saved: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/native-release-source-empty-association.json"
+        ))
+        .unwrap();
+        let mut config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        config.identities.server_bot.id = saved["run"]["actor"]["id"].as_u64().unwrap();
+        config.branches.release = Some(saved["run"]["head_branch"].as_str().unwrap().to_owned());
+        let repo = Repository::parse(saved["pull"]["base"]["repo"]["full_name"].as_str().unwrap())
+            .unwrap();
+        let route = format!(
+            "/repos/{}/commits/{}/pulls?per_page=100&page=1",
+            repo.as_str(),
+            saved["run"]["head_sha"].as_str().unwrap()
+        );
+        let fixture = Fixture::new(vec![Route::get(&route, saved["associated"].clone())]);
+        validate_native_source_pr_association(
+            &fixture.api,
+            &config,
+            &repo,
+            &saved["run"],
+            &saved["pull"],
+        )
+        .unwrap();
+        fixture.finish();
+        let mut changed = saved["associated"].clone();
+        changed[0]["head"]["sha"] = json!("f".repeat(40));
+        let fixture = Fixture::new(vec![Route::get(&route, changed)]);
+        assert!(
+            validate_native_source_pr_association(
+                &fixture.api,
+                &config,
+                &repo,
+                &saved["run"],
+                &saved["pull"]
+            )
+            .is_err()
+        );
+        fixture.finish();
     }
 
     #[test]
