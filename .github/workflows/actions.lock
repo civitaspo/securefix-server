@@ -227,6 +227,7 @@ workflows:
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        - 'civitaspo/securefix-server@fa2fa8318a9e76c7c51748355620a014661d6f47'
     '.github/workflows/testing-securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -285,6 +286,13 @@ dependencies:
         commit: 'sha1-ee98f4f12f3c32855c95feb3fe75bc2870b88460'
         owner_id: 4525500
         repo_id: 1250079425
+    'civitaspo/securefix-server@fa2fa8318a9e76c7c51748355620a014661d6f47':
+        ref: 'integration/native-server-approve-pre35-20261023'
+        commit: 'sha1-fa2fa8318a9e76c7c51748355620a014661d6f47'
+        owner_id: 4525500
+        repo_id: 1250079425
+        uses:
+            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
     'crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd':
         ref: 'v7.0.0'
         commit: 'sha1-2dc316deee8e90f13e1a351ab510b4d5bc0c82cd'
