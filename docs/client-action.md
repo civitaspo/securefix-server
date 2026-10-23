@@ -94,7 +94,15 @@ request admission, policy, credential isolation, signatures, expected-head and
 stale authority checks. Download permission does not authorize a mutation.
 
 The current development mapping explicitly selects the verified scratch
-prerelease `v0.2.45-pre.42` in `civitaspo/testing-securefix-server`. It does not
+prerelease `v0.2.45-pre.114` in `civitaspo/testing-securefix-server`. It does not
 change the production `load-cli` or `load-runtime` path or activate a runtime.
 
 Scratch package admission accepts only configured owner or Server Bot PR authors. Producers must be the owner, except that the configured Server Bot may produce policy checks. This does not authorize approval or merge commands; those still require the exact-head, current-authority owner command and review. All identities are checked by both ID and login against the protected instance configuration.
+
+For a `pull_request` execution, the caller workflow revision is GitHub's merge
+revision, independently of the binary source revision. Its workflow bytes must
+match the current protected default-branch workflow. When it is not already on
+default-branch history, it must have exactly two parents: a default-branch
+ancestor followed by the accepted exact PR head. Client capture, Server request
+verification and the write gate apply the same check. Workflow and Server authority epochs still
+reject workflow, configuration and deployment changes, including reverts, before writing.

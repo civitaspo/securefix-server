@@ -784,6 +784,8 @@ fn verify_request_with_deployment(
         &manifest.pull_request.base_ref,
         &manifest.producer.workflow_path,
         &manifest.producer.workflow_sha,
+        (manifest.producer.event == "pull_request")
+            .then_some(manifest.pull_request.head_sha.as_str()),
     )?;
     securefix::api::require_native_client_workflow_epoch_unchanged(
         &manifest.client_workflow_epoch,
@@ -2431,6 +2433,8 @@ pub(crate) fn verify_native_release_approval(
         default_branch,
         &manifest.producer.workflow_path,
         &manifest.producer.workflow_sha,
+        (manifest.producer.event == "pull_request")
+            .then_some(manifest.pull_request.head_sha.as_str()),
     )?;
     securefix::api::require_native_client_workflow_epoch_unchanged(
         &manifest.client_workflow_epoch,
