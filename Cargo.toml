@@ -1,6 +1,6 @@
 [package]
 name = "securefix"
-version = "0.2.45-pre.122"
+version = "0.2.45-pre.123"
 edition = "2024"
 publish = false
 default-run = "securefix"
