@@ -1187,16 +1187,14 @@ fn verify_run_identity(run: &Value, manifest: &RequestManifest) -> Result<()> {
             && run["path"].as_str() == Some(manifest.producer.workflow_path.as_str()),
         "native request producer run identity or conclusion mismatch"
     );
-    crate::native_client::validate_pull_request_target_identity(
+    crate::native_client::validate_pull_request_target_head(
         &manifest.producer.event,
         &manifest.producer.source_sha,
-        &manifest.producer.context_sha,
         run["head_branch"]
             .as_str()
             .context("producer run head branch is missing")?,
         &manifest.pull_request.head_sha,
         &manifest.pull_request.head_branch,
-        &manifest.pull_request.base_sha,
     )
 }
 
@@ -1859,7 +1857,6 @@ fn validate_securefix_artifact_context(
             && event_pr.head_repository_id == manifest.pull_request.head_repository_id
             && event_pr.head_repository == manifest.repository.full_name
             && event_pr.base_sha == manifest.pull_request.base_sha
-            && event_pr.base_sha == manifest.producer.context_sha
             && event_pr.base_branch == manifest.pull_request.base_ref
             && event_pr.base_repository_id == manifest.repository.id
             && event_pr.base_repository == manifest.repository.full_name
@@ -3613,7 +3610,7 @@ mod tests {
         manifest.operation = "securefix".into();
         manifest.producer.event = "pull_request_target".into();
         manifest.pull_request.base_sha = "f".repeat(40);
-        manifest.producer.context_sha = manifest.pull_request.base_sha.clone();
+        manifest.producer.context_sha = "9".repeat(40);
         manifest.producer.source_sha = manifest.pull_request.head_sha.clone();
         let fix = crate::securefix_gate::artifact::FixArtifact {
             repository: manifest.repository.full_name.clone(),
@@ -3723,87 +3720,63 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_target_binds_run_head_and_context_sha_to_separate_pr_facts() {
+    fn pull_request_target_accepts_distinct_execution_and_pr_base_snapshots() {
         let snapshots: Vec<Value> = serde_json::from_slice(include_bytes!(
             "../tests/fixtures/native-client-base-snapshots.json"
         ))
         .unwrap();
         for snapshot in snapshots {
-            let accepted = crate::native_client::validate_pull_request_target_identity(
-                "pull_request_target",
-                snapshot["source_sha"].as_str().unwrap(),
-                snapshot["context_sha"].as_str().unwrap(),
-                snapshot["head_branch"].as_str().unwrap(),
-                snapshot["source_sha"].as_str().unwrap(),
-                snapshot["head_branch"].as_str().unwrap(),
-                snapshot["base_sha"].as_str().unwrap(),
-            )
-            .is_ok();
-            assert_eq!(
-                accepted,
-                snapshot["accepted"].as_bool().unwrap(),
-                "PR {}",
-                snapshot["pull_request"]
+            let mut manifest = manifest();
+            manifest.producer.event = "pull_request_target".into();
+            manifest.producer.source_sha = snapshot["source_sha"].as_str().unwrap().into();
+            manifest.producer.context_sha = snapshot["context_sha"].as_str().unwrap().into();
+            manifest.pull_request.head_sha = manifest.producer.source_sha.clone();
+            manifest.pull_request.head_branch = snapshot["head_branch"].as_str().unwrap().into();
+            manifest.pull_request.base_sha = snapshot["base_sha"].as_str().unwrap().into();
+            let run = serde_json::json!({
+                "id":42,"run_attempt":2,"status":"completed","conclusion":"success",
+                "event":"pull_request_target","head_sha":manifest.producer.source_sha,
+                "head_branch":manifest.pull_request.head_branch,
+                "repository":{"id":10,"full_name":"owner/project","owner":{"id":20}},
+                "actor":{"id":12,"login":"maintainer"},"path":".github/workflows/client.yml"
+            });
+            verify_run_identity(&run, &manifest).unwrap();
+            let verified = verifier_result(
+                &manifest,
+                "https://github.com/owner/project/actions/runs/42/attempts/2".into(),
             );
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            verify_certificate(
+                &verified,
+                &manifest,
+                &run,
+                "client-org/securefix-client",
+                ".github/workflows/request-producer.yml",
+                &"c".repeat(40),
+                &bytes,
+            )
+            .unwrap();
+            let mut changed = manifest.clone();
+            changed.producer.context_sha = "0".repeat(40);
+            assert!(
+                verify_certificate(
+                    &verified,
+                    &changed,
+                    &run,
+                    "client-org/securefix-client",
+                    ".github/workflows/request-producer.yml",
+                    &"c".repeat(40),
+                    &bytes
+                )
+                .is_err()
+            );
+            changed = manifest.clone();
+            changed.pull_request.head_sha = "0".repeat(40);
+            assert!(verify_run_identity(&run, &changed).is_err());
+            changed = manifest;
+            changed.pull_request.head_branch = "another-branch".into();
+            assert!(verify_run_identity(&run, &changed).is_err());
         }
-        let mut manifest = manifest();
-        manifest.producer.event = "pull_request_target".to_owned();
-        manifest.producer.source_sha = "a499b4ede1752c1ddb83e0651d74d1ce73faa76d".to_owned();
-        manifest.pull_request.head_sha = manifest.producer.source_sha.clone();
-        manifest.pull_request.head_branch =
-            "testing/native-producer-trigger-20261021-c80e".to_owned();
-        manifest.producer.context_sha = "ceb1faee17b5c13817b089dc5f956ba472b0b43f".to_owned();
-        manifest.pull_request.base_sha = manifest.producer.context_sha.clone();
-
-        assert!(
-            verify_run_identity(
-                &serde_json::json!({
-                    "id":42,"run_attempt":2,"status":"completed","conclusion":"success",
-                    "event":"pull_request_target","head_sha":manifest.producer.source_sha,
-                    "head_branch":manifest.pull_request.head_branch,
-                    "repository":{"id":10,"full_name":"owner/project"},
-                    "actor":{"id":12,"login":"maintainer"},
-                    "path":".github/workflows/client.yml"
-                }),
-                &manifest
-            )
-            .is_ok()
-        );
-
-        let wrong_attempt = serde_json::json!({
-            "id":42,"run_attempt":1,"status":"completed","conclusion":"success",
-            "event":"pull_request_target","head_sha":manifest.producer.source_sha,
-            "head_branch":manifest.pull_request.head_branch,
-            "repository":{"id":10,"full_name":"owner/project"},
-            "actor":{"id":12,"login":"maintainer"},
-            "path":".github/workflows/client.yml"
-        });
-        assert!(verify_run_identity(&wrong_attempt, &manifest).is_err());
-
-        assert!(
-            crate::native_client::validate_pull_request_target_identity(
-                "pull_request_target",
-                "a499b4ede1752c1ddb83e0651d74d1ce73faa76d",
-                "ceb1faee17b5c13817b089dc5f956ba472b0b43f",
-                "testing/native-producer-trigger-20261021-c80e",
-                "a499b4ede1752c1ddb83e0651d74d1ce73faa76d",
-                "testing/native-producer-trigger-20261021-c80e",
-                "ceb1faee17b5c13817b089dc5f956ba472b0b43f",
-            )
-            .is_ok()
-        );
-        assert!(
-            crate::native_client::validate_pull_request_target_identity(
-                "pull_request_target",
-                "a499b4ede1752c1ddb83e0651d74d1ce73faa76d",
-                "a499b4ede1752c1ddb83e0651d74d1ce73faa76d",
-                "testing/native-producer-trigger-20261021-c80e",
-                "a499b4ede1752c1ddb83e0651d74d1ce73faa76d",
-                "testing/native-producer-trigger-20261021-c80e",
-                "ceb1faee17b5c13817b089dc5f956ba472b0b43f",
-            )
-            .is_err()
-        );
     }
 
     #[test]

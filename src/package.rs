@@ -19,7 +19,8 @@ const PACKAGE_ARTIFACT_NAME: &str = "native-package-attested";
 const PACKAGE_BINARY_NAME: &str = "securefix-linux-x86_64";
 const PACKAGE_BUNDLE_NAME: &str = "bundle.json";
 const MAX_PACKAGE_WORKFLOW_BYTES: usize = 64 * 1024;
-const SOURCE_BUILD_MANIFEST_PATH: &str = ".github/actions/load-package/source-package.json";
+pub(crate) const SOURCE_BUILD_MANIFEST_PATH: &str =
+    ".github/actions/load-package/source-package.json";
 const PACKAGE_PRODUCER_WORKFLOW: &str = ".github/workflows/testing-native-package-build.yml";
 const PACKAGE_PUBLISHER_WORKFLOW: &str = ".github/workflows/testing-publish-native-package.yml";
 pub(crate) const NATIVE_PACKAGE_PRODUCER_WORKFLOW: &str =

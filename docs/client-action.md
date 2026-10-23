@@ -61,3 +61,5 @@ It reuses the bounded file staging and metadata validation of the legacy Client,
 but uses the protocol artifact prefix without loading deployment policy.
 The subsequent capture and Server verification bind the artifact to the run,
 exact PR head and protected instance configuration; staging does not authorize a write.
+
+Native requests bind the Actions run head and branch to the target PR. For `pull_request_target`, the attested `GITHUB_SHA` is the base-branch execution snapshot; it can differ from the PR API's persisted base SHA. The Server verifies that execution snapshot against the attestation certificate, and separately checks the artifact event against the PR head and base. Current Client workflow and Server authority checks still run before writes.

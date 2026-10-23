@@ -146,7 +146,7 @@ pub struct ProducerIdentity {
     pub run_attempt: u32,
     pub event: String,
     /// GitHub's event context SHA (GITHUB_SHA); for pull_request_target this is
-    /// the PR base SHA, while source_sha remains the Actions run's PR head SHA.
+    /// the base-branch execution snapshot, independent of the PR API base SHA.
     pub context_sha: String,
     /// Actions run API head_sha, independently checked against the run and PR.
     pub source_sha: String,
@@ -488,16 +488,14 @@ fn capture_request(
         .as_str()
         .context("pull request head branch is missing")?
         .to_owned();
-    validate_pull_request_target_identity(
+    validate_pull_request_target_head(
         &event,
         &source_sha,
-        &context_sha,
         run["head_branch"]
             .as_str()
             .context("request workflow head branch is missing")?,
         &head_sha,
         &head_branch,
-        &base_sha,
     )?;
     let head_repository_id = pull_request["head"]["repo"]["id"]
         .as_u64()
@@ -785,19 +783,17 @@ pub(crate) fn validate_artifact_run_binding(
     Ok(())
 }
 
-pub(crate) fn validate_pull_request_target_identity(
+pub(crate) fn validate_pull_request_target_head(
     event: &str,
     source_sha: &str,
-    context_sha: &str,
     run_branch: &str,
     head_sha: &str,
     head_branch: &str,
-    base_sha: &str,
 ) -> Result<()> {
     if event == "pull_request_target" {
         ensure!(
-            source_sha == head_sha && run_branch == head_branch && context_sha == base_sha,
-            "pull_request_target run head and event context do not match the exact PR head and base"
+            source_sha == head_sha && run_branch == head_branch,
+            "pull_request_target run head and branch do not match the exact PR head"
         );
     }
     Ok(())

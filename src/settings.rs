@@ -21,10 +21,11 @@ const MANAGED_FILES_LIMIT: u64 = 1024 * 1024;
 const MANAGED_INSTANCE_CONFIG_TARGET: &str = "securefix-server.toml";
 const MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH: &str =
     "repo-settings/native-securefix-test-instance.toml";
-const MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH: &str = "securefix-server.toml";
+const MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH: &str = MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH;
+const MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH: &str =
+    "repo-settings/native-securefix-write-test-instance.toml";
 const MANAGED_POLICY_CHECK_SIGNER_PATH: &str = ".github/workflows/reusable-client-request.yml";
 const MANAGED_POLICY_CHECK_WORKFLOW_PATH: &str = ".github/workflows/reusable-policy-check.yml";
-const MANAGED_POLICY_CHECK_WORKFLOW_SHA: &str = "119643d5407f97b3589059246d43bd05590a248e";
 const MANAGED_CLIENT_RELEASE_TAG_TARGET: &str = ".github/workflows/release-tag.yml";
 const MANAGED_CLIENT_POLICY_CHECK_TARGET: &str = ".github/workflows/policy-check.yml";
 const MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET: &str = ".github/workflows/securefix-request.yml";
@@ -173,7 +174,21 @@ fn managed_desired_files() -> Result<(ManagedFilesManifest, BTreeMap<String, Vec
         &instance_config,
         policy_check_instance_config.as_deref(),
     )?;
-    validate_managed_securefix_request_caller(&manifest, &desired, &instance_config, None)?;
+    let securefix_config = if expected_managed_targets(&instance_config)
+        .contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
+    {
+        Some(read_bounded_regular_file(
+            MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH,
+        )?)
+    } else {
+        None
+    };
+    validate_managed_securefix_request_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        securefix_config.as_deref(),
+    )?;
     Ok((manifest, desired))
 }
 
@@ -737,10 +752,7 @@ fn validate_managed_policy_check_caller(
     let reusable_sha = uses
         .strip_prefix(&reusable_prefix)
         .context("managed Client policy-check producer uses an unexpected reusable workflow")?;
-    ensure!(
-        reusable_sha == MANAGED_POLICY_CHECK_WORKFLOW_SHA,
-        "managed Client policy-check caller must pin the reviewed reusable policy workflow source"
-    );
+    crate::policy::validate_sha(reusable_sha)?;
 
     let inputs = job["with"]
         .as_object()
@@ -775,19 +787,45 @@ fn validate_managed_securefix_request_caller(
     manifest: &ManagedFilesManifest,
     desired: &BTreeMap<String, Vec<u8>>,
     instance_config: &securefix::instance_config::InstanceConfig,
-    source_sha: Option<&str>,
+    securefix_config_bytes: Option<&[u8]>,
 ) -> Result<()> {
     if !expected_managed_targets(instance_config).contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
     {
         return Ok(());
     }
+    let securefix_config = securefix::instance_config::InstanceConfig::parse(
+        securefix_config_bytes.context("managed Securefix Server instance config is missing")?,
+    )?;
+    let server = &config::trusted()?.deployment.server;
     ensure!(
-        instance_config.acceptable_clients.producer_workflow
+        securefix_config.instance.repository == server.repository
+            && securefix_config.instance.id == server.id
+            && securefix_config.instance.default_branch == server.default_branch
+            && securefix_config.identities.owner.id == instance_config.identities.owner.id
+            && securefix_config.identities.owner.login == instance_config.identities.owner.login
+            && securefix_config.acceptable_clients.repository
+                == instance_config.acceptable_clients.repository
+            && securefix_config.acceptable_clients.id == instance_config.acceptable_clients.id
+            && securefix_config.acceptable_clients.version
+                == instance_config.acceptable_clients.version,
+        "managed Securefix Server config identity or Client acceptance differs"
+    );
+    ensure!(
+        securefix_config
+            .repositories
+            .iter()
+            .any(|repository| repository.repository == manifest.repository
+                && repository.id == manifest.repository_id
+                && repository.capabilities.contains(&Capability::Securefix)),
+        "managed Securefix Server config does not authorize the target"
+    );
+    ensure!(
+        securefix_config.acceptable_clients.producer_workflow
             == MANAGED_CLIENT_SECUREFIX_SIGNER_PATH,
         "managed Client Securefix request must select the dedicated scratch signer"
     );
     ensure!(
-        instance_config.allows_scratch_request_caller(
+        securefix_config.allows_scratch_request_caller(
             &manifest.repository,
             manifest.repository_id,
             MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET,
@@ -800,29 +838,19 @@ fn validate_managed_securefix_request_caller(
     let bytes = desired
         .get(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
         .context("managed Client Securefix request caller is missing")?;
-    let template = std::str::from_utf8(bytes)
-        .context("managed Client Securefix request caller is not UTF-8")?;
-    let expected_suffix = match source_sha {
-        Some(sha) => {
-            crate::policy::validate_sha(sha)?;
-            sha
-        }
-        None => "@SECUREFIX_SOURCE_SHA@",
-    };
-    if source_sha.is_none() {
-        ensure!(
-            template.matches("@SECUREFIX_SOURCE_SHA@").count() == 1
-                && template.matches("@RUNTIME_VERSION@").count() == 1,
-            "managed Client Securefix request must contain exactly one source and version placeholder"
-        );
-    }
-    let expected_uses = format!(
-        "{}/{}@{}",
-        instance_config.acceptable_clients.repository,
-        MANAGED_CLIENT_SECUREFIX_SIGNER_PATH,
-        expected_suffix
-    );
     let workflow: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
+    let uses = workflow["jobs"]["request"]["uses"]
+        .as_str()
+        .context("managed Securefix caller has no workflow pin")?;
+    let prefix = format!(
+        "{}/{}@",
+        securefix_config.acceptable_clients.repository, MANAGED_CLIENT_SECUREFIX_SIGNER_PATH
+    );
+    crate::policy::validate_sha(
+        uses.strip_prefix(&prefix)
+            .context("managed Securefix caller has an unexpected implementation")?,
+    )?;
+    let expected_uses = uses.to_owned();
     let mut workflow = workflow;
     if let Some(mapping) = workflow.as_mapping_mut()
         && let Some(on) = mapping.remove(serde_yaml::Value::Bool(true))
@@ -848,8 +876,8 @@ fn validate_managed_securefix_request_caller(
             "if": expected_condition,
             "uses": expected_uses,
             "with": {
-                "server_repository": instance_config.instance.repository,
-                "instance_config_path": MANAGED_INSTANCE_CONFIG_TARGET,
+                "server_repository": securefix_config.instance.repository,
+                "instance_config_path": MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH,
             },
             "permissions": {
                 "actions": "read",
@@ -868,54 +896,6 @@ fn validate_managed_securefix_request_caller(
         workflow == expected,
         "managed Client Securefix request has an unexpected trigger, permission, input, secret, or job"
     );
-    Ok(())
-}
-
-fn render_managed_securefix_request(
-    desired: &mut BTreeMap<String, Vec<u8>>,
-    instance_config: &securefix::instance_config::InstanceConfig,
-    source_sha: &str,
-    runtime_version: &str,
-) -> Result<()> {
-    if !expected_managed_targets(instance_config).contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
-    {
-        return Ok(());
-    }
-    crate::policy::validate_sha(source_sha)?;
-    let bytes = desired
-        .get_mut(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
-        .context("managed Client Securefix request caller is missing")?;
-    let template = std::str::from_utf8(bytes)
-        .context("managed Client Securefix request caller is not UTF-8")?;
-    ensure!(
-        template.matches("@SECUREFIX_SOURCE_SHA@").count() == 1
-            && template.matches("@RUNTIME_VERSION@").count() == 1,
-        "managed Client Securefix request must contain exactly one source and version placeholder"
-    );
-    let rendered = template
-        .replace("@SECUREFIX_SOURCE_SHA@", source_sha)
-        .replace("@RUNTIME_VERSION@", runtime_version);
-    ensure!(
-        !rendered.contains("@SECUREFIX_SOURCE_SHA@") && !rendered.contains("@RUNTIME_VERSION@"),
-        "managed Client Securefix request contains an unresolved placeholder"
-    );
-    let rendered_desired = BTreeMap::from([(
-        MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned(),
-        rendered.as_bytes().to_vec(),
-    )]);
-    validate_managed_securefix_request_caller(
-        &ManagedFilesManifest {
-            repository: instance_config.instance.repository.clone(),
-            repository_id: instance_config.instance.id,
-            default_branch: instance_config.instance.default_branch.clone(),
-            files: Vec::new(),
-            remove: Vec::new(),
-        },
-        &rendered_desired,
-        instance_config,
-        Some(source_sha),
-    )?;
-    *bytes = rendered.into_bytes();
     Ok(())
 }
 
@@ -1031,7 +1011,25 @@ fn managed_desired_files_from_source(
         &instance_config,
         policy_check_instance_config_bytes.as_deref(),
     )?;
-    validate_managed_securefix_request_caller(&manifest, &desired, &instance_config, None)?;
+    let securefix_config = if expected_managed_targets(&instance_config)
+        .contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
+    {
+        Some(read_managed_source_file(
+            &source_api,
+            source_repository,
+            source_sha,
+            &entries,
+            MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH,
+        )?)
+    } else {
+        None
+    };
+    validate_managed_securefix_request_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        securefix_config.as_deref(),
+    )?;
     for role in instance_config.workflow_roles.keys() {
         let receiver = format!(
             ".github/workflows/reusable-server-{}.yml",
@@ -1059,7 +1057,6 @@ fn managed_desired_files_from_source(
         source_sha,
         &runtime_version,
     )?;
-    render_managed_securefix_request(&mut desired, &instance_config, source_sha, &runtime_version)?;
     let has_client_release_caller =
         expected_managed_targets(&instance_config).contains(MANAGED_CLIENT_RELEASE_TAG_TARGET);
     ensure!(
@@ -2377,55 +2374,55 @@ mod tests {
     }
 
     #[test]
-    fn managed_securefix_request_is_owner_bound_and_source_pinned() {
+    fn managed_securefix_request_preserves_the_verified_cross_repository_caller() {
         let manifest =
             parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
         let instance_config = managed_instance_config();
-        let mut desired = BTreeMap::from([(
+        let config = include_bytes!("../repo-settings/native-securefix-write-test-instance.toml");
+        let desired = BTreeMap::from([(
             MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned(),
             canonical_managed_securefix_request_caller(),
         )]);
-        validate_managed_securefix_request_caller(&manifest, &desired, &instance_config, None)
-            .unwrap();
-
-        render_managed_securefix_request(
-            &mut desired,
-            &instance_config,
-            &"a".repeat(40),
-            "v0.2.45-pre.37 (candidate source)",
-        )
-        .unwrap();
-        let rendered =
-            std::str::from_utf8(&desired[MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET]).unwrap();
-        assert!(rendered.contains(
-            "civitaspo/securefix-server/.github/workflows/reusable-client-request-scratch.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        ));
-        assert!(!rendered.contains("@SECUREFIX_SOURCE_SHA@"));
-        assert!(!rendered.contains("@RUNTIME_VERSION@"));
         validate_managed_securefix_request_caller(
             &manifest,
             &desired,
             &instance_config,
-            Some(&"a".repeat(40)),
+            Some(config),
         )
         .unwrap();
-
-        let mut changed = desired.clone();
-        changed.insert(
-            MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned(),
-            rendered
-                .replace("github.actor_id == '4525500'", "github.actor_id == '1'")
-                .into_bytes(),
-        );
         assert!(
-            validate_managed_securefix_request_caller(
-                &manifest,
-                &changed,
-                &instance_config,
-                Some(&"a".repeat(40)),
-            )
-            .is_err()
+            validate_managed_securefix_request_caller(&manifest, &desired, &instance_config, None)
+                .is_err()
         );
+        let caller =
+            std::str::from_utf8(&desired[MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET]).unwrap();
+        for (from, to) in [
+            ("github.actor_id == '4525500'", "github.actor_id == '1'"),
+            (
+                "server_repository: civitaspo/securefix-server",
+                "server_repository: civitaspo/testing-securefix-server",
+            ),
+            (
+                "repo-settings/native-securefix-write-test-instance.toml",
+                "securefix-server.toml",
+            ),
+            ("0dbeaa7d1afa336722bf820408b69022121d9714", "main"),
+        ] {
+            assert!(caller.contains(from));
+            let changed = BTreeMap::from([(
+                MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned(),
+                caller.replace(from, to).into_bytes(),
+            )]);
+            assert!(
+                validate_managed_securefix_request_caller(
+                    &manifest,
+                    &changed,
+                    &instance_config,
+                    Some(config)
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2578,7 +2575,7 @@ mod tests {
 
         let wrong_pin = String::from_utf8(caller.clone())
             .unwrap()
-            .replace(MANAGED_POLICY_CHECK_WORKFLOW_SHA, &"a".repeat(40));
+            .replace("13d31194fd2e82da4c6acfda51ad4a160ac0a711", "main");
         let wrong_pin_desired = BTreeMap::from([
             (
                 MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
@@ -2646,8 +2643,8 @@ mod tests {
         );
 
         let wrong_config_path = String::from_utf8(caller.clone()).unwrap().replace(
-            "instance_config_path: securefix-server.toml",
             "instance_config_path: repo-settings/native-securefix-test-instance.toml",
+            "instance_config_path: securefix-server.toml",
         );
         let wrong_config_path_desired = BTreeMap::from([
             (

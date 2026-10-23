@@ -1373,7 +1373,7 @@ impl GitHub {
         );
         let manifest = self.content_uncached(
             &write.source_repository,
-            ".github/actions/load-package/package.json",
+            crate::package::SOURCE_BUILD_MANIFEST_PATH,
             &write.source_sha,
         )?;
         ensure!(

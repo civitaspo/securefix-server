@@ -9,10 +9,10 @@ permissions: {}
 jobs:
   check:
     if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.run_attempt == 1
-    uses: civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@119643d5407f97b3589059246d43bd05590a248e # Admit exact scratch Server role receiver contexts
+    uses: civitaspo/securefix-server/.github/workflows/reusable-policy-check.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711 # v0.2.45-pre.43
     with:
       server_repository: civitaspo/securefix-server
-      instance_config_path: securefix-server.toml
+      instance_config_path: repo-settings/native-securefix-test-instance.toml
     permissions:
       actions: read
       attestations: write
