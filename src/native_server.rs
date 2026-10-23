@@ -501,12 +501,20 @@ fn validate_native_request_event_payload(
     );
     if config.scratch_package_repository.is_some() {
         validate_owner_selected_request_caller(config, manifest)?;
+        let owner = &config.identities.owner;
+        let server = &config.identities.server_bot;
+        let owner_producer =
+            owner.id == manifest.producer.actor_id && owner.login == manifest.producer.actor_login;
+        let server_policy_producer = manifest.operation == "policy_check"
+            && server.id == manifest.producer.actor_id
+            && server.login == manifest.producer.actor_login;
+        let owner_author = owner.id == manifest.pull_request.author_id
+            && owner.login == manifest.pull_request.author_login;
+        let server_author = server.id == manifest.pull_request.author_id
+            && server.login == manifest.pull_request.author_login;
         ensure!(
-            config.identities.owner.id == manifest.producer.actor_id
-                && config.identities.owner.login == manifest.producer.actor_login
-                && config.identities.owner.id == manifest.pull_request.author_id
-                && config.identities.owner.login == manifest.pull_request.author_login,
-            "scratch package requests require the configured owner as producer actor and PR author"
+            (owner_producer || server_policy_producer) && (owner_author || server_author),
+            "scratch package requests require owner commands or Server policy production and an owner or Server PR author"
         );
     }
     Ok(())
@@ -1022,7 +1030,7 @@ fn capture_remote_instance_authority(
     Ok((api, captured))
 }
 
-fn unique_referenced_workflow_sha(
+pub(crate) fn unique_referenced_workflow_sha(
     references: &[securefix::workflow::ReferencedWorkflow],
     repository: &str,
     workflow_path: &str,
@@ -3657,6 +3665,72 @@ version = "1.4.0-pre.1"
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn scratch_package_accepts_server_owned_prs_without_minting_owner_commands() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-role-events-test-instance.toml"
+        ))
+        .unwrap();
+        let mut request = manifest();
+        request.repository.id = 1410312556;
+        request.repository.full_name = "civitaspo/testing-securefix-server".into();
+        request.producer.workflow_ref = "refs/heads/main".into();
+        request.pull_request.author_id = config.identities.server_bot.id;
+        request.pull_request.author_login = config.identities.server_bot.login.clone();
+        for (operation, mode, caller, event) in [
+            (
+                "policy_check",
+                securefix::api::NativeScratchMode::PolicyCheck,
+                "policy-check.yml",
+                "pull_request_target",
+            ),
+            (
+                "approval",
+                securefix::api::NativeScratchMode::Approval,
+                "approve-request.yml",
+                "issue_comment",
+            ),
+            (
+                "merge",
+                securefix::api::NativeScratchMode::Merge,
+                "merge-request.yml",
+                "issue_comment",
+            ),
+        ] {
+            request.operation = operation.into();
+            request.producer.workflow_path = format!(".github/workflows/{caller}");
+            request.producer.event = event.into();
+            request.producer.actor_id = config.identities.owner.id;
+            request.producer.actor_login = config.identities.owner.login.clone();
+            let label =
+                securefix::api::native_client_request_label(operation, request.producer.run_id)
+                    .unwrap();
+            let payload = serde_json::json!({
+                "action":"created", "repository":{"full_name":config.instance.repository},
+                "sender":{"id":config.identities.client_bot.id,"login":config.identities.client_bot.login,"type":"Bot"},
+                "label":{"name":label,"description":format!("{}/{}",request.repository.full_name,request.producer.run_id)}
+            });
+            validate_native_request_event_payload(&config, &request, &payload, mode).unwrap();
+            request.producer.actor_id = config.identities.server_bot.id;
+            request.producer.actor_login = config.identities.server_bot.login.clone();
+            assert_eq!(
+                validate_native_request_event_payload(&config, &request, &payload, mode).is_ok(),
+                operation == "policy_check"
+            );
+            request.producer.actor_login.push_str("-forged");
+            assert!(
+                validate_native_request_event_payload(&config, &request, &payload, mode).is_err()
+            );
+            request.producer.actor_id = config.identities.owner.id;
+            request.producer.actor_login = config.identities.owner.login.clone();
+            request.pull_request.author_login.push_str("-forged");
+            assert!(
+                validate_native_request_event_payload(&config, &request, &payload, mode).is_err()
+            );
+            request.pull_request.author_login = config.identities.server_bot.login.clone();
+        }
     }
 
     #[test]

@@ -151,7 +151,7 @@ Pin each reusable to a full commit SHA and give its caller the minimum `permissi
 | `reusable-release-pr-sync.yml` | `actions: read`, `contents: read`, `attestations: read`, `pull-requests: write` |
 | `reusable-release-tag.yml` | `actions: read`, `contents: write`, `attestations: read`, `pull-requests: read`, `issues: write` |
 
-A release PR wrapper passes `SECUREFIX_CLIENT_PRIVATE_KEY` and may provide an explicit version. The Rust CLI updates `.release-version`, `CHANGELOG.md`, and supported root package version metadata before Securefix opens or updates `release/next`. When reusing an existing Server App-owned release PR, the apply step also synchronizes its title and body from the validated artifact options, including on idempotent retries.
+A release PR wrapper passes `SECUREFIX_CLIENT_PRIVATE_KEY` and may provide an explicit version. The Rust CLI updates `.release-version`, `CHANGELOG.md`, and supported root package version metadata before Securefix opens or updates `release/next`. When reusing an existing Server App-owned release PR, the apply step also synchronizes its title and body from the validated artifact options, including on idempotent retries. Native metadata sync uses the protected external Server configuration and the authenticated Client workflow/package mapping. Its Client repository token may PATCH only the validated title and body of the exact Server-owned release PR; current run, release-branch head, caller epoch and Server authority are rechecked immediately before that write. A release-request label existence read does not require a POST payload; label creation retains its exact run-bound payload and pre-write Server authority check.
 
 ```yaml
 name: Release PR

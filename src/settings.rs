@@ -792,12 +792,15 @@ fn validate_managed_policy_check_caller(
 
     let owner_id = policy_check_instance_config.identities.owner.id;
     let expected_condition = format!(
-        "github.repository == '{}' && github.event.pull_request.base.repo.id == {} && github.event.pull_request.user.id == {} && github.run_attempt == 1",
-        manifest.repository, manifest.repository_id, owner_id
+        "github.repository == '{}' && github.event.pull_request.base.repo.id == {} && (github.event.pull_request.user.id == {} || github.event.pull_request.user.id == {}) && github.run_attempt == 1",
+        manifest.repository,
+        manifest.repository_id,
+        owner_id,
+        policy_check_instance_config.identities.server_bot.id
     );
     ensure!(
         job["if"].as_str() == Some(expected_condition.as_str()),
-        "managed Client policy-check producer must be restricted to the configured owner and scratch repository"
+        "managed Client policy-check producer must be restricted to configured owner or Server PRs in the scratch repository"
     );
     let reusable_prefix = format!(
         "{}/{}@",

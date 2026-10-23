@@ -1025,6 +1025,14 @@ fn output_multiline(name: &str, values: &[&str]) -> Result<()> {
 
 fn sync_pr() -> Result<()> {
     let api = api()?;
+    match (
+        std::env::var("SECUREFIX_SERVER_REPOSITORY"),
+        std::env::var("SECUREFIX_INSTANCE_CONFIG_PATH"),
+    ) {
+        (Ok(repository), Ok(path)) => return sync_native_release_pr(&api, &repository, &path),
+        (Err(_), Err(_)) => {}
+        _ => bail!("release sync requires both the Server repository and config path"),
+    }
     let repo = current_repository()?;
     let policy = current_policy(&api)?;
     let _runtime = require_current_runtime(&api, ".github/workflows/reusable-release-pr-sync.yml")?;
@@ -1071,6 +1079,172 @@ fn sync_pr() -> Result<()> {
     let _: Value = api.patch(
         &format!("/repos/{}/pulls/{number}", repo.as_str()),
         &json!({"title":format!("chore(release): v{version}"),"body":body}),
+    )?;
+    Ok(())
+}
+
+fn sync_native_release_pr(api: &GitHub, server_repository: &str, config_path: &str) -> Result<()> {
+    let repository = current_repository()?;
+    let instance = native_release_instance_for(api, server_repository, config_path)?;
+    let repository_id = configured_release_destination(&instance.config, &repository)?;
+    let repo: Value = api.get(&format!("/repos/{}", repository.as_str()))?;
+    let default_branch = repo["default_branch"]
+        .as_str()
+        .context("release repository lacks default branch")?;
+    ensure!(
+        repo["id"].as_u64() == Some(repository_id)
+            && repo["full_name"].as_str() == Some(repository.as_str())
+            && repo["owner"]["id"].as_u64() == Some(instance.config.identities.repository_owner.id),
+        "release sync repository does not match protected configuration"
+    );
+    let run_id = env("GITHUB_RUN_ID")?.parse::<u64>()?;
+    let attempt = env("GITHUB_RUN_ATTEMPT")?.parse::<u64>()?;
+    let head = CommitSha::parse(&env("GITHUB_SHA")?)?;
+    let run: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{run_id}",
+        repository.as_str()
+    ))?;
+    ensure!(
+        run_id > 0
+            && attempt == 1
+            && run["id"].as_u64() == Some(run_id)
+            && run["repository"]["id"].as_u64() == Some(repository_id)
+            && run["head_repository"]["id"].as_u64() == Some(repository_id)
+            && run["run_attempt"].as_u64() == Some(attempt)
+            && run["event"] == "push"
+            && run["status"] == "in_progress"
+            && run["head_sha"].as_str() == Some(head.as_str())
+            && run["head_branch"].as_str() == instance.config.branches.release.as_deref(),
+        "release sync requires the original push of the exact configured release branch"
+    );
+    let owner = &instance.config.identities.owner;
+    let server_bot = &instance.config.identities.server_bot;
+    ensure!(
+        crate::request::matches_principal(&run["actor"], owner.id, &owner.login, "User")
+            || crate::request::matches_principal(
+                &run["actor"],
+                server_bot.id,
+                &server_bot.login,
+                "Bot"
+            ),
+        "release sync actor is not the configured owner or Server"
+    );
+    let references: Vec<ReferencedWorkflow> =
+        serde_json::from_value(run["referenced_workflows"].clone())
+            .context("release sync has no reusable workflow provenance")?;
+    let signer_path = ".github/workflows/reusable-release-pr-sync.yml";
+    let signer_sha = crate::native_server::unique_referenced_workflow_sha(
+        &references,
+        &instance.config.acceptable_clients.repository,
+        signer_path,
+    )?;
+    let signer = api.content(
+        &instance.config.acceptable_clients.repository,
+        signer_path,
+        &signer_sha,
+    )?;
+    let action = crate::native_server::native_client_package_action(
+        &signer,
+        &instance.config.acceptable_clients.repository,
+    )?;
+    crate::native_server::verify_configured_client_package(
+        api,
+        &instance.config,
+        &signer_sha,
+        &action,
+    )?;
+    let caller_path = crate::native_client::canonical_workflow_path(
+        run["path"]
+            .as_str()
+            .context("release sync caller path is missing")?,
+    )?;
+    let workflow_sha = env("GITHUB_WORKFLOW_SHA")?;
+    let workflow_epoch = securefix::api::capture_native_client_workflow_epoch(
+        api,
+        repository.as_str(),
+        repository_id,
+        default_branch,
+        &caller_path,
+        &workflow_sha,
+    )?;
+    let owner_name = repository
+        .as_str()
+        .split('/')
+        .next()
+        .context("release repository owner missing")?;
+    let release_branch = instance
+        .config
+        .branches
+        .release
+        .as_deref()
+        .context("release branch is not configured")?;
+    let pulls: Vec<Value> = api.get(&format!(
+        "/repos/{}/pulls?state=open&head={}&base={}&per_page=100",
+        repository.as_str(),
+        url_encode(&format!("{owner_name}:{release_branch}")),
+        url_encode(default_branch),
+    ))?;
+    ensure!(
+        pulls.len() < 100 && pulls.len() <= 1,
+        "release PR lookup is incomplete or ambiguous"
+    );
+    let Some(pull) = pulls.first() else {
+        return Ok(());
+    };
+    let number = pull["number"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .context("release PR number missing")?;
+    crate::request::validate_native_pr_commit_policy(
+        api,
+        repository.as_str(),
+        number,
+        head.as_str(),
+        &instance.config.policy.trusted_committers,
+    )?;
+    let version =
+        String::from_utf8(api.content(repository.as_str(), ".release-version", head.as_str())?)?;
+    let version = version.trim();
+    let parsed = Version::parse(version).context("release sync version is invalid")?;
+    ensure!(
+        parsed.build.is_empty(),
+        "release sync version cannot contain build metadata"
+    );
+    ensure!(
+        git_output(&["rev-parse", "HEAD"])? == head.as_str(),
+        "release sync checkout differs from its source head"
+    );
+    let metadata =
+        if Path::new("dbt_project.yml").is_file() || Path::new("pyproject.toml").is_file() {
+            "package version metadata"
+        } else {
+            "release metadata"
+        };
+    let title = format!("chore(release): v{version}");
+    let body = format!(
+        "## Summary\n- Prepare release v{version}\n- Update the changelog and {metadata}\n\nThis pull request is managed by the Release PR workflow."
+    );
+    let writer = GitHub::native_release_pr_metadata_from_env(
+        "GITHUB_TOKEN",
+        crate::api::NativeReleasePrMetadataTarget {
+            instance: instance.clone(),
+            repository: repository.as_str().to_owned(),
+            repository_id,
+            pull_number: number,
+            head_sha: head.as_str().to_owned(),
+            default_branch: default_branch.to_owned(),
+            workflow_path: caller_path,
+            workflow_sha,
+            workflow_epoch,
+            run_id,
+            run_attempt: attempt,
+            title: title.clone(),
+            body: body.clone(),
+        },
+    )?;
+    let _: Value = writer.patch(
+        &format!("/repos/{}/pulls/{number}", repository.as_str()),
+        &json!({"title":title,"body":body}),
     )?;
     Ok(())
 }

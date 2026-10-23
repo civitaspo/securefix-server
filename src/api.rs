@@ -90,6 +90,24 @@ pub struct NativeReleaseTagWriteTarget<'a> {
     pub tag: &'a str,
 }
 
+/// A Client metadata-only update of its configured, Server-owned release PR.
+#[derive(Clone)]
+pub struct NativeReleasePrMetadataTarget {
+    pub instance: NativeServerInstanceAuthority,
+    pub repository: String,
+    pub repository_id: u64,
+    pub pull_number: u64,
+    pub head_sha: String,
+    pub default_branch: String,
+    pub workflow_path: String,
+    pub workflow_sha: String,
+    pub workflow_epoch: String,
+    pub run_id: u64,
+    pub run_attempt: u64,
+    pub title: String,
+    pub body: String,
+}
+
 /// The only production mutations permitted through an external-instance
 /// request writer. Release publication has a separate lifecycle and writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,6 +374,7 @@ enum WriteContext {
     },
     NativeClientReleaseLabel(Box<NativeClientReleaseLabelWrite>),
     NativeReleaseTag(Box<NativeReleaseTagWrite>),
+    NativeReleasePrMetadata(Box<NativeReleasePrMetadataTarget>),
     Production {
         revision: Option<String>,
         control_id: Option<String>,
@@ -666,6 +685,19 @@ impl GitHub {
         write.tag_object_sha = Arc::new(Mutex::new(None));
         let mut api = api;
         api.writes = WriteContext::NativeReleaseTag(Box::new(write));
+        Ok(api)
+    }
+
+    pub fn native_release_pr_metadata_from_env(
+        name: &str,
+        target: NativeReleasePrMetadataTarget,
+    ) -> Result<Self> {
+        validate_native_release_pr_metadata_target(&target)?;
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let mut api = Self::new("https://api.github.com", token)?;
+        require_single_repository_installation(&api, target.repository_id, &target.repository)?;
+        api.writes = WriteContext::NativeReleasePrMetadata(Box::new(target));
         Ok(api)
     }
 
@@ -2255,6 +2287,13 @@ impl GitHub {
                 "native release cleanup may only delete its authenticated request label"
             );
         }
+        if let WriteContext::NativeReleasePrMetadata(write) = &self.writes {
+            ensure!(
+                *method == Method::PATCH
+                    && path == format!("/repos/{}/pulls/{}", write.repository, write.pull_number),
+                "native release metadata writer may only update its exact release PR"
+            );
+        }
         if let WriteContext::NativeReleaseTag(write) = &self.writes {
             let tag_path = format!("/repos/{}/git/tags", write.repository);
             let ref_path = format!("/repos/{}/git/refs", write.repository);
@@ -2555,7 +2594,10 @@ impl GitHub {
         body: Option<&Value>,
         no_cache: bool,
     ) -> Result<Value> {
-        if let WriteContext::ClientLabel { server } = &self.writes {
+        if let WriteContext::ClientLabel { server } = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
             ensure!(
                 method == Method::POST && path == format!("/repos/{server}/labels"),
                 "client may only create configured server request labels"
@@ -2566,6 +2608,8 @@ impl GitHub {
             name,
             description,
         } = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
         {
             validate_native_client_label_body(
                 &method,
@@ -2576,7 +2620,10 @@ impl GitHub {
                 body.context("native Client label body is missing")?,
             )?;
         }
-        if let WriteContext::NativeClientReleaseLabel(write) = &self.writes {
+        if let WriteContext::NativeClientReleaseLabel(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
             validate_native_client_release_label_write(write)?;
             validate_native_client_release_label_body(
                 &method,
@@ -2584,6 +2631,15 @@ impl GitHub {
                 write,
                 body.context("native Client release label body is missing")?,
             )?;
+        }
+        if let WriteContext::NativeReleasePrMetadata(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            ensure!(
+                body == Some(&serde_json::json!({"title": write.title, "body": write.body})),
+                "native release metadata payload differs from the validated title and summary"
+            );
         }
         if let WriteContext::NativeReleaseTag(write) = &self.writes
             && method != Method::GET
@@ -2864,6 +2920,9 @@ impl GitHub {
             }
             WriteContext::NativeReleaseTag(write) => {
                 return self.require_native_release_tag_current(write);
+            }
+            WriteContext::NativeReleasePrMetadata(write) => {
+                return self.require_native_release_pr_metadata_current(write);
             }
             WriteContext::Scratch { .. } => return Ok(()),
             WriteContext::PackageScratch { .. } => return Ok(()),
@@ -3257,6 +3316,70 @@ impl GitHub {
         validate_native_client_release_label_write(write)?;
         validate_native_client_release_label_execution(write)?;
         self.require_remote_native_server_instance_authority_unchanged(&write.instance)
+    }
+
+    fn require_native_release_pr_metadata_current(
+        &self,
+        write: &NativeReleasePrMetadataTarget,
+    ) -> Result<()> {
+        validate_native_release_pr_metadata_target(write)?;
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(write.repository.as_str())
+                && std::env::var("GITHUB_SHA").as_deref() == Ok(write.head_sha.as_str())
+                && std::env::var("GITHUB_RUN_ID")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    == Some(write.run_id)
+                && std::env::var("GITHUB_RUN_ATTEMPT")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    == Some(write.run_attempt),
+            "native release metadata execution differs from the captured Client run"
+        );
+        self.require_remote_native_server_instance_authority_unchanged(&write.instance)?;
+        require_single_repository_installation(self, write.repository_id, &write.repository)?;
+        let current_epoch = capture_native_client_workflow_epoch(
+            self,
+            &write.repository,
+            write.repository_id,
+            &write.default_branch,
+            &write.workflow_path,
+            &write.workflow_sha,
+        )?;
+        require_native_client_workflow_epoch_unchanged(&write.workflow_epoch, &current_epoch)?;
+        let run: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}",
+            write.repository, write.run_id
+        ))?;
+        ensure!(
+            run["repository"]["id"].as_u64() == Some(write.repository_id)
+                && run["head_repository"]["id"].as_u64() == Some(write.repository_id)
+                && run["head_sha"].as_str() == Some(write.head_sha.as_str())
+                && run["head_branch"].as_str() == write.instance.config.branches.release.as_deref()
+                && run["event"] == "push"
+                && run["status"] == "in_progress"
+                && run["run_attempt"].as_u64() == Some(write.run_attempt),
+            "native release metadata source run changed"
+        );
+        let pull: Value = self.get_uncached(&format!(
+            "/repos/{}/pulls/{}",
+            write.repository, write.pull_number
+        ))?;
+        validate_native_release_pr_metadata_pull(write, &pull)?;
+        ensure!(
+            self.branch_head(
+                &write.repository,
+                write
+                    .instance
+                    .config
+                    .branches
+                    .release
+                    .as_deref()
+                    .context("release branch is not configured")?
+            )? == write.head_sha,
+            "native release PR head advanced before metadata write"
+        );
+        Ok(())
     }
 
     fn require_native_release_tag_current(&self, write: &NativeReleaseTagWrite) -> Result<()> {
@@ -4909,6 +5032,71 @@ fn validate_native_release_tag_target(
         source_run_id,
         tag_object_sha: Arc::new(Mutex::new(None)),
     })
+}
+
+fn validate_native_release_pr_metadata_target(write: &NativeReleasePrMetadataTarget) -> Result<()> {
+    crate::policy::validate_repository(&write.repository)?;
+    crate::policy::validate_sha(&write.head_sha)?;
+    crate::policy::validate_sha(&write.workflow_sha)?;
+    crate::policy::validate_sha(&write.workflow_epoch)?;
+    crate::config::validate_branch(&write.default_branch)?;
+    validate_native_authority_snapshot(&write.instance.authority)?;
+    let config = crate::instance_config::InstanceConfig::parse(&write.instance.config_bytes)?;
+    ensure!(
+        write.instance.authority.config_sha256
+            == crate::hex_encode(sha2::Sha256::digest(&write.instance.config_bytes)),
+        "native release metadata config differs from its captured authority"
+    );
+    ensure!(
+        config.instance.repository == write.instance.authority.instance_repository
+            && config.instance.id == write.instance.authority.instance_id
+            && config.instance.default_branch == write.instance.authority.default_branch,
+        "native release metadata instance differs from its captured authority"
+    );
+    let configured = config
+        .repositories
+        .iter()
+        .find(|r| r.repository == write.repository && r.id == write.repository_id)
+        .context("native release metadata destination is not configured")?;
+    configured
+        .policy()
+        .require(crate::policy::Capability::Release)?;
+    ensure!(
+        write.pull_number > 0
+            && write.run_id > 0
+            && write.run_attempt == 1
+            && write.workflow_path.starts_with(".github/workflows/")
+            && !write.workflow_path[18..].contains('/')
+            && write.workflow_path.ends_with(".yml")
+            && write.title.starts_with("chore(release): v")
+            && write.title.len() <= 256
+            && write.body.len() <= 65536,
+        "invalid native release PR metadata target"
+    );
+    Ok(())
+}
+
+fn validate_native_release_pr_metadata_pull(
+    write: &NativeReleasePrMetadataTarget,
+    pull: &Value,
+) -> Result<()> {
+    let config = crate::instance_config::InstanceConfig::parse(&write.instance.config_bytes)?;
+    ensure!(
+        pull["number"].as_u64() == Some(write.pull_number)
+            && pull["state"] == "open"
+            && pull["head"]["sha"].as_str() == Some(write.head_sha.as_str())
+            && pull["head"]["ref"].as_str() == config.branches.release.as_deref()
+            && pull["head"]["repo"]["id"].as_u64() == Some(write.repository_id)
+            && pull["head"]["repo"]["full_name"].as_str() == Some(write.repository.as_str())
+            && pull["base"]["ref"].as_str() == Some(write.default_branch.as_str())
+            && pull["base"]["repo"]["id"].as_u64() == Some(write.repository_id)
+            && pull["base"]["repo"]["full_name"].as_str() == Some(write.repository.as_str())
+            && pull["user"]["id"].as_u64() == Some(config.identities.server_bot.id)
+            && pull["user"]["login"].as_str() == Some(config.identities.server_bot.login.as_str())
+            && pull["user"]["type"] == "Bot",
+        "native release metadata PR head, base, repository, or Server author changed"
+    );
+    Ok(())
 }
 
 fn validate_native_release_tag_execution(write: &NativeReleaseTagWrite) -> Result<()> {
@@ -10858,6 +11046,128 @@ mod tests {
         assert!(validate_native_client_release_label_target(&wrong_config_path).is_err());
         assert!(native_client_release_label_name("testing-", 0).is_err());
         assert!(native_client_release_label_name(&"x".repeat(32), 12_345).is_err());
+    }
+
+    #[test]
+    fn native_client_label_read_preflight_does_not_require_a_write_payload() {
+        use crate::fixtures::{Fixture, Route};
+        let instance =
+            instance_authority_fixture(include_bytes!("../tests/fixtures/instance-config.toml"));
+        let write = validate_native_client_release_label_target(&NativeClientReleaseLabelTarget {
+            instance: &instance,
+            config_path: TEST_CONFIG_PATH,
+            release_repository: "example-org/project",
+            release_repository_id: 987_654,
+            source_run_id: 12_345,
+        })
+        .unwrap();
+        let path = "/repos/example-org/securefix-server/labels/securefix-native-release-12345";
+        let response = serde_json::json!({"name": write.name, "description": write.description});
+        let contexts = [
+            WriteContext::ClientLabel {
+                server: "example-org/securefix-server".into(),
+            },
+            WriteContext::NativeClientLabel {
+                server: "example-org/securefix-server".into(),
+                name: write.name.clone(),
+                description: write.description.clone(),
+            },
+            WriteContext::NativeClientReleaseLabel(Box::new(write)),
+        ];
+        for context in contexts {
+            let mut fixture =
+                Fixture::new(vec![Route::request("GET", path, 200, response.clone())]);
+            fixture.api.writes = context;
+            assert_eq!(fixture.api.get::<Value>(path).unwrap(), response);
+            assert!(
+                fixture
+                    .api
+                    .patch::<Value>(path, &serde_json::json!({"description":"changed"}))
+                    .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn native_release_metadata_binds_exact_pr_head_authority_and_payload() {
+        use crate::fixtures::Fixture;
+        let instance =
+            instance_authority_fixture(include_bytes!("../tests/fixtures/instance-config.toml"));
+        let write = NativeReleasePrMetadataTarget {
+            repository: "example-org/project".into(),
+            repository_id: 987_654,
+            pull_number: 88,
+            head_sha: "a".repeat(40),
+            default_branch: "main".into(),
+            workflow_path: ".github/workflows/release-pr-sync.yml".into(),
+            workflow_sha: "b".repeat(40),
+            workflow_epoch: "c".repeat(40),
+            run_id: 123,
+            run_attempt: 1,
+            title: "chore(release): v1.2.3".into(),
+            body: "Prepare release v1.2.3".into(),
+            instance,
+        };
+        validate_native_release_pr_metadata_target(&write).unwrap();
+        let pull = serde_json::json!({
+            "number":88,"state":"open",
+            "head":{"sha":write.head_sha,"ref":"release/next","repo":{"id":987654,"full_name":write.repository}},
+            "base":{"ref":"main","repo":{"id":987654,"full_name":write.repository}},
+            "user":{"id":write.instance.config.identities.server_bot.id,
+                    "login":write.instance.config.identities.server_bot.login,"type":"Bot"}
+        });
+        validate_native_release_pr_metadata_pull(&write, &pull).unwrap();
+        for (pointer, value) in [
+            ("/head/sha", serde_json::json!("d".repeat(40))),
+            ("/head/ref", serde_json::json!("another-branch")),
+            ("/head/repo/id", serde_json::json!(1)),
+            ("/base/ref", serde_json::json!("another-base")),
+            ("/user/id", serde_json::json!(1)),
+            ("/user/type", serde_json::json!("User")),
+            ("/state", serde_json::json!("closed")),
+        ] {
+            let mut changed = pull.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                validate_native_release_pr_metadata_pull(&write, &changed).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut changed = write.clone();
+        changed.instance.authority.config_sha256 = "d".repeat(64);
+        assert!(validate_native_release_pr_metadata_target(&changed).is_err());
+        let mut changed = write.clone();
+        changed.run_attempt = 2;
+        assert!(validate_native_release_pr_metadata_target(&changed).is_err());
+        let mut fixture = Fixture::new(vec![]);
+        fixture.api.writes = WriteContext::NativeReleasePrMetadata(Box::new(write));
+        let path = "/repos/example-org/project/pulls/88";
+        assert!(
+            fixture
+                .api
+                .require_write_target(&Method::PATCH, path)
+                .is_ok()
+        );
+        assert!(
+            fixture
+                .api
+                .require_write_target(&Method::POST, path)
+                .is_err()
+        );
+        assert!(
+            fixture
+                .api
+                .require_write_target(&Method::PATCH, "/repos/example-org/project/pulls/89")
+                .is_err()
+        );
+        assert!(
+            fixture
+                .api
+                .patch::<Value>(path, &serde_json::json!({"title":"unvalidated"}))
+                .is_err()
+        );
+        fixture.finish();
     }
 
     #[test]

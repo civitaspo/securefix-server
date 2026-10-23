@@ -806,7 +806,7 @@ fn parse_env<T: std::str::FromStr>(name: &str) -> Result<T> {
         .map_err(|_| anyhow::anyhow!("invalid {name}"))
 }
 
-fn canonical_workflow_path(path: &str) -> Result<String> {
+pub(crate) fn canonical_workflow_path(path: &str) -> Result<String> {
     let path = path.split('@').next().context("invalid workflow path")?;
     validate_workflow_path(path)?;
     Ok(path.to_owned())
