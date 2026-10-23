@@ -21,7 +21,7 @@ jobs:
       pull-requests: read
       checks: read
       statuses: read
-    uses: civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@2179c5566b1cc84bd7d53082f028f00f5f046b60 # v0.2.45-pre.52
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@563d519fff5ad8b06a228c2eae655a15f65eda8b # v0.2.45-pre.106
     with:
       config_path: repo-settings/native-securefix-write-test-instance.toml
     secrets:
