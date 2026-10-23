@@ -53,6 +53,7 @@ default_sensitive_paths = [
   ".github/actions/**",
   "**/Cargo.toml",
   "**/Cargo.lock",
+  "repo-settings/**",
 ]
 merge_controls_enabled = false
 

@@ -17,7 +17,7 @@ jobs:
       pull-requests: read
       checks: read
       statuses: read
-    uses: civitaspo/securefix-server/.github/workflows/reusable-server-release.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a # v0.2.45-pre.121
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-release.yml@170cc1d6580c8e9041e9ef7ebd6ee1d01642acf9 # v0.2.45-pre.124
     with:
       config_path: repo-settings/native-role-events-test-instance.toml
     secrets:
