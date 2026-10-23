@@ -170,7 +170,7 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           artifact-ids: ${{ needs.preflight.outputs.strategy == 'terraform-provider' && needs.sign.outputs.artifact_id || needs.preflight.outputs.artifact_id }}
-          path: release-input
+          path: release-package
           merge-multiple: true
       - name: Mint a read-only Client release token
         id: release-read

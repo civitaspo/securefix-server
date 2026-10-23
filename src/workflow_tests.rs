@@ -5822,6 +5822,23 @@ fn server_release_receiver_keeps_read_write_and_cleanup_credentials_separate() {
         1,
         "release writer token is exposed only to the final publish command"
     );
+    let download = publish
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+        })
+        .unwrap();
+    assert_eq!(
+        download["with"]["path"], "release-package",
+        "publish reads release-package/plan.json; download must preserve the plan/assets layout"
+    );
+    let preflight_upload = preflight
+        .iter()
+        .find(|step| step["id"] == "upload")
+        .unwrap();
+    assert_eq!(preflight_upload["with"]["path"], "release-input/");
     let publish_json = serde_json::to_string(&jobs["publish"]).unwrap();
     assert!(!publish_json.contains("TERRAFORM_PROVIDER_GPG_PRIVATE_KEY"));
     assert!(!publish_json.contains("TERRAFORM_PROVIDER_GPG_PASSPHRASE"));
