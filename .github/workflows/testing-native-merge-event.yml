@@ -21,7 +21,7 @@ jobs:
       pull-requests: read
       checks: read
       statuses: read
-    uses: civitaspo/securefix-server/.github/workflows/reusable-server-merge.yml@5c52c7b6f61d58d3d0cafc35456777bc1b1e1ce3 # v0.2.45-pre.47
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-merge.yml@046b97b22622f6ca052836303f1f194018fd51a6 # v0.2.45-pre.69
     with:
       config_path: repo-settings/native-role-events-test-instance.toml
     secrets:

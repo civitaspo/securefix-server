@@ -1,6 +1,12 @@
 name: testing-native-policy-check-event
 
 on:
+  workflow_dispatch:
+    inputs:
+      producer_run_id:
+        description: Existing policy request producer to verify without a writer token
+        required: true
+        type: string
   label:
     types: [created]
 
@@ -17,8 +23,46 @@ jobs:
       pull-requests: read
       checks: read
       statuses: read
-    uses: civitaspo/securefix-server/.github/workflows/reusable-server-policy-check.yml@2719567ddd2cb9e13294e12cb9537780c6643263 # v0.2.45-pre.45
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-policy-check.yml@046b97b22622f6ca052836303f1f194018fd51a6 # v0.2.45-pre.69
     with:
       config_path: repo-settings/native-role-events-test-instance.toml
     secrets:
       SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+
+  stale-request-probe:
+    if: github.event_name == 'workflow_dispatch' && github.actor_id == '4525500' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Load the fixed policy verifier
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@d39821591200073b7513a01d6d7d721683ba5b7a # v0.2.45-pre.68
+        with:
+          token: ${{ github.token }}
+      - name: Create the scratch-only read token
+        id: client-read
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: testing-securefix-server
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Verify the existing request without publishing a check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.client-read.outputs.token }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+        run: |
+          "$CLI_BINARY" new-server instance-policy-check-run \
+            --config-path repo-settings/native-role-events-test-instance.toml \
+            --producer-repository civitaspo/testing-securefix-server \
+            --producer-run-id "$PRODUCER_RUN_ID"
