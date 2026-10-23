@@ -1193,7 +1193,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     }
                     assert_eq!(job_id, "handler");
                     let revision = if role == "release" {
-                        "7086c38f918c31f44eb6f63e34235477dd82fb8f"
+                        "ec9b37f01e7f18ae3ef45370332916c4c3d3ed58"
                     } else {
                         "035a37453cc8b5243abf62ee20d22e284ee681f6"
                     };
