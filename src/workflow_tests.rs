@@ -1147,11 +1147,11 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "handler");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@563d519fff5ad8b06a228c2eae655a15f65eda8b"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@e78897bdbf15e7abd0135a879b2774fcbb932091"
                     );
                     assert_eq!(
                         job["with"]["config_path"],
-                        "repo-settings/native-securefix-write-test-instance.toml"
+                        "repo-settings/native-role-events-test-instance.toml"
                     );
                     assert_eq!(
                         job["secrets"]["SERVER_PRIVATE_KEY"],
@@ -1192,7 +1192,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = "563d519fff5ad8b06a228c2eae655a15f65eda8b";
+                    let revision = "e78897bdbf15e7abd0135a879b2774fcbb932091";
                     assert_eq!(
                         uses,
                         format!(
@@ -1220,7 +1220,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "reconcile");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@563d519fff5ad8b06a228c2eae655a15f65eda8b"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@e78897bdbf15e7abd0135a879b2774fcbb932091"
                     );
                     assert_eq!(
                         job["with"],
@@ -5272,7 +5272,7 @@ fn native_settings_administrator_job_is_separate_from_managed_file_writer() {
     assert_eq!(steps.len(), 1);
     assert_eq!(
         steps[0]["uses"],
-        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@16a9af64de4feb4da49d8d28d8103165db634759"
+        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@e78897bdbf15e7abd0135a879b2774fcbb932091"
     );
     assert_eq!(
         steps[0]["with"],

@@ -118,3 +118,72 @@ fn native_client_capture_passes_the_securefix_artifact_only_to_its_rust_command(
         );
     }
 }
+
+#[test]
+fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() {
+    const SOURCE: &str = "e78897bdbf15e7abd0135a879b2774fcbb932091";
+    let config = securefix::instance_config::InstanceConfig::parse(
+        &fs::read("repo-settings/native-role-events-test-instance.toml").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        config.acceptable_clients.producer_workflow,
+        ".github/workflows/reusable-client-request.yml"
+    );
+    for (file, job, operation) in [
+        ("policy-check", "check", "policy_check"),
+        ("approve-request", "request", "approval"),
+        ("merge-request", "request", "merge"),
+        ("securefix-request", "request", "securefix"),
+    ] {
+        let value = workflow(&format!(
+            "repo-settings/managed-files/native-settings/{file}.yml"
+        ));
+        let request = &value["jobs"][job];
+        assert_eq!(
+            request["uses"],
+            format!(
+                "civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@{SOURCE}"
+            )
+        );
+        assert_eq!(request["with"]["operation"], operation);
+        assert_eq!(
+            request["with"]["server_repository"],
+            config.instance.repository
+        );
+        assert_eq!(
+            request["with"]["instance_config_path"],
+            "repo-settings/native-role-events-test-instance.toml"
+        );
+        assert!(config.allows_scratch_request_caller(
+            "civitaspo/testing-securefix-server",
+            1410312556,
+            &format!(".github/workflows/{file}.yml"),
+            "refs/heads/main",
+            if matches!(operation, "approval" | "merge") {
+                "issue_comment"
+            } else {
+                "pull_request_target"
+            },
+            operation,
+        ));
+        if operation == "securefix" {
+            assert_eq!(request["needs"], "prepare-source");
+            assert_eq!(
+                request["with"]["artifact_name"],
+                "${{ needs.prepare-source.outputs.artifact-name }}"
+            );
+            let prepare = &value["jobs"]["prepare-source"];
+            assert_eq!(
+                prepare["permissions"],
+                serde_json::json!({"actions":"read", "attestations":"read", "contents":"read"})
+            );
+            assert!(!serde_json::to_string(prepare).unwrap().contains("secrets."));
+            assert_eq!(prepare["if"], request["if"]);
+            assert_eq!(
+                prepare["outputs"]["artifact-name"],
+                "${{ steps.source.outputs.artifact_name }}"
+            );
+        }
+    }
+}

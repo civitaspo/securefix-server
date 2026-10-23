@@ -15,7 +15,7 @@ jobs:
       contents: read
       attestations: write
       pull-requests: write
-    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@c87a8977515a88c06480783933620d2a9dd32b9d # v0.2.45-pre.90
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr-sync.yml@e78897bdbf15e7abd0135a879b2774fcbb932091 # v0.2.45-pre.112
     with:
       server_repository: civitaspo/securefix-server
       instance_config_path: repo-settings/native-role-events-test-instance.toml
