@@ -356,11 +356,25 @@ impl InstanceConfig {
                 "scratch request caller repository ID must be nonzero"
             );
             validate_workflow_path(&caller.workflow_path)?;
-            let branch = caller
-                .workflow_ref
-                .strip_prefix("refs/heads/")
-                .context("scratch request caller ref must name a branch")?;
-            crate::config::validate_branch(branch)?;
+            if caller.event == ScratchRequestEvent::PullRequest {
+                let number = caller
+                    .workflow_ref
+                    .strip_prefix("refs/pull/")
+                    .and_then(|reference| reference.strip_suffix("/merge"))
+                    .context("scratch pull request caller ref must name its merge ref")?;
+                ensure!(
+                    number
+                        .parse::<u64>()
+                        .is_ok_and(|value| value > 0 && value.to_string() == number),
+                    "scratch pull request caller number must be canonical and positive"
+                );
+            } else {
+                let branch = caller
+                    .workflow_ref
+                    .strip_prefix("refs/heads/")
+                    .context("scratch request caller ref must name a branch")?;
+                crate::config::validate_branch(branch)?;
+            }
             ensure!(
                 scratch_callers.insert((
                     caller.repository.to_ascii_lowercase(),
@@ -809,6 +823,46 @@ mod tests {
             ),
         ] {
             assert!(InstanceConfig::parse(invalid.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn scratch_pull_request_callers_require_an_exact_canonical_merge_ref() {
+        let source = changed(
+            &fixture_text(),
+            "event = \"pull_request_target\"",
+            "event = \"pull_request\"",
+        );
+        for reference in ["refs/pull/432/merge", "refs/pull/1/merge"] {
+            let source = changed(&source, "refs/heads/main", reference);
+            let config = InstanceConfig::parse(source.as_bytes()).unwrap();
+            assert!(config.allows_scratch_request_caller(
+                "example-org/requester",
+                765432,
+                ".github/workflows/policy-check.yml",
+                reference,
+                "pull_request",
+                "policy_check",
+            ));
+            assert!(!config.allows_scratch_request_caller(
+                "example-org/requester",
+                765432,
+                ".github/workflows/policy-check.yml",
+                "refs/pull/433/merge",
+                "pull_request",
+                "policy_check",
+            ));
+        }
+        for reference in [
+            "refs/heads/main",
+            "refs/pull/0/merge",
+            "refs/pull/0432/merge",
+            "refs/pull/432/head",
+            "refs/pull/432/merge/extra",
+            "refs/pull/*/merge",
+            "refs/pull/18446744073709551616/merge",
+        ] {
+            rejects(&changed(&source, "refs/heads/main", reference));
         }
     }
 

@@ -59,14 +59,18 @@ The generated Merge Request wrapper permits the configured owner and the exact c
 The native package prepares source artifacts with `securefix new-client securefix prepare`.
 It reuses the bounded file staging and metadata validation of the legacy Client,
 but uses the protocol artifact prefix without loading deployment policy.
-For an existing PR, a credential-free Client job stages and uploads the artifact,
+For an existing PR, `.github/actions/prepare-securefix` stages and uploads the artifact
+in a credential-free Client job. Its fixed loader token is read-only. It accepts
+`files`, `root-dir`, `commit-message`, and `custom-json`, and exposes
+`artifact-name`, `artifact-id`, and `changed-files`. An empty file list skips upload.
+The prepare job checks out the exact PR head without persisted credentials,
 then calls `reusable-client-request.yml` with `operation: securefix` and the emitted
 `artifact_name`. The reusable workflow captures that artifact from the same run,
 attests the request, and dispatches it using a separate Client App token.
 The subsequent capture and Server verification bind the artifact to the run,
 exact PR head and protected instance configuration; staging does not authorize a write.
 
-Native requests bind the Actions run head and branch to the target PR. For `pull_request_target`, the attested `GITHUB_SHA` is the base-branch execution snapshot; it can differ from the PR API's persisted base SHA. The Server verifies that execution snapshot against the attestation certificate, and separately checks the artifact event against the PR head and base. Current Client workflow and Server authority checks still run before writes.
+Native Securefix accepts both `pull_request` and `pull_request_target`. Requests bind the Actions run head and branch to the target PR. For `pull_request`, `GITHUB_SHA` identifies the merge-context execution snapshot; for `pull_request_target`, the attested `GITHUB_SHA` is the base-branch execution snapshot; it can differ from the PR API's persisted base SHA. The Server verifies that execution snapshot against the attestation certificate, and separately checks the artifact event against the PR head and base. Current Client workflow and Server authority checks still run before writes.
 
 ## Fixed package loader
 

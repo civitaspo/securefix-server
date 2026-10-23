@@ -488,7 +488,7 @@ fn capture_request(
         .as_str()
         .context("pull request head branch is missing")?
         .to_owned();
-    validate_pull_request_target_head(
+    validate_pull_request_run_head(
         &event,
         &source_sha,
         run["head_branch"]
@@ -783,17 +783,17 @@ pub(crate) fn validate_artifact_run_binding(
     Ok(())
 }
 
-pub(crate) fn validate_pull_request_target_head(
+pub(crate) fn validate_pull_request_run_head(
     event: &str,
     source_sha: &str,
     run_branch: &str,
     head_sha: &str,
     head_branch: &str,
 ) -> Result<()> {
-    if event == "pull_request_target" {
+    if matches!(event, "pull_request" | "pull_request_target") {
         ensure!(
             source_sha == head_sha && run_branch == head_branch,
-            "pull_request_target run head and branch do not match the exact PR head"
+            "pull request run head and branch do not match the exact PR head"
         );
     }
     Ok(())
@@ -1055,6 +1055,19 @@ mod tests {
             ".github/workflows/not-yaml.yaml",
         ] {
             assert!(canonical_workflow_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn pull_request_runs_bind_the_source_head_and_branch_for_both_events() {
+        for event in ["pull_request", "pull_request_target"] {
+            validate_pull_request_run_head(event, "head", "branch", "head", "branch").unwrap();
+            assert!(
+                validate_pull_request_run_head(event, "old", "branch", "head", "branch").is_err()
+            );
+            assert!(
+                validate_pull_request_run_head(event, "head", "other", "head", "branch").is_err()
+            );
         }
     }
 

@@ -1213,7 +1213,7 @@ fn verify_run_identity(run: &Value, manifest: &RequestManifest) -> Result<()> {
             && run["path"].as_str() == Some(manifest.producer.workflow_path.as_str()),
         "native request producer run identity or conclusion mismatch"
     );
-    crate::native_client::validate_pull_request_target_head(
+    crate::native_client::validate_pull_request_run_head(
         &manifest.producer.event,
         &manifest.producer.source_sha,
         run["head_branch"]
@@ -1842,8 +1842,11 @@ fn apply_securefix_mode(
         .context("Securefix producer run branch is missing")?;
     securefix::config::validate_branch(run_branch)?;
     ensure!(
-        manifest.producer.event == "pull_request_target",
-        "native Securefix requires pull_request_target"
+        matches!(
+            manifest.producer.event.as_str(),
+            "pull_request" | "pull_request_target"
+        ),
+        "native Securefix requires a pull request event"
     );
     let artifact_bytes =
         download_securefix_artifact(&verified.client_api, manifest, artifact_identity)?;
@@ -1922,15 +1925,17 @@ fn validate_securefix_artifact_context(
     fix: &crate::securefix_gate::artifact::FixArtifact,
 ) -> Result<()> {
     ensure!(
-        manifest.producer.event == "pull_request_target"
-            && run_branch == manifest.pull_request.head_branch
+        matches!(
+            manifest.producer.event.as_str(),
+            "pull_request" | "pull_request_target"
+        ) && run_branch == manifest.pull_request.head_branch
             && fix.event_name == manifest.producer.event,
-        "native Securefix requires a pull_request_target run for the exact PR head"
+        "native Securefix requires a pull request run for the exact PR head"
     );
     let event_pr = fix
         .pull_request_context
         .as_ref()
-        .context("Securefix artifact does not contain its pull_request_target context")?;
+        .context("Securefix artifact does not contain its pull request context")?;
     ensure!(
         event_pr.number == manifest.pull_request.number
             && event_pr.head_sha == manifest.pull_request.head_sha
@@ -4081,46 +4086,51 @@ version = "1.4.0-pre.1"
 
     #[test]
     fn securefix_artifact_binds_protected_base_run_to_separate_pr_head() {
-        let mut manifest = manifest();
-        manifest.operation = "securefix".into();
-        manifest.producer.event = "pull_request_target".into();
-        manifest.pull_request.base_sha = "f".repeat(40);
-        manifest.producer.context_sha = "9".repeat(40);
-        manifest.producer.source_sha = manifest.pull_request.head_sha.clone();
-        let fix = crate::securefix_gate::artifact::FixArtifact {
-            repository: manifest.repository.full_name.clone(),
-            branch: manifest.pull_request.head_branch.clone(),
-            run_id: manifest.producer.run_id,
-            source_sha: manifest.producer.source_sha.clone(),
-            event_name: "pull_request_target".into(),
-            pull_request_context: Some(
-                crate::securefix_gate::artifact::PullRequestArtifactContext {
-                    number: manifest.pull_request.number,
-                    head_sha: manifest.pull_request.head_sha.clone(),
-                    head_branch: manifest.pull_request.head_branch.clone(),
-                    head_repository_id: manifest.pull_request.head_repository_id,
-                    head_repository: manifest.repository.full_name.clone(),
-                    base_sha: manifest.pull_request.base_sha.clone(),
-                    base_branch: manifest.pull_request.base_ref.clone(),
-                    base_repository_id: manifest.repository.id,
-                    base_repository: manifest.repository.full_name.clone(),
-                },
-            ),
-            commit_message: "test".into(),
-            create_pull_request: None,
-            additions: std::collections::BTreeMap::from([("README.md".into(), b"test".to_vec())]),
-            deletions: vec![],
-        };
-        assert!(validate_securefix_artifact_context(&manifest, "scratch", &fix).is_ok());
-        assert!(validate_securefix_artifact_context(&manifest, "main", &fix).is_err());
+        for event in ["pull_request_target", "pull_request"] {
+            let mut manifest = manifest();
+            manifest.operation = "securefix".into();
+            manifest.producer.event = event.into();
+            manifest.pull_request.base_sha = "f".repeat(40);
+            manifest.producer.context_sha = "9".repeat(40);
+            manifest.producer.source_sha = manifest.pull_request.head_sha.clone();
+            let fix = crate::securefix_gate::artifact::FixArtifact {
+                repository: manifest.repository.full_name.clone(),
+                branch: manifest.pull_request.head_branch.clone(),
+                run_id: manifest.producer.run_id,
+                source_sha: manifest.producer.source_sha.clone(),
+                event_name: event.into(),
+                pull_request_context: Some(
+                    crate::securefix_gate::artifact::PullRequestArtifactContext {
+                        number: manifest.pull_request.number,
+                        head_sha: manifest.pull_request.head_sha.clone(),
+                        head_branch: manifest.pull_request.head_branch.clone(),
+                        head_repository_id: manifest.pull_request.head_repository_id,
+                        head_repository: manifest.repository.full_name.clone(),
+                        base_sha: manifest.pull_request.base_sha.clone(),
+                        base_branch: manifest.pull_request.base_ref.clone(),
+                        base_repository_id: manifest.repository.id,
+                        base_repository: manifest.repository.full_name.clone(),
+                    },
+                ),
+                commit_message: "test".into(),
+                create_pull_request: None,
+                additions: std::collections::BTreeMap::from([(
+                    "README.md".into(),
+                    b"test".to_vec(),
+                )]),
+                deletions: vec![],
+            };
+            assert!(validate_securefix_artifact_context(&manifest, "scratch", &fix).is_ok());
+            assert!(validate_securefix_artifact_context(&manifest, "main", &fix).is_err());
 
-        let mut changed = fix;
-        changed.pull_request_context.as_mut().unwrap().head_sha = "e".repeat(40);
-        assert!(validate_securefix_artifact_context(&manifest, "scratch", &changed).is_err());
-        changed.pull_request_context.as_mut().unwrap().head_sha =
-            manifest.pull_request.head_sha.clone();
-        changed.pull_request_context.as_mut().unwrap().base_sha = "9".repeat(40);
-        assert!(validate_securefix_artifact_context(&manifest, "scratch", &changed).is_err());
+            let mut changed = fix;
+            changed.pull_request_context.as_mut().unwrap().head_sha = "e".repeat(40);
+            assert!(validate_securefix_artifact_context(&manifest, "scratch", &changed).is_err());
+            changed.pull_request_context.as_mut().unwrap().head_sha =
+                manifest.pull_request.head_sha.clone();
+            changed.pull_request_context.as_mut().unwrap().base_sha = "9".repeat(40);
+            assert!(validate_securefix_artifact_context(&manifest, "scratch", &changed).is_err());
+        }
     }
 
     fn verifier_result(manifest: &RequestManifest, run_invocation: String) -> Value {
@@ -4195,14 +4205,16 @@ version = "1.4.0-pre.1"
     }
 
     #[test]
-    fn pull_request_target_accepts_distinct_execution_and_pr_base_snapshots() {
+    fn pull_request_events_accept_distinct_execution_and_pr_base_snapshots() {
         let snapshots: Vec<Value> = serde_json::from_slice(include_bytes!(
             "../tests/fixtures/native-client-base-snapshots.json"
         ))
         .unwrap();
-        for snapshot in snapshots {
+        for (snapshot, event) in snapshots.iter().flat_map(|snapshot| {
+            ["pull_request_target", "pull_request"].map(|event| (snapshot, event))
+        }) {
             let mut manifest = manifest();
-            manifest.producer.event = "pull_request_target".into();
+            manifest.producer.event = event.into();
             manifest.producer.source_sha = snapshot["source_sha"].as_str().unwrap().into();
             manifest.producer.context_sha = snapshot["context_sha"].as_str().unwrap().into();
             manifest.pull_request.head_sha = manifest.producer.source_sha.clone();
@@ -4210,7 +4222,7 @@ version = "1.4.0-pre.1"
             manifest.pull_request.base_sha = snapshot["base_sha"].as_str().unwrap().into();
             let run = serde_json::json!({
                 "id":42,"run_attempt":2,"status":"completed","conclusion":"success",
-                "event":"pull_request_target","head_sha":manifest.producer.source_sha,
+                "event":event,"head_sha":manifest.producer.source_sha,
                 "head_branch":manifest.pull_request.head_branch,
                 "repository":{"id":10,"full_name":"owner/project","owner":{"id":20}},
                 "actor":{"id":12,"login":"maintainer"},"path":".github/workflows/client.yml"

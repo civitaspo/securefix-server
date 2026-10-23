@@ -140,11 +140,12 @@ pub fn parse(
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let pull_request_context = if event_name == "pull_request_target" {
-        Some(parse_pull_request_context(&metadata["context"]["payload"])?)
-    } else {
-        None
-    };
+    let pull_request_context =
+        if matches!(event_name.as_str(), "pull_request" | "pull_request_target") {
+            Some(parse_pull_request_context(&metadata["context"]["payload"])?)
+        } else {
+            None
+        };
     let inputs = metadata["inputs"]
         .as_object()
         .context("artifact inputs missing")?;
@@ -407,6 +408,52 @@ mod tests {
 
     fn metadata() -> Vec<u8> {
         br#"{"context":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"repository":{"full_name":"civitaspo/example"}},"runId":42},"inputs":{"commit_message":"Fix it"}}"#.to_vec()
+    }
+
+    #[test]
+    fn both_pull_request_events_parse_the_full_context_before_accepting_files() {
+        for event in ["pull_request", "pull_request_target"] {
+            let mut metadata = serde_json::json!({
+                "context": {"eventName":event, "sha":"9".repeat(40), "runId":42,
+                    "payload": {"number":7, "repository":{"id":10,"full_name":"owner/project"},
+                        "pull_request": {
+                            "head":{"sha":"d".repeat(40),"ref":"change","repo":{"id":10,"full_name":"owner/project"}},
+                            "base":{"sha":"a".repeat(40),"ref":"main","repo":{"id":10,"full_name":"owner/project"}}
+                        }
+                    }},
+                "inputs":{}
+            });
+            for valid in [true, false] {
+                if !valid {
+                    metadata["context"]["payload"]["pull_request"]["head"]["sha"] = Value::Null;
+                }
+                let encoded = serde_json::to_vec(&metadata).unwrap();
+                let bytes = archive(
+                    "securefix-test",
+                    &[
+                        ("securefix-test.json", &encoded),
+                        ("securefix-test_files.txt", b"README.md\n"),
+                        ("README.md", b"fixed"),
+                    ],
+                );
+                let result = parse(
+                    &bytes,
+                    "securefix-test",
+                    "owner/project",
+                    42,
+                    &"d".repeat(40),
+                    "change",
+                );
+                if valid {
+                    let fix = result.unwrap();
+                    assert_eq!(fix.event_name, event);
+                    assert_eq!(fix.pull_request_context.unwrap().head_sha, "d".repeat(40));
+                    assert_eq!(fix.additions["README.md"], b"fixed");
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
     }
 
     #[test]
