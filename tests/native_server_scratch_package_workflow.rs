@@ -208,7 +208,7 @@ fn server_release_receiver_uses_a_fixed_package_in_each_credential_domain() {
     assert_eq!(jobs.len(), 6);
     for (job_id, job) in jobs {
         let steps = job["steps"].as_sequence().unwrap();
-        assert_fixed_package(steps, "b00b2080d5be9fe35ece19ee63d064f45997c1ca");
+        assert_fixed_package(steps, "81f79f0893f44344289a82b525bd8d186fb6cd93");
         for step in steps {
             assert!(step["with"]["permission-attestations"].is_null());
             if step["env"]["CLI_BINARY"].is_string() {
