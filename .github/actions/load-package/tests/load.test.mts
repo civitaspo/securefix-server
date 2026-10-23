@@ -445,23 +445,23 @@ test('attestation command failure never publishes the package', async () => {
   }
 });
 
-test('bundled mapping matches the immutable pre45 package receipt', async () => {
+test('bundled mapping matches the immutable pre47 package receipt', async () => {
   const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
   const parsed: unknown = JSON.parse(await readFile(join(originalDirectory, 'package.json'), 'utf8'));
   assert.ok(isRecord(parsed));
   const mapping = parsed;
   assert.equal(mapping.schema_version, 3);
   assert.equal(mapping.channel, 'scratch');
-  assert.equal(mapping.source_sha, '9cc8211150c749dd73638425ec01a1f53db8369f');
-  assert.equal(mapping.source_manifest_sha256, 'a8f30c440a7d60c2306689fdfcf9e347a3abbb3244af65951d6c45c79e9ae7f9');
-  assert.equal(mapping.tag, 'v0.2.45-pre.45');
-  assert.equal(mapping.release_id, 421530758);
-  assert.equal(mapping.asset_id, 668253070);
-  assert.equal(mapping.asset_size, 12252648);
-  assert.equal(mapping.asset_sha256, '582ca75fd5218401cb653a9306b65895ebfa0d005c6009fcae2aa4010cb94e18');
-  assert.equal(mapping.producer_run_id, 39913062937);
-  assert.equal(mapping.publisher_run_id, 39913909860);
-  assert.equal(mapping.publisher_sha, 'f4771a91e6f7fe6b3c5b8c3f4432b64cf1732520');
+  assert.equal(mapping.source_sha, '8c02b59291becda46770664560045dfd18a513df');
+  assert.equal(mapping.source_manifest_sha256, '8522476b5fab644f47aea1b4f96b0c24aa3df278c1346cf2728c1a9bc0408097');
+  assert.equal(mapping.tag, 'v0.2.45-pre.47');
+  assert.equal(mapping.release_id, 421580858);
+  assert.equal(mapping.asset_id, 668409073);
+  assert.equal(mapping.asset_size, 12252056);
+  assert.equal(mapping.asset_sha256, '9b418d0a593f63d1be59dc042c5f0a2277a9e34b2e194c5e894cdca7fee81c33');
+  assert.equal(mapping.producer_run_id, 39920364421);
+  assert.equal(mapping.publisher_run_id, 39921073844);
+  assert.equal(mapping.publisher_sha, 'ad939f0911377ab9a479f1eb5fa38c5ed3f420d8');
 });
 
 test('composite metadata exposes only token and invokes the tested Node 24 entry module', async () => {

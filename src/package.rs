@@ -3890,7 +3890,7 @@ mod tests {
 
     #[test]
     fn bundled_v3_action_mapping_binds_the_verified_binary_receipt() {
-        const BINARY_SOURCE_SHA: &str = "9cc8211150c749dd73638425ec01a1f53db8369f";
+        const BINARY_SOURCE_SHA: &str = "8c02b59291becda46770664560045dfd18a513df";
         let action_bytes = include_bytes!("../.github/actions/load-package/package.json");
         let manifest = NativeClientPackageManifest::parse(action_bytes).unwrap();
         let source = TrustedPublisher {
