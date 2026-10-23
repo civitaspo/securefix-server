@@ -21,6 +21,8 @@ if [[ "$CHANNEL" == scratch ]]; then
     :
   elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-securefix.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
     :
+  elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/securefix-request.yml@refs/heads/main' && "$EVENT_NAME" == 'pull_request_target' && "$ACTOR_ID" == "$OWNER_ID" && "$RUN_ATTEMPT" == 1 ]]; then
+    :
   elif [[ "$CALLER_REPOSITORY" == 'civitaspo/testing-securefix-server' && "$CALLER_REPOSITORY_ID" == '1410312556' && "$CALLER_WORKFLOW_REF" == 'civitaspo/testing-securefix-server/.github/workflows/server-release.yml@refs/heads/main' && "$EVENT_NAME" == 'label' && "$RUN_ATTEMPT" == 1 ]]; then
     :
   else
