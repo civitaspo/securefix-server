@@ -484,6 +484,16 @@ fn validate_native_request_event_payload(
         repository == manifest.repository.full_name && run_id == manifest.producer.run_id,
         "native request manifest does not match the triggering Server label"
     );
+    if config.scratch_package_repository.is_some() {
+        validate_owner_selected_request_caller(config, manifest)?;
+        ensure!(
+            config.identities.owner.id == manifest.producer.actor_id
+                && config.identities.owner.login == manifest.producer.actor_login
+                && config.identities.owner.id == manifest.pull_request.author_id
+                && config.identities.owner.login == manifest.pull_request.author_login,
+            "scratch package requests require the configured owner as producer actor and PR author"
+        );
+    }
     Ok(())
 }
 
@@ -637,6 +647,8 @@ fn verify_request_with_deployment(
     let manifest: RequestManifest =
         serde_json::from_slice(&manifest_bytes).context("parse native request manifest")?;
     manifest.validate()?;
+    let configured_scratch_package =
+        !scratch && !owner_selected_test_package && config.scratch_package_repository.is_some();
     ensure!(
         match mode {
             securefix::api::NativeScratchMode::PolicyCheck => manifest.operation == "policy_check",
@@ -773,10 +785,8 @@ fn verify_request_with_deployment(
         &config.acceptable_clients.producer_workflow,
         &signer_sha,
     )?;
-    let loader_action_sha = native_client_loader_action_sha(
-        &signer_workflow_yaml,
-        &config.acceptable_clients.repository,
-    )?;
+    let loader_action =
+        native_client_package_action(&signer_workflow_yaml, &config.acceptable_clients.repository)?;
     let verified = verify_with_gh(
         manifest_path,
         bundle_path,
@@ -794,27 +804,32 @@ fn verify_request_with_deployment(
         &signer_sha,
         &manifest_bytes,
     )?;
-    let verified_client_package = if scratch || owner_selected_test_package {
-        let publication_json =
-            std::env::var("SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON")
+    let verified_client_package =
+        if scratch || owner_selected_test_package || configured_scratch_package {
+            let publication = if configured_scratch_package {
+                None
+            } else {
+                let publication_json = std::env::var(
+                    "SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON",
+                )
                 .context("missing owner-selected native scratch package publication record")?;
-        let publication = scratch_package_publication(&publication_json, &config)?;
-        securefix::package::verify_native_client_package_scratch(
-            &server_api,
-            &config,
-            execution_mode,
-            &config.acceptable_clients,
-            &signer_sha,
-            &loader_action_sha,
-            REQUEST_PROTOCOL,
-            &publication,
-        )?
-    } else {
-        verify_stable_client_package(&server_api, &config, &signer_sha, &loader_action_sha)?
-    };
+                Some(scratch_package_publication(&publication_json, &config)?)
+            };
+            securefix::package::verify_native_client_package_scratch(
+                &server_api,
+                &config,
+                &config.acceptable_clients,
+                &signer_sha,
+                &loader_action,
+                REQUEST_PROTOCOL,
+                publication.as_ref(),
+            )?
+        } else {
+            verify_stable_client_package(&server_api, &config, &signer_sha, &loader_action)?
+        };
     ensure!(
         verified_client_package.implementation_sha == signer_sha
-            && verified_client_package.loader_action_sha == loader_action_sha
+            && verified_client_package.loader_action_sha == loader_action.revision()
             && verified_client_package.protocol == REQUEST_PROTOCOL,
         "verified Client package does not match the accepted producer workflow and request protocol"
     );
@@ -947,12 +962,15 @@ fn scratch_package_publication(
     config: &securefix::instance_config::InstanceConfig,
 ) -> Result<securefix::package::ScratchPackagePublication> {
     let input = parse_scratch_package_publication_input(json)?;
-    let trusted = securefix::config::trusted()?;
+    let destination = config
+        .scratch_package_repository
+        .as_ref()
+        .context("scratch package repository is not configured")?;
     Ok(securefix::package::ScratchPackagePublication {
         source_repository: config.acceptable_clients.repository.clone(),
         source_repository_id: config.acceptable_clients.id,
-        destination_repository: trusted.deployment.integration.repository.clone(),
-        destination_repository_id: trusted.deployment.integration.id,
+        destination_repository: destination.repository.clone(),
+        destination_repository_id: destination.id,
         source_sha: input.source_sha,
         source_branch: input.source_branch,
         tag: input.tag,
@@ -1030,10 +1048,10 @@ fn unique_referenced_workflow_sha(
     Ok(reference.sha.clone())
 }
 
-pub(crate) fn native_client_loader_action_sha(
+pub(crate) fn native_client_package_action(
     workflow_yaml: &[u8],
     repository: &str,
-) -> Result<String> {
+) -> Result<securefix::package::PinnedPackageAction> {
     securefix::policy::validate_repository(repository)?;
     ensure!(
         !workflow_yaml.is_empty() && workflow_yaml.len() <= 64 * 1024,
@@ -1041,77 +1059,59 @@ pub(crate) fn native_client_loader_action_sha(
     );
     let yaml: serde_yaml::Value = serde_yaml::from_slice(workflow_yaml)
         .context("parse Client producer workflow for its fixed package loader")?;
-    let prefix = format!("{repository}/.github/actions/load-package@");
+    let repository_prefix = format!("{repository}/");
     let mut matches = Vec::new();
-    fn visit<'a>(
-        value: &'a serde_yaml::Value,
-        prefix: &str,
-        matches: &mut Vec<(&'a str, Option<&'a str>)>,
-        unexpected_loader: &mut bool,
-    ) {
+    fn visit(
+        value: &serde_yaml::Value,
+        repository: &str,
+        repository_prefix: &str,
+        matches: &mut Vec<securefix::package::PinnedPackageAction>,
+    ) -> Result<()> {
         match value {
             serde_yaml::Value::Mapping(mapping) => {
-                if let Some(uses) = mapping
-                    .get(serde_yaml::Value::String("uses".to_owned()))
-                    .and_then(serde_yaml::Value::as_str)
-                    && uses.contains(".github/actions/load-package@")
+                if let Some(uses_value) = mapping.get(serde_yaml::Value::String("uses".to_owned()))
                 {
-                    if uses.starts_with(prefix) {
-                        let action_sha = mapping
-                            .get(serde_yaml::Value::String("with".to_owned()))
-                            .and_then(serde_yaml::Value::as_mapping)
-                            .and_then(|with| {
-                                with.get(serde_yaml::Value::String("action-sha".to_owned()))
-                            })
-                            .and_then(serde_yaml::Value::as_str);
-                        matches.push((uses, action_sha));
-                    } else {
-                        *unexpected_loader = true;
+                    let uses = uses_value
+                        .as_str()
+                        .context("Client producer workflow has a non-string uses entry")?;
+                    if let Some(reference) = uses.strip_prefix(repository_prefix) {
+                        let (path, sha) = reference
+                            .rsplit_once('@')
+                            .context("Client package Action has no immutable revision")?;
+                        ensure!(!path.is_empty(), "Client package Action path is empty");
+                        matches.push(securefix::package::PinnedPackageAction::new(
+                            repository.to_owned(),
+                            path.to_owned(),
+                            sha.to_owned(),
+                        )?);
+                    } else if uses.contains(".github/actions/") {
+                        anyhow::bail!("Client producer workflow uses an unconfigured local Action");
                     }
                 }
                 for child in mapping.values() {
-                    visit(child, prefix, matches, unexpected_loader);
+                    visit(child, repository, repository_prefix, matches)?;
                 }
             }
             serde_yaml::Value::Sequence(items) => {
                 for child in items {
-                    visit(child, prefix, matches, unexpected_loader);
+                    visit(child, repository, repository_prefix, matches)?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
-    let mut unexpected_loader = false;
-    visit(&yaml, &prefix, &mut matches, &mut unexpected_loader);
-    ensure!(
-        !unexpected_loader,
-        "Client producer workflow uses an unconfigured package loader"
-    );
+    visit(&yaml, repository, &repository_prefix, &mut matches)?;
     ensure!(
         !matches.is_empty(),
-        "Client producer workflow has no configured package loader"
+        "Client producer workflow has no configured package Action"
     );
-    let mut expected_sha = None;
-    for (uses, action_sha) in matches {
-        let sha = uses
-            .strip_prefix(&prefix)
-            .context("Client package loader reference has an invalid repository path")?;
-        securefix::policy::validate_sha(sha)
-            .context("Client package loader must use a full commit SHA")?;
-        ensure!(
-            action_sha == Some(sha),
-            "Client package loader action-sha input must equal its immutable uses pin"
-        );
-        if let Some(expected) = expected_sha.as_deref() {
-            ensure!(
-                sha == expected,
-                "Client producer workflow mixes package loader bindings"
-            );
-        } else {
-            expected_sha = Some(sha.to_owned());
-        }
-    }
-    expected_sha.context("Client producer workflow package loader binding is missing")
+    let selected = matches[0].clone();
+    ensure!(
+        matches.iter().all(|binding| binding == &selected),
+        "Client producer workflow mixes package Action bindings"
+    );
+    Ok(selected)
 }
 
 /// Resolve the source branch for release attestation only after authenticating
@@ -1137,7 +1137,7 @@ fn verify_stable_client_package(
     server_api: &securefix::api::GitHub,
     config: &securefix::instance_config::InstanceConfig,
     signer_sha: &str,
-    loader_action_sha: &str,
+    loader_action: &securefix::package::PinnedPackageAction,
 ) -> Result<securefix::package::VerifiedNativeClientPackage> {
     let repository: Value =
         server_api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
@@ -1146,7 +1146,7 @@ fn verify_stable_client_package(
         server_api,
         &config.acceptable_clients,
         signer_sha,
-        loader_action_sha,
+        loader_action,
         REQUEST_PROTOCOL,
         &default_branch,
     )
@@ -2369,10 +2369,8 @@ pub(crate) fn verify_native_release_approval(
         &config.acceptable_clients.producer_workflow,
         &signer_sha,
     )?;
-    let loader_action_sha = native_client_loader_action_sha(
-        &signer_workflow_yaml,
-        &config.acceptable_clients.repository,
-    )?;
+    let loader_action =
+        native_client_package_action(&signer_workflow_yaml, &config.acceptable_clients.repository)?;
     let directory = tempfile::tempdir()?;
     let manifest_path = directory.path().join("manifest.json");
     let bundle_path = directory.path().join("bundle.json");
@@ -2395,11 +2393,10 @@ pub(crate) fn verify_native_release_approval(
         &signer_sha,
         &manifest_bytes,
     )?;
-    let package =
-        verify_stable_client_package(server_api, config, &signer_sha, &loader_action_sha)?;
+    let package = verify_stable_client_package(server_api, config, &signer_sha, &loader_action)?;
     ensure!(
         package.implementation_sha == signer_sha
-            && package.loader_action_sha == loader_action_sha
+            && package.loader_action_sha == loader_action.revision()
             && package.protocol == REQUEST_PROTOCOL,
         "verified Client package does not match the accepted approval signer and protocol"
     );
@@ -3272,6 +3269,44 @@ mod tests {
     }
 
     #[test]
+    fn normal_scratch_label_retains_client_app_and_owner_caller_authority() {
+        let mut config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-securefix-write-test-instance.toml"
+        ))
+        .unwrap();
+        let mut request = manifest();
+        request.operation = "securefix".to_owned();
+        request.repository.id = 1410312556;
+        request.repository.full_name = "civitaspo/testing-securefix-server".to_owned();
+        request.producer.event = "pull_request_target".to_owned();
+        request.producer.workflow_path = ".github/workflows/securefix-request.yml".to_owned();
+        request.producer.workflow_ref = "refs/heads/main".to_owned();
+        request.producer.actor_id = config.identities.owner.id;
+        request.producer.actor_login = config.identities.owner.login.clone();
+        request.pull_request.author_id = config.identities.owner.id;
+        request.pull_request.author_login = config.identities.owner.login.clone();
+        let payload = serde_json::json!({
+            "action": "created",
+            "repository": {"full_name": config.instance.repository},
+            "sender": {"id": config.identities.client_bot.id, "login": config.identities.client_bot.login, "type": "Bot"},
+            "label": {"name": format!("securefix-native-securefix-{}", request.producer.run_id),
+                "description": format!("{}/{}", request.repository.full_name, request.producer.run_id)}
+        });
+        assert!(validate_native_request_event_payload(&config, &request, &payload).is_ok());
+        let mut forged = payload.clone();
+        forged["sender"]["id"] = serde_json::json!(config.identities.owner.id);
+        assert!(validate_native_request_event_payload(&config, &request, &forged).is_err());
+        request.producer.actor_id += 1;
+        assert!(validate_native_request_event_payload(&config, &request, &payload).is_err());
+        request.producer.actor_id = config.identities.owner.id;
+        request.pull_request.author_id += 1;
+        assert!(validate_native_request_event_payload(&config, &request, &payload).is_err());
+        request.pull_request.author_id = config.identities.owner.id;
+        config.scratch_request_callers.clear();
+        assert!(validate_native_request_event_payload(&config, &request, &payload).is_err());
+    }
+
+    #[test]
     fn stable_client_branch_requires_authenticated_configured_repository_identity() {
         let acceptable = securefix::instance_config::AcceptableClients {
             repository: "owner/client".to_owned(),
@@ -3376,57 +3411,93 @@ mod tests {
     }
 
     #[test]
-    fn client_package_loader_repeated_bindings_must_be_identical_immutable_pins() {
+    fn client_package_action_repeated_bindings_must_be_identical_immutable_pins() {
         let repo = "client-org/securefix-server";
         let sha = "a".repeat(40);
         let workflow = format!(
-            "jobs:\n  request:\n    steps:\n      - uses: {repo}/.github/actions/load-package@{sha}\n        with:\n          action-sha: {sha}\n"
+            "jobs:\n  request:\n    steps:\n      - uses: {repo}/.github/actions/load-package@{sha}\n"
         );
         assert_eq!(
-            native_client_loader_action_sha(workflow.as_bytes(), repo).unwrap(),
-            sha
+            native_client_package_action(workflow.as_bytes(), repo).unwrap(),
+            securefix::package::PinnedPackageAction::new(
+                repo.to_owned(),
+                ".github/actions/load-package".to_owned(),
+                sha.clone(),
+            )
+            .unwrap()
         );
 
-        let wrong_input = workflow.replace(
-            &format!("action-sha: {sha}"),
-            &format!("action-sha: {}", "b".repeat(40)),
-        );
-        assert!(native_client_loader_action_sha(wrong_input.as_bytes(), repo).is_err());
         let mutable_ref = workflow.replace(&sha, "main");
-        assert!(native_client_loader_action_sha(mutable_ref.as_bytes(), repo).is_err());
-        let duplicate = format!(
-            "{workflow}  second:\n    uses: {repo}/.github/actions/load-package@{sha}\n    with:\n      action-sha: {sha}\n"
-        );
+        assert!(native_client_package_action(mutable_ref.as_bytes(), repo).is_err());
+        let duplicate =
+            format!("{workflow}  second:\n    uses: {repo}/.github/actions/load-package@{sha}\n");
         assert_eq!(
-            native_client_loader_action_sha(duplicate.as_bytes(), repo).unwrap(),
-            sha
+            native_client_package_action(duplicate.as_bytes(), repo).unwrap(),
+            securefix::package::PinnedPackageAction::new(
+                repo.to_owned(),
+                ".github/actions/load-package".to_owned(),
+                sha.clone(),
+            )
+            .unwrap()
         );
 
         let mixed = duplicate.replacen(&sha, &"b".repeat(40), 1);
-        assert!(native_client_loader_action_sha(mixed.as_bytes(), repo).is_err());
+        assert!(native_client_package_action(mixed.as_bytes(), repo).is_err());
 
-        let missing_input =
-            workflow.replace(&format!("        with:\n          action-sha: {sha}\n"), "");
-        assert!(native_client_loader_action_sha(missing_input.as_bytes(), repo).is_err());
+        let relocated = workflow.replace(
+            ".github/actions/load-package",
+            "actions/packages/Native Client loader",
+        );
+        assert_eq!(
+            native_client_package_action(relocated.as_bytes(), repo).unwrap(),
+            securefix::package::PinnedPackageAction::new(
+                repo.to_owned(),
+                "actions/packages/Native Client loader".to_owned(),
+                sha.clone(),
+            )
+            .unwrap()
+        );
+        let mixed_path = format!(
+            "{workflow}  other:\n    uses: {repo}/actions/packages/Native Client loader@{sha}\n"
+        );
+        assert!(native_client_package_action(mixed_path.as_bytes(), repo).is_err());
+
+        assert!(
+            securefix::package::PinnedPackageAction::new(
+                repo.to_owned(),
+                "../outside".to_owned(),
+                sha.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            securefix::package::PinnedPackageAction::new(
+                repo.to_owned(),
+                "/absolute/action".to_owned(),
+                sha.clone(),
+            )
+            .is_err()
+        );
 
         let other_repository = workflow.replace(
             &format!("{repo}/.github/actions/load-package@"),
             "attacker/securefix-server/.github/actions/load-package@",
         );
-        assert!(native_client_loader_action_sha(other_repository.as_bytes(), repo).is_err());
+        assert!(native_client_package_action(other_repository.as_bytes(), repo).is_err());
 
         let absent = b"jobs:\n  request:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n";
-        assert!(native_client_loader_action_sha(absent, repo).is_err());
-        assert!(native_client_loader_action_sha(workflow.as_bytes(), "other-org/server").is_err());
+        assert!(native_client_package_action(absent, repo).is_err());
+        assert!(native_client_package_action(workflow.as_bytes(), "other-org/server").is_err());
+        let non_string_uses =
+            b"jobs:\n  request:\n    steps:\n      - uses: { unexpected: value }\n";
+        assert!(native_client_package_action(non_string_uses, repo).is_err());
     }
 
     #[test]
-    fn scratch_client_signer_uses_one_repeated_immutable_loader_binding() {
+    fn scratch_client_signer_uses_one_repeated_immutable_package_action_binding() {
         let workflow = include_bytes!("../.github/workflows/reusable-client-request-scratch.yml");
-        assert_eq!(
-            native_client_loader_action_sha(workflow, "civitaspo/securefix-server").unwrap(),
-            "bfa7b7f5356df03546b97cd254a57a596405a91a"
-        );
+        let action = native_client_package_action(workflow, "civitaspo/securefix-server").unwrap();
+        assert_eq!(action.revision().len(), 40);
     }
 
     #[test]
@@ -3454,6 +3525,21 @@ mod tests {
         );
         assert_eq!(record.publisher_run_id, 39783817011);
         assert_eq!(record.publisher_run_attempt, 1);
+        let instance = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-securefix-test-instance.toml"
+        ))
+        .unwrap();
+        let publication = scratch_package_publication(&json, &instance).unwrap();
+        assert_eq!(
+            publication.destination_repository,
+            "civitaspo/testing-securefix-server"
+        );
+        assert_eq!(publication.destination_repository_id, 1_410_312_556);
+        let instance_without_scratch_package = securefix::instance_config::InstanceConfig::parse(
+            include_bytes!("../tests/fixtures/instance-config.toml"),
+        )
+        .unwrap();
+        assert!(scratch_package_publication(&json, &instance_without_scratch_package).is_err());
         assert!(parse_scratch_package_publication_input(&format!("{json} ")).is_ok());
         assert!(
             parse_scratch_package_publication_input(&json.replace(
@@ -3765,17 +3851,17 @@ mod tests {
     #[test]
     fn owner_selected_package_requires_the_configured_scratch_caller_tuple() {
         let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
-            "../repo-settings/native-securefix-test-instance.toml"
+            "../repo-settings/native-securefix-write-test-instance.toml"
         ))
         .unwrap();
         let mut request = manifest();
-        request.operation = "policy_check".to_owned();
+        request.operation = "securefix".to_owned();
         request.repository = crate::native_client::RepositoryIdentity {
             id: 1410312556,
             full_name: "civitaspo/testing-securefix-server".to_owned(),
         };
         request.producer.event = "pull_request_target".to_owned();
-        request.producer.workflow_path = ".github/workflows/policy-check.yml".to_owned();
+        request.producer.workflow_path = ".github/workflows/securefix-request.yml".to_owned();
         request.producer.workflow_ref = "refs/heads/main".to_owned();
         assert!(validate_owner_selected_request_caller(&config, &request).is_ok());
 

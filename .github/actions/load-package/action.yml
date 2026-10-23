@@ -1,62 +1,8 @@
-name: Load source-bound Securefix package
-description: Verify one raw package from the pinned implementation and add it to PATH
+name: Load verified Securefix package
+description: Verify the immutable package mapping bundled with this action and add the verified binary to PATH
 inputs:
-  action-sha:
-    description: Full SHA of this loader action's protected source revision
-    required: true
-  source-repository:
-    description: Trusted source and attestation repository from deployment configuration
-    required: true
-  source-repository-id:
-    description: Numeric source repository ID from deployment configuration
-    required: true
-  destination-repository:
-    description: Repository that owns the immutable package release
-    required: true
-  destination-repository-id:
-    description: Numeric release destination ID from deployment configuration
-    required: true
-  source-default-branch:
-    description: Configured source repository default branch
-    required: true
-  owner-id:
-    description: Trusted User actor ID declared by the immutable caller for owner-dispatched package runs
-    required: true
-  channel:
-    description: stable for normal consumers or scratch for an explicit prerelease probe
-    required: true
-  manifest-source-sha:
-    description: Exact source revision for the scratch package manifest; forbidden for stable loads
-    required: false
-  publication-source-sha:
-    description: Source commit in the current trusted scratch publication record
-    required: false
-  publication-source-branch:
-    description: Source branch in the current trusted scratch publication record
-    required: false
-  publication-tag:
-    description: Release tag in the current trusted scratch publication record
-    required: false
-  publication-release-id:
-    description: Immutable release ID in the current trusted scratch publication record
-    required: false
-  publication-asset-id:
-    description: Immutable release asset ID in the current trusted scratch publication record
-    required: false
-  publication-asset-sha256:
-    description: Release asset digest in the current trusted scratch publication record
-    required: false
-  publication-asset-size:
-    description: Release asset size in the current trusted scratch publication record
-    required: false
-  publication-producer-run-id:
-    description: Producer run ID in the current trusted scratch publication record
-    required: false
-  publication-producer-run-attempt:
-    description: Producer run attempt in the current trusted scratch publication record
-    required: false
   token:
-    description: Read token for release and source metadata
+    description: Read-only token for the package source and destination repositories
     required: true
 outputs:
   binary:
@@ -66,54 +12,39 @@ outputs:
     description: Verified package version
     value: ${{ steps.load.outputs.version }}
   asset-id:
-    description: Release asset ID whose bytes passed verification
+    description: Verified immutable release asset ID
     value: ${{ steps.load.outputs.asset-id }}
   release-id:
-    description: Immutable release ID
+    description: Verified immutable release ID
     value: ${{ steps.load.outputs.release-id }}
   source-sha:
-    description: Source commit derived from the verified binary attestation
+    description: Verified binary source revision
     value: ${{ steps.load.outputs.source-sha }}
   source-branch:
-    description: Source branch derived from the verified binary attestation
+    description: Verified binary source branch
     value: ${{ steps.load.outputs.source-branch }}
   producer-run-id:
-    description: Producer run derived from the verified binary attestation
+    description: Verified producer workflow run ID
     value: ${{ steps.load.outputs.producer-run-id }}
   producer-run-attempt:
-    description: Producer attempt derived from the verified binary attestation
+    description: Verified producer workflow run attempt
     value: ${{ steps.load.outputs.producer-run-attempt }}
 runs:
   using: composite
   steps:
     - id: load
-      shell: bash
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
       env:
-        ACTION_PATH: ${{ github.action_path }}
-        ACTION_REF: ${{ github.action_ref }}
-        ACTION_SHA: ${{ inputs.action-sha }}
-        SOURCE_REPOSITORY: ${{ inputs.source-repository }}
-        SOURCE_REPOSITORY_ID: ${{ inputs.source-repository-id }}
-        DESTINATION_REPOSITORY: ${{ inputs.destination-repository }}
-        DESTINATION_REPOSITORY_ID: ${{ inputs.destination-repository-id }}
-        SOURCE_DEFAULT_BRANCH: ${{ inputs.source-default-branch }}
-        OWNER_ID: ${{ inputs.owner-id }}
-        CHANNEL: ${{ inputs.channel }}
-        MANIFEST_SOURCE_SHA: ${{ inputs.manifest-source-sha }}
-        PUBLICATION_SOURCE_SHA: ${{ inputs.publication-source-sha }}
-        PUBLICATION_SOURCE_BRANCH: ${{ inputs.publication-source-branch }}
-        PUBLICATION_TAG: ${{ inputs.publication-tag }}
-        PUBLICATION_RELEASE_ID: ${{ inputs.publication-release-id }}
-        PUBLICATION_ASSET_ID: ${{ inputs.publication-asset-id }}
-        PUBLICATION_ASSET_SHA256: ${{ inputs.publication-asset-sha256 }}
-        PUBLICATION_ASSET_SIZE: ${{ inputs.publication-asset-size }}
-        PUBLICATION_PRODUCER_RUN_ID: ${{ inputs.publication-producer-run-id }}
-        PUBLICATION_PRODUCER_RUN_ATTEMPT: ${{ inputs.publication-producer-run-attempt }}
-        GH_TOKEN: ${{ inputs.token }}
-        CALLER_REPOSITORY: ${{ github.repository }}
-        CALLER_REPOSITORY_ID: ${{ github.repository_id }}
-        CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
-        EVENT_NAME: ${{ github.event_name }}
-        ACTOR_ID: ${{ github.actor_id }}
-        RUN_ATTEMPT: ${{ github.run_attempt }}
-      run: bash "$ACTION_PATH/load.sh"
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const { join } = await import('node:path');
+          const { pathToFileURL } = await import('node:url');
+          const actionPath = process.env.GITHUB_ACTION_PATH;
+          if (typeof actionPath !== 'string' || actionPath.length === 0) {
+            throw new Error('composite action path is unavailable');
+          }
+          const entryUrl = pathToFileURL(join(actionPath, 'entry.mts')).href;
+          const entry = await import(entryUrl);
+          await entry.run({ github, context, core, exec });

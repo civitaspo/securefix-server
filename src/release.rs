@@ -2403,7 +2403,7 @@ fn verify_accepted_client_package(
         &instance.acceptable_clients.producer_workflow,
         signer_sha,
     )?;
-    let loader_action_sha = crate::native_server::native_client_loader_action_sha(
+    let loader_action = crate::native_server::native_client_package_action(
         &workflow,
         &instance.acceptable_clients.repository,
     )?;
@@ -2423,7 +2423,7 @@ fn verify_accepted_client_package(
         server_api,
         &instance.acceptable_clients,
         signer_sha,
-        &loader_action_sha,
+        &loader_action,
         "securefix-native-request/v1",
         default_branch,
     )

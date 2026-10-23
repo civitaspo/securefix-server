@@ -85,15 +85,25 @@ revision; the publisher treats the producer artifact as data and never executes
 it with a write token.
 
 Dispatch the publisher with the exact producer run ID and `channel`. The
-source-bound schema-v2 loader manifest fixes the producer workflow, publisher
-workflow, package version, size limit, and asset name. Rust validates the source
-manifest against `Cargo.toml`, the producer run and attempt, the exact artifact
-and attestation, and the actual owner-dispatched publisher run. The release
-body records the source-manifest digest, source revision, producer and publisher
-run identities, tag, and exact asset name, size, and digest. The publisher
-rechecks the protected destination branch before each write, uploads the single
-`securefix-linux-x86_64` asset to a draft, publishes it, then rereads the release
-and asset and requires immutable state and matching bytes and digests.
+source revision carries a strict schema-v2 build manifest at
+`.github/actions/load-package/source-package.json`; it fixes the producer
+workflow, publisher workflow, package version, size limit, and asset name. Rust
+validates that manifest against `Cargo.toml`, the producer run and attempt, the
+exact artifact and attestation, and the actual owner-dispatched publisher run.
+The release body records the source-manifest digest, source revision, producer
+and publisher run identities, tag, and exact asset name, size, and digest.
+
+The package loader Action has a separate strict schema-v3 `package.json` at its
+pinned Action revision. It maps that Action revision to the executable's source
+revision, the source-manifest path and digest, and the immutable release and
+asset record. Rust derives the local Action references from the authenticated
+Client producer workflow and rejects missing or mixed mappings; the Action
+revision may differ from the executable source revision. The caller passes only
+the token to the loader, which verifies the mapping before downloading the
+executable. The publisher rechecks the protected destination branch before each
+write, uploads the single `securefix-linux-x86_64` asset to a draft, publishes
+it, then rereads the release and asset and requires immutable state and matching
+bytes and digests.
 
 `stable` targets the Server repository and uses a canonical stable SemVer tag.
 `scratch` targets only the repository fixed in the protected publisher workflow

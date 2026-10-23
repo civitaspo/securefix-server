@@ -24,6 +24,10 @@ pub struct InstanceConfig {
     pub repositories: Vec<ConfiguredRepository>,
     #[serde(default)]
     pub scratch_request_callers: Vec<ScratchRequestCaller>,
+    /// Dedicated repository for explicitly enabled scratch Client package acceptance.
+    /// Omission disables that path; there is no deployment fallback.
+    #[serde(default)]
+    pub scratch_package_repository: Option<crate::config::Repository>,
     pub workflow_roles: BTreeMap<WorkflowRole, String>,
     pub acceptable_clients: AcceptableClients,
 }
@@ -218,6 +222,24 @@ impl InstanceConfig {
                 == Some(self.identities.repository_owner.login.as_str()),
             "instance repository owner differs from configured account"
         );
+        if let Some(repository) = &self.scratch_package_repository {
+            crate::policy::validate_repository(&repository.repository)?;
+            ensure!(
+                repository.id > 0,
+                "scratch package repository ID must be nonzero"
+            );
+            crate::config::validate_branch(&repository.default_branch)?;
+            ensure!(
+                repository.repository.split('/').next()
+                    == Some(self.identities.repository_owner.login.as_str()),
+                "scratch package repository must belong to the configured account"
+            );
+            ensure!(
+                repository.repository != self.instance.repository
+                    && repository.repository != self.acceptable_clients.repository,
+                "scratch package repository must differ from the Server and Client repositories"
+            );
+        }
         if let Some(bot) = &self.identities.renovate_merge_bot {
             validate_principal(bot)?;
             ensure!(
@@ -397,6 +419,7 @@ impl InstanceConfig {
             &self.repositories,
             &self.acceptable_clients,
             &self.scratch_request_callers,
+            self.scratch_package_repository.as_ref(),
         )?;
         Ok(())
     }
@@ -456,6 +479,7 @@ fn validate_repository_identity_consistency(
     repositories: &[ConfiguredRepository],
     acceptable_clients: &AcceptableClients,
     scratch_request_callers: &[ScratchRequestCaller],
+    scratch_package_repository: Option<&crate::config::Repository>,
 ) -> Result<()> {
     let mut ids_by_name = HashMap::new();
     let mut names_by_id = HashMap::new();
@@ -481,6 +505,9 @@ fn validate_repository_identity_consistency(
         add(&configured.repository, configured.id)?;
     }
     add(&acceptable_clients.repository, acceptable_clients.id)?;
+    if let Some(repository) = scratch_package_repository {
+        add(&repository.repository, repository.id)?;
+    }
     for caller in scratch_request_callers {
         add(&caller.repository, caller.id)?;
     }
@@ -719,6 +746,43 @@ mod tests {
                 event,
                 operation,
             ));
+        }
+    }
+
+    #[test]
+    fn scratch_package_repository_is_optional_and_strictly_validated() {
+        let without_destination = InstanceConfig::parse(FIXTURE).unwrap();
+        assert!(without_destination.scratch_package_repository.is_none());
+
+        let configured = format!(
+            "{}\n[scratch_package_repository]\nrepository = \"example-org/package-scratch\"\nid = 987655\ndefault_branch = \"main\"\n",
+            fixture_text()
+        );
+        let config = InstanceConfig::parse(configured.as_bytes()).unwrap();
+        let destination = config.scratch_package_repository.unwrap();
+        assert_eq!(destination.repository, "example-org/package-scratch");
+        assert_eq!(destination.id, 987655);
+        assert_eq!(destination.default_branch, "main");
+
+        let scratch_branch = "id = 987655\ndefault_branch = \"main\"";
+        let scratch_unknown = "id = 987655\ndefault_branch = \"main\"";
+        for invalid in [
+            configured.replace("id = 987655", "id = 0"),
+            configured.replace(
+                scratch_branch,
+                "id = 987655\ndefault_branch = \"bad..branch\"",
+            ),
+            configured.replace(
+                "repository = \"example-org/package-scratch\"",
+                "repository = \"other-org/package-scratch\"",
+            ),
+            configured.replace("id = 987655", "id = 987654"),
+            configured.replace(
+                scratch_unknown,
+                "id = 987655\ndefault_branch = \"main\"\nunlisted = true",
+            ),
+        ] {
+            assert!(InstanceConfig::parse(invalid.as_bytes()).is_err());
         }
     }
 

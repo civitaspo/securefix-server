@@ -7738,7 +7738,7 @@ fn workflow_uses_pins(bytes: &[u8]) -> Result<Vec<String>> {
     Ok(pins)
 }
 
-fn encode_path_segment(value: &str) -> String {
+pub(crate) fn encode_path_segment(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {

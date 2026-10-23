@@ -22,7 +22,8 @@ Only `schema_version = 1` is supported. The root contains the required
 `repositories` array, `[workflow_roles]`, and `[acceptable_clients]`. The
 repository array may be empty (`repositories = []`), which grants no repository
 capabilities. The `[branches]` table is optional when no repository grants the
-`release` capability.
+`release` capability. `[scratch_package_repository]` is optional; its absence
+disables scratch Client package acceptance.
 
 ## Fields
 
@@ -65,6 +66,10 @@ unlisted key is rejected.
 | `[[scratch_request_callers]].workflow_ref` | Required `refs/heads/<branch>` ref; the branch must pass the existing branch validator. |
 | `[[scratch_request_callers]].event` | Required closed enum: `pull_request_target`, `pull_request`, `issue_comment`, or `workflow_dispatch`. |
 | `[[scratch_request_callers]].operation` | Required closed enum: `policy_check`, `approval`, `merge`, or `securefix`. Runtime matching compares the full tuple: repository case-insensitively, then ID, workflow path, workflow ref, event, and operation exactly. |
+| `[scratch_package_repository]` | Optional `{ repository, id, default_branch }` table. Its absence disables scratch Client package acceptance; there is no fallback destination. When present, the repository must belong to the configured repository owner and differ from both the Server instance and acceptable Client repositories. Its name, ID, and branch are checked against the actual destination during package verification. |
+| `[scratch_package_repository].repository` | Required `owner/name` scratch package destination when the table is present. |
+| `[scratch_package_repository].id` | Required nonzero destination repository ID claim when the table is present. |
+| `[scratch_package_repository].default_branch` | Required configured destination branch; checked with the existing branch validator and against the remote repository during package verification. |
 | `[acceptable_clients].repository` | Required `owner/name` identifying the configured Client publisher claim. No same-owner constraint is applied. |
 | `[acceptable_clients].id` | Required nonzero publisher repository ID claim. |
 | `[acceptable_clients].producer_workflow` | Required canonical `.github/workflows/<name>.yml` path for the Client request-capture reusable workflow. Its literal full-SHA pin and attested signer identity must match at request verification. |
@@ -86,14 +91,15 @@ the exemption lists reject. App IDs in `[apps]` are a separate namespace and
 are not compared with principal IDs. Existing role-separation and exemption
 checks still apply.
 
-Repository identity claims across `[instance]`, `[[repositories]]`, and
-`[acceptable_clients]` are checked the same way: a case-insensitive `owner/name`
+Repository identity claims across `[instance]`, `[[repositories]]`,
+`[scratch_package_repository]`, `[acceptable_clients]`, and
+`[[scratch_request_callers]]` are checked the same way: a case-insensitive `owner/name`
 can map to only one ID, and an ID can map to only one case-insensitive
-`owner/name`. A repeated matching claim is allowed, including when a repository
-row or acceptable Client publisher names the instance repository with the same
-ID. Duplicate names or IDs within `[[repositories]]` are still rejected by the
-existing per-row checks. This verifies consistency only within the TOML; it does
-not authenticate repository names or IDs against GitHub.
+`owner/name`. Repeated matching claims are allowed, including when the scratch
+destination also appears as a repository target or scratch caller. Duplicate
+names or IDs within `[[repositories]]` are still rejected by the existing
+per-row checks. This verifies consistency only within the TOML; it does not
+authenticate repository names or IDs against GitHub.
 
 In particular, the owner, Client Bot, and Server Bot IDs must be pairwise
 distinct. Owner, repository-owner, and approval-reviewer roles may share a
@@ -112,8 +118,16 @@ YAML workflow/action pin remains the proposed implementation selector. The
 parser has no legacy `integration`, `control_repository`,
 `runtime_update_branch`, or `workflow_prefix` field. These and any other unknown
 keys reject. `release_request_label_prefix` only namespaces release-request
-labels; it does not select workflow paths. The parser does not invent a scratch
-repository, legacy branch, or control identity.
+labels; it does not select workflow paths. Scratch package acceptance requires
+the explicit optional `[scratch_package_repository]` declaration; it is never
+inferred from a Client request, publication record, or bundled deployment.
+For normal label events this explicit scratch setting requires the configured
+Client App sender, exact `scratch_request_callers` tuple, and owner identity for
+both the producer actor and PR author. The pinned Action manifest supplies the
+immutable prerelease publication tuple; callers do not supply another selector.
+Request attestation, expected head and current Server authority are still
+verified before writes. Owner-dispatched probes retain their separate event
+validation.
 
 `scratch_request_callers` declares caller identities separately from the
 acceptable Client package publisher. The optional field does not infer or grant

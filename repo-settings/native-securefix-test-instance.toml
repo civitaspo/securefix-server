@@ -62,6 +62,11 @@ id = 1410312556
 capabilities = ["approve", "merge", "securefix"]
 protect_tags = false
 
+[scratch_package_repository]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+default_branch = "main"
+
 [acceptable_clients]
 repository = "civitaspo/securefix-server"
 id = 1250079425
