@@ -452,16 +452,16 @@ test('bundled mapping matches the immutable pre97 package receipt', async () => 
   const mapping = parsed;
   assert.equal(mapping.schema_version, 3);
   assert.equal(mapping.channel, 'scratch');
-  assert.equal(mapping.source_sha, '820f1fd7ffbfaf5f3cab8b5cc7e2e0d15d43af16');
-  assert.equal(mapping.source_manifest_sha256, '418ef8f9e8852cdfb9e8ad6ce97256bcb810243a7dd18f6044f05ab5d7054eaf');
-  assert.equal(mapping.tag, 'v0.2.45-pre.97');
-  assert.equal(mapping.release_id, 422134399);
-  assert.equal(mapping.asset_id, 669883509);
-  assert.equal(mapping.asset_size, 12642952);
-  assert.equal(mapping.asset_sha256, '8a091cbf35e4a7cc075b3744dbeca81f00cf549290798727ba0ef4aeeb421b07');
-  assert.equal(mapping.producer_run_id, 39995755317);
-  assert.equal(mapping.publisher_run_id, 39996342078);
-  assert.equal(mapping.publisher_sha, '08636568b7a230de5c0650e42412dd903d210ace');
+  assert.equal(mapping.source_sha, '07d6adfbfb037c83fdbe95e19a1b564d6275c483');
+  assert.equal(mapping.source_manifest_sha256, 'a7161ae6ec0660c42f43bcc1e6256f4ac056d14badc57d59f46b8febc45bbf39');
+  assert.equal(mapping.tag, 'v0.2.45-pre.102');
+  assert.equal(mapping.release_id, 422163866);
+  assert.equal(mapping.asset_id, 669965445);
+  assert.equal(mapping.asset_size, 12688520);
+  assert.equal(mapping.asset_sha256, 'e7845a801d25d608f9f5aa4a867083e6546b9e196fc28a8da23a91ed56690841');
+  assert.equal(mapping.producer_run_id, 40000279212);
+  assert.equal(mapping.publisher_run_id, 40000944395);
+  assert.equal(mapping.publisher_sha, 'ec45fed0b5b6a9c940c28f3eb2d6569c4abdf655');
 });
 
 test('composite metadata exposes only token and invokes the tested Node 24 entry module', async () => {
