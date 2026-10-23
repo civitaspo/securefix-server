@@ -1210,7 +1210,11 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     );
                 }
                 assert!(
-                    !uses.contains("github-script")
+                    (!uses.contains("github-script")
+                        || (path == ".github/workflows/ci.yml"
+                            && step["name"] == "Check and test the package loader on Node.js 24"
+                            && uses
+                                == "actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"))
                         && !uses.contains("approve-pr-action")
                         && !uses.contains("csm-actions/securefix-action"),
                     "business logic must be in Rust"
@@ -1445,7 +1449,7 @@ fn native_policy_check_authority_validates_before_its_checks_only_writer() {
         .iter()
         .find(|step| {
             step["uses"]
-                == "civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a"
+                == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
         })
         .unwrap();
     let inputs = &wrapper["on"]["workflow_dispatch"]["inputs"];
@@ -1482,65 +1486,15 @@ fn native_policy_check_authority_validates_before_its_checks_only_writer() {
             .iter()
             .find(|step| {
                 step["uses"]
-                    == "civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a"
+                    == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
             })
             .unwrap();
         assert_eq!(
-            package_loader["with"]["action-sha"],
-            "6be9fb42e14770a9162301787e158f7db3ab918a"
+            package_loader["with"],
+            serde_json::json!({"token":"${{ github.token }}"})
         );
-        assert_eq!(
-            package_loader["with"]["source-repository"],
-            "civitaspo/securefix-server"
-        );
-        assert_eq!(package_loader["with"]["source-repository-id"], "1250079425");
-        assert_eq!(
-            package_loader["with"]["destination-repository-id"],
-            "1410312556"
-        );
-        assert_eq!(package_loader["with"]["source-default-branch"], "main");
-        assert_eq!(package_loader["with"]["owner-id"], "4525500");
-        assert_eq!(package_loader["with"]["channel"], "scratch");
-        assert_eq!(
-            package_loader["with"]["manifest-source-sha"],
-            approval_loader["with"]["manifest-source-sha"]
-        );
-        assert_eq!(
-            package_loader["with"]["publication-source-sha"],
-            approval_loader["with"]["publication-source-sha"]
-        );
-        assert_eq!(
-            package_loader["with"]["manifest-source-sha"],
-            "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
-        );
-        assert_eq!(
-            package_loader["with"]["publication-producer-run-id"],
-            "39783133806"
-        );
-        assert_eq!(
-            package_loader["with"]["publication-source-branch"],
-            "integration/native-package-pre23"
-        );
-        assert_eq!(package_loader["with"]["publication-tag"], "v0.2.45-pre.23");
-        assert_eq!(
-            package_loader["with"]["publication-release-id"],
-            "420735040"
-        );
-        assert_eq!(package_loader["with"]["publication-asset-id"], "665912019");
-        assert_eq!(
-            package_loader["with"]["publication-asset-sha256"],
-            "fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936"
-        );
-        assert_eq!(package_loader["with"]["publication-asset-size"], "11767224");
-        assert_eq!(
-            package_loader["with"]["publication-producer-run-attempt"],
-            "1"
-        );
-        assert_eq!(package_loader["with"]["token"], "${{ github.token }}");
-        assert_eq!(
-            package_loader["with"]["destination-repository"],
-            "civitaspo/testing-securefix-server"
-        );
+        assert_eq!(package_loader["with"], approval_loader["with"]);
+
         if name == "validate-request" {
             assert!(steps.iter().any(|step| {
                 step["run"] == "securefix new-server instance-policy-check-run --help"
@@ -1708,41 +1662,15 @@ fn native_approval_uses_the_fixed_package_and_keeps_the_user_token_in_one_protec
             .iter()
             .find(|step| {
                 step["uses"]
-                    == "civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a"
+                    == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
             })
             .unwrap();
         assert_eq!(package["name"], "Load the fixed immutable scratch package");
         assert_eq!(
-            package["with"]["action-sha"],
-            "6be9fb42e14770a9162301787e158f7db3ab918a"
+            package["with"],
+            serde_json::json!({"token":"${{ github.token }}"})
         );
-        assert_eq!(package["with"]["channel"], "scratch");
-        assert_eq!(
-            package["with"]["publication-source-sha"],
-            "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
-        );
-        assert_eq!(
-            package["with"]["manifest-source-sha"],
-            "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
-        );
-        assert_eq!(
-            package["with"]["publication-source-branch"],
-            "integration/native-package-pre23"
-        );
-        assert_eq!(package["with"]["publication-tag"], "v0.2.45-pre.23");
-        assert_eq!(package["with"]["publication-release-id"], "420735040");
-        assert_eq!(package["with"]["publication-asset-id"], "665912019");
-        assert_eq!(
-            package["with"]["publication-asset-sha256"],
-            "fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936"
-        );
-        assert_eq!(package["with"]["publication-asset-size"], "11767224");
-        assert_eq!(
-            package["with"]["publication-producer-run-id"],
-            "39783133806"
-        );
-        assert_eq!(package["with"]["publication-producer-run-attempt"], "1");
-        assert_eq!(package["with"]["token"], "${{ github.token }}");
+
         assert!(!steps.iter().any(|step| {
             step["uses"]
                 .as_str()
@@ -2419,7 +2347,7 @@ fn verified_runtime_loading_and_publishing_keep_credentials_separate() {
     let ci_build = &ci["jobs"]["workflows"];
     assert_eq!(
         ci_build["permissions"],
-        serde_json::json!({"contents":"read"})
+        serde_json::json!({"actions":"read","attestations":"read","contents":"read"})
     );
     assert!(
         !serde_json::to_string(ci_build)
@@ -3396,13 +3324,17 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     let verify = &publish["jobs"]["verify"];
     assert_eq!(
         verify["permissions"],
-        serde_json::json!({"contents":"read"})
+        serde_json::json!({"actions":"read","attestations":"read","contents":"read"})
     );
     let verify_steps = verify["steps"].as_array().unwrap();
-    assert!(verify_steps.iter().all(|step| {
-        step["uses"] != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-            || step["with"]["path"] != "candidate-source"
-    }));
+    let package_loader = verify_steps
+        .iter()
+        .find(|step| step["uses"] == "$/.github/actions/load-package")
+        .unwrap();
+    assert_eq!(
+        package_loader["with"],
+        serde_json::json!({"token":"${{ github.token }}"})
+    );
     let execute = verify_steps
         .iter()
         .find(|step| step["name"] == "Execute the verified package without credentials")
@@ -3410,101 +3342,44 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(execute["run"], "securefix --version");
     assert_eq!(execute["env"]["GH_TOKEN"], "");
     assert_eq!(execute["env"]["GITHUB_TOKEN"], "");
-    let package_loader = verify_steps
-        .iter()
-        .find(|step| step["uses"] == "$/.github/actions/load-package")
-        .unwrap();
-    assert_eq!(
-        package_loader["with"]["action-sha"],
-        "${{ github.workflow_sha }}"
-    );
-    assert_eq!(
-        package_loader["with"]["manifest-source-sha"],
-        "${{ needs.publish.outputs.source-sha }}"
-    );
-    assert_eq!(package_loader["with"]["channel"], "scratch");
-    for (input, output) in [
-        ("publication-source-sha", "source-sha"),
-        ("publication-source-branch", "source-branch"),
-        ("publication-tag", "tag"),
-        ("publication-release-id", "release-id"),
-        ("publication-asset-id", "asset-id"),
-        ("publication-asset-sha256", "asset-sha256"),
-        ("publication-asset-size", "asset-size"),
-        ("publication-producer-run-id", "producer-run-id"),
-        ("publication-producer-run-attempt", "producer-run-attempt"),
-    ] {
-        assert_eq!(
-            writer["outputs"][output],
-            format!("${{{{ steps.publish.outputs.{output} }}}}")
-        );
-        assert_eq!(
-            package_loader["with"][input],
-            format!("${{{{ needs.publish.outputs.{output} }}}}")
-        );
-    }
 
-    let package_action: Value = serde_yaml::from_str(
+    let action: Value = serde_yaml::from_str(
         &fs::read_to_string(".github/actions/load-package/action.yml").unwrap(),
     )
     .unwrap();
-    let load_script = fs::read_to_string(".github/actions/load-package/load.sh").unwrap();
-    let action_step = &package_action["runs"]["steps"][0];
-    assert!(
-        load_script.contains(
-            "contents/.github/actions/load-package/package.json?ref=$MANIFEST_SOURCE_SHA"
-        )
+    assert_eq!(
+        action["inputs"],
+        serde_json::json!({"token":{"description":"Read-only token for the package source and destination repositories","required":true}})
     );
-    assert!(load_script.contains("\"$PUBLICATION_SOURCE_SHA\" == \"$MANIFEST_SOURCE_SHA\""));
-    assert!(load_script.contains("\"$manifest_source_sha\" == \"$MANIFEST_SOURCE_SHA\""));
-    assert!(load_script.contains("stable package loads cannot override the fixed manifest source"));
-    assert!(load_script.contains("source differs from the fixed loader mapping"));
-    for input in [
-        "manifest-source-sha",
-        "publication-source-sha",
-        "publication-source-branch",
-        "publication-tag",
-        "publication-release-id",
-        "publication-asset-id",
-        "publication-asset-sha256",
-        "publication-asset-size",
-        "publication-producer-run-id",
-        "publication-producer-run-attempt",
-    ] {
-        let env_name = input.replace('-', "_").to_ascii_uppercase();
-        assert_eq!(
-            action_step["env"][&env_name],
-            format!("${{{{ inputs.{input} }}}}")
-        );
-    }
-    for (output, emitted) in [
-        ("binary", "binary=$install_dir/securefix"),
-        ("version", "version=$version"),
-        ("asset-id", "asset-id=$asset_id"),
-        ("release-id", "release-id=$release_id"),
-        ("source-sha", "source-sha=$source_sha"),
-        ("source-branch", "source-branch=$source_branch"),
-        ("producer-run-id", "producer-run-id=$run_id"),
-        ("producer-run-attempt", "producer-run-attempt=$attempt"),
-    ] {
-        assert_eq!(
-            package_action["outputs"][output]["value"],
-            format!("${{{{ steps.load.outputs.{output} }}}}")
-        );
-        assert!(
-            load_script.contains(&format!("echo \"{emitted}\"")),
-            "loader script does not emit {output}"
-        );
-    }
-
-    let manifest: Value =
+    let mapping: Value =
         serde_json::from_slice(&fs::read(".github/actions/load-package/package.json").unwrap())
             .unwrap();
+    assert_eq!(mapping["schema_version"], 3);
+    assert_eq!(mapping["channel"], "scratch");
     assert_eq!(
-        manifest["producer_workflow"],
-        ".github/workflows/testing-native-package-build.yml"
+        mapping["source_sha"],
+        "d84c178ac49ffb21bdc49e816a1285ff873fe259"
     );
-    assert_eq!(manifest["assets"]["linux-x86_64"], "securefix-linux-x86_64");
+    assert_eq!(
+        mapping["source_manifest_sha256"],
+        "204152c788f6d6e922b26649cb2bff7133df99c71b647f25518a3dddfca2d98e"
+    );
+    assert_eq!(mapping["version"], "0.2.45-pre.42");
+    assert_eq!(mapping["tag"], "v0.2.45-pre.42");
+    assert_eq!(mapping["release_id"], 421458267);
+    assert_eq!(mapping["asset_id"], 667986180);
+    assert_eq!(
+        mapping["asset_sha256"],
+        "a9b90725a751b8a18f67af39fe6e5831c610f5ea56ae1acdbf4f4c2f4990cada"
+    );
+    assert_eq!(
+        mapping["producer_run_id"],
+        serde_json::json!(39901232125_u64)
+    );
+    assert_eq!(
+        mapping["publisher_run_id"],
+        serde_json::json!(39901637756_u64)
+    );
 }
 
 #[test]
@@ -3996,10 +3871,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             {
                 assert!(steps.iter().any(|step| {
                     step["uses"]
-                        == "civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a"
-                        && step["with"]["channel"] == "scratch"
-                        && step["with"]["manifest-source-sha"]
-                            == "3b88bcd0e228791e355aec238d5c7e95027b3f6f"
+                        == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
+                        && step["with"] == serde_json::json!({"token":"${{ github.token }}"})
                 }));
                 assert!(steps.iter().any(|step| {
                     step["run"].as_str().is_some_and(|run| {
@@ -4323,7 +4196,8 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                             && run == "securefix --version"
                             && steps.iter().any(|candidate| {
                                 candidate["uses"] == "$/.github/actions/load-package"
-                                    && candidate["with"]["channel"] == "scratch"
+                                    && candidate["with"]
+                                        == serde_json::json!({"token":"${{ github.token }}"})
                             });
                         assert!(
                             job["env"]["SECUREFIX_SOURCE_SHA"].is_string()

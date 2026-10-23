@@ -653,12 +653,12 @@ pub fn publish_scratch_prerelease(
     );
     let tag = format!("v{version}");
     let source_package_manifest: Value = source_api.get(&format!(
-        "/repos/{}/contents/.github/actions/load-package/package.json?ref={source_sha}",
+        "/repos/{}/contents/.github/actions/load-package/source-package.json?ref={source_sha}",
         source.repository
     ))?;
     let manifest_bytes = source_file_bytes(
         &source_package_manifest,
-        ".github/actions/load-package/package.json",
+        ".github/actions/load-package/source-package.json",
     )?;
     let package_manifest: SourcePackageManifest = serde_json::from_slice(&manifest_bytes)
         .context("source package manifest is invalid JSON")?;

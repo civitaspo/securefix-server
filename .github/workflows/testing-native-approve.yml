@@ -29,6 +29,7 @@ jobs:
     environment: main
     permissions:
       actions: read
+      attestations: read
       contents: read
     timeout-minutes: 15
     steps:
@@ -36,11 +37,6 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Read the configured package repository identities
-        id: package-config
-        run: |
-          set -euo pipefail
-          jq -r '"source-repository=" + .deployment.server.repository, "source-repository-id=" + (.deployment.server.id|tostring), "source-default-branch=" + .deployment.server.default_branch, "destination-repository=" + .deployment.integration.repository, "destination-repository-id=" + (.deployment.integration.id|tostring), "owner-id=" + (.owner_id|tostring)' .github/testing-policy.json >> "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: scratch-reader
         with:
@@ -52,26 +48,8 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
-          action-sha: 6be9fb42e14770a9162301787e158f7db3ab918a
-          source-repository: ${{ steps.package-config.outputs.source-repository }}
-          source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
-          destination-repository: ${{ steps.package-config.outputs.destination-repository }}
-          destination-repository-id: ${{ steps.package-config.outputs.destination-repository-id }}
-          source-default-branch: ${{ steps.package-config.outputs.source-default-branch }}
-          owner-id: ${{ steps.package-config.outputs.owner-id }}
-          channel: scratch
-          manifest-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
-          publication-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
-          publication-source-branch: integration/native-package-pre23
-          publication-tag: v0.2.45-pre.23
-          publication-release-id: '420735040'
-          publication-asset-id: '665912019'
-          publication-asset-sha256: fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936
-          publication-asset-size: '11767224'
-          publication-producer-run-id: '39783133806'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Validate the owner-selected request without approval credentials
         env:
@@ -100,6 +78,7 @@ jobs:
     environment: main
     permissions:
       actions: read
+      attestations: read
       contents: read
     timeout-minutes: 15
     outputs:
@@ -109,11 +88,6 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Read the configured package repository identities
-        id: package-config
-        run: |
-          set -euo pipefail
-          jq -r '"source-repository=" + .deployment.server.repository, "source-repository-id=" + (.deployment.server.id|tostring), "source-default-branch=" + .deployment.server.default_branch, "destination-repository=" + .deployment.integration.repository, "destination-repository-id=" + (.deployment.integration.id|tostring), "owner-id=" + (.owner_id|tostring)' .github/testing-policy.json >> "$GITHUB_OUTPUT"
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: scratch-reader
         with:
@@ -125,26 +99,8 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: civitaspo/securefix-server/.github/actions/load-package@6be9fb42e14770a9162301787e158f7db3ab918a # v0.2.45-pre.12
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
-          action-sha: 6be9fb42e14770a9162301787e158f7db3ab918a
-          source-repository: ${{ steps.package-config.outputs.source-repository }}
-          source-repository-id: ${{ steps.package-config.outputs.source-repository-id }}
-          destination-repository: ${{ steps.package-config.outputs.destination-repository }}
-          destination-repository-id: ${{ steps.package-config.outputs.destination-repository-id }}
-          source-default-branch: ${{ steps.package-config.outputs.source-default-branch }}
-          owner-id: ${{ steps.package-config.outputs.owner-id }}
-          channel: scratch
-          manifest-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
-          publication-source-sha: 3b88bcd0e228791e355aec238d5c7e95027b3f6f
-          publication-source-branch: integration/native-package-pre23
-          publication-tag: v0.2.45-pre.23
-          publication-release-id: '420735040'
-          publication-asset-id: '665912019'
-          publication-asset-sha256: fd72ab4c2f767aaaf46f8d67537187f0496e4312922e33ef6a8348ec2dac1936
-          publication-asset-size: '11767224'
-          publication-producer-run-id: '39783133806'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Apply the current-head approval with the trusted Bot credential
         id: approve

@@ -26,6 +26,8 @@ jobs:
     name: GitHub Actions
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
+      attestations: read
       contents: read
     timeout-minutes: 10
 
@@ -42,6 +44,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh-actions-lock --verify
+
+      - name: Check and test the package loader on Node.js 24
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const { join } = await import('node:path');
+            const tests = join(process.env.GITHUB_WORKSPACE, '.github/actions/load-package/tests');
+            await exec.exec('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: tests });
+            await exec.exec(process.execPath, [join(tests, 'node_modules/typescript/bin/tsc'), '--project', join(tests, 'tsconfig.json')]);
+            await exec.exec(process.execPath, ['--test', join(tests, 'load.test.mts')]);
+
+      - name: Load the bundled package through the composite Action
+        id: loader-smoke
+        uses: $/.github/actions/load-package
+        with:
+          token: ${{ github.token }}
+
+      - name: Verify the installed package command and outputs
+        env:
+          CLI_BINARY: ${{ steps.loader-smoke.outputs.binary }}
+          CLI_VERSION: ${{ steps.loader-smoke.outputs.version }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          test "$(command -v securefix)" = "$CLI_BINARY"
+          test "$("$CLI_BINARY" --version)" = "securefix $CLI_VERSION"
 
       - name: Install Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt
