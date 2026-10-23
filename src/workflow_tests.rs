@@ -1149,10 +1149,15 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                 {
                     let config_path = "repo-settings/native-role-events-test-instance.toml";
                     assert_eq!(job_id, "handler");
+                    let revision = if role == "merge" {
+                        "5c52c7b6f61d58d3d0cafc35456777bc1b1e1ce3"
+                    } else {
+                        "2719567ddd2cb9e13294e12cb9537780c6643263"
+                    };
                     assert_eq!(
                         uses,
                         format!(
-                            "civitaspo/securefix-server/.github/workflows/reusable-server-{role}.yml@2719567ddd2cb9e13294e12cb9537780c6643263"
+                            "civitaspo/securefix-server/.github/workflows/reusable-server-{role}.yml@{revision}"
                         )
                     );
                     assert_eq!(job["with"]["config_path"], config_path);
