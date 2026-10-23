@@ -94,7 +94,7 @@ request admission, policy, credential isolation, signatures, expected-head and
 stale authority checks. Download permission does not authorize a mutation.
 
 The current development mapping explicitly selects the verified scratch
-prerelease `v0.2.45-pre.114` in `civitaspo/testing-securefix-server`. It does not
+prerelease `v0.2.45-pre.119` in `civitaspo/testing-securefix-server`. It does not
 change the production `load-cli` or `load-runtime` path or activate a runtime.
 
 Scratch package admission accepts only configured owner or Server Bot PR authors. Producers must be the owner, except that the configured Server Bot may produce policy checks. This does not authorize approval or merge commands; those still require the exact-head, current-authority owner command and review. All identities are checked by both ID and login against the protected instance configuration.
