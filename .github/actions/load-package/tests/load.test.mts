@@ -228,7 +228,7 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
       if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}') {
         return { data: parameters.run_id === MAPPING.producer_run_id
           ? { ...SOURCE_RUN, ...options.producerOverrides }
-          : { ...PUBLISHER_RUN, ...options.publisherOverrides } }; 
+          : { ...PUBLISHER_RUN, ...options.publisherOverrides } };
       }
       if (route === 'GET /repos/{owner}/{repo}/attestations/{subject_digest}') {
         return { data: { attestations: [{ repository_id: MAPPING.source_repository_id, bundle: { fixture: true } }] } };
@@ -445,23 +445,23 @@ test('attestation command failure never publishes the package', async () => {
   }
 });
 
-test('bundled mapping matches the immutable pre42 package receipt', async () => {
+test('bundled mapping matches the immutable pre97 package receipt', async () => {
   const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
   const parsed: unknown = JSON.parse(await readFile(join(originalDirectory, 'package.json'), 'utf8'));
   assert.ok(isRecord(parsed));
   const mapping = parsed;
   assert.equal(mapping.schema_version, 3);
   assert.equal(mapping.channel, 'scratch');
-  assert.equal(mapping.source_sha, 'd84c178ac49ffb21bdc49e816a1285ff873fe259');
-  assert.equal(mapping.source_manifest_sha256, '204152c788f6d6e922b26649cb2bff7133df99c71b647f25518a3dddfca2d98e');
-  assert.equal(mapping.tag, 'v0.2.45-pre.42');
-  assert.equal(mapping.release_id, 421458267);
-  assert.equal(mapping.asset_id, 667986180);
-  assert.equal(mapping.asset_size, 12227416);
-  assert.equal(mapping.asset_sha256, 'a9b90725a751b8a18f67af39fe6e5831c610f5ea56ae1acdbf4f4c2f4990cada');
-  assert.equal(mapping.producer_run_id, 39901232125);
-  assert.equal(mapping.publisher_run_id, 39901637756);
-  assert.equal(mapping.publisher_sha, '439d8b12784aef749e539158ac308f50a448fa3a');
+  assert.equal(mapping.source_sha, '07d6adfbfb037c83fdbe95e19a1b564d6275c483');
+  assert.equal(mapping.source_manifest_sha256, 'a7161ae6ec0660c42f43bcc1e6256f4ac056d14badc57d59f46b8febc45bbf39');
+  assert.equal(mapping.tag, 'v0.2.45-pre.102');
+  assert.equal(mapping.release_id, 422163866);
+  assert.equal(mapping.asset_id, 669965445);
+  assert.equal(mapping.asset_size, 12688520);
+  assert.equal(mapping.asset_sha256, 'e7845a801d25d608f9f5aa4a867083e6546b9e196fc28a8da23a91ed56690841');
+  assert.equal(mapping.producer_run_id, 40000279212);
+  assert.equal(mapping.publisher_run_id, 40000944395);
+  assert.equal(mapping.publisher_sha, 'ec45fed0b5b6a9c940c28f3eb2d6569c4abdf655');
 });
 
 test('composite metadata exposes only token and invokes the tested Node 24 entry module', async () => {

@@ -1,0 +1,28 @@
+name: Securefix server Securefix
+
+on:
+  label:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  handler:
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    if: startsWith(github.event.label.name, 'securefix-native-securefix-')
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-server-securefix.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
+    with:
+      config_path: securefix-server.toml
+    secrets:
+      SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}

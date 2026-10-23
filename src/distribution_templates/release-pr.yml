@@ -23,10 +23,13 @@ jobs:
     permissions:
       actions: read
       contents: read
-      attestations: read
+      attestations: write
+      id-token: write
       pull-requests: read
     uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
     with:
-      version: ${{ inputs.version }}
+      version: ${{ inputs.version || '' }}
+      server_repository: @SERVER_REPOSITORY@
+      instance_config_path: securefix-server.toml
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

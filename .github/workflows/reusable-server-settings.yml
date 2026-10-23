@@ -1,0 +1,69 @@
+name: Reusable managed workflow reconciliation
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
+      manifest_path:
+        description: Root-relative protected repo-settings managed file manifest
+        required: true
+        type: string
+    secrets:
+      SERVER_PRIVATE_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  managed-files:
+    runs-on: ubuntu-24.04
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@5c4effcaefca77e8c3750bc82ff82156f60cd74b # v0.2.45-pre.103
+        with:
+          token: ${{ github.token }}
+      - name: Resolve protected managed-file destination
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CONFIG_PATH: ${{ inputs.config_path }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" settings managed-prepare --config-path "$CONFIG_PATH" --manifest-path "$MANIFEST_PATH"
+      - name: Mint a single-repository workflow PR token
+        id: writer
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ steps.prepare.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ steps.prepare.outputs.repo_owner }}
+          repositories: ${{ steps.prepare.outputs.repo_name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Propose protected managed-file changes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SERVER_APP_TOKEN: ${{ steps.writer.outputs.token }}
+          CONFIG_PATH: ${{ inputs.config_path }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" settings managed-reconcile --config-path "$CONFIG_PATH" --manifest-path "$MANIFEST_PATH"

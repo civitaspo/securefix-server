@@ -410,7 +410,7 @@ fn testing_deployment_canonical_callers_round_trip() {
             .unwrap(),
         caller::rendered_push_fixture("main").unwrap(),
     );
-    validate_previous_generation(&files, true).unwrap();
+    validate_previous_generation(&files, "main", true).unwrap();
     for (path, bytes) in &files {
         validate_existing(path, bytes, "main").unwrap();
         let unprefixed = path.replace("/testing-", "/");
@@ -1498,7 +1498,7 @@ fn runtime_renderer_accepts_only_source_bound_canonical_or_legacy_annotations() 
 fn prior_generation_ignores_only_runtime_comment_changes() {
     let sha = "a".repeat(40);
     let mut files = caller::rendered_files(&sha, "v0.2.0-pre.1", "main", false).unwrap();
-    assert!(validate_previous_generation(&files, false).is_ok());
+    assert!(validate_previous_generation(&files, "main", false).is_ok());
 
     let approve_path = ".github/workflows/approve-request.yml";
     let approve = String::from_utf8(files[approve_path].clone()).unwrap();
@@ -1507,7 +1507,7 @@ fn prior_generation_ignores_only_runtime_comment_changes() {
         approve_path.to_owned(),
         approve.replace("# v0.2.0-pre.1", "# v9.8.7").into_bytes(),
     );
-    assert!(validate_previous_generation(&files, false).is_ok());
+    assert!(validate_previous_generation(&files, "main", false).is_ok());
 
     let approve: serde_yaml::Value = serde_yaml::from_slice(&files[approve_path]).unwrap();
     let mut changed = approve;
@@ -1517,7 +1517,7 @@ fn prior_generation_ignores_only_runtime_comment_changes() {
         approve_path.to_owned(),
         serde_yaml::to_string(&changed).unwrap().into_bytes(),
     );
-    assert!(validate_previous_generation(&files, false).is_err());
+    assert!(validate_previous_generation(&files, "main", false).is_err());
 }
 
 #[test]
@@ -1543,10 +1543,10 @@ fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows
                 path.to_owned(),
                 serde_yaml::to_string(&workflow).unwrap().into_bytes(),
             );
-            assert!(validate_previous_generation(&files, false).is_ok());
+            assert!(validate_previous_generation(&files, "main", false).is_ok());
         }
     }
-    assert!(validate_previous_generation(&files, false).is_ok());
+    assert!(validate_previous_generation(&files, "main", false).is_ok());
 
     let path = ".github/workflows/approve-request.yml";
     let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
@@ -1556,7 +1556,7 @@ fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows
         path.to_owned(),
         serde_yaml::to_string(&workflow).unwrap().into_bytes(),
     );
-    assert!(validate_previous_generation(&files, false).is_err());
+    assert!(validate_previous_generation(&files, "main", false).is_err());
 
     let path = ".github/workflows/policy-check.yml";
     let mut workflow: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
@@ -1566,7 +1566,7 @@ fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows
         path.to_owned(),
         serde_yaml::to_string(&workflow).unwrap().into_bytes(),
     );
-    assert!(validate_previous_generation(&files, false).is_err());
+    assert!(validate_previous_generation(&files, "main", false).is_err());
 
     // Reset to the exact legacy generation before checking an unrelated broadening
     // on the request workflow itself.
@@ -1581,7 +1581,7 @@ fn prior_generation_accepts_only_the_legacy_read_permission_on_request_workflows
         path.to_owned(),
         serde_yaml::to_string(&workflow).unwrap().into_bytes(),
     );
-    assert!(validate_previous_generation(&files, false).is_err());
+    assert!(validate_previous_generation(&files, "main", false).is_err());
 }
 
 #[test]
@@ -1610,14 +1610,14 @@ fn approval_caller_migration_accepts_only_known_unguarded_generations() {
         let bytes = serde_yaml::to_string(&workflow).unwrap().into_bytes();
         files.insert(path.into(), bytes.clone());
         assert!(caller::validate_existing(path, &bytes, "main").is_ok());
-        assert!(validate_previous_generation(&files, false).is_ok());
+        assert!(validate_previous_generation(&files, "main", false).is_ok());
 
         for condition in ["true", "false", ""] {
             workflow["jobs"]["approve"]["if"] = serde_yaml::Value::String(condition.into());
             let bytes = serde_yaml::to_string(&workflow).unwrap().into_bytes();
             files.insert(path.into(), bytes.clone());
             assert!(caller::validate_existing(path, &bytes, "main").is_err());
-            assert!(validate_previous_generation(&files, false).is_err());
+            assert!(validate_previous_generation(&files, "main", false).is_err());
         }
     }
 }
@@ -1651,7 +1651,7 @@ fn release_tag_validator_accepts_exact_previous_empty_event_input_fallback() {
     let previous = canonical.replace(new_value, "${{ inputs.release_pr_number }}");
     files.insert(path.to_owned(), previous.as_bytes().to_vec());
 
-    assert!(validate_previous_generation(&files, true).is_ok());
+    assert!(validate_previous_generation(&files, "main", true).is_ok());
     assert!(caller::validate_existing(path, previous.as_bytes(), "main").is_ok());
 
     let unsupported = previous.replace(
@@ -1659,7 +1659,7 @@ fn release_tag_validator_accepts_exact_previous_empty_event_input_fallback() {
         "${{ inputs.release_pr_number || 0 }}",
     );
     files.insert(path.to_owned(), unsupported.as_bytes().to_vec());
-    assert!(validate_previous_generation(&files, true).is_err());
+    assert!(validate_previous_generation(&files, "main", true).is_err());
     assert!(caller::validate_existing(path, unsupported.as_bytes(), "main").is_err());
 }
 
@@ -1668,14 +1668,14 @@ fn release_sync_is_manual_only_and_accepts_the_exact_previous_push_trigger() {
     let mut files = caller::rendered_files(&"a".repeat(40), "v0.2.9", "main", true).unwrap();
     let path = ".github/workflows/release-pr-sync.yml";
     let canonical: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
-    assert!(canonical["on"].get("push").is_none());
-    assert!(canonical["on"].get("workflow_dispatch").is_some());
+    assert!(canonical["on"].get("push").is_some());
+    assert!(canonical["on"].get("workflow_dispatch").is_none());
     let previous = legacy_release_generation(path, canonical).unwrap();
     let contents = serde_yaml::to_string(&previous).unwrap();
     files.insert(path.to_owned(), contents.as_bytes().to_vec());
-    assert!(validate_previous_generation(&files, true).is_ok());
+    assert!(validate_previous_generation(&files, "main", true).is_ok());
     assert!(caller::validate_existing(path, contents.as_bytes(), "main").is_ok());
-    let unexpected = contents.replace("release/next", "untrusted");
+    let unexpected = contents.replace("reusable-release-pr-sync.yml", "untrusted.yml");
     assert!(caller::validate_existing(path, unexpected.as_bytes(), "main").is_err());
 }
 
@@ -2064,7 +2064,7 @@ fn isolated_distribution_includes_only_its_configured_control_repository() {
 }
 
 #[test]
-fn actual_eight_caller_inventory_contains_only_supported_managed_workflow_shapes() {
+fn actual_eight_caller_inventory_keeps_legacy_ops_and_rejects_stale_request_wrappers() {
     let callers: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/distribution-callers.json"
     ))
@@ -2083,12 +2083,34 @@ fn actual_eight_caller_inventory_contains_only_supported_managed_workflow_shapes
             "{repository}"
         );
         for (path, contents) in files {
-            validate_existing(
+            let actual: serde_yaml::Value =
+                serde_yaml::from_str(contents.as_str().unwrap()).unwrap();
+            let reusable_request = match path.as_str() {
+                ".github/workflows/approve-request.yml" => {
+                    actual["jobs"]["approve"]["uses"].is_string()
+                }
+                ".github/workflows/merge-request.yml" => {
+                    actual["jobs"]["request"]["uses"].is_string()
+                }
+                ".github/workflows/release-pr.yml" => actual["jobs"]["prepare"]["uses"].is_string(),
+                ".github/workflows/release-pr-sync.yml" => {
+                    actual["jobs"]["sync"]["uses"].is_string()
+                }
+                _ => false,
+            };
+            let validation = validate_existing(
                 path,
                 contents.as_str().unwrap().as_bytes(),
                 caller["default_branch"].as_str().unwrap(),
-            )
-            .unwrap_or_else(|e| panic!("{repository}/{path}: {e:#}"));
+            );
+            if reusable_request {
+                assert!(
+                    validation.is_err(),
+                    "{repository}/{path}: historical reusable caller must not satisfy the new required instance-input contract"
+                );
+            } else {
+                validation.unwrap_or_else(|e| panic!("{repository}/{path}: {e:#}"));
+            }
         }
     }
 }
@@ -2100,7 +2122,10 @@ fn templates_render_exact_sha_default_branch_and_capability_specific_files() {
     assert_eq!(files.len(), 3);
     let policy = String::from_utf8(files[".github/workflows/policy-check.yml"].clone()).unwrap();
     assert!(policy.contains(&format!("reusable-policy-check.yml@{sha}")));
-    assert!(policy.contains("branches:\n      - \"trunk\""));
+    assert!(policy.contains("pull_request_target:"));
+    assert!(!policy.contains("push:"));
+    assert!(policy.contains("server_repository: civitaspo/securefix-server"));
+    assert!(policy.contains("instance_config_path: securefix-server.toml"));
     assert!(!policy.contains("@SECUREFIX_RUNTIME_SHA@"));
     let releases = rendered_files(&sha, "v0.2.0-pre.1", "main", true).unwrap();
     assert_eq!(releases.len(), 6);

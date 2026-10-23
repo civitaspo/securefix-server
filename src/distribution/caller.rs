@@ -59,6 +59,111 @@ const POLICY_CHECK: &str = include_str!("../distribution_templates/policy-check.
 const RELEASE_SYNC: &str = include_str!("../distribution_templates/release-pr-sync.yml");
 const RELEASE_PR: &str = include_str!("../distribution_templates/release-pr.yml");
 const RELEASE_TAG: &str = include_str!("../distribution_templates/release-tag.yml");
+#[cfg(test)]
+const MANAGED_CLIENT_RELEASE_TAG: &str =
+    include_str!("../distribution_templates/managed-client-release-tag.yml");
+
+/// Explicit Client reusable implementation pin supplied at adoption time.
+/// Construction validates its repository, SHA, and version syntax only; the
+/// caller must obtain the tuple from the reviewed package/workflow handoff.
+/// This is distinct from the Server source/runtime SHA used by the legacy
+/// caller distributor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClientImplementationPin {
+    repository: String,
+    sha: String,
+    version: semver::Version,
+}
+
+impl ClientImplementationPin {
+    pub(crate) fn new(repository: &str, sha: &str, version: &str) -> Result<Self> {
+        crate::policy::validate_repository(repository)?;
+        validate_sha(sha)?;
+        let version = semver::Version::parse(version.trim_start_matches('v'))
+            .context("invalid Client implementation version")?;
+        ensure!(
+            version.build.is_empty(),
+            "Client version comment cannot contain build metadata"
+        );
+        Ok(Self {
+            repository: repository.to_owned(),
+            sha: sha.to_owned(),
+            version,
+        })
+    }
+}
+
+/// Render the separate managed Client release caller from the explicit
+/// adoption-time Client tuple. The tuple's repo and version are checked
+/// against the authenticated instance's accepted Client contract; no Server
+/// runtime SHA or live branch lookup is accepted here.
+#[cfg(test)]
+fn render_managed_client_release_tag(
+    accepted: &securefix::instance_config::AcceptableClients,
+    pin: &ClientImplementationPin,
+    server_repository: &str,
+    instance_config_path: &str,
+) -> Result<Vec<u8>> {
+    render_managed_client_release_tag_from_template(
+        accepted,
+        pin,
+        server_repository,
+        instance_config_path,
+        MANAGED_CLIENT_RELEASE_TAG.as_bytes(),
+    )
+}
+
+/// Render source-bound managed bytes supplied by the settings manifest. The
+/// caller must pass the exact template bytes it read from the selected source
+/// revision; this avoids silently substituting a separately embedded template.
+pub(crate) fn render_managed_client_release_tag_from_template(
+    accepted: &securefix::instance_config::AcceptableClients,
+    pin: &ClientImplementationPin,
+    server_repository: &str,
+    instance_config_path: &str,
+    template: &[u8],
+) -> Result<Vec<u8>> {
+    crate::policy::validate_repository(server_repository)?;
+    let path = Path::new(instance_config_path);
+    ensure!(
+        !path.is_absolute()
+            && path.extension().is_some_and(|ext| ext == "toml")
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "Server instance config path must be a root-relative TOML path"
+    );
+    ensure!(
+        pin.repository == accepted.repository,
+        "Client implementation repository differs from the accepted Client"
+    );
+    ensure!(
+        accepted.version.matches(&pin.version),
+        "Client implementation version is outside the accepted range"
+    );
+    let template = std::str::from_utf8(template).context("managed Client template is not UTF-8")?;
+    let rendered = template
+        .replace("@CLIENT_REPOSITORY@", &pin.repository)
+        .replace("@SERVER_REPOSITORY@", server_repository)
+        .replace("@INSTANCE_CONFIG_PATH@", instance_config_path)
+        .replace("@CLIENT_IMPLEMENTATION_SHA@", &pin.sha)
+        .replace(
+            "@CLIENT_IMPLEMENTATION_VERSION@",
+            &format!("v{}", pin.version),
+        );
+    ensure!(
+        !rendered.contains("@CLIENT_"),
+        "managed Client release caller has unresolved pin data"
+    );
+    ensure!(
+        !rendered.contains("@SERVER_") && !rendered.contains("@INSTANCE_"),
+        "managed Client release caller has unresolved instance data"
+    );
+    crate::policy::validate_repository(&pin.repository)?;
+    validate_sha(&pin.sha)?;
+    let _: serde_yaml::Value = serde_yaml::from_str(&rendered)?;
+    Ok(rendered.into_bytes())
+}
 
 pub(crate) struct InitialTestingCallers {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
@@ -742,20 +847,6 @@ fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut 
                 {
                     dispatch.insert(serde_yaml::Value::String("inputs".into()), inputs.clone());
                 }
-                let actual_job = actual
-                    .get("jobs")
-                    .and_then(serde_yaml::Value::as_mapping)
-                    .and_then(|jobs| jobs.values().next());
-                if actual_job.is_some_and(|job| job.get("with").is_none())
-                    && let Some(job) = expected
-                        .as_mapping_mut()
-                        .and_then(|m| m.get_mut("jobs"))
-                        .and_then(serde_yaml::Value::as_mapping_mut)
-                        .and_then(|jobs| jobs.values_mut().next())
-                        .and_then(serde_yaml::Value::as_mapping_mut)
-                {
-                    job.remove("with");
-                }
             } else {
                 if let Some(dispatch) = expected
                     .as_mapping_mut()
@@ -763,15 +854,6 @@ fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut 
                     .and_then(|on| on.get_mut("workflow_dispatch"))
                 {
                     *dispatch = serde_yaml::Value::Null;
-                }
-                if let Some(job) = expected
-                    .as_mapping_mut()
-                    .and_then(|m| m.get_mut("jobs"))
-                    .and_then(serde_yaml::Value::as_mapping_mut)
-                    .and_then(|jobs| jobs.values_mut().next())
-                    .and_then(serde_yaml::Value::as_mapping_mut)
-                {
-                    job.remove("with");
                 }
             }
         }
@@ -979,7 +1061,136 @@ fn optional_content(
 
 #[cfg(test)]
 mod tests {
-    use super::rendered_files;
+    use super::{
+        ClientImplementationPin, render_managed_client_release_tag,
+        render_managed_client_release_tag_from_template, rendered_files,
+    };
+
+    fn accepted_client() -> securefix::instance_config::AcceptableClients {
+        securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap()
+        .acceptable_clients
+    }
+
+    #[test]
+    fn managed_client_release_tag_uses_only_the_explicit_accepted_client_tuple() {
+        let accepted = accepted_client();
+        let pin =
+            ClientImplementationPin::new("example-org/securefix-client", &"a".repeat(40), "1.4.2")
+                .unwrap();
+        let rendered = String::from_utf8(
+            render_managed_client_release_tag(
+                &accepted,
+                &pin,
+                "example-org/securefix-server",
+                "securefix-server.toml",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(rendered.contains(
+            "uses: example-org/securefix-client/.github/workflows/reusable-release-tag.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v1.4.2"
+        ));
+        assert!(!rendered.contains("SECUREFIX_RUNTIME_SHA"));
+        assert!(!rendered.contains("@SERVER_REPOSITORY@"));
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(workflow["jobs"]["tag"]["permissions"]["id-token"], "write");
+        assert_eq!(
+            workflow["jobs"]["tag"]["permissions"]["attestations"],
+            "write"
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["with"]["server_repository"],
+            "example-org/securefix-server"
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["with"]["instance_config_path"],
+            "securefix-server.toml"
+        );
+    }
+
+    #[test]
+    fn managed_client_release_tag_rejects_unaccepted_repository_or_version() {
+        let accepted = accepted_client();
+        let sha = "b".repeat(40);
+        let wrong_repository =
+            ClientImplementationPin::new("example-org/other", &sha, "1.4.2").unwrap();
+        assert!(
+            render_managed_client_release_tag(
+                &accepted,
+                &wrong_repository,
+                "example-org/securefix-server",
+                "securefix-server.toml"
+            )
+            .is_err()
+        );
+        let wrong_version =
+            ClientImplementationPin::new("example-org/securefix-client", &sha, "1.3.9").unwrap();
+        assert!(
+            render_managed_client_release_tag(
+                &accepted,
+                &wrong_version,
+                "example-org/securefix-server",
+                "securefix-server.toml"
+            )
+            .is_err()
+        );
+        assert!(
+            ClientImplementationPin::new("example-org/securefix-client", &"A".repeat(40), "1.4.2")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_client_release_tag_renders_the_exact_supplied_template_bytes() {
+        let accepted = accepted_client();
+        let pin =
+            ClientImplementationPin::new("example-org/securefix-client", &"c".repeat(40), "1.4.2")
+                .unwrap();
+        let template = format!(
+            "{}\n# manifest-source-template\n",
+            super::MANAGED_CLIENT_RELEASE_TAG
+        );
+        let rendered = render_managed_client_release_tag_from_template(
+            &accepted,
+            &pin,
+            "example-org/securefix-server",
+            "securefix-server.toml",
+            template.as_bytes(),
+        )
+        .unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.ends_with("# manifest-source-template\n"));
+        assert!(rendered.contains(&format!("@{} # v1.4.2", "c".repeat(40))));
+    }
+
+    #[test]
+    fn managed_client_release_tag_rejects_invalid_instance_locator() {
+        let accepted = accepted_client();
+        let pin =
+            ClientImplementationPin::new("example-org/securefix-client", &"c".repeat(40), "1.4.2")
+                .unwrap();
+        assert!(
+            render_managed_client_release_tag(
+                &accepted,
+                &pin,
+                "example-org/securefix-server",
+                "../securefix-server.toml"
+            )
+            .is_err()
+        );
+        assert!(
+            render_managed_client_release_tag(
+                &accepted,
+                &pin,
+                "not/a/repository/path",
+                "securefix-server.toml"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn testing_callers_use_only_the_selected_repository_and_namespace() {

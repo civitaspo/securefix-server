@@ -2,16 +2,25 @@ use serde_json::{Value, json};
 use std::{fs, process::Command};
 
 fn client(workspace: &std::path::Path, files: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_securefix"))
+    // Run the package layout: executable only, with no adjacent deployment policy.
+    let binary = workspace.join("securefix");
+    if !binary.exists() {
+        fs::copy(env!("CARGO_BIN_EXE_securefix"), &binary).unwrap();
+    }
+    Command::new(binary)
         .current_dir(workspace)
         .args([
+            "new-client",
             "securefix",
-            "client-prepare",
+            "prepare",
             "--files",
             files,
             "--branch",
             "feature/fix",
         ])
+        .env_remove("SECUREFIX_POLICY_PATH")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_TOKEN")
         .env("GITHUB_WORKSPACE", workspace)
         .env("GITHUB_EVENT_PATH", workspace.join("event.json"))
         .env("GITHUB_REPOSITORY", "civitaspo/testing-securefix-server")

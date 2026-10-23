@@ -1,0 +1,24 @@
+name: Securefix server Release
+
+on:
+  label:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  handler:
+    if: startsWith(github.event.label.name, '@RELEASE_REQUEST_LABEL_PREFIX@securefix-native-release-') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: write
+      pull-requests: read
+      checks: read
+      statuses: read
+    uses: @SERVER_REPOSITORY@/.github/workflows/reusable-server-release.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
+    with:
+      config_path: securefix-server.toml
+    secrets:
+      SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}

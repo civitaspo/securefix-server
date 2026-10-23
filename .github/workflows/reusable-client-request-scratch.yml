@@ -1,0 +1,180 @@
+name: Reusable scratch Securefix Client request
+
+on:
+  workflow_call:
+    inputs:
+      server_repository:
+        description: Authenticated Server instance repository locator
+        required: true
+        type: string
+      instance_config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  prepare-source:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      artifact-name: ${{ steps.source.outputs.artifact_name }}
+    steps:
+      - name: Load the bundled Securefix Client package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        with:
+          token: ${{ github.token }}
+      - name: Prepare a fixed Securefix source artifact
+        id: source
+        env:
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'native producer proof fixture' > native-producer-proof.txt
+          "$CLI_BINARY" new-client securefix prepare \
+            --root-dir '' \
+            --files native-producer-proof.txt \
+            --repository "$GITHUB_REPOSITORY" \
+            --branch "$SOURCE_BRANCH" \
+            --commit-message 'test: exercise native Securefix request' \
+            --custom-json '{}' \
+            --output-dir .securefix-artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          path: ${{ steps.source.outputs.artifact_path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+  capture:
+    needs: prepare-source
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+      pull-requests: read
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.manifest.outputs.artifact-id }}
+      server-owner: ${{ steps.capture.outputs.server_owner }}
+      server-repository-name: ${{ steps.capture.outputs.server_repository_name }}
+      client-app-id: ${{ steps.capture.outputs.client_app_id }}
+    steps:
+      - name: Load the bundled Securefix Client package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        with:
+          token: ${{ github.token }}
+      - name: Capture the exact pull request Securefix request
+        id: capture
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_ARTIFACT_NAME: ${{ needs.prepare-source.outputs.artifact-name }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ -n "$SOURCE_ARTIFACT_NAME" ]]
+          "$CLI_BINARY" new-client securefix capture \
+            --pull-request-number "$PULL_REQUEST_NUMBER" \
+            --artifact-name "$SOURCE_ARTIFACT_NAME" \
+            --output native-request/manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: manifest
+        with:
+          name: native-request-manifest
+          path: native-request/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  attest:
+    needs: capture
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.capture.outputs.artifact-id }}
+          path: native-request
+          merge-multiple: true
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attestation
+        with:
+          subject-path: native-request/manifest.json
+          create-storage-record: false
+      - name: Place the attestation bundle beside the manifest
+        env:
+          BUNDLE_PATH: ${{ steps.attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE_PATH"
+          test -s "$BUNDLE_PATH"
+          cp -- "$BUNDLE_PATH" native-request/bundle.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-request-proof
+          path: |
+            native-request/manifest.json
+            native-request/bundle.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  dispatch:
+    needs: [capture, attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Load the bundled Securefix Client package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        with:
+          token: ${{ github.token }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.capture.outputs.artifact-id }}
+          path: native-request
+          merge-multiple: true
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-token
+        with:
+          app-id: ${{ needs.capture.outputs.client-app-id }}
+          private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
+          owner: ${{ needs.capture.outputs.server-owner }}
+          repositories: ${{ needs.capture.outputs.server-repository-name }}
+          permission-issues: write
+      - name: Dispatch the authenticated request with the Client App label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.client-token.outputs.token }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ needs.capture.outputs.server-owner }}/${{ needs.capture.outputs.server-repository-name }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" new-client dispatch --manifest native-request/manifest.json

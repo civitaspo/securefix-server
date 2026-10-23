@@ -243,7 +243,8 @@ same way. These scratch probes require only test-scoped installation tokens; ord
 
 The owner-dispatched `managed-files` phase is a separate reconciliation probe.
 It accepts an explicit candidate source and owner-selected Client repository,
-implementation SHA, and version label. The candidate CLI validates that tuple
+implementation SHA, and version label. Its fixed package Action supplies the
+verified controller independently of the desired-file source. The controller validates that tuple
 against the configured scratch instance and validates the exact managed-file
 manifest before the workflow mints a Server App token. The writer is limited to
 the `testing-securefix-server` repository and opens a reviewable PR for the
@@ -288,6 +289,42 @@ and attestation. This test creates no candidate Release.
 The prepare run uploads `fixtures/state.json` as `scratch-fixtures` and uploads
 `control-probe/control-verification.json` separately as `control-probe`. Download both
 artifacts from the completed prepare run:
+
+The separate `managed-files-probe` job in a `managed-files` run opens a reviewable
+managed-files PR from the exact candidate source. It validates the candidate and
+workflow revision before minting a repository-scoped Server App token with only
+`contents`, `workflows`, and `pull-requests` write permissions. Source reads use the
+job's read-only `GITHUB_TOKEN`. `repo-settings/managed-files.json` is constrained to
+the configured scratch repository and branch. Its exact desired targets are
+`securefix-server.toml`, every path in that instance's `workflow_roles`, and the
+capability-specific Client callers: `release-pr.yml`, `release-pr-sync.yml`, and `release-tag.yml` for a Release target and
+`policy-check.yml` for a Merge target. The policy-check caller is validated against
+`repo-settings/native-securefix-test-instance.toml` read from the same protected
+Server source revision; that Server instance config is not copied into the scratch
+repository. The optional `remove` list may name only distinct, direct `.yml` files in
+`.github/workflows/` that are not active managed targets. Reconciliation creates or
+updates only declared desired files and removes only those explicit paths, then
+checks that the PR's complete changed-file set matches that plan. This scratch-only
+file writer is separate from `repo-settings.yml` and its
+administrator-managed repository settings.
+
+The managed `policy-check.yml` caller exercises the normal Client request
+chain. It is limited to the configured owner opening or updating a scratch PR,
+pins the reviewed `reusable-policy-check.yml` source, and passes the managed
+`securefix-server.toml` plus the Client App key. The reusable workflow captures
+and attests the request before its separate dispatch job creates the Server
+label with a repository-scoped Client App token. The scratch Server config
+accepts the exact `reusable-client-request.yml` signer. The earlier
+read-only `request-producer-probe` path could not create that label and does
+not qualify this normal request route.
+
+Its Client repository, reusable-workflow SHA, and version are explicit owner-selected
+inputs for the scratch probe. The CLI checks their syntax and the protected instance's
+accepted repository/version range; this probe does not verify the Client release,
+source, or publisher provenance. Treat its rendered Client caller as unqualified
+scratch data. Production adoption requires the independently verified distributor,
+revision, immutable release, and package relationship from the existing package
+verification flow.
 
 ```sh
 gh run download <prepare-run-id> --name scratch-fixtures --dir fixtures
@@ -494,6 +531,35 @@ compiled only for tests; the installed runtime retains its normal authorization
 and provenance requirements. This verifies build, signing, and draft recovery;
 Terraform Registry ingestion still requires a published release.
 
+## Native release asset rehearsal
+
+The `release-assets` phase of `testing-securefix-server.yml` calls
+`testing-native-release-assets.yml` from a reviewed, frozen integration branch.
+Its builder compiles the source-bound Rust test executable without credentials.
+The publish job rechecks the frozen branch, then receives only a Server App token
+installed on `civitaspo/testing-securefix-server` with Contents write access.
+
+The probe reads the four target and runner pairs from the configured
+`herdr-linear-agent` release policy and builds pinned Client commit
+`ccdaada3efa78ebdef58f2db38aaf6ec5a8c8e00` on those matching runners. The build
+jobs have no credentials. A read-only Rust validator checks the current run and
+attempt, exact artifact names and IDs, archive digests, source commit signature
+and merged PR, `.release-version` at the source commit, runner/version evidence,
+and each binary's size and digest. The writer repeats validation before minting
+its scratch-only token.
+
+The success case passes those same four binary files through the production
+native-bundle validator and shared exact asset publisher. It publishes a unique
+immutable scratch prerelease and rereads its release state plus every asset ID,
+name, size, and digest; the immutable release is retained as evidence. The
+scratch tag is a unique prerelease while the expected binary version remains
+bound to the pinned source's `.release-version`. The rejection case omits one
+configured target from an otherwise verified bundle; validation must reject it
+while the separate scratch release remains a draft with no assets, then remove
+that draft and tag. A failed or incomplete matrix job prevents the writer job
+from starting. The workflow uploads the successful input and release evidence
+artifacts for seven days.
+
 The candidate verify phase exercises receipt reactions on both owner commands and the configured scratch bot's `/merge`. After the scratch merge, it checks the completion comment's squash SHA and Server run URL. The policy feedback probe publishes two failure results, verifies only the latest failure comment is visible, then publishes success and verifies both failure comments are hidden. The comment bodies identify the server CI and target commit. These probes use scratch-scoped Server App credentials.
 
 Prepare also exercises the shared policy feedback probe: wrapping multiline failure comments, superseding an older failure, and hiding failures after success. It preserves the server run and commit references and leaves no visible probe failure comment.
@@ -531,25 +597,3 @@ verify its exact failure reason and a fresh after state. Revoked owner reviews
 and edited commands are made by the owner controller outside candidate execution.
 The consumed-command case must retain an open PR after accepted authorization
 and failing required CI, then reject the same IDs in a new first-attempt run.
-
-The generic `publish-native-package.yml` publisher reads the build specification
-from `.github/actions/load-package/source-package.json` at the exact producer
-source SHA. It does not read the Action acquisition manifest (`package.json`)
-as build input or fall back to it. This keeps a loader revision's fixed package
-mapping independent from the source being built. The specification digest
-remains bound into the immutable publication record. Existing published
-packages and the legacy scratch publisher are unchanged.
-
-
-## Normal native request events in scratch
-
-`testing-native-approve-event.yml`, `testing-native-merge-event.yml`, and
-`testing-native-policy-check-event.yml` receive Client App labels on the Server.
-They select fixed reusable workflows and use
-`repo-settings/native-role-events-test-instance.toml` from protected main.
-That configuration permits only the testing repository and exact protected-main
-Client callers. Approval and merge use owner `issue_comment` commands. Policy
-checks use `pull_request_target`. Scratch package admission retains the configured
-owner actor and PR-author checks. These workflows do not change production pins,
-policy, or credentials. Their presence alone does not establish a successful
-end-to-end test.
