@@ -240,7 +240,7 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'default branch did not resolve to a full SHA' >&2; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
   build:
-    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'candidate-artifact' || inputs.phase == 'prepare' || inputs.phase == 'verify' || inputs.phase == 'bootstrap' || inputs.phase == 'managed-files') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha))) && (inputs.phase == 'candidate-artifact' || inputs.phase == 'prepare' || inputs.phase == 'verify' || inputs.phase == 'bootstrap') && (inputs.phase != 'bootstrap' || inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -430,34 +430,33 @@ jobs:
           retention-days: 7
 
   managed-files-probe:
-    needs: [baseline, build]
+    needs: [baseline]
     if: inputs.phase == 'managed-files' && github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.run_attempt == 1 && (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/integration/native-') && (inputs.candidate_sha == '' || inputs.candidate_sha == github.sha)))
     runs-on: ubuntu-24.04
     environment: main
     permissions:
       actions: read
+      attestations: read
       contents: read
     timeout-minutes: 15
+    env:
+      SECUREFIX_POLICY_PATH: ${{ github.workspace }}/policy.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: civitaspo/securefix-server
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - name: Load the verified managed-file controller
+        uses: civitaspo/securefix-server/.github/actions/load-package@fa2fa8318a9e76c7c51748355620a014661d6f47 # v0.2.45-pre.78
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: candidate-runtime
-          merge-multiple: true
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: candidate-runtime/securefix
+          token: ${{ github.token }}
       - name: Validate the exact selected candidate before minting a writer token
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_TEST_BASELINE_SHA: ${{ needs.baseline.outputs.source-sha }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
-          CANDIDATE_SHA: ${{ needs.build.outputs.source-sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || job.workflow_sha }}
           REQUESTED_SOURCE_SHA: ${{ inputs.candidate_sha }}
           CLIENT_REPOSITORY: ${{ inputs.client_repository }}
           CLIENT_IMPLEMENTATION_SHA: ${{ inputs.client_implementation_sha }}
@@ -465,9 +464,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -n "$REQUESTED_SOURCE_SHA" ]]; then
-            [[ "$CANDIDATE_SHA" == "$REQUESTED_SOURCE_SHA" ]] || { echo 'candidate binary source differs from the explicitly selected source' >&2; exit 1; }
+            [[ "$CANDIDATE_SHA" == "$REQUESTED_SOURCE_SHA" ]] || { echo 'managed-file source differs from the explicitly selected source' >&2; exit 1; }
           else
-            [[ "$CANDIDATE_SHA" == "$WORKFLOW_SHA" ]] || { echo 'candidate binary source differs from the dispatched workflow revision' >&2; exit 1; }
+            [[ "$CANDIDATE_SHA" == "$WORKFLOW_SHA" ]] || { echo 'managed-file source differs from the dispatched workflow revision' >&2; exit 1; }
           fi
           securefix integration validate-producer --workflow-sha "$WORKFLOW_SHA"
           [[ -n "$CLIENT_REPOSITORY" && -n "$CLIENT_IMPLEMENTATION_SHA" && -n "$CLIENT_VERSION" ]] || { echo 'owner-selected Client pin tuple is required for this scratch-only probe' >&2; exit 1; }
@@ -488,7 +487,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_SERVER_APP_TOKEN: ${{ steps.managed-writer.outputs.token }}
-          SOURCE_SHA: ${{ needs.build.outputs.source-sha }}
+          SOURCE_SHA: ${{ inputs.candidate_sha || job.workflow_sha }}
           CLIENT_REPOSITORY: ${{ inputs.client_repository }}
           CLIENT_IMPLEMENTATION_SHA: ${{ inputs.client_implementation_sha }}
           CLIENT_VERSION: ${{ inputs.client_version }}

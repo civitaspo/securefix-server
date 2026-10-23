@@ -65,13 +65,30 @@ fn managed_files_scratch_probe_validates_before_scoped_writer_token() {
     }
 
     let job = &value["jobs"]["managed-files-probe"];
-    assert_eq!(job["needs"], serde_json::json!(["baseline", "build"]));
+    assert_eq!(job["needs"], serde_json::json!(["baseline"]));
     assert_eq!(job["environment"], "main");
     assert_eq!(
         job["permissions"],
-        serde_json::json!({"actions":"read", "contents":"read"})
+        serde_json::json!({"actions":"read", "attestations":"read", "contents":"read"})
     );
     let steps = job["steps"].as_array().unwrap();
+    assert!(
+        !steps
+            .iter()
+            .any(|step| step["with"]["binary"] == "candidate-runtime/securefix")
+    );
+    let loader = steps
+        .iter()
+        .find(|step| step["name"] == "Load the verified managed-file controller")
+        .unwrap();
+    assert_eq!(
+        loader["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@fa2fa8318a9e76c7c51748355620a014661d6f47"
+    );
+    assert_eq!(
+        loader["with"],
+        serde_json::json!({"token":"${{ github.token }}"})
+    );
     let validate = steps
         .iter()
         .position(|step| {
