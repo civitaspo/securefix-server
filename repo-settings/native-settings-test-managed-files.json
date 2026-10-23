@@ -1,0 +1,74 @@
+{
+  "repository": "civitaspo/testing-securefix-server",
+  "repository_id": 1410312556,
+  "default_branch": "main",
+  "files": [
+    {
+      "source": "repo-settings/managed-files/native-settings/policy-check.yml",
+      "target": ".github/workflows/policy-check.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/securefix-request.yml",
+      "target": ".github/workflows/securefix-request.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/server-approve.yml",
+      "target": ".github/workflows/server-approve.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/server-merge.yml",
+      "target": ".github/workflows/server-merge.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/server-policy-check.yml",
+      "target": ".github/workflows/server-policy-check.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/server-release.yml",
+      "target": ".github/workflows/server-release.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/server-securefix.yml",
+      "target": ".github/workflows/server-securefix.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/securefix-server.toml",
+      "target": "securefix-server.toml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/release-tag.yml",
+      "target": ".github/workflows/release-tag.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/actions.lock",
+      "target": ".github/workflows/actions.lock"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/approve-request.yml",
+      "target": ".github/workflows/approve-request.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/merge-request.yml",
+      "target": ".github/workflows/merge-request.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/release-pr.yml",
+      "target": ".github/workflows/release-pr.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/native-settings/release-pr-sync.yml",
+      "target": ".github/workflows/release-pr-sync.yml"
+    }
+  ],
+  "remove": [
+    ".github/workflows/testing-approve-request.yml",
+    ".github/workflows/testing-merge-request.yml",
+    ".github/workflows/testing-policy-check.yml",
+    ".github/workflows/testing-release-pr-sync.yml",
+    ".github/workflows/testing-release-pr.yml",
+    ".github/workflows/testing-release-tag.yml",
+    ".github/workflows/native-securefix-producer.yml",
+    ".github/workflows/native-approval-producer.yml",
+    ".github/workflows/native-merge-producer.yml"
+  ]
+}
