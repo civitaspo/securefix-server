@@ -1147,7 +1147,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "handler");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@170cc1d6580c8e9041e9ef7ebd6ee1d01642acf9"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a"
                     );
                     assert_eq!(
                         job["with"]["config_path"],
@@ -1192,7 +1192,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = "170cc1d6580c8e9041e9ef7ebd6ee1d01642acf9";
+                    let revision = "9eabce19f60eac5eb281ec0e85abc9913b6d727a";
                     assert_eq!(
                         uses,
                         format!(
