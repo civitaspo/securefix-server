@@ -1140,6 +1140,36 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         job["secrets"]["SERVER_PRIVATE_KEY"],
                         "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
                     );
+                } else if let Some(role) =
+                    ["approve", "merge", "policy-check"]
+                        .into_iter()
+                        .find(|role| {
+                            path == format!(".github/workflows/testing-native-{role}-event.yml")
+                        })
+                {
+                    let config_path = "repo-settings/native-role-events-test-instance.toml";
+                    assert_eq!(job_id, "handler");
+                    assert_eq!(
+                        uses,
+                        format!(
+                            "civitaspo/securefix-server/.github/workflows/reusable-server-{role}.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+                        )
+                    );
+                    assert_eq!(job["with"]["config_path"], config_path);
+                    assert_eq!(
+                        job["if"],
+                        format!("startsWith(github.event.label.name, 'securefix-native-{role}-')")
+                    );
+                    assert_eq!(
+                        job["secrets"]["SERVER_PRIVATE_KEY"],
+                        "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+                    );
+                    if role == "approve" {
+                        assert_eq!(
+                            job["secrets"]["APPROVAL_TOKEN"],
+                            "${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}"
+                        );
+                    }
                 } else {
                     assert!(
                         uses.starts_with("./.github/workflows/"),

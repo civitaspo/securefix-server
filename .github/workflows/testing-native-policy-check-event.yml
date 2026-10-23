@@ -1,0 +1,24 @@
+name: testing-native-policy-check-event
+
+on:
+  label:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  handler:
+    if: startsWith(github.event.label.name, 'securefix-native-policy-check-')
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-policy-check.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711 # v0.2.45-pre.43
+    with:
+      config_path: repo-settings/native-role-events-test-instance.toml
+    secrets:
+      SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
