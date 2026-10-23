@@ -32,7 +32,7 @@ fn server_policy_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "d39821591200073b7513a01d6d7d721683ba5b7a");
+    assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the exact-head policy check without a writer token",
@@ -57,7 +57,7 @@ fn server_approval_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d");
+    assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the owner approval without a write credential",
@@ -103,7 +103,7 @@ fn server_merge_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "d39821591200073b7513a01d6d7d721683ba5b7a");
+    assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the merge request and paired approval without a writer token",
@@ -208,7 +208,7 @@ fn server_release_receiver_uses_a_fixed_package_in_each_credential_domain() {
     assert_eq!(jobs.len(), 5);
     for (job_id, job) in jobs {
         let steps = job["steps"].as_sequence().unwrap();
-        assert_fixed_package(steps, "1809839378fc30930e4431f86009f98fc5849684");
+        assert_fixed_package(steps, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
         for step in steps {
             if step["env"]["CLI_BINARY"].is_string() {
                 assert_eq!(

@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@d39821591200073b7513a01d6d7d721683ba5b7a # v0.2.45-pre.68
+        uses: civitaspo/securefix-server/.github/actions/load-package@0b4bc206f60c822ffb1ca58d918547f53eac0764 # v0.2.45-pre.74
         with:
           token: ${{ github.token }}
       - name: Resolve the authenticated Client request label
