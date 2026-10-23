@@ -91,6 +91,14 @@ jobs:
           [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
           test -x publisher/securefix
           test -s publisher/securefix
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: destination-reader
+        with:
+          app-id: '3872533'
+          private-key: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+          owner: civitaspo
+          repositories: ${{ inputs.channel == 'stable' && 'securefix-server' || 'testing-securefix-server' }}
+          permission-contents: write
       - name: Qualify the exact producer artifact and attestation before minting a writer token
         id: preflight
         env:
@@ -98,6 +106,7 @@ jobs:
           GITHUB_ACTOR_ID: ${{ github.actor_id }}
           GITHUB_TOKEN: ${{ github.token }}
           PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SECUREFIX_PACKAGE_READ_TOKEN: ${{ steps.destination-reader.outputs.token }}
         run: |
           set -euo pipefail
           result="$(publisher/securefix package preflight --producer-run-id "$PRODUCER_RUN_ID" --channel "$CHANNEL")"
@@ -126,6 +135,7 @@ jobs:
           GITHUB_ACTOR_ID: ${{ github.actor_id }}
           GITHUB_TOKEN: ${{ github.token }}
           PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SECUREFIX_PACKAGE_READ_TOKEN: ${{ steps.destination-reader.outputs.token }}
           SECUREFIX_PACKAGE_PUBLISH_TOKEN: ${{ inputs.channel == 'stable' && steps.writer.outputs.token || '' }}
           SECUREFIX_PACKAGE_TOKEN: ${{ inputs.channel == 'scratch' && steps.writer.outputs.token || '' }}
         run: |

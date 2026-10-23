@@ -35,6 +35,24 @@ fn native_package_preflight_outputs_both_release_states_without_skipping_read_on
         .unwrap()
         .trim();
 
+    let destination_reader = steps
+        .iter()
+        .find(|step| step["id"] == "destination-reader")
+        .unwrap();
+    assert_eq!(destination_reader["with"]["permission-contents"], "write");
+    assert_eq!(
+        preflight["env"]["SECUREFIX_PACKAGE_READ_TOKEN"],
+        "${{ steps.destination-reader.outputs.token }}"
+    );
+    assert!(preflight["env"]["SECUREFIX_PACKAGE_TOKEN"].is_null());
+    assert!(preflight["env"]["SECUREFIX_PACKAGE_PUBLISH_TOKEN"].is_null());
+    assert!(
+        steps
+            .iter()
+            .position(|s| s["id"] == "destination-reader")
+            .unwrap()
+            < steps.iter().position(|s| s["id"] == "preflight").unwrap()
+    );
     let writer = steps.iter().find(|step| step["id"] == "writer").unwrap();
     let publish = steps
         .iter()

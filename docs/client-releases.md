@@ -262,3 +262,12 @@ the isolated publication credential. GitHub's tag lookup exposes only published
 releases, so an absent tag lookup is valid only before selection or while that
 exact selected release is still a verified draft. A different published release
 on the tag, a missing selected ID, or changed release identity stops publication.
+
+The native package publisher keeps source provenance reads on its read-only
+`GITHUB_TOKEN`. Destination draft lookup and recovery use a separately minted,
+repository-scoped App token through a read-only Rust API client. GitHub requires
+contents-write access to see unpublished drafts; this token is never supplied to
+candidate code. The publication token is minted separately after qualification.
+`preflight_only` may obtain the draft reader credential, but never creates a writer
+context or changes releases. Every publication and recovery still revalidates the
+source, producer, destination, current publisher deployment, and exact asset bytes.

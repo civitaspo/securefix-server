@@ -1207,7 +1207,11 @@ impl GitHub {
         write_name: &str,
         target: &PackageReleaseWriteTarget<'_>,
     ) -> Result<Self> {
-        let preflight_state = Self::package_release_preflight_from_env(read_name, target)?;
+        let preflight_state = Self::package_release_preflight_from_env(
+            read_name,
+            "SECUREFIX_PACKAGE_READ_TOKEN",
+            target,
+        )?;
         ensure!(
             !matches!(
                 preflight_state,
@@ -1300,9 +1304,10 @@ impl GitHub {
     }
 
     /// Run all read-only source, publisher, destination, and tag checks using
-    /// the job's read token. Call this before minting the scoped App writer.
+    /// separate source and destination read clients before minting the App writer.
     pub fn package_release_preflight_from_env(
         read_name: &str,
+        destination_read_name: &str,
         target: &PackageReleaseWriteTarget<'_>,
     ) -> Result<PackageReleasePreflightState> {
         validate_package_release_write_target(target)?;
@@ -1310,7 +1315,23 @@ impl GitHub {
         let read_token =
             std::env::var(read_name).with_context(|| format!("missing {read_name}"))?;
         ensure!(!read_token.is_empty(), "{read_name} is empty");
-        let api = Self::new("https://api.github.com", read_token)?;
+        let api = Self::new("https://api.github.com", read_token.clone())?;
+        let destination_token = std::env::var(destination_read_name)
+            .with_context(|| format!("missing {destination_read_name}"))?;
+        ensure!(
+            !destination_token.is_empty(),
+            "{destination_read_name} is empty"
+        );
+        ensure!(
+            read_token != destination_token,
+            "package source and destination readers must be separate credentials"
+        );
+        let destination_api = Self::new("https://api.github.com", destination_token)?;
+        require_single_repository_installation(
+            &destination_api,
+            target.destination_repository_id,
+            target.destination_repository,
+        )?;
 
         let source: Value = api.get_uncached(&format!("/repos/{}", target.source_repository))?;
         ensure!(
@@ -1361,7 +1382,7 @@ impl GitHub {
         validate_package_release_publisher_run_for_target(target, &publisher)?;
 
         let destination: Value =
-            api.get_uncached(&format!("/repos/{}", target.destination_repository))?;
+            destination_api.get_uncached(&format!("/repos/{}", target.destination_repository))?;
         ensure!(
             destination["id"].as_u64() == Some(target.destination_repository_id)
                 && destination["full_name"] == target.destination_repository
@@ -1371,14 +1392,14 @@ impl GitHub {
         );
         ensure!(
             current_branch_sha(
-                &api,
+                &destination_api,
                 target.destination_repository,
                 target.destination_default_branch
             )? == target.destination_branch_sha,
             "package release destination branch head moved before token issuance"
         );
 
-        let releases: Vec<Value> = api.paginate_uncached(&format!(
+        let releases: Vec<Value> = destination_api.paginate_uncached(&format!(
             "/repos/{}/releases",
             target.destination_repository
         ))?;
@@ -1387,7 +1408,7 @@ impl GitHub {
             .filter(|release| release["tag_name"] == target.tag)
             .collect();
         ensure!(matching.len() <= 1, "package release tag is duplicated");
-        let refs: Vec<Value> = api.get_uncached(&format!(
+        let refs: Vec<Value> = destination_api.get_uncached(&format!(
             "/repos/{}/git/matching-refs/tags/{}",
             target.destination_repository,
             encode_path_segment(target.tag)
@@ -1403,7 +1424,11 @@ impl GitHub {
         let tag_commit = exact_refs
             .first()
             .map(|reference| {
-                package_release_tag_ref_commit(&api, target.destination_repository, reference)
+                package_release_tag_ref_commit(
+                    &destination_api,
+                    target.destination_repository,
+                    reference,
+                )
             })
             .transpose()?;
         let tag_exists = tag_commit.is_some();
@@ -1437,7 +1462,7 @@ impl GitHub {
         if draft {
             validate_package_release_recoverable_draft(target, release, release_id)?;
             let asset_uploaded =
-                validate_package_release_recovery_asset(target, &api, release, false)?;
+                validate_package_release_recovery_asset(target, &destination_api, release, false)?;
             Ok(PackageReleasePreflightState::ResumeDraft {
                 release_id,
                 asset_uploaded,
@@ -1453,7 +1478,7 @@ impl GitHub {
                 .filter(|id| *id > 0)
                 .context("published package asset ID is invalid")?;
             let asset_uploaded =
-                validate_package_release_recovery_asset(target, &api, release, true)?;
+                validate_package_release_recovery_asset(target, &destination_api, release, true)?;
             ensure!(asset_uploaded, "published package release asset is missing");
             Ok(PackageReleasePreflightState::AlreadyPublished {
                 release_id,
@@ -2933,8 +2958,14 @@ impl GitHub {
                 self.write_token.as_deref().unwrap_or(&self.token)
             }
             WriteContext::PackageRelease(write)
-                if (method == Method::POST
-                    && path == format!("/repos/{}/releases", write.destination_repository))
+                if (matches!(method, Method::GET | Method::HEAD)
+                    && (path == format!("/repos/{}/releases", write.destination_repository)
+                        || path.starts_with(&format!(
+                            "/repos/{}/releases/",
+                            write.destination_repository
+                        ))))
+                    || (method == Method::POST
+                        && path == format!("/repos/{}/releases", write.destination_repository))
                     || (method == Method::POST
                         && path == format!("/repos/{}/git/refs", write.destination_repository))
                     || (method == Method::PATCH
@@ -13188,6 +13219,30 @@ mod tests {
             recovery_body_updated: false,
             release_id: Some(103),
         }
+    }
+
+    #[test]
+    fn package_release_draft_reads_use_only_the_isolated_publisher_token() {
+        use crate::fixtures::{Fixture, Route};
+        let write = package_release_write_fixture_for(PackageReleaseChannel::Scratch);
+        let release_path = format!("/repos/{}/releases/103", write.destination_repository);
+        let source_path = format!(
+            "/repos/{}/commits/{}",
+            write.source_repository, write.source_sha
+        );
+        let fixture = Fixture::new(vec![
+            Route::get(&release_path, serde_json::json!({"id":103,"draft":true}))
+                .with_request_header("Authorization", "Bearer publisher-token"),
+            Route::get(&source_path, serde_json::json!({"sha":write.source_sha}))
+                .with_request_header("Authorization", "Bearer reader-token"),
+        ]);
+        let mut api = GitHub::new(&fixture.base, "reader-token".to_owned()).unwrap();
+        api.write_token = Some("publisher-token".to_owned());
+        api.writes = WriteContext::PackageRelease(Box::new(write));
+        let draft: Value = api.get_uncached(&release_path).unwrap();
+        assert_eq!(draft["draft"], true);
+        api.get_uncached::<Value>(&source_path).unwrap();
+        fixture.finish();
     }
 
     #[test]

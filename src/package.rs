@@ -3366,7 +3366,11 @@ fn publish_native_package(
         owner_id,
         release_id: None,
     };
-    let release_state = GitHub::package_release_preflight_from_env("GITHUB_TOKEN", &target)?;
+    let release_state = GitHub::package_release_preflight_from_env(
+        "GITHUB_TOKEN",
+        "SECUREFIX_PACKAGE_READ_TOKEN",
+        &target,
+    )?;
     let preflight = NativePackagePreflight {
         channel: match channel {
             PublishChannel::Stable => "stable".to_owned(),
@@ -5574,11 +5578,7 @@ jobs:
         );
         let writer_index = steps
             .iter()
-            .position(|step| {
-                step["uses"]
-                    .as_str()
-                    .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
-            })
+            .position(|step| step["id"] == "writer")
             .unwrap();
         assert_eq!(steps[writer_index]["with"]["permission-contents"], "write");
         assert_eq!(

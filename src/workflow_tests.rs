@@ -3574,6 +3574,27 @@ fn production_native_package_workflows_isolate_build_preflight_and_publisher_wri
         .iter()
         .position(|step| step["name"] == "Publish the exact attested executable")
         .unwrap();
+    let destination_reader = steps
+        .iter()
+        .position(|step| step["id"] == "destination-reader")
+        .unwrap();
+    assert!(validate_host < destination_reader && destination_reader < preflight);
+    assert_eq!(
+        steps[destination_reader]["with"]["permission-contents"],
+        "write"
+    );
+    assert_eq!(
+        steps[destination_reader]["with"]["repositories"],
+        "${{ inputs.channel == 'stable' && 'securefix-server' || 'testing-securefix-server' }}"
+    );
+    assert_eq!(
+        steps[preflight]["env"]["SECUREFIX_PACKAGE_READ_TOKEN"],
+        "${{ steps.destination-reader.outputs.token }}"
+    );
+    assert_eq!(
+        steps[publish_step]["env"]["SECUREFIX_PACKAGE_READ_TOKEN"],
+        "${{ steps.destination-reader.outputs.token }}"
+    );
     assert!(validate_host < preflight && preflight < writer && writer < publish_step);
     let read_only_record = steps
         .iter()
