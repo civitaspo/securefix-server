@@ -1216,6 +1216,17 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                             "${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}"
                         );
                     }
+                } else if matches!(
+                    path.as_str(),
+                    ".github/workflows/testing-native-self-client-approve.yml"
+                        | ".github/workflows/testing-native-self-client-merge.yml"
+                        | ".github/workflows/testing-native-self-client-policy-check.yml"
+                ) {
+                    assert_eq!(job_id, "request");
+                    assert_eq!(
+                        uses,
+                        "civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@170cc1d6580c8e9041e9ef7ebd6ee1d01642acf9"
+                    );
                 } else if path == ".github/workflows/testing-native-settings.yml" {
                     assert_eq!(job_id, "reconcile");
                     assert_eq!(
@@ -1420,6 +1431,98 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn native_self_hosted_client_uses_existing_environment_only_for_dispatch() {
+    let client = workflow("reusable-client-request.yml");
+    assert_eq!(
+        client["jobs"]["dispatch"]["environment"],
+        "${{ github.repository == inputs.server_repository && 'main' || null }}"
+    );
+    for name in ["capture", "attest"] {
+        assert!(client["jobs"][name]["environment"].is_null());
+        assert!(
+            !serde_json::to_string(&client["jobs"][name])
+                .unwrap()
+                .contains("secrets.")
+        );
+    }
+}
+
+#[test]
+fn native_self_update_clients_are_bounded_and_reuse_the_existing_instance() {
+    let config = securefix::instance_config::InstanceConfig::parse(
+        &fs::read("repo-settings/native-role-events-test-instance.toml").unwrap(),
+    )
+    .unwrap();
+    let host = config
+        .repositories
+        .iter()
+        .find(|repo| repo.id == config.instance.id)
+        .unwrap();
+    assert_eq!(host.repository, config.instance.repository);
+    assert_eq!(
+        host.capabilities,
+        vec![
+            crate::policy::Capability::Approve,
+            crate::policy::Capability::Merge
+        ]
+    );
+    for (role, operation, event) in [
+        ("approve", "approval", "issue_comment"),
+        ("merge", "merge", "issue_comment"),
+        ("policy-check", "policy_check", "pull_request_target"),
+    ] {
+        let filename = format!("testing-native-self-client-{role}.yml");
+        let wrapper = workflow(&filename);
+        assert!(wrapper["on"][event].is_object());
+        assert_eq!(wrapper["jobs"].as_object().unwrap().len(), 1);
+        let request = &wrapper["jobs"]["request"];
+        assert_eq!(
+            request["with"],
+            serde_json::json!({
+                "operation": operation,
+                "server_repository": config.instance.repository,
+                "instance_config_path": "repo-settings/native-role-events-test-instance.toml"
+            })
+        );
+        assert_eq!(
+            request["secrets"],
+            serde_json::json!({
+                "SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+            })
+        );
+        let guard = request["if"].as_str().unwrap();
+        assert!(guard.contains("github.run_attempt == 1"));
+        assert!(guard.contains("'[testing native self] '"));
+        if event == "issue_comment" {
+            assert!(guard.contains("github.event.comment.user.id == 4525500"));
+            assert!(guard.contains(&format!("github.event.comment.body == '/{role}'")));
+        } else {
+            assert!(guard.contains("github.event.pull_request.user.id == 4525500"));
+            assert!(guard.contains("'testing/native-self-'"));
+            assert!(
+                guard.contains("github.event.pull_request.head.repo.id == github.repository_id")
+            );
+        }
+        assert!(config.allows_scratch_request_caller(
+            &config.instance.repository,
+            config.instance.id,
+            &format!(".github/workflows/{filename}"),
+            "refs/heads/main",
+            event,
+            operation
+        ));
+    }
+    for role in ["approve", "merge"] {
+        let receiver = workflow(&format!("testing-native-{role}-event.yml"));
+        assert_eq!(
+            receiver["jobs"]["handler"]["concurrency"]["group"],
+            "securefix-control"
+        );
+        assert_eq!(receiver["jobs"]["handler"]["concurrency"]["queue"], "max");
     }
 }
 

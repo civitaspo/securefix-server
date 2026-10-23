@@ -1,0 +1,26 @@
+name: testing-native-self-client-merge
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  request:
+    if: >-
+      github.repository == 'civitaspo/securefix-server' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.event.issue.pull_request && github.event.issue.user.id == 4525500 && github.event.comment.user.id == 4525500 && github.event.comment.body == '/merge' && startsWith(github.event.issue.title, '[testing native self] ')
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write
+      attestations: write
+    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@170cc1d6580c8e9041e9ef7ebd6ee1d01642acf9 # v0.2.45-pre.124
+    with:
+      operation: merge
+      server_repository: civitaspo/securefix-server
+      instance_config_path: repo-settings/native-role-events-test-instance.toml
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

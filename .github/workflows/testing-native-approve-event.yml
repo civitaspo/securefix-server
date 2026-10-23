@@ -9,7 +9,7 @@ permissions: {}
 jobs:
   handler:
     concurrency:
-      group: securefix-testing-native-control
+      group: securefix-control
       cancel-in-progress: false
       queue: max
     if: startsWith(github.event.label.name, 'securefix-native-approve-')
