@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   handler:
-    if: startsWith(github.event.label.name, '@RELEASE_REQUEST_LABEL_PREFIX@securefix-native-release-')
+    if: startsWith(github.event.label.name, '@RELEASE_REQUEST_LABEL_PREFIX@securefix-native-release-') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')
     permissions:
       actions: read
       attestations: read

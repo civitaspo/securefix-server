@@ -545,6 +545,9 @@ fn validate_rendered_managed_role_workflow(
         }))?;
     }
     if role == securefix::instance_config::WorkflowRole::Release {
+        expected["jobs"]["handler"]["if"] = serde_yaml::to_value(format!(
+            "startsWith(github.event.label.name, '{release_prefix}securefix-native-release-') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')"
+        ))?;
         expected["jobs"]["handler"]["permissions"]["issues"] = serde_yaml::to_value("write")?;
     }
     let actual: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
@@ -3093,12 +3096,16 @@ mod tests {
                     format!("securefix-native-{role_slug}-")
                 };
             let parsed: serde_yaml::Value = serde_yaml::from_slice(rendered).unwrap();
+            let condition = if *role == securefix::instance_config::WorkflowRole::Release {
+                format!(
+                    "startsWith(github.event.label.name, '{expected_label_prefix}') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')"
+                )
+            } else {
+                format!("startsWith(github.event.label.name, '{expected_label_prefix}')")
+            };
             assert_eq!(
                 parsed["jobs"]["handler"]["if"].as_str(),
-                Some(
-                    format!("startsWith(github.event.label.name, '{expected_label_prefix}')")
-                        .as_str()
-                )
+                Some(condition.as_str())
             );
             assert_eq!(
                 workflow_uses(rendered).unwrap(),
