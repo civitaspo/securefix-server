@@ -2830,6 +2830,49 @@ fn env_bool(name: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_settings_deployment_matches_its_protected_desired_manifest() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-settings-test-instance.toml"
+        ))
+        .unwrap();
+        let manifest = parse_managed_file_manifest(include_bytes!(
+            "../repo-settings/native-settings-test-managed-files.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            config.workflow_roles[&securefix::instance_config::WorkflowRole::Settings],
+            ".github/workflows/testing-native-settings.yml"
+        );
+        config
+            .repositories
+            .iter()
+            .find(|entry| {
+                entry.repository == manifest.repository && entry.id == manifest.repository_id
+            })
+            .unwrap()
+            .policy()
+            .require(Capability::Settings)
+            .unwrap();
+        assert_eq!(manifest.files.len(), 14);
+        for file in &manifest.files {
+            let bytes = fs::read(&file.source).unwrap();
+            assert!(!bytes.is_empty(), "{}", file.source);
+            if file.target.ends_with(".yml") {
+                let _: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("@CLIENT_"));
+                assert!(!String::from_utf8_lossy(&bytes).contains("@SERVER_"));
+            } else if file.target == "securefix-server.toml" {
+                securefix::instance_config::InstanceConfig::parse(&bytes).unwrap();
+            } else {
+                assert_eq!(file.target, MANAGED_ACTIONS_LOCK_TARGET);
+                let lock: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+                assert_eq!(lock["version"].as_str(), Some("v0.0.3"));
+                assert!(lock["workflows"].as_mapping().is_some());
+            }
+        }
+    }
+
     use super::*;
     use crate::fixtures::{Fixture, Route};
 

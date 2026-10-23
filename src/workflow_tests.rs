@@ -6445,3 +6445,65 @@ fn production_native_package_workflows_isolate_build_preflight_and_publisher_wri
             .contains("permission-administration")
     );
 }
+
+#[test]
+fn native_managed_reconcile_has_a_scoped_pr_writer_without_administrator_credentials() {
+    let value = workflow("reusable-server-settings.yml");
+    let inputs = value["on"]["workflow_call"]["inputs"].as_object().unwrap();
+    assert_eq!(inputs.len(), 2);
+    for name in ["config_path", "manifest_path"] {
+        assert_eq!(inputs[name]["required"], true);
+        assert_eq!(inputs[name]["type"], "string");
+    }
+    let job = &value["jobs"]["managed-files"];
+    assert_eq!(job["environment"], "main");
+    assert_eq!(job["concurrency"]["group"], "securefix-control");
+    assert_eq!(
+        job["permissions"],
+        serde_json::json!({"actions":"read", "attestations":"read", "contents":"read"})
+    );
+    let steps = job["steps"].as_array().unwrap();
+    let prepare = steps
+        .iter()
+        .position(|step| step["id"] == "prepare")
+        .unwrap();
+    let writer = steps
+        .iter()
+        .position(|step| step["id"] == "writer")
+        .unwrap();
+    assert!(prepare < writer);
+    assert!(steps[prepare]["run"].as_str().unwrap().contains(
+        "settings managed-prepare --config-path \"$CONFIG_PATH\" --manifest-path \"$MANIFEST_PATH\""
+    ));
+    assert_eq!(
+        steps[writer]["with"]["owner"],
+        "${{ steps.prepare.outputs.repo_owner }}"
+    );
+    assert_eq!(
+        steps[writer]["with"]["repositories"],
+        "${{ steps.prepare.outputs.repo_name }}"
+    );
+    for permission in [
+        "permission-contents",
+        "permission-pull-requests",
+        "permission-workflows",
+    ] {
+        assert_eq!(steps[writer]["with"][permission], "write");
+    }
+    let apply = steps.last().unwrap();
+    assert!(apply["run"].as_str().unwrap().contains("settings managed-reconcile --config-path \"$CONFIG_PATH\" --manifest-path \"$MANIFEST_PATH\""));
+    assert_eq!(
+        apply["env"]["SECUREFIX_SERVER_APP_TOKEN"],
+        "${{ steps.writer.outputs.token }}"
+    );
+    let serialized = serde_json::to_string(&value).unwrap();
+    for forbidden in [
+        "ADMIN",
+        "PUBLIC_REPO_SETTINGS_TOKEN",
+        "permission-administration",
+        "APPROVAL_TOKEN",
+        "candidate_sha",
+    ] {
+        assert!(!serialized.contains(forbidden), "{forbidden}");
+    }
+}
