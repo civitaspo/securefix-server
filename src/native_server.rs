@@ -1730,20 +1730,11 @@ fn publish_request_proof_check(verified: &VerifiedRequest) -> Result<()> {
         .writer
         .as_ref()
         .context("native request writer was not captured before proof validation")?;
-    let checks: Value = api.get(&format!(
-        "/repos/{}/commits/{}/check-runs?per_page=100&page=1&filter=latest&check_name={}&app_id={}",
-        manifest.repository.full_name,
-        manifest.pull_request.head_sha,
-        securefix::api::NATIVE_POLICY_CHECK_NAME,
-        verified.config.apps.policy_check_id
-    ))?;
-    let existing = checks["check_runs"]
-        .as_array()
-        .context("native check listing is missing")?;
-    ensure!(
-        checks["total_count"].as_u64() == Some(existing.len() as u64) && existing.is_empty(),
-        "native request proof check already exists or check listing is incomplete"
-    );
+    let existing = securefix::api::native_check_runs_for_head(
+        api,
+        &manifest.repository.full_name,
+        &manifest.pull_request.head_sha,
+    )?;
     let request_sha = securefix::hex_encode(Sha256::digest(&verified.manifest_bytes));
     let body = if verified.target_policy_control_identity.is_some() {
         securefix::api::native_policy_check_body(&manifest.pull_request.head_sha, &request_sha)
@@ -1754,12 +1745,21 @@ fn publish_request_proof_check(verified: &VerifiedRequest) -> Result<()> {
             &request_sha,
         )?
     };
+    require_new_request_proof_check(
+        &existing,
+        verified.config.apps.policy_check_id,
+        &manifest.pull_request.head_sha,
+        body["external_id"]
+            .as_str()
+            .context("request proof identity is missing")?,
+    )?;
     let result: Value = api.post(
         &format!("/repos/{}/check-runs", manifest.repository.full_name),
         &body,
     )?;
     ensure!(
-        result["name"] == securefix::api::NATIVE_POLICY_CHECK_NAME
+        result["external_id"] == body["external_id"]
+            && result["name"] == securefix::api::NATIVE_POLICY_CHECK_NAME
             && result["head_sha"].as_str() == Some(manifest.pull_request.head_sha.as_str())
             && result["status"] == "completed"
             && result["conclusion"] == "success"
@@ -1767,6 +1767,43 @@ fn publish_request_proof_check(verified: &VerifiedRequest) -> Result<()> {
         "GitHub returned a different native request proof check"
     );
     println!("native_check_run_id={}", result["id"]);
+    Ok(())
+}
+
+fn require_new_request_proof_check(
+    checks: &[Value],
+    app_id: u64,
+    head: &str,
+    external_id: &str,
+) -> Result<()> {
+    for check in checks.iter().filter(|check| {
+        check["name"] == securefix::api::NATIVE_POLICY_CHECK_NAME
+            && check["app"]["id"].as_u64() == Some(app_id)
+    }) {
+        ensure!(
+            check["head_sha"].as_str() == Some(head),
+            "existing native check has a different head"
+        );
+        let existing_id = check["external_id"]
+            .as_str()
+            .context("existing native check identity is missing")?;
+        if existing_id.len() != 64
+            || !existing_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            let identity =
+                securefix::api::parse_native_instance_policy_check_external_id(existing_id)?;
+            ensure!(
+                identity.head_sha == head,
+                "existing native check identity has a different head"
+            );
+        }
+        ensure!(
+            existing_id != external_id,
+            "native request proof already exists for this exact request"
+        );
+    }
     Ok(())
 }
 
@@ -3156,6 +3193,50 @@ fn read_bounded(path: &std::path::Path, max: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_proof_allows_new_authority_and_request_but_rejects_exact_replay() {
+        let manifest = manifest();
+        let old = &manifest.server_authority;
+        let mut current = old.clone();
+        current.config_sha256 = "8".repeat(64);
+        let head = &manifest.pull_request.head_sha;
+        let old_body =
+            securefix::api::native_instance_policy_check_body(old, head, &"1".repeat(64)).unwrap();
+        let body =
+            securefix::api::native_instance_policy_check_body(&current, head, &"2".repeat(64))
+                .unwrap();
+        let check = |id, body: &Value| {
+            let mut check = body.clone();
+            check["id"] = serde_json::json!(id);
+            check["app"] = serde_json::json!({"id":42});
+            check
+        };
+        let mut checks = vec![check(1, &old_body)];
+        require_new_request_proof_check(&checks, 42, head, body["external_id"].as_str().unwrap())
+            .unwrap();
+        checks.push(check(2, &body));
+        assert!(
+            require_new_request_proof_check(
+                &checks,
+                42,
+                head,
+                body["external_id"].as_str().unwrap()
+            )
+            .is_err()
+        );
+        let another =
+            securefix::api::native_instance_policy_check_body(&current, head, &"3".repeat(64))
+                .unwrap();
+        require_new_request_proof_check(
+            &checks,
+            42,
+            head,
+            another["external_id"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checks[0]["external_id"], old_body["external_id"]);
+    }
 
     #[test]
     fn configured_client_package_keeps_prerelease_acceptance_explicit_without_fallback() {

@@ -46,6 +46,10 @@ Approval and merge authorization can refresh that check after an owner command.
 The default-branch ruleset binds this check to Server App ID `3872533` and dismisses stale reviews.
 Thus a green check and approval for head A do not authorize sensitive head B, including Renovate direct merges.
 
+For the external-config instance path, `securefix-native-request-policy-check` uses `native:v1:<head>:<authority SHA-256>:<request SHA-256>` as its external identity. Each authenticated fresh request creates a new check; an existing check for that exact request rejects replay. Previous authority results remain unchanged and cannot authorize the current authority. Both publication and merge read every page with `filter=all`, validate counts and reject duplicate check IDs.
+
+Merge selects the greatest check-run ID among results for the exact head, configured App and current authority. The ID orders creation, independent of completion time and API list order. A newer failed or incomplete request blocks merge even if an earlier request succeeded. A request-only legacy scratch result never satisfies the instance authority check. Fresh owner commands and authority-bound approval are still required after configuration or Server placement changes; the writer revalidates authority, head, checks and approval immediately before writing.
+
 ## Merge readiness
 
 The server waits up to 60 minutes from the manifest's fixed acceptance time.

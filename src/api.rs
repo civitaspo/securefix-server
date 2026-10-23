@@ -6223,24 +6223,7 @@ pub fn capture_native_instance_merge_fence(
         .as_str()
         .context("native approval marker has no body")?;
     let reader = GitHub::new(&api.base, api.token.clone())?;
-    let mut checks = Vec::new();
-    for page in 1..=100 {
-        let response: Value = reader.get_uncached(&format!(
-            "/repos/{repository}/commits/{head_sha}/check-runs?per_page=100&page={page}&filter=latest"
-        ))?;
-        let batch = response["check_runs"]
-            .as_array()
-            .context("native merge check runs are malformed")?;
-        let done = batch.len() < 100;
-        checks.extend(batch.iter().cloned());
-        if done {
-            break;
-        }
-        ensure!(
-            page < 100,
-            "native merge check run pagination exceeded limit"
-        );
-    }
+    let checks = native_check_runs_for_head(&reader, repository, head_sha)?;
     ensure!(
         native_instance_merge_checks_ready(
             &checks,
@@ -6305,6 +6288,54 @@ fn send_after_native_instance_merge_fence<T>(
     send()
 }
 
+pub fn native_check_runs_for_head(
+    api: &GitHub,
+    repository: &str,
+    head_sha: &str,
+) -> Result<Vec<Value>> {
+    crate::policy::validate_repository(repository)?;
+    crate::policy::validate_sha(head_sha)?;
+    let mut checks = Vec::new();
+    let mut expected_total = None;
+    let mut ids = std::collections::BTreeSet::new();
+    for page in 1..=100 {
+        let response: Value = api.get_uncached(&format!(
+            "/repos/{repository}/commits/{head_sha}/check-runs?per_page=100&page={page}&filter=all"
+        ))?;
+        let total = response["total_count"]
+            .as_u64()
+            .context("native check count is missing")?;
+        ensure!(total <= 10_000, "native check listing exceeds its bound");
+        ensure!(
+            expected_total.is_none_or(|expected| total == expected),
+            "native check listing changed during pagination"
+        );
+        expected_total = Some(total);
+        let batch = response["check_runs"]
+            .as_array()
+            .context("native check listing is malformed")?;
+        ensure!(
+            batch.len() as u64 == (total - checks.len() as u64).min(100),
+            "native check listing is incomplete"
+        );
+        for check in batch {
+            let id = check["id"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .context("native check ID is invalid")?;
+            ensure!(
+                ids.insert(id),
+                "native check listing contains duplicate IDs"
+            );
+            checks.push(check.clone());
+        }
+        if checks.len() as u64 == total {
+            return Ok(checks);
+        }
+    }
+    anyhow::bail!("native check pagination exceeded its bound")
+}
+
 fn native_instance_merge_checks_ready(
     checks: &[Value],
     status_app_id: u64,
@@ -6316,32 +6347,48 @@ fn native_instance_merge_checks_ready(
         check["status"] == "completed"
             && (check["conclusion"] == "success" || check["conclusion"] == "skipped")
     });
-    let policy_checks: Vec<_> = checks
-        .iter()
-        .filter(|check| {
-            check["name"] == NATIVE_POLICY_CHECK_NAME
-                && check["app"]["id"].as_u64() == Some(policy_app_id)
-        })
-        .collect();
-    ensure!(
-        policy_checks.len() <= 1,
-        "duplicate Securefix policy checks for the native merge head"
-    );
-    let policy_ok = if let Some(check) = policy_checks.first() {
-        let identity = parse_native_instance_policy_check_external_id(
-            check["external_id"]
-                .as_str()
-                .context("native instance policy check has no external identity")?,
-        )?;
-        check["head_sha"].as_str() == Some(expected_head)
-            && identity.head_sha == expected_head
-            && identity.authority_sha256 == native_authority_sha256(authority)?
-            && check["status"] == "completed"
-            && check["conclusion"] == "success"
-    } else {
-        false
-    };
-    Ok(ci_ok && policy_ok)
+    let authority_sha256 = native_authority_sha256(authority)?;
+    let mut latest: Option<(u64, &Value)> = None;
+    let mut requests = std::collections::BTreeSet::new();
+    for check in checks.iter().filter(|check| {
+        check["name"] == NATIVE_POLICY_CHECK_NAME
+            && check["app"]["id"].as_u64() == Some(policy_app_id)
+    }) {
+        ensure!(
+            check["head_sha"].as_str() == Some(expected_head),
+            "native policy check has a different head"
+        );
+        let external_id = check["external_id"]
+            .as_str()
+            .context("native instance policy check has no external identity")?;
+        if external_id.len() == 64 && validate_sha256(external_id, "legacy check request").is_ok() {
+            continue;
+        }
+        let identity = parse_native_instance_policy_check_external_id(external_id)?;
+        ensure!(
+            identity.head_sha == expected_head,
+            "native policy check identity has a different head"
+        );
+        if identity.authority_sha256 != authority_sha256 {
+            continue;
+        }
+        ensure!(
+            requests.insert(identity.request_sha256),
+            "duplicate native policy request proof"
+        );
+        let id = check["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .context("native policy check ID is invalid")?;
+        // Check-run IDs order creation, independently of API list order or completion time.
+        if latest.is_none_or(|(current, _)| id > current) {
+            latest = Some((id, check));
+        }
+    }
+    Ok(ci_ok
+        && latest.is_some_and(|(_, check)| {
+            check["status"] == "completed" && check["conclusion"] == "success"
+        }))
 }
 
 fn native_latest_check<'a>(checks: &'a [Value], name: &str, app_id: u64) -> Option<&'a Value> {
@@ -8246,12 +8293,52 @@ mod tests {
         use crate::fixtures::{Fixture, Route};
 
         let check_path = format!(
-            "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=latest"
+            "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=all"
         );
         Fixture::new(vec![Route::get(
             check_path,
-            serde_json::json!({"check_runs":checks}),
+            serde_json::json!({"total_count":checks.len(),"check_runs":checks}),
         )])
+    }
+
+    #[test]
+    fn native_check_listing_reads_all_pages_and_rejects_incomplete_or_duplicate_results() {
+        use crate::fixtures::{Fixture, Route};
+        let head = "a".repeat(40);
+        let path = |page| {
+            format!(
+                "/repos/example-org/project/commits/{head}/check-runs?per_page=100&page={page}&filter=all"
+            )
+        };
+        let first: Vec<_> = (1..=100).map(|id| serde_json::json!({"id":id})).collect();
+        let fixture = Fixture::new(vec![
+            Route::get(
+                path(1),
+                serde_json::json!({"total_count":101,"check_runs":first}),
+            ),
+            Route::get(
+                path(2),
+                serde_json::json!({"total_count":101,"check_runs":[{"id":101}]}),
+            ),
+        ]);
+        assert_eq!(
+            native_check_runs_for_head(&fixture.api, "example-org/project", &head)
+                .unwrap()
+                .len(),
+            101
+        );
+        fixture.finish();
+        for response in [
+            serde_json::json!({"total_count":2,"check_runs":[{"id":1}]}),
+            serde_json::json!({"total_count":2,"check_runs":[{"id":1},{"id":1}]}),
+            serde_json::json!({"check_runs":[]}),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(path(1), response)]);
+            assert!(
+                native_check_runs_for_head(&fixture.api, "example-org/project", &head).is_err()
+            );
+            fixture.finish();
+        }
     }
 
     #[test]
@@ -8281,6 +8368,11 @@ mod tests {
             &"e".repeat(64),
         )
         .unwrap();
+        let mut old_authority = instance.authority.clone();
+        old_authority.config_sha256 = "1".repeat(64);
+        let old_external_id =
+            native_instance_policy_check_external_id(&old_authority, &head_sha, &"d".repeat(64))
+                .unwrap();
         let checks = |status_conclusion: &str| {
             vec![
                 serde_json::json!({
@@ -8292,6 +8384,15 @@ mod tests {
                 }),
                 serde_json::json!({
                     "id": 2,
+                    "name": NATIVE_POLICY_CHECK_NAME,
+                    "app": {"id": instance.config.apps.policy_check_id},
+                    "head_sha": head_sha,
+                    "external_id": old_external_id,
+                    "status": "completed",
+                    "conclusion": "success"
+                }),
+                serde_json::json!({
+                    "id": 3,
                     "name": NATIVE_POLICY_CHECK_NAME,
                     "app": {"id": instance.config.apps.policy_check_id},
                     "head_sha": head_sha,
@@ -8331,9 +8432,9 @@ mod tests {
             Fixture::new(vec![
                 Route::get(
                     format!(
-                        "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=latest"
+                        "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=all"
                     ),
-                    serde_json::json!({"check_runs":checks("success")}),
+                    serde_json::json!({"total_count":3,"check_runs":checks("success")}),
                 ),
                 Route::get(
                     "/repos/example-org/project/pulls/4/reviews?per_page=100&page=1",
@@ -8387,6 +8488,83 @@ mod tests {
         assert_eq!(changed_check_merge_puts, 0);
         changed_check_fixture.finish();
 
+        for state in [
+            "failure",
+            "in_progress",
+            "old_authority_only",
+            "replayed_request",
+        ] {
+            let mut values = checks("success");
+            if state == "old_authority_only" {
+                values.pop();
+            } else {
+                let mut newer = values[2].clone();
+                newer["id"] = serde_json::json!(4);
+                if state != "replayed_request" {
+                    newer["external_id"] = serde_json::json!(
+                        native_instance_policy_check_external_id(
+                            &instance.authority,
+                            &head_sha,
+                            &"f".repeat(64)
+                        )
+                        .unwrap()
+                    );
+                }
+                if state == "in_progress" {
+                    newer["status"] = serde_json::json!("in_progress");
+                    newer["conclusion"] = Value::Null;
+                } else if state == "failure" {
+                    newer["conclusion"] = serde_json::json!("failure");
+                }
+                values.insert(0, newer);
+            }
+            let fixture = native_instance_merge_checks_fixture(&head_sha, values);
+            let mut writes = 0;
+            assert!(
+                send_after_native_instance_merge_fence(&accepted, capture(&fixture.api), || {
+                    writes += 1;
+                    Ok(())
+                })
+                .is_err(),
+                "{state}"
+            );
+            assert_eq!(writes, 0, "{state}");
+            fixture.finish();
+        }
+        let mut reordered = checks("success");
+        reordered.reverse();
+        assert!(
+            native_instance_merge_checks_ready(
+                &reordered,
+                instance.config.apps.status_check_id,
+                instance.config.apps.policy_check_id,
+                &head_sha,
+                &instance.authority
+            )
+            .unwrap()
+        );
+        let mut fresh_success = reordered[0].clone();
+        fresh_success["id"] = serde_json::json!(5);
+        fresh_success["external_id"] = serde_json::json!(
+            native_instance_policy_check_external_id(
+                &instance.authority,
+                &head_sha,
+                &"f".repeat(64)
+            )
+            .unwrap()
+        );
+        reordered.insert(0, fresh_success);
+        assert!(
+            native_instance_merge_checks_ready(
+                &reordered,
+                instance.config.apps.status_check_id,
+                instance.config.apps.policy_check_id,
+                &head_sha,
+                &instance.authority
+            )
+            .unwrap()
+        );
+
         let mut latest_review = approved_review.clone();
         latest_review["id"] = serde_json::json!(43);
         latest_review["state"] = serde_json::json!("CHANGES_REQUESTED");
@@ -8394,9 +8572,9 @@ mod tests {
         let changed_review_fixture = Fixture::new(vec![
             Route::get(
                 format!(
-                    "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=latest"
+                    "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=all"
                 ),
-                serde_json::json!({"check_runs":checks("success")}),
+                serde_json::json!({"total_count":3,"check_runs":checks("success")}),
             ),
             Route::get(
                 "/repos/example-org/project/pulls/4/reviews?per_page=100&page=1",
