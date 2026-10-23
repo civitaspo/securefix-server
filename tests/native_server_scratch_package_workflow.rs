@@ -15,7 +15,7 @@ fn assert_fixed_package(steps: &[serde_yaml::Value]) {
     assert!(package["if"].is_null());
     assert_eq!(
         package["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231"
+        "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
     );
     assert_eq!(package["with"].as_mapping().unwrap().len(), 1);
     assert_eq!(package["with"]["token"], "${{ github.token }}");
