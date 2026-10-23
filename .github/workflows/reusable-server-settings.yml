@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@acbb9eded335037dc7be51d1f49113043153cb2c # v0.2.45-pre.115
+        uses: civitaspo/securefix-server/.github/actions/load-package@6e267a900d6798d4097a3a2aae7b42fa2e2a46c7 # v0.2.45-pre.120
         with:
           token: ${{ github.token }}
       - name: Resolve protected managed-file destination

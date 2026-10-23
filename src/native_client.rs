@@ -523,6 +523,7 @@ fn capture_request(
         default_branch,
         &workflow_path,
         &workflow_sha,
+        (event == "pull_request").then_some(head_sha.as_str()),
     )?;
     let server_repository = std::env::var("SECUREFIX_SERVER_REPOSITORY")
         .context("missing SECUREFIX_SERVER_REPOSITORY")?;

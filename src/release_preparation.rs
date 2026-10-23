@@ -189,6 +189,7 @@ pub(super) fn capture(artifact_name: &str, output: &Path) -> Result<()> {
             &default_branch,
             &workflow_path,
             &workflow_sha,
+            None,
         )?,
         server_authority: instance.authority,
     };
@@ -408,6 +409,7 @@ pub(super) fn apply(apply: bool) -> Result<()> {
         &m.default_branch,
         &m.producer.workflow_path,
         &m.producer.workflow_sha,
+        None,
     )?;
     securefix::api::require_native_client_workflow_epoch_unchanged(
         &m.client_workflow_epoch,

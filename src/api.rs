@@ -3570,6 +3570,7 @@ impl GitHub {
             base_ref,
             caller_workflow_path,
             caller_workflow_sha,
+            (*mode == NativeScratchMode::Securefix).then_some(head_sha.as_str()),
         )?;
         require_native_client_workflow_epoch_unchanged(
             client_workflow_epoch,
@@ -3711,6 +3712,7 @@ impl GitHub {
             &write.base_ref,
             &write.producer_workflow_path,
             &write.producer_workflow_sha,
+            (write.mode == NativeInstanceMode::Securefix).then_some(write.head_sha.as_str()),
         )?;
         require_native_client_workflow_epoch_unchanged(
             &write.client_workflow_epoch,
@@ -3815,6 +3817,7 @@ impl GitHub {
             &t.default_branch,
             &t.workflow_path,
             &t.workflow_sha,
+            None,
         )?;
         require_native_client_workflow_epoch_unchanged(&t.workflow_epoch, &epoch)?;
         let run: Value = self.get_uncached(&format!(
@@ -5466,6 +5469,7 @@ pub fn capture_native_release_sync_workflow_epoch(
         default_branch,
         workflow_path,
         &protected_revision,
+        None,
     )?;
     ensure!(
         api.branch_head(repository_name, default_branch)? == protected_revision,
@@ -5481,6 +5485,7 @@ pub fn capture_native_client_workflow_epoch(
     default_branch: &str,
     workflow_path: &str,
     workflow_revision: &str,
+    pull_request_head: Option<&str>,
 ) -> Result<String> {
     crate::policy::validate_repository(repository_name)?;
     ensure!(repository_id > 0, "invalid authority repository ID");
@@ -5516,13 +5521,13 @@ pub fn capture_native_client_workflow_epoch(
         workflow_bytes == captured_workflow,
         "caller workflow differs from its protected default-branch version"
     );
-    let compare: Value = api.get(&format!(
-        "/repos/{repository_name}/compare/{workflow_revision}...{snapshot_sha}"
-    ))?;
-    ensure!(
-        matches!(compare["status"].as_str(), Some("ahead" | "identical")),
-        "caller workflow revision is not on default-branch history"
-    );
+    require_native_client_workflow_revision(
+        api,
+        repository_name,
+        workflow_revision,
+        &snapshot_sha,
+        pull_request_head,
+    )?;
     let workflow_epoch = first_parent_path_epoch(
         api,
         repository_name,
@@ -5535,6 +5540,49 @@ pub fn capture_native_client_workflow_epoch(
         "instance default branch moved during authority capture"
     );
     Ok(workflow_epoch)
+}
+
+fn require_native_client_workflow_revision(
+    api: &GitHub,
+    repository: &str,
+    revision: &str,
+    protected_revision: &str,
+    pull_request_head: Option<&str>,
+) -> Result<()> {
+    let compare: Value = api.get(&format!(
+        "/repos/{repository}/compare/{revision}...{protected_revision}"
+    ))?;
+    if matches!(compare["status"].as_str(), Some("ahead" | "identical")) {
+        return Ok(());
+    }
+    let head =
+        pull_request_head.context("caller workflow revision is not on default-branch history")?;
+    crate::policy::validate_sha(head)?;
+    let commit: Value = api.get(&format!("/repos/{repository}/commits/{revision}"))?;
+    ensure!(
+        commit["sha"].as_str() == Some(revision),
+        "caller merge revision identity differs"
+    );
+    let parents = commit["parents"]
+        .as_array()
+        .context("caller merge revision parents are missing")?;
+    ensure!(
+        parents.len() == 2 && parents[1]["sha"].as_str() == Some(head),
+        "caller merge revision is not bound to the exact PR head"
+    );
+    let base = parents[0]["sha"]
+        .as_str()
+        .context("caller merge revision base is missing")?;
+    crate::policy::validate_sha(base)?;
+    ensure!(base != head, "caller merge revision parents are identical");
+    let compare: Value = api.get(&format!(
+        "/repos/{repository}/compare/{base}...{protected_revision}"
+    ))?;
+    ensure!(
+        matches!(compare["status"].as_str(), Some("ahead" | "identical")),
+        "caller merge revision base is not on default-branch history"
+    );
+    Ok(())
 }
 
 pub fn require_native_authority_unchanged(
@@ -10647,6 +10695,137 @@ mod tests {
             write.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
             "Bearer check-write-token"
         );
+    }
+
+    #[test]
+    fn client_workflow_revision_accepts_default_history_and_exact_pr_merge() {
+        use crate::fixtures::{Fixture, Route};
+        let snapshots: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native-client-base-snapshots.json"
+        ))
+        .unwrap();
+        let snapshot = snapshots.as_array().unwrap().last().unwrap();
+        let revision = snapshot["context_sha"].as_str().unwrap();
+        let base = snapshot["base_sha"].as_str().unwrap();
+        let head = snapshot["source_sha"].as_str().unwrap();
+        let repository = "example/project";
+        let compare_path = format!("/repos/{repository}/compare/{revision}...{base}");
+        for status in ["ahead", "identical"] {
+            let fixture = Fixture::new(vec![Route::get(
+                &compare_path,
+                serde_json::json!({"status":status}),
+            )]);
+            require_native_client_workflow_revision(&fixture.api, repository, revision, base, None)
+                .unwrap();
+            fixture.finish();
+        }
+        for status in ["ahead", "identical"] {
+            let fixture = Fixture::new(vec![
+                Route::get(&compare_path, serde_json::json!({"status":"behind"})),
+                Route::get(
+                    format!("/repos/{repository}/commits/{revision}"),
+                    snapshot["workflow_commit"].clone(),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/compare/{base}...{base}"),
+                    serde_json::json!({"status":status}),
+                ),
+            ]);
+            require_native_client_workflow_revision(
+                &fixture.api,
+                repository,
+                revision,
+                base,
+                Some(head),
+            )
+            .unwrap();
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn client_workflow_revision_rejects_unbound_and_non_default_pr_merges() {
+        use crate::fixtures::{Fixture, Route};
+        let revision = "a".repeat(40);
+        let base = "b".repeat(40);
+        let head = "c".repeat(40);
+        let repository = "example/project";
+        let compare_path = format!("/repos/{repository}/compare/{revision}...{base}");
+        let fixture = Fixture::new(vec![Route::get(
+            &compare_path,
+            serde_json::json!({"status":"behind"}),
+        )]);
+        assert!(
+            require_native_client_workflow_revision(
+                &fixture.api,
+                repository,
+                &revision,
+                &base,
+                None,
+            )
+            .is_err()
+        );
+        fixture.finish();
+        let valid = serde_json::json!({"sha":revision,"parents":[{"sha":base},{"sha":head}]});
+        let mut invalid = Vec::new();
+        for parents in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([{"sha":base}]),
+            serde_json::json!([{"sha":base},{"sha":head},{"sha":head}]),
+            serde_json::json!([{"sha":base},{"sha":base}]),
+            serde_json::json!([{"sha":head},{"sha":head}]),
+            serde_json::json!([{"sha":"invalid"},{"sha":head}]),
+            serde_json::json!([{}, {"sha":head}]),
+        ] {
+            let mut commit = valid.clone();
+            commit["parents"] = parents;
+            invalid.push(commit);
+        }
+        let mut wrong_revision = valid.clone();
+        wrong_revision["sha"] = serde_json::json!(base);
+        invalid.push(wrong_revision);
+        for commit in invalid {
+            let fixture = Fixture::new(vec![
+                Route::get(&compare_path, serde_json::json!({"status":"diverged"})),
+                Route::get(format!("/repos/{repository}/commits/{revision}"), commit),
+            ]);
+            assert!(
+                require_native_client_workflow_revision(
+                    &fixture.api,
+                    repository,
+                    &revision,
+                    &base,
+                    Some(&head),
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
+        for status in ["behind", "diverged", "unknown"] {
+            let fixture = Fixture::new(vec![
+                Route::get(&compare_path, serde_json::json!({"status":"behind"})),
+                Route::get(
+                    format!("/repos/{repository}/commits/{revision}"),
+                    valid.clone(),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/compare/{base}...{base}"),
+                    serde_json::json!({"status":status}),
+                ),
+            ]);
+            assert!(
+                require_native_client_workflow_revision(
+                    &fixture.api,
+                    repository,
+                    &revision,
+                    &base,
+                    Some(&head),
+                )
+                .is_err()
+            );
+            fixture.finish();
+        }
     }
 
     #[test]
