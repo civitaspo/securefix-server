@@ -2700,7 +2700,7 @@ mod tests {
 
         let wrong_pin = String::from_utf8(caller.clone())
             .unwrap()
-            .replace("13d31194fd2e82da4c6acfda51ad4a160ac0a711", "main");
+            .replace("2719567ddd2cb9e13294e12cb9537780c6643263", "main");
         let wrong_pin_desired = BTreeMap::from([
             (
                 MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
@@ -2854,7 +2854,7 @@ mod tests {
         assert!(validate_managed_command_callers(&manifest, &callers, &config, None).is_err());
         for target in [MANAGED_CLIENT_APPROVE_TARGET, MANAGED_CLIENT_MERGE_TARGET] {
             for (from, to) in [
-                ("13d31194fd2e82da4c6acfda51ad4a160ac0a711", "main"),
+                ("2719567ddd2cb9e13294e12cb9537780c6643263", "main"),
                 ("comment.user.id == 4525500", "comment.user.id == 1"),
                 (
                     "SECUREFIX_CLIENT_PRIVATE_KEY",
