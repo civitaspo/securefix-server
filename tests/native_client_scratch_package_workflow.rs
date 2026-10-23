@@ -159,9 +159,15 @@ fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() 
             "civitaspo/testing-securefix-server",
             1410312556,
             &format!(".github/workflows/{file}.yml"),
-            "refs/heads/main",
+            if operation == "securefix" {
+                "refs/pull/432/merge"
+            } else {
+                "refs/heads/main"
+            },
             if matches!(operation, "approval" | "merge") {
                 "issue_comment"
+            } else if operation == "securefix" {
+                "pull_request"
             } else {
                 "pull_request_target"
             },
@@ -182,8 +188,24 @@ fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() 
             assert_eq!(prepare["if"], request["if"]);
             assert_eq!(
                 prepare["outputs"]["artifact-name"],
-                "${{ steps.source.outputs.artifact_name }}"
+                "${{ steps.source.outputs.artifact-name }}"
             );
+            assert_eq!(
+                value["on"]["pull_request"]["types"],
+                serde_json::json!(["opened", "synchronize", "reopened"])
+            );
+            assert!(value["on"].get("pull_request_target").is_none());
+            let steps = prepare["steps"].as_array().unwrap();
+            assert_eq!(
+                steps[0]["with"]["ref"],
+                "${{ github.event.pull_request.head.sha }}"
+            );
+            assert_eq!(steps[0]["with"]["persist-credentials"], false);
+            assert_eq!(
+                steps[2]["uses"],
+                "civitaspo/securefix-server/.github/actions/prepare-securefix@9d135f2ac6e0ba7312fcb8c344704abef3954d98"
+            );
+            assert_eq!(steps[2]["with"]["files"], "native-producer-proof.txt");
         }
     }
 }
