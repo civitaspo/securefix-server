@@ -103,7 +103,7 @@ fn server_merge_receiver_uses_a_fixed_package() {
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    assert_fixed_package(steps, "ca149202236c91d1920b244a66d28c11e62039f3");
+    assert_fixed_package(steps, "69dd93cd89596fbaff30b6d03c2c4b9507ce914e");
     for name in [
         "Resolve the authenticated Client request label",
         "Validate the merge request and paired approval without a writer token",
