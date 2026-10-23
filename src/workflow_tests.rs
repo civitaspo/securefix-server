@@ -1147,7 +1147,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "handler");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@2179c5566b1cc84bd7d53082f028f00f5f046b60"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@563d519fff5ad8b06a228c2eae655a15f65eda8b"
                     );
                     assert_eq!(
                         job["with"]["config_path"],
@@ -1192,11 +1192,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = if role == "release" {
-                        "0feb79673cc176f8e0d7edc0cff98176cbb43f75"
-                    } else {
-                        "035a37453cc8b5243abf62ee20d22e284ee681f6"
-                    };
+                    let revision = "563d519fff5ad8b06a228c2eae655a15f65eda8b";
                     assert_eq!(
                         uses,
                         format!(
@@ -1224,7 +1220,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "reconcile");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@a34bf384006e06a3de73bb6f6f4d890ad4abc21b"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@563d519fff5ad8b06a228c2eae655a15f65eda8b"
                     );
                     assert_eq!(
                         job["with"],
