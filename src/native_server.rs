@@ -662,8 +662,6 @@ fn verify_request_with_deployment(
     let manifest: RequestManifest =
         serde_json::from_slice(&manifest_bytes).context("parse native request manifest")?;
     manifest.validate()?;
-    let configured_scratch_package =
-        !scratch && !owner_selected_test_package && config.scratch_package_repository.is_some();
     ensure!(
         match mode {
             securefix::api::NativeScratchMode::PolicyCheck => manifest.operation == "policy_check",
@@ -819,29 +817,23 @@ fn verify_request_with_deployment(
         &signer_sha,
         &manifest_bytes,
     )?;
-    let verified_client_package =
-        if scratch || owner_selected_test_package || configured_scratch_package {
-            let publication = if configured_scratch_package {
-                None
-            } else {
-                let publication_json = std::env::var(
-                    "SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON",
-                )
+    let verified_client_package = if scratch || owner_selected_test_package {
+        let publication_json =
+            std::env::var("SECUREFIX_NATIVE_SCRATCH_PACKAGE_PUBLICATION_JSON")
                 .context("missing owner-selected native scratch package publication record")?;
-                Some(scratch_package_publication(&publication_json, &config)?)
-            };
-            securefix::package::verify_native_client_package_scratch(
-                &server_api,
-                &config,
-                &config.acceptable_clients,
-                &signer_sha,
-                &loader_action,
-                REQUEST_PROTOCOL,
-                publication.as_ref(),
-            )?
-        } else {
-            verify_stable_client_package(&server_api, &config, &signer_sha, &loader_action)?
-        };
+        let publication = scratch_package_publication(&publication_json, &config)?;
+        securefix::package::verify_native_client_package_scratch(
+            &server_api,
+            &config,
+            &config.acceptable_clients,
+            &signer_sha,
+            &loader_action,
+            REQUEST_PROTOCOL,
+            Some(&publication),
+        )?
+    } else {
+        verify_configured_client_package(&server_api, &config, &signer_sha, &loader_action)?
+    };
     ensure!(
         verified_client_package.implementation_sha == signer_sha
             && verified_client_package.loader_action_sha == loader_action.revision()
@@ -1148,12 +1140,23 @@ fn verified_client_default_branch(
     Ok(branch.to_owned())
 }
 
-fn verify_stable_client_package(
+pub(crate) fn verify_configured_client_package(
     server_api: &securefix::api::GitHub,
     config: &securefix::instance_config::InstanceConfig,
     signer_sha: &str,
     loader_action: &securefix::package::PinnedPackageAction,
 ) -> Result<securefix::package::VerifiedNativeClientPackage> {
+    if config.scratch_package_repository.is_some() {
+        return securefix::package::verify_native_client_package_scratch(
+            server_api,
+            config,
+            &config.acceptable_clients,
+            signer_sha,
+            loader_action,
+            REQUEST_PROTOCOL,
+            None,
+        );
+    }
     let repository: Value =
         server_api.get(&format!("/repos/{}", config.acceptable_clients.repository))?;
     let default_branch = verified_client_default_branch(&repository, &config.acceptable_clients)?;
@@ -2424,7 +2427,8 @@ pub(crate) fn verify_native_release_approval(
         &signer_sha,
         &manifest_bytes,
     )?;
-    let package = verify_stable_client_package(server_api, config, &signer_sha, &loader_action)?;
+    let package =
+        verify_configured_client_package(server_api, config, &signer_sha, &loader_action)?;
     ensure!(
         package.implementation_sha == signer_sha
             && package.loader_action_sha == loader_action.revision()
@@ -3152,6 +3156,74 @@ fn read_bounded(path: &std::path::Path, max: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_client_package_keeps_prerelease_acceptance_explicit_without_fallback() {
+        use crate::fixtures::{Fixture, Route};
+        use base64::Engine;
+        let mut config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let signer = "a".repeat(40);
+        let action = securefix::package::PinnedPackageAction::new(
+            config.acceptable_clients.repository.clone(),
+            ".github/actions/load-package".into(),
+            "b".repeat(40),
+        )
+        .unwrap();
+        let repo = config.acceptable_clients.repository.clone();
+        let repository = serde_json::json!({
+            "id": config.acceptable_clients.id,
+            "full_name": repo,
+            "default_branch": "main",
+            "owner": {"id": 44, "login": "example-org"}
+        });
+        let cargo = r#"[package]
+name = "securefix"
+version = "1.4.0-pre.1"
+"#;
+        let stable = Fixture::new(vec![
+            Route::get(format!("/repos/{repo}"), repository.clone()),
+            Route::get(format!("/repos/{repo}"), repository),
+            Route::get(
+                format!("/repos/{repo}/contents/Cargo.toml?ref={signer}"),
+                serde_json::json!({
+                    "path": "Cargo.toml", "type": "file", "size": cargo.len(), "encoding": "base64",
+                    "content": base64::engine::general_purpose::STANDARD.encode(cargo)
+                }),
+            ),
+        ]);
+        let error =
+            verify_configured_client_package(&stable.api, &config, &signer, &action).unwrap_err();
+        assert!(
+            error.to_string().contains("canonical SemVer allowed"),
+            "{error:#}"
+        );
+        stable.finish();
+        config.scratch_package_repository = Some(securefix::config::Repository {
+            repository: "example-org/scratch".into(),
+            id: 888,
+            default_branch: "main".into(),
+        });
+        let scratch = Fixture::new(vec![Route::get(
+            format!(
+                "/repos/{repo}/contents/.github/actions/load-package/package.json?ref={}",
+                "b".repeat(40)
+            ),
+            serde_json::json!({"path": ".github/actions/load-package/package.json", "type": "file",
+                "size": 2, "encoding": "base64", "content": "e30="}),
+        )]);
+        let error =
+            verify_configured_client_package(&scratch.api, &config, &signer, &action).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("pinned Client package action manifest is invalid"),
+            "{error:#}"
+        );
+        scratch.finish();
+    }
 
     #[test]
     fn native_label_event_locator_binds_operation_repository_and_run() {

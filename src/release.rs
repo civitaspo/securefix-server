@@ -2366,36 +2366,11 @@ fn verify_accepted_client_package(
         &workflow,
         &instance.acceptable_clients.repository,
     )?;
-    if instance.scratch_package_repository.is_some() {
-        return securefix::package::verify_native_client_package_scratch(
-            server_api,
-            instance,
-            &instance.acceptable_clients,
-            signer_sha,
-            &loader_action,
-            "securefix-native-request/v1",
-            None,
-        );
-    }
-    let repository: Value = server_api.get(&format!(
-        "/repos/{}",
-        instance.acceptable_clients.repository
-    ))?;
-    ensure!(
-        repository["id"].as_u64() == Some(instance.acceptable_clients.id)
-            && repository["full_name"] == instance.acceptable_clients.repository,
-        "configured Client distributor repository identity is invalid"
-    );
-    let default_branch = repository["default_branch"]
-        .as_str()
-        .context("configured Client distributor has no default branch")?;
-    securefix::package::verify_native_client_package(
+    crate::native_server::verify_configured_client_package(
         server_api,
-        &instance.acceptable_clients,
+        instance,
         signer_sha,
         &loader_action,
-        "securefix-native-request/v1",
-        default_branch,
     )
 }
 
