@@ -5169,7 +5169,7 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
             .unwrap();
         assert_eq!(fixed_ref.len(), 40);
         assert!(fixed_ref.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(fixed_ref, "e392b49ede4052319bd3ca4f859b528a51c07177");
+        assert_eq!(fixed_ref, "c90a864201695ced72101e81014501a2d8f96641");
         assert_eq!(
             loader["with"],
             serde_json::json!({"token":"${{ github.token }}"})

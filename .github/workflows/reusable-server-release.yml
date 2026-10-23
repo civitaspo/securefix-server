@@ -37,7 +37,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
+        uses: civitaspo/securefix-server/.github/actions/load-package@c90a864201695ced72101e81014501a2d8f96641 # v0.2.45-pre.60
         with:
           token: ${{ github.token }}
       - name: Parse and authenticate the release request locator
@@ -67,7 +67,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
+        uses: civitaspo/securefix-server/.github/actions/load-package@c90a864201695ced72101e81014501a2d8f96641 # v0.2.45-pre.60
         with:
           token: ${{ github.token }}
       - name: Mint a Client token for read-only draft inspection
@@ -117,7 +117,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
+        uses: civitaspo/securefix-server/.github/actions/load-package@c90a864201695ced72101e81014501a2d8f96641 # v0.2.45-pre.60
         with:
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -164,7 +164,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
+        uses: civitaspo/securefix-server/.github/actions/load-package@c90a864201695ced72101e81014501a2d8f96641 # v0.2.45-pre.60
         with:
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -219,7 +219,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
+        uses: civitaspo/securefix-server/.github/actions/load-package@c90a864201695ced72101e81014501a2d8f96641 # v0.2.45-pre.60
         with:
           token: ${{ github.token }}
       - name: Remove only the authenticated release request label
