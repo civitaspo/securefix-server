@@ -13,7 +13,7 @@ use securefix::{
     workflow,
 };
 
-const INVALIDATING_EVENTS: &[&str] = &[
+pub(crate) const INVALIDATING_EVENTS: &[&str] = &[
     "head_ref_force_pushed",
     "head_ref_deleted",
     "base_ref_force_pushed",
@@ -366,7 +366,7 @@ pub(crate) fn validate_state(
     Ok(())
 }
 
-fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool {
+pub(crate) fn has_invalidating_event(events: &[Value], accepted_at: DateTime<Utc>) -> bool {
     let cutoff = accepted_at.timestamp();
     events.iter().any(|event| {
         event["created_at"]
@@ -1235,7 +1235,6 @@ mod tests {
                 status: reqwest::StatusCode::from_u16(status).unwrap(),
                 method: reqwest::Method::PUT,
                 path: "/merge".into(),
-                message: None,
             });
             assert!(retryable_merge_error(&error));
         }
@@ -1243,7 +1242,6 @@ mod tests {
             status: reqwest::StatusCode::CONFLICT,
             method: reqwest::Method::PUT,
             path: "/merge".into(),
-            message: None,
         });
         assert!(!retryable_merge_error(&conflict));
     }

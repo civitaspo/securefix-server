@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Subcommand;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -17,10 +18,28 @@ use std::{
 const RULESET_DIR: &str = "repo-settings/rulesets";
 const MANAGED_FILES_MANIFEST: &str = "repo-settings/managed-files.json";
 const MANAGED_FILES_LIMIT: u64 = 1024 * 1024;
-const MANAGED_TARGETS: &[&str] = &[
-    ".github/workflows/policy-check.yml",
-    "securefix-server.toml",
-];
+const MANAGED_INSTANCE_CONFIG_TARGET: &str = "securefix-server.toml";
+const MANAGED_ACTIONS_LOCK_TARGET: &str = ".github/workflows/actions.lock";
+const MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH: &str =
+    "repo-settings/native-role-events-test-instance.toml";
+const MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH: &str = MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH;
+const MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH: &str =
+    "repo-settings/native-securefix-write-test-instance.toml";
+const MANAGED_POLICY_CHECK_SIGNER_PATH: &str = ".github/workflows/reusable-client-request.yml";
+const MANAGED_POLICY_CHECK_WORKFLOW_PATH: &str = ".github/workflows/reusable-policy-check.yml";
+const MANAGED_CLIENT_RELEASE_PR_TARGET: &str = ".github/workflows/release-pr.yml";
+const MANAGED_CLIENT_RELEASE_SYNC_TARGET: &str = ".github/workflows/release-pr-sync.yml";
+const MANAGED_CLIENT_RELEASE_TAG_TARGET: &str = ".github/workflows/release-tag.yml";
+const MANAGED_CLIENT_POLICY_CHECK_TARGET: &str = ".github/workflows/policy-check.yml";
+const MANAGED_CLIENT_APPROVE_TARGET: &str = ".github/workflows/approve-request.yml";
+const MANAGED_CLIENT_MERGE_TARGET: &str = ".github/workflows/merge-request.yml";
+const MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET: &str = ".github/workflows/securefix-request.yml";
+const MANAGED_CLIENT_SECUREFIX_SIGNER_PATH: &str =
+    ".github/workflows/reusable-client-request-scratch.yml";
+const OBSERVED_LEGACY_POLICY_CHECK_SHA256: &str =
+    "bc91f9c8993732f17a32ba17e95cdc6bbeba553ecf7fe3eeb7b467bf91086050";
+const OBSERVED_PROBE_POLICY_CHECK_SHA256: &str =
+    "deab228834396ec569705898264f5d10e0fe3e7fd11ebc3432e01d9c226a6faf";
 const CLIENT_WORKFLOWS: &[(&str, &str)] = &[
     (
         ".github/workflows/merge-request.yml",
@@ -44,19 +63,137 @@ pub enum Command {
     },
     ActivationPreflight,
     ControlledMerges,
+    InstancePrepare {
+        #[arg(long)]
+        config_path: String,
+    },
+    InstanceReconcile {
+        #[arg(long)]
+        config_path: String,
+        #[arg(long)]
+        repository: String,
+    },
+    ManagedPrepare {
+        #[arg(long)]
+        config_path: String,
+        #[arg(long)]
+        manifest_path: String,
+    },
+    ManagedReconcile {
+        #[arg(long)]
+        config_path: String,
+        #[arg(long)]
+        manifest_path: String,
+    },
     ManagedRender {
         #[arg(long)]
         output_dir: PathBuf,
+    },
+    ManagedReconcileScratch {
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        client_repository: Option<String>,
+        #[arg(long)]
+        client_implementation_sha: Option<String>,
+        #[arg(long)]
+        client_version: Option<String>,
+    },
+    ManagedValidateScratch {
+        #[arg(long)]
+        source_sha: String,
+        #[arg(long)]
+        client_repository: Option<String>,
+        #[arg(long)]
+        client_implementation_sha: Option<String>,
+        #[arg(long)]
+        client_version: Option<String>,
     },
 }
 
 pub fn run(command: Command) -> Result<()> {
     match command {
+        Command::InstancePrepare { config_path } => {
+            let target = load_instance_settings(&config_path)?;
+            let repositories: Vec<_> = target
+                .0
+                .config
+                .repositories
+                .iter()
+                .filter(|entry| entry.capabilities.contains(&Capability::Settings))
+                .map(|entry| entry.repository.clone())
+                .collect();
+            ensure!(
+                !repositories.is_empty(),
+                "instance has no settings repositories"
+            );
+            crate::output("repositories", serde_json::to_string(&repositories)?)
+        }
+        Command::InstanceReconcile {
+            config_path,
+            repository,
+        } => reconcile_instance_settings(&config_path, &repository),
         Command::Prepare => prepare(),
         Command::Reconcile { repository } => reconcile(&repository),
         Command::ActivationPreflight => activation_preflight(),
         Command::ControlledMerges => controlled_merges(),
         Command::ManagedRender { output_dir } => managed_render(&output_dir),
+        Command::ManagedPrepare {
+            config_path,
+            manifest_path,
+        } => {
+            let prepared = load_managed_deployment(&config_path, &manifest_path)?;
+            let (owner, name) = prepared
+                .manifest
+                .repository
+                .split_once('/')
+                .context("managed repository has no owner")?;
+            crate::output("repository", &prepared.manifest.repository)?;
+            crate::output("repo_owner", owner)?;
+            crate::output("repo_name", name)?;
+            crate::output(
+                "server_app_id",
+                prepared.instance.config.apps.server_id.to_string(),
+            )
+        }
+        Command::ManagedReconcile {
+            config_path,
+            manifest_path,
+        } => managed_reconcile(&config_path, &manifest_path),
+        Command::ManagedReconcileScratch {
+            source_sha,
+            client_repository,
+            client_implementation_sha,
+            client_version,
+        } => {
+            let client_pin =
+                client_pin(client_repository, client_implementation_sha, client_version)?;
+            managed_reconcile_scratch(&source_sha, client_pin.as_ref())
+        }
+        Command::ManagedValidateScratch {
+            source_sha,
+            client_repository,
+            client_implementation_sha,
+            client_version,
+        } => {
+            let client_pin =
+                client_pin(client_repository, client_implementation_sha, client_version)?;
+            managed_validate_scratch(&source_sha, client_pin.as_ref())
+        }
+    }
+}
+
+fn client_pin(
+    repository: Option<String>,
+    implementation_sha: Option<String>,
+    version: Option<String>,
+) -> Result<Option<crate::distribution::caller::ClientImplementationPin>> {
+    match (repository, implementation_sha, version) {
+        (None, None, None) => Ok(None),
+        (Some(repository), Some(sha), Some(version)) => Ok(Some(
+            crate::distribution::caller::ClientImplementationPin::new(&repository, &sha, &version)?,
+        )),
+        _ => bail!("Client repository, implementation SHA, and version must be supplied together"),
     }
 }
 
@@ -67,9 +204,11 @@ struct ManagedFilesManifest {
     repository_id: u64,
     default_branch: String,
     files: Vec<ManagedFileEntry>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagedFileEntry {
     source: String,
@@ -86,41 +225,104 @@ fn managed_desired_files() -> Result<(ManagedFilesManifest, BTreeMap<String, Vec
             read_bounded_regular_file(&file.source)?,
         );
     }
-    validate_managed_instance_config(&manifest, &desired)?;
+    let instance_config = validate_managed_instance_config(&manifest, &desired)?;
+    validate_managed_targets(&manifest.files, &instance_config)?;
+    validate_managed_removals(&manifest.remove, &instance_config)?;
+    let policy_check_instance_config = if expected_managed_targets(&instance_config)
+        .contains(MANAGED_CLIENT_POLICY_CHECK_TARGET)
+    {
+        Some(read_bounded_regular_file(
+            MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH,
+        )?)
+    } else {
+        None
+    };
+    validate_managed_policy_check_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        policy_check_instance_config.as_deref(),
+    )?;
+    validate_managed_command_callers(
+        &manifest,
+        &desired,
+        &instance_config,
+        policy_check_instance_config.as_deref(),
+    )?;
+    let securefix_config = if expected_managed_targets(&instance_config)
+        .contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
+    {
+        Some(read_bounded_regular_file(
+            MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH,
+        )?)
+    } else {
+        None
+    };
+    validate_managed_securefix_request_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        securefix_config.as_deref(),
+    )?;
     Ok((manifest, desired))
 }
 
-fn parse_managed_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
+fn parse_managed_file_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
     ensure!(
         bytes.len() <= 32 * 1024,
         "managed-files manifest exceeds size limit"
     );
     let manifest: ManagedFilesManifest = serde_json::from_slice(bytes)?;
+    validate_repository(&manifest.repository)?;
+    config::validate_branch(&manifest.default_branch)?;
+    ensure!(
+        manifest.repository_id > 0 && !manifest.files.is_empty(),
+        "managed-file identity or files missing"
+    );
+    let mut targets = BTreeSet::new();
+    for file in &manifest.files {
+        ensure!(
+            file.source.starts_with("repo-settings/managed-files/")
+                && safe_relative_path(&file.source),
+            "managed-files manifest contains an unsafe source"
+        );
+        securefix::api::validate_native_managed_file_path(&file.target)?;
+        ensure!(
+            targets.insert(&file.target),
+            "duplicate managed-file target"
+        );
+    }
+    for path in &manifest.remove {
+        securefix::api::validate_native_managed_file_path(path)?;
+        ensure!(
+            targets.insert(path),
+            "duplicate or active managed-file removal"
+        );
+    }
+    ensure!(
+        targets.len() <= 1000,
+        "managed-file target count exceeds bound"
+    );
+    Ok(manifest)
+}
+
+fn parse_managed_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
+    let manifest = parse_managed_file_manifest(bytes)?;
     let scratch = &config::trusted()?.deployment.integration;
     ensure!(
         manifest.repository == scratch.repository && manifest.repository_id == scratch.id,
         "managed-files target differs from the configured scratch repository"
     );
-    config::validate_branch(&manifest.default_branch)?;
-    validate_managed_targets(&manifest.files)?;
-    for file in &manifest.files {
-        ensure!(
-            file.source.starts_with("repo-settings/managed-files/")
-                && safe_relative_path(&file.source)
-                && safe_relative_path(&file.target),
-            "managed-files manifest contains an unsafe source or target"
-        );
-    }
     Ok(manifest)
 }
 
 fn validate_managed_instance_config(
     manifest: &ManagedFilesManifest,
     desired: &BTreeMap<String, Vec<u8>>,
-) -> Result<()> {
+) -> Result<securefix::instance_config::InstanceConfig> {
     let parsed_config = securefix::instance_config::InstanceConfig::parse(
         desired
-            .get("securefix-server.toml")
+            .get(MANAGED_INSTANCE_CONFIG_TARGET)
             .context("managed instance config missing")?,
     )?;
     ensure!(
@@ -129,22 +331,391 @@ fn validate_managed_instance_config(
             && parsed_config.instance.default_branch == manifest.default_branch,
         "managed instance config does not match its declared scratch target"
     );
-    Ok(())
+    Ok(parsed_config)
 }
 
-fn validate_managed_targets(files: &[ManagedFileEntry]) -> Result<()> {
+fn validate_managed_targets(
+    files: &[ManagedFileEntry],
+    instance_config: &securefix::instance_config::InstanceConfig,
+) -> Result<()> {
     let targets = files
         .iter()
         .map(|file| file.target.as_str())
         .collect::<BTreeSet<_>>();
+    let expected = expected_managed_targets(instance_config);
     ensure!(
         files.len() == targets.len()
-            && targets.len() == MANAGED_TARGETS.len()
-            && MANAGED_TARGETS
+            && targets.len() == expected.len()
+            && expected
                 .iter()
-                .all(|target| targets.contains(target)),
-        "managed-files manifest has duplicate or unexpected targets"
+                .all(|target| targets.contains(target.as_str())),
+        "managed-files manifest must contain exactly the instance config, configured workflow roles, and capability-scoped Client callers"
     );
+    for (target, source) in [
+        (
+            MANAGED_CLIENT_APPROVE_TARGET,
+            "repo-settings/managed-files/approve-request.yml",
+        ),
+        (
+            MANAGED_CLIENT_MERGE_TARGET,
+            "repo-settings/managed-files/merge-request.yml",
+        ),
+    ] {
+        if expected.contains(target) {
+            ensure!(
+                files
+                    .iter()
+                    .any(|file| file.target == target && file.source == source),
+                "managed command caller must use its canonical desired-state source"
+            );
+            ensure!(
+                !instance_config
+                    .workflow_roles
+                    .values()
+                    .any(|path| path == target),
+                "managed command caller collides with a Server role"
+            );
+        }
+    }
+    for (target, source) in [
+        (
+            MANAGED_CLIENT_RELEASE_TAG_TARGET,
+            "repo-settings/managed-files/release-tag.yml",
+        ),
+        (
+            MANAGED_CLIENT_RELEASE_PR_TARGET,
+            "repo-settings/managed-files/release-pr.yml",
+        ),
+        (
+            MANAGED_CLIENT_RELEASE_SYNC_TARGET,
+            "repo-settings/managed-files/release-pr-sync.yml",
+        ),
+    ] {
+        if expected.contains(target) {
+            ensure!(
+                files
+                    .iter()
+                    .any(|file| file.target == target && file.source == source),
+                "managed Client release caller must use its canonical desired-state source"
+            );
+            ensure!(
+                !instance_config
+                    .workflow_roles
+                    .values()
+                    .any(|role| role == target),
+                "managed Client release caller collides with a Server role"
+            );
+        }
+    }
+    if expected.contains(MANAGED_CLIENT_POLICY_CHECK_TARGET) {
+        ensure!(
+            files.iter().any(|file| {
+                file.target == MANAGED_CLIENT_POLICY_CHECK_TARGET
+                    && file.source == "repo-settings/managed-files/policy-check.yml"
+            }),
+            "managed Client policy-check caller must use its canonical desired-state source"
+        );
+        ensure!(
+            !instance_config
+                .workflow_roles
+                .values()
+                .any(|path| path == MANAGED_CLIENT_POLICY_CHECK_TARGET),
+            "managed Client policy-check caller collides with an instance workflow role"
+        );
+    }
+    if expected.contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET) {
+        ensure!(
+            files.iter().any(|file| {
+                file.target == MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET
+                    && file.source == "repo-settings/managed-files/securefix-request.yml"
+            }),
+            "managed Client Securefix request must use its canonical desired-state source"
+        );
+        ensure!(
+            !instance_config
+                .workflow_roles
+                .values()
+                .any(|path| path == MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET),
+            "managed Client Securefix request caller collides with an instance workflow role"
+        );
+    }
+    Ok(())
+}
+
+fn expected_managed_targets(
+    instance_config: &securefix::instance_config::InstanceConfig,
+) -> BTreeSet<String> {
+    use securefix::policy::Capability;
+
+    let mut expected = [MANAGED_INSTANCE_CONFIG_TARGET, MANAGED_ACTIONS_LOCK_TARGET]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(instance_config.workflow_roles.values().cloned())
+        .collect::<BTreeSet<_>>();
+    if instance_config
+        .repositories
+        .iter()
+        .any(|repository| repository.capabilities.contains(&Capability::Approve))
+    {
+        expected.insert(MANAGED_CLIENT_APPROVE_TARGET.to_owned());
+    }
+    if instance_config
+        .repositories
+        .iter()
+        .any(|repository| repository.capabilities.contains(&Capability::Release))
+    {
+        expected.extend(
+            [
+                MANAGED_CLIENT_RELEASE_TAG_TARGET,
+                MANAGED_CLIENT_RELEASE_PR_TARGET,
+                MANAGED_CLIENT_RELEASE_SYNC_TARGET,
+            ]
+            .map(str::to_owned),
+        );
+    }
+    if instance_config
+        .repositories
+        .iter()
+        .any(|repository| repository.capabilities.contains(&Capability::Merge))
+    {
+        expected.insert(MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned());
+        expected.insert(MANAGED_CLIENT_MERGE_TARGET.to_owned());
+    }
+    if instance_config
+        .repositories
+        .iter()
+        .any(|repository| repository.capabilities.contains(&Capability::Securefix))
+    {
+        expected.insert(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned());
+    }
+    expected
+}
+
+fn validate_managed_removals(
+    removals: &[String],
+    instance_config: &securefix::instance_config::InstanceConfig,
+) -> Result<()> {
+    let managed_targets = expected_managed_targets(instance_config);
+    let mut seen = BTreeSet::new();
+    for target in removals {
+        let Some(name) = target.strip_prefix(".github/workflows/") else {
+            bail!("managed-file removal is not a workflow path: {target}");
+        };
+        ensure!(
+            safe_relative_path(target) && !name.contains('/') && name.ends_with(".yml"),
+            "managed-file removal is not a canonical workflow file: {target}"
+        );
+        ensure!(
+            !managed_targets
+                .iter()
+                .any(|path| path.eq_ignore_ascii_case(target)),
+            "managed-file removal targets a currently managed file: {target}"
+        );
+        ensure!(
+            seen.insert(target.to_ascii_lowercase()),
+            "managed-files manifest contains duplicate removals"
+        );
+    }
+    Ok(())
+}
+
+fn validate_managed_pr_files(files: &[Value], expected_changed: &BTreeSet<String>) -> Result<()> {
+    let mut changed = BTreeSet::new();
+    for file in files {
+        let filename = file["filename"]
+            .as_str()
+            .context("managed-files PR response has no filename")?;
+        ensure!(
+            safe_relative_path(filename),
+            "managed-files PR response contains an unsafe filename"
+        );
+        let status = file["status"]
+            .as_str()
+            .context("managed-files PR response has no status")?;
+        ensure!(
+            changed.insert(filename.to_owned()),
+            "managed-files PR response contains duplicate paths"
+        );
+        match status {
+            "added" | "modified" | "removed" => {
+                ensure!(
+                    file.get("previous_filename").is_none(),
+                    "non-renamed managed file has a previous filename"
+                );
+            }
+            "renamed" => {
+                let previous_filename = file["previous_filename"]
+                    .as_str()
+                    .context("renamed managed file has no previous filename")?;
+                ensure!(
+                    safe_relative_path(previous_filename)
+                        && previous_filename != filename
+                        && changed.insert(previous_filename.to_owned()),
+                    "managed-files PR response contains an invalid or duplicate rename source"
+                );
+            }
+            _ => bail!("managed-files PR response has an unsupported file status"),
+        }
+    }
+    ensure!(
+        &changed == expected_changed,
+        "managed-files PR contains files outside the exact desired-state set"
+    );
+    Ok(())
+}
+
+fn workflow_role_slug(role: securefix::instance_config::WorkflowRole) -> &'static str {
+    use securefix::instance_config::WorkflowRole;
+    match role {
+        WorkflowRole::Approve => "approve",
+        WorkflowRole::Merge => "merge",
+        WorkflowRole::PolicyCheck => "policy-check",
+        WorkflowRole::Release => "release",
+        WorkflowRole::Securefix => "securefix",
+        WorkflowRole::Settings => "settings",
+    }
+}
+
+fn workflow_role_name(role: securefix::instance_config::WorkflowRole) -> &'static str {
+    use securefix::instance_config::WorkflowRole;
+    match role {
+        WorkflowRole::Approve => "Approve",
+        WorkflowRole::Merge => "Merge",
+        WorkflowRole::PolicyCheck => "Policy Check",
+        WorkflowRole::Release => "Release",
+        WorkflowRole::Securefix => "Securefix",
+        WorkflowRole::Settings => "Repository settings",
+    }
+}
+
+fn validate_rendered_managed_role_workflow(
+    role: securefix::instance_config::WorkflowRole,
+    expected_uses: &str,
+    instance_config: &securefix::instance_config::InstanceConfig,
+    bytes: &[u8],
+) -> Result<()> {
+    let role_slug = workflow_role_slug(role);
+    let release_prefix = if role == securefix::instance_config::WorkflowRole::Release {
+        instance_config.release_request_label_prefix.as_str()
+    } else {
+        ""
+    };
+    let mut secrets = json!({
+        "SERVER_PRIVATE_KEY": "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+    });
+    if role == securefix::instance_config::WorkflowRole::Approve {
+        secrets["APPROVAL_TOKEN"] = json!("${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}");
+    }
+    let mut expected: serde_yaml::Value = serde_yaml::to_value(json!({
+        "name": format!("Securefix server {}", workflow_role_name(role)),
+        "on": {"label": {"types": ["created"]}},
+        "permissions": {},
+        "jobs": {"handler": {
+            "if": format!("startsWith(github.event.label.name, '{release_prefix}securefix-native-{role_slug}-')"),
+            "permissions": {
+                "actions": "read",
+                "attestations": "read",
+                "checks": "read",
+                "contents": "read",
+                "issues": "read",
+                "pull-requests": "read",
+                "statuses": "read"
+            },
+            "uses": expected_uses,
+            "with": {"config_path": "securefix-server.toml"},
+            "secrets": secrets
+        }}
+    }))?;
+    if matches!(
+        role,
+        securefix::instance_config::WorkflowRole::Approve
+            | securefix::instance_config::WorkflowRole::Merge
+            | securefix::instance_config::WorkflowRole::Securefix
+    ) {
+        expected["jobs"]["handler"]["concurrency"] = serde_yaml::to_value(json!({
+            "group": "securefix-control", "cancel-in-progress": false, "queue": "max"
+        }))?;
+    }
+    if role == securefix::instance_config::WorkflowRole::Release {
+        expected["jobs"]["handler"]["if"] = serde_yaml::to_value(format!(
+            "startsWith(github.event.label.name, '{release_prefix}securefix-native-release-') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')"
+        ))?;
+        expected["jobs"]["handler"]["permissions"]["issues"] = serde_yaml::to_value("write")?;
+    }
+    let actual: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
+    ensure!(
+        actual == expected,
+        "managed role workflow has an unexpected trigger, permission, input, secret, or job: {}",
+        workflow_role_slug(role)
+    );
+    Ok(())
+}
+
+fn render_managed_role_workflows(
+    desired: &mut BTreeMap<String, Vec<u8>>,
+    instance_config: &securefix::instance_config::InstanceConfig,
+    server_repository: &str,
+    source_sha: &str,
+    runtime_version: &str,
+) -> Result<()> {
+    crate::policy::validate_sha(source_sha)?;
+    validate_repository(server_repository)?;
+    for (role, path) in &instance_config.workflow_roles {
+        let bytes = desired
+            .get_mut(path)
+            .with_context(|| format!("managed role workflow is missing: {path}"))?;
+        let template = std::str::from_utf8(bytes)
+            .with_context(|| format!("managed role workflow is not UTF-8: {path}"))?;
+        for placeholder in [
+            "@SERVER_REPOSITORY@",
+            "@SECUREFIX_RUNTIME_SHA@",
+            "@RUNTIME_VERSION@",
+        ] {
+            ensure!(
+                template.matches(placeholder).count() == 1,
+                "managed role workflow must contain exactly one {placeholder}: {path}"
+            );
+        }
+        let release_prefix_placeholder = "@RELEASE_REQUEST_LABEL_PREFIX@";
+        if *role == securefix::instance_config::WorkflowRole::Release {
+            ensure!(
+                template.matches(release_prefix_placeholder).count() == 1,
+                "managed release workflow must contain exactly one {release_prefix_placeholder}: {path}"
+            );
+        } else {
+            ensure!(
+                !template.contains(release_prefix_placeholder),
+                "non-release managed workflow contains {release_prefix_placeholder}: {path}"
+            );
+        }
+        let role_slug = workflow_role_slug(*role);
+        let expected_uses = format!(
+            "{server_repository}/.github/workflows/reusable-server-{role_slug}.yml@{source_sha}"
+        );
+        let rendered = template
+            .replace("@SERVER_REPOSITORY@", server_repository)
+            .replace("@SECUREFIX_RUNTIME_SHA@", source_sha)
+            .replace("@RUNTIME_VERSION@", runtime_version)
+            .replace(
+                release_prefix_placeholder,
+                &instance_config.release_request_label_prefix,
+            );
+        ensure!(
+            !rendered.contains("@SERVER_REPOSITORY@")
+                && !rendered.contains("@SECUREFIX_RUNTIME_SHA@")
+                && !rendered.contains("@RUNTIME_VERSION@")
+                && !rendered.contains(release_prefix_placeholder),
+            "managed role workflow contains an unresolved placeholder: {path}"
+        );
+        validate_rendered_managed_role_workflow(
+            *role,
+            &expected_uses,
+            instance_config,
+            rendered.as_bytes(),
+        )
+        .with_context(|| format!("invalid managed role workflow: {path}"))?;
+        *bytes = rendered.into_bytes();
+    }
     Ok(())
 }
 
@@ -229,8 +800,363 @@ fn workflow_uses(bytes: &[u8]) -> Result<BTreeSet<String>> {
     Ok(uses)
 }
 
+fn validate_managed_policy_check_caller(
+    manifest: &ManagedFilesManifest,
+    desired: &BTreeMap<String, Vec<u8>>,
+    instance_config: &securefix::instance_config::InstanceConfig,
+    policy_check_instance_config_bytes: Option<&[u8]>,
+) -> Result<()> {
+    if !expected_managed_targets(instance_config).contains(MANAGED_CLIENT_POLICY_CHECK_TARGET) {
+        return Ok(());
+    }
+
+    let policy_check_instance_config = securefix::instance_config::InstanceConfig::parse(
+        policy_check_instance_config_bytes.context(
+            "managed Client policy-check instance config is missing from candidate source",
+        )?,
+    )?;
+    let server = &config::trusted()?.deployment.server;
+    ensure!(
+        policy_check_instance_config.instance.repository == server.repository
+            && policy_check_instance_config.instance.id == server.id
+            && policy_check_instance_config.instance.default_branch == server.default_branch,
+        "managed Client policy-check instance config does not match the protected Server identity"
+    );
+    ensure!(
+        policy_check_instance_config.acceptable_clients.repository
+            == instance_config.acceptable_clients.repository
+            && policy_check_instance_config.acceptable_clients.id
+                == instance_config.acceptable_clients.id
+            && policy_check_instance_config
+                .acceptable_clients
+                .version
+                .to_string()
+                == instance_config.acceptable_clients.version.to_string()
+            && policy_check_instance_config.identities.owner.id
+                == instance_config.identities.owner.id
+            && policy_check_instance_config.identities.owner.login
+                == instance_config.identities.owner.login,
+        "managed Client policy-check test config disagrees with the managed scratch instance"
+    );
+    ensure!(
+        policy_check_instance_config
+            .acceptable_clients
+            .producer_workflow
+            == MANAGED_POLICY_CHECK_SIGNER_PATH,
+        "managed Client policy-check test config must select the configured reusable Client signer"
+    );
+    ensure!(
+        policy_check_instance_config
+            .repositories
+            .iter()
+            .any(|repository| {
+                repository.repository == manifest.repository
+                    && repository.id == manifest.repository_id
+                    && repository.capabilities.contains(&Capability::Merge)
+            }),
+        "managed Client policy-check instance config does not authorize the scratch merge target"
+    );
+
+    let bytes = desired
+        .get(MANAGED_CLIENT_POLICY_CHECK_TARGET)
+        .context("managed Client policy-check caller is missing")?;
+    let mut workflow: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
+    // serde_yaml follows YAML 1.1 and parses GitHub Actions' `on` key as true.
+    if let Some(mapping) = workflow.as_mapping_mut()
+        && let Some(on) = mapping.remove(serde_yaml::Value::Bool(true))
+    {
+        mapping.insert(serde_yaml::Value::String("on".into()), on);
+    }
+    let workflow = serde_json::to_value(workflow)?;
+    let workflow_keys = workflow
+        .as_object()
+        .context("managed Client policy-check workflow is not a mapping")?;
+    ensure!(
+        workflow_keys.len() == 4
+            && workflow_keys.contains_key("name")
+            && workflow_keys.contains_key("on")
+            && workflow_keys.contains_key("permissions")
+            && workflow_keys.contains_key("jobs")
+            && workflow["name"].as_str().is_some(),
+        "managed Client policy-check workflow has unexpected top-level fields"
+    );
+    let triggers = workflow["on"]
+        .as_object()
+        .context("managed Client policy-check workflow has no trigger mapping")?;
+    ensure!(
+        triggers.len() == 1
+            && workflow["on"]["pull_request_target"]["types"]
+                == json!(["opened", "synchronize", "reopened", "ready_for_review"]),
+        "managed Client policy-check workflow must use only the canonical pull_request_target event"
+    );
+    ensure!(
+        workflow["permissions"] == json!({}),
+        "managed Client policy-check workflow must default to no permissions"
+    );
+
+    let jobs = workflow["jobs"]
+        .as_object()
+        .context("managed Client policy-check workflow has no jobs mapping")?;
+    ensure!(
+        jobs.len() == 1,
+        "managed Client policy-check workflow has extra jobs"
+    );
+    let job = &workflow["jobs"]["check"];
+    let job_fields = job
+        .as_object()
+        .context("managed Client policy-check producer is not a mapping")?;
+    ensure!(
+        job_fields.len() == 5
+            && job_fields.contains_key("if")
+            && job_fields.contains_key("uses")
+            && job_fields.contains_key("with")
+            && job_fields.contains_key("permissions")
+            && job_fields.contains_key("secrets"),
+        "managed Client policy-check producer has unexpected fields"
+    );
+
+    let owner_id = policy_check_instance_config.identities.owner.id;
+    let expected_condition = format!(
+        "github.repository == '{}' && github.event.pull_request.base.repo.id == {} && (github.event.pull_request.user.id == {} || github.event.pull_request.user.id == {}) && github.run_attempt == 1",
+        manifest.repository,
+        manifest.repository_id,
+        owner_id,
+        policy_check_instance_config.identities.server_bot.id
+    );
+    ensure!(
+        job["if"].as_str() == Some(expected_condition.as_str()),
+        "managed Client policy-check producer must be restricted to configured owner or Server PRs in the scratch repository"
+    );
+    let reusable_prefix = format!(
+        "{}/{}@",
+        policy_check_instance_config.acceptable_clients.repository,
+        MANAGED_POLICY_CHECK_WORKFLOW_PATH
+    );
+    let uses = job["uses"]
+        .as_str()
+        .context("managed Client policy-check producer has no reusable workflow pin")?;
+    let reusable_sha = uses
+        .strip_prefix(&reusable_prefix)
+        .context("managed Client policy-check producer uses an unexpected reusable workflow")?;
+    crate::policy::validate_sha(reusable_sha)?;
+
+    let inputs = job["with"]
+        .as_object()
+        .context("managed Client policy-check producer has no input mapping")?;
+    ensure!(
+        inputs.len() == 2
+            && inputs["server_repository"] == policy_check_instance_config.instance.repository
+            && inputs["instance_config_path"] == MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH,
+        "managed Client policy-check producer has unexpected request inputs"
+    );
+    ensure!(
+        job["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"]
+            == "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}",
+        "managed Client policy-check caller must forward only the configured Client App key"
+    );
+    ensure!(
+        job["permissions"]
+            == json!({
+                "actions": "read",
+                "attestations": "write",
+                "contents": "read",
+                "id-token": "write",
+                "issues": "read",
+                "pull-requests": "read"
+            }),
+        "managed Client policy-check producer permissions changed"
+    );
+    Ok(())
+}
+
+fn validate_managed_command_callers(
+    manifest: &ManagedFilesManifest,
+    desired: &BTreeMap<String, Vec<u8>>,
+    instance_config: &securefix::instance_config::InstanceConfig,
+    config_bytes: Option<&[u8]>,
+) -> Result<()> {
+    let targets = expected_managed_targets(instance_config);
+    for (role, operation, target) in [
+        ("approve", "approval", MANAGED_CLIENT_APPROVE_TARGET),
+        ("merge", "merge", MANAGED_CLIENT_MERGE_TARGET),
+    ] {
+        if !targets.contains(target) {
+            continue;
+        }
+        let config = securefix::instance_config::InstanceConfig::parse(
+            config_bytes.context("managed command caller Server config is missing")?,
+        )?;
+        ensure!(
+            config.allows_scratch_request_caller(
+                &manifest.repository,
+                manifest.repository_id,
+                target,
+                "refs/heads/main",
+                "issue_comment",
+                operation,
+            ),
+            "managed command caller is not authorized by its exact scratch scope"
+        );
+        let workflow: serde_yaml::Value = serde_yaml::from_slice(
+            desired
+                .get(target)
+                .context("managed command caller is missing")?,
+        )?;
+        let uses = workflow["jobs"]["request"]["uses"]
+            .as_str()
+            .context("managed command caller has no implementation pin")?;
+        let prefix = format!(
+            "{}/.github/workflows/reusable-{role}-request.yml@",
+            config.acceptable_clients.repository
+        );
+        crate::policy::validate_sha(
+            uses.strip_prefix(&prefix)
+                .context("managed command caller uses an unexpected implementation")?,
+        )?;
+        let expected: serde_yaml::Value = serde_yaml::to_value(json!({
+            "name": format!("testing-{} Request", if role == "approve" { "Approve" } else { "Merge" }),
+            "on": {"issue_comment": {"types": ["created"]}},
+            "permissions": {},
+            "jobs": {"request": {
+                "if": format!("github.repository == '{}' && github.event.issue.pull_request && github.event.comment.user.id == {} && github.event.comment.body == '/{role}' && github.run_attempt == 1", manifest.repository, config.identities.owner.id),
+                "uses": uses,
+                "with": {"server_repository": config.instance.repository, "instance_config_path": MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH},
+                "permissions": {"actions": "read", "attestations": "write", "contents": "read", "id-token": "write", "issues": "read", "pull-requests": "read"},
+                "secrets": {"SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"}
+            }}
+        }))?;
+        ensure!(
+            workflow == expected,
+            "managed command caller has an unexpected event, condition, input, credential or permission"
+        );
+    }
+    Ok(())
+}
+
+fn validate_managed_securefix_request_caller(
+    manifest: &ManagedFilesManifest,
+    desired: &BTreeMap<String, Vec<u8>>,
+    instance_config: &securefix::instance_config::InstanceConfig,
+    securefix_config_bytes: Option<&[u8]>,
+) -> Result<()> {
+    if !expected_managed_targets(instance_config).contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
+    {
+        return Ok(());
+    }
+    let securefix_config = securefix::instance_config::InstanceConfig::parse(
+        securefix_config_bytes.context("managed Securefix Server instance config is missing")?,
+    )?;
+    let server = &config::trusted()?.deployment.server;
+    ensure!(
+        securefix_config.instance.repository == server.repository
+            && securefix_config.instance.id == server.id
+            && securefix_config.instance.default_branch == server.default_branch
+            && securefix_config.identities.owner.id == instance_config.identities.owner.id
+            && securefix_config.identities.owner.login == instance_config.identities.owner.login
+            && securefix_config.acceptable_clients.repository
+                == instance_config.acceptable_clients.repository
+            && securefix_config.acceptable_clients.id == instance_config.acceptable_clients.id
+            && securefix_config.acceptable_clients.version
+                == instance_config.acceptable_clients.version,
+        "managed Securefix Server config identity or Client acceptance differs"
+    );
+    ensure!(
+        securefix_config
+            .repositories
+            .iter()
+            .any(|repository| repository.repository == manifest.repository
+                && repository.id == manifest.repository_id
+                && repository.capabilities.contains(&Capability::Securefix)),
+        "managed Securefix Server config does not authorize the target"
+    );
+    ensure!(
+        securefix_config.acceptable_clients.producer_workflow
+            == MANAGED_CLIENT_SECUREFIX_SIGNER_PATH,
+        "managed Client Securefix request must select the dedicated scratch signer"
+    );
+    ensure!(
+        securefix_config.allows_scratch_request_caller(
+            &manifest.repository,
+            manifest.repository_id,
+            MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET,
+            "refs/heads/main",
+            "pull_request_target",
+            "securefix",
+        ),
+        "managed Client Securefix request is not authorized by the exact scratch caller tuple"
+    );
+    let bytes = desired
+        .get(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
+        .context("managed Client Securefix request caller is missing")?;
+    let workflow: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
+    let uses = workflow["jobs"]["request"]["uses"]
+        .as_str()
+        .context("managed Securefix caller has no workflow pin")?;
+    let prefix = format!(
+        "{}/{}@",
+        securefix_config.acceptable_clients.repository, MANAGED_CLIENT_SECUREFIX_SIGNER_PATH
+    );
+    crate::policy::validate_sha(
+        uses.strip_prefix(&prefix)
+            .context("managed Securefix caller has an unexpected implementation")?,
+    )?;
+    let expected_uses = uses.to_owned();
+    let mut workflow = workflow;
+    if let Some(mapping) = workflow.as_mapping_mut()
+        && let Some(on) = mapping.remove(serde_yaml::Value::Bool(true))
+    {
+        mapping.insert(serde_yaml::Value::String("on".into()), on);
+    }
+    let workflow = serde_json::to_value(workflow)?;
+    let owner_id = instance_config.identities.owner.id;
+    let expected_condition = format!(
+        "github.repository == '{}' && github.event.pull_request.base.repo.id == {} && github.event.pull_request.head.repo.id == {} && github.event.pull_request.user.id == {} && github.event.pull_request.base.ref == '{}' && github.event.pull_request.state == 'open' && github.actor_id == '{}' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1",
+        manifest.repository,
+        manifest.repository_id,
+        manifest.repository_id,
+        owner_id,
+        manifest.default_branch,
+        owner_id,
+    );
+    let expected = json!({
+        "name": "testing-Native Securefix request",
+        "on": {"pull_request_target": {"types": ["labeled"]}},
+        "permissions": {},
+        "jobs": {"request": {
+            "if": expected_condition,
+            "uses": expected_uses,
+            "with": {
+                "server_repository": securefix_config.instance.repository,
+                "instance_config_path": MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH,
+            },
+            "permissions": {
+                "actions": "read",
+                "attestations": "write",
+                "contents": "read",
+                "id-token": "write",
+                "issues": "read",
+                "pull-requests": "read",
+            },
+            "secrets": {
+                "SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+            }
+        }}
+    });
+    ensure!(
+        workflow == expected,
+        "managed Client Securefix request has an unexpected trigger, permission, input, secret, or job"
+    );
+    Ok(())
+}
+
 fn validate_supported_pin_state(path: &str, current: &[u8], desired: &[u8]) -> Result<()> {
-    if path == ".github/workflows/policy-check.yml" {
+    if path == MANAGED_CLIENT_POLICY_CHECK_TARGET {
+        let current_sha256 = crate::hex_encode(sha2::Sha256::digest(current));
+        if current_sha256 == OBSERVED_LEGACY_POLICY_CHECK_SHA256
+            || current_sha256 == OBSERVED_PROBE_POLICY_CHECK_SHA256
+        {
+            return Ok(());
+        }
         ensure!(
             workflow_uses(current)? == workflow_uses(desired)?,
             "managed workflow action or reusable-workflow pins changed; refusing to replace them"
@@ -245,17 +1171,19 @@ fn managed_render(output_dir: &Path) -> Result<()> {
         "managed render output directory already exists"
     );
     let (_, desired) = managed_desired_files()?;
+    let file_count = desired.len();
     for (path, bytes) in desired {
         let output = output_dir.join(&path);
         fs::create_dir_all(output.parent().context("managed output has no parent")?)?;
         fs::write(output, bytes)?;
     }
-    println!("rendered {} managed files", MANAGED_TARGETS.len());
+    println!("rendered {file_count} managed files");
     Ok(())
 }
 
 fn managed_desired_files_from_source(
     source_sha: &str,
+    client_pin: Option<&crate::distribution::caller::ClientImplementationPin>,
 ) -> Result<(ManagedFilesManifest, BTreeMap<String, Vec<u8>>)> {
     crate::policy::validate_sha(source_sha)?;
     let trusted = config::trusted()?;
@@ -311,8 +1239,161 @@ fn managed_desired_files_from_source(
             )?,
         );
     }
-    validate_managed_instance_config(&manifest, &desired)?;
+    let instance_config = validate_managed_instance_config(&manifest, &desired)?;
+    validate_managed_targets(&manifest.files, &instance_config)?;
+    validate_managed_removals(&manifest.remove, &instance_config)?;
+    let targets = expected_managed_targets(&instance_config);
+    let policy_check_instance_config_bytes = if targets.contains(MANAGED_CLIENT_POLICY_CHECK_TARGET)
+        || targets.contains(MANAGED_CLIENT_RELEASE_TAG_TARGET)
+    {
+        Some(read_managed_source_file(
+            &source_api,
+            source_repository,
+            source_sha,
+            &entries,
+            MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH,
+        )?)
+    } else {
+        None
+    };
+    validate_managed_policy_check_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        policy_check_instance_config_bytes.as_deref(),
+    )?;
+    validate_managed_command_callers(
+        &manifest,
+        &desired,
+        &instance_config,
+        policy_check_instance_config_bytes.as_deref(),
+    )?;
+    let securefix_config = if expected_managed_targets(&instance_config)
+        .contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
+    {
+        Some(read_managed_source_file(
+            &source_api,
+            source_repository,
+            source_sha,
+            &entries,
+            MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH,
+        )?)
+    } else {
+        None
+    };
+    validate_managed_securefix_request_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        securefix_config.as_deref(),
+    )?;
+    for role in instance_config.workflow_roles.keys() {
+        let receiver = format!(
+            ".github/workflows/reusable-server-{}.yml",
+            workflow_role_slug(*role)
+        );
+        let bytes = read_managed_source_file(
+            &source_api,
+            source_repository,
+            source_sha,
+            &entries,
+            &receiver,
+        )?;
+        let yaml = std::str::from_utf8(&bytes)
+            .with_context(|| format!("Server role implementation is not UTF-8: {receiver}"))?;
+        ensure!(
+            yaml.contains("workflow_call:"),
+            "Server role implementation is not reusable: {receiver}"
+        );
+    }
+    let runtime_version = format!("v{} (candidate source)", env!("CARGO_PKG_VERSION"));
+    render_managed_role_workflows(
+        &mut desired,
+        &instance_config,
+        source_repository,
+        source_sha,
+        &runtime_version,
+    )?;
+    let has_client_release_caller =
+        expected_managed_targets(&instance_config).contains(MANAGED_CLIENT_RELEASE_TAG_TARGET);
+    ensure!(
+        has_client_release_caller == client_pin.is_some(),
+        "a Client release implementation pin is required exactly when the managed target includes release-tag.yml"
+    );
+    if let Some(client_pin) = client_pin {
+        let server_config = securefix::instance_config::InstanceConfig::parse(
+            policy_check_instance_config_bytes
+                .as_deref()
+                .context("managed Release Tag approval authority config is missing")?,
+        )?;
+        for target in [
+            MANAGED_CLIENT_RELEASE_TAG_TARGET,
+            MANAGED_CLIENT_RELEASE_PR_TARGET,
+            MANAGED_CLIENT_RELEASE_SYNC_TARGET,
+        ] {
+            let template = desired
+                .get_mut(target)
+                .context("managed Client release caller is missing")?;
+            *template =
+                render_managed_release_tag(&manifest, &server_config, client_pin, template)?;
+        }
+    }
     Ok((manifest, desired))
+}
+
+fn render_managed_release_tag(
+    manifest: &ManagedFilesManifest,
+    server_config: &securefix::instance_config::InstanceConfig,
+    pin: &crate::distribution::caller::ClientImplementationPin,
+    template: &[u8],
+) -> Result<Vec<u8>> {
+    let server = &config::trusted()?.deployment.server;
+    ensure!(
+        server_config.instance.repository == server.repository
+            && server_config.instance.id == server.id
+            && server_config.instance.default_branch == server.default_branch,
+        "managed Release Tag must use the protected approval Server instance"
+    );
+    server_config
+        .repositories
+        .iter()
+        .find(|repository| {
+            repository.repository == manifest.repository && repository.id == manifest.repository_id
+        })
+        .context("managed Release Tag target is not configured in its approval Server")?
+        .policy()
+        .require(Capability::Release)?;
+    let template = std::str::from_utf8(template)?
+        .replace("@DEFAULT_BRANCH@", &manifest.default_branch)
+        .replace(
+            "@RELEASE_BRANCH@",
+            server_config
+                .branches
+                .release
+                .as_deref()
+                .context("managed release branch missing")?,
+        );
+    crate::distribution::caller::render_managed_client_release_tag_from_template(
+        &server_config.acceptable_clients,
+        pin,
+        &server_config.instance.repository,
+        MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH,
+        template.as_bytes(),
+    )
+}
+
+fn managed_validate_scratch(
+    candidate_sha: &str,
+    client_pin: Option<&crate::distribution::caller::ClientImplementationPin>,
+) -> Result<()> {
+    crate::policy::validate_sha(candidate_sha)?;
+    let (manifest, desired) = managed_desired_files_from_source(candidate_sha, client_pin)?;
+    println!(
+        "validated {} exact managed scratch files for {} at {candidate_sha}",
+        desired.len(),
+        manifest.repository
+    );
+    Ok(())
 }
 
 fn read_managed_source_file(
@@ -344,9 +1425,231 @@ fn read_managed_source_file(
     Ok(bytes)
 }
 
-pub(crate) fn managed_reconcile_scratch(candidate_sha: &str) -> Result<()> {
+/// Reconcile the exact desired files from protected instance main. Unlike the
+/// development probe, this path has no candidate-source or Client pin input.
+struct PreparedManagedDeployment {
+    instance: securefix::api::NativeServerInstanceAuthority,
+    manifest: ManagedFilesManifest,
+    source_files: BTreeMap<String, Vec<u8>>,
+    desired: BTreeMap<String, Vec<u8>>,
+}
+
+fn load_managed_deployment(
+    config_path: &str,
+    manifest_path: &str,
+) -> Result<PreparedManagedDeployment> {
+    securefix::api::validate_native_instance_config_path(config_path)?;
+    ensure!(
+        manifest_path.starts_with("repo-settings/") && safe_relative_path(manifest_path),
+        "managed manifest must be root-relative under repo-settings"
+    );
+    let server = GitHub::from_env("GITHUB_TOKEN")?;
+    let instance_repository =
+        std::env::var("GITHUB_REPOSITORY").context("missing instance repository")?;
+    let instance = server
+        .capture_remote_native_server_instance_authority(&instance_repository, config_path)?;
+    let reference: Value = server.get_uncached(&format!(
+        "/repos/{instance_repository}/git/ref/heads/{}",
+        instance.config.instance.default_branch
+    ))?;
+    let source_sha = reference["object"]["sha"]
+        .as_str()
+        .context("instance main SHA missing")?;
+    crate::policy::validate_sha(source_sha)?;
+    let manifest_bytes = server.content(&instance_repository, manifest_path, source_sha)?;
+    let manifest = parse_managed_file_manifest(&manifest_bytes)?;
+    instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == manifest.repository && entry.id == manifest.repository_id)
+        .context("managed destination is not configured")?
+        .policy()
+        .require(Capability::Settings)?;
+    let settings_path = instance
+        .config
+        .workflow_roles
+        .get(&securefix::instance_config::WorkflowRole::Settings)
+        .context("managed-file settings workflow role is missing")?;
+    let mut source_files = BTreeMap::from([
+        (manifest_path.to_owned(), manifest_bytes),
+        (
+            settings_path.clone(),
+            server.content(&instance_repository, settings_path, source_sha)?,
+        ),
+    ]);
+    let mut desired = BTreeMap::new();
+    for file in &manifest.files {
+        ensure!(
+            file.source.starts_with("repo-settings/managed-files/")
+                && safe_relative_path(&file.source)
+                && safe_relative_path(&file.target),
+            "unsafe managed source or target"
+        );
+        securefix::api::validate_native_managed_file_path(&file.target)?;
+        let bytes = server.content(&instance_repository, &file.source, source_sha)?;
+        ensure!(
+            bytes.len() <= MANAGED_FILES_LIMIT as usize,
+            "managed source exceeds size limit"
+        );
+        ensure!(
+            desired.insert(file.target.clone(), bytes.clone()).is_none(),
+            "duplicate managed target"
+        );
+        source_files.insert(file.source.clone(), bytes);
+    }
+    Ok(PreparedManagedDeployment {
+        instance,
+        manifest,
+        source_files,
+        desired,
+    })
+}
+
+fn managed_reconcile(config_path: &str, manifest_path: &str) -> Result<()> {
+    let PreparedManagedDeployment {
+        instance,
+        manifest,
+        source_files,
+        desired,
+    } = load_managed_deployment(config_path, manifest_path)?;
+    // Reads and workflow-PR writes use a repository-scoped installation token;
+    // the administrator credential is never accepted by this command.
+    let reader = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
+    let repository: Value = reader.get(&format!("/repos/{}", manifest.repository))?;
+    ensure!(
+        repository["id"].as_u64() == Some(manifest.repository_id)
+            && repository["full_name"] == manifest.repository
+            && repository["default_branch"] == manifest.default_branch,
+        "managed destination identity changed"
+    );
+    let reference: Value = reader.get_uncached(&format!(
+        "/repos/{}/git/ref/heads/{}",
+        manifest.repository, manifest.default_branch
+    ))?;
+    let base_sha = reference["object"]["sha"]
+        .as_str()
+        .context("managed destination main SHA missing")?
+        .to_owned();
+    crate::policy::validate_sha(&base_sha)?;
+    let mut current = BTreeMap::new();
+    for path in desired.keys() {
+        if let Some(bytes) =
+            optional_managed_content(&reader, &manifest.repository, path, &base_sha)?
+        {
+            current.insert(path.clone(), bytes);
+        }
+    }
+    let additions = managed_changes(&desired, &current);
+    let mut deletions = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in &manifest.remove {
+        securefix::api::validate_native_managed_file_path(path)?;
+        ensure!(
+            !desired.contains_key(path) && seen.insert(path.clone()),
+            "duplicate or active managed removal"
+        );
+        if optional_managed_content(&reader, &manifest.repository, path, &base_sha)?.is_some() {
+            deletions.push(path.clone());
+        }
+    }
+    if additions.is_empty() && deletions.is_empty() {
+        println!("managed files match protected desired state at {base_sha}; no PR created");
+        return Ok(());
+    }
+    let expected_changed = additions
+        .keys()
+        .cloned()
+        .chain(deletions.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let branch = format!(
+        "securefix/managed-files/{}-{}",
+        env_u64("GITHUB_RUN_ID")?,
+        env_u64("GITHUB_RUN_ATTEMPT")?
+    );
+    let target = securefix::api::NativeManagedFilesTarget {
+        instance,
+        repository: manifest.repository.clone(),
+        repository_id: manifest.repository_id,
+        default_branch: manifest.default_branch.clone(),
+        base_sha: base_sha.clone(),
+        branch: branch.clone(),
+        source_files,
+        additions: additions.clone(),
+        deletions: deletions.clone(),
+    };
+    let writer = GitHub::native_managed_files_from_env("SECUREFIX_SERVER_APP_TOKEN", target)?;
+    writer.post::<Value>(
+        &format!("/repos/{}/git/refs", manifest.repository),
+        &json!({"ref":format!("refs/heads/{branch}"),"sha":base_sha}),
+    )?;
+    let head = writer.create_commit(
+        &manifest.repository,
+        &branch,
+        &base_sha,
+        "Reconcile managed files",
+        additions,
+        deletions,
+    )?;
+    let branch_ref: Value = reader.get_uncached(&format!(
+        "/repos/{}/git/ref/heads/{branch}",
+        manifest.repository
+    ))?;
+    ensure!(
+        branch_ref["object"]["sha"] == head,
+        "managed signed branch changed"
+    );
+    let pull: Value = writer.post(&format!("/repos/{}/pulls", manifest.repository), &json!({
+        "title":"Reconcile managed files","head":branch,"base":manifest.default_branch,
+        "body":"Reconcile the protected repo-settings desired files. This PR does not merge automatically."
+    }))?;
+    let number = pull["number"]
+        .as_u64()
+        .context("managed PR number missing")?;
+    ensure!(
+        pull["state"] == "open"
+            && pull["head"]["sha"] == head
+            && pull["head"]["ref"] == branch
+            && pull["head"]["repo"]["id"].as_u64() == Some(manifest.repository_id)
+            && pull["base"]["repo"]["id"].as_u64() == Some(manifest.repository_id)
+            && pull["base"]["ref"] == manifest.default_branch
+            && pull["base"]["sha"] == base_sha,
+        "unexpected managed PR identity"
+    );
+    let files = reader.paginate(&format!(
+        "/repos/{}/pulls/{number}/files",
+        manifest.repository
+    ))?;
+    validate_managed_pr_files(&files, &expected_changed)?;
+    println!("created reviewable managed-file PR #{number} at {head}");
+    Ok(())
+}
+
+fn optional_managed_content(
+    api: &GitHub,
+    repository: &str,
+    path: &str,
+    revision: &str,
+) -> Result<Option<Vec<u8>>> {
+    match api.content(repository, path, revision) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn managed_reconcile_scratch(
+    candidate_sha: &str,
+    client_pin: Option<&crate::distribution::caller::ClientImplementationPin>,
+) -> Result<()> {
     crate::policy::validate_sha(candidate_sha)?;
-    let (manifest, desired) = managed_desired_files_from_source(candidate_sha)?;
+    let (manifest, desired) = managed_desired_files_from_source(candidate_sha, client_pin)?;
     let api = GitHub::scratch_from_env("SECUREFIX_SERVER_APP_TOKEN", candidate_sha)?;
     let repository: Value = api.get(&format!("/repos/{}", manifest.repository))?;
     ensure!(
@@ -383,11 +1686,29 @@ pub(crate) fn managed_reconcile_scratch(candidate_sha: &str) -> Result<()> {
         }
     }
     let additions = managed_changes(&desired, &current_files);
-    if additions.is_empty() {
+    let mut deletions = Vec::new();
+    for path in &manifest.remove {
+        match api.content(&manifest.repository, path, base_sha) {
+            Ok(_) => deletions.push(path.clone()),
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                // An already absent exact path is reconciled.
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if additions.is_empty() && deletions.is_empty() {
         println!("managed files already match scratch main at {base_sha}; no PR created");
         return Ok(());
     }
-    let expected_changed = additions.keys().cloned().collect::<BTreeSet<_>>();
+    let expected_changed = additions
+        .keys()
+        .cloned()
+        .chain(deletions.iter().cloned())
+        .collect::<BTreeSet<_>>();
     let branch = format!(
         "securefix/managed-files/{}-{}",
         env_u64("GITHUB_RUN_ID")?,
@@ -405,7 +1726,7 @@ pub(crate) fn managed_reconcile_scratch(candidate_sha: &str) -> Result<()> {
         base_sha,
         "Reconcile managed scratch files",
         additions,
-        Vec::new(),
+        deletions,
     )?;
     let branch_ref: Value = api.get(&reference_path)?;
     ensure!(
@@ -441,17 +1762,7 @@ pub(crate) fn managed_reconcile_scratch(candidate_sha: &str) -> Result<()> {
         "/repos/{}/pulls/{number}/files?per_page=100",
         manifest.repository
     ))?;
-    let changed = files
-        .iter()
-        .map(|file| file["filename"].as_str().unwrap_or_default())
-        .collect::<BTreeSet<_>>();
-    ensure!(
-        changed.len() == expected_changed.len()
-            && expected_changed
-                .iter()
-                .all(|path| changed.contains(path.as_str())),
-        "managed-files PR contains files outside the exact desired-state set"
-    );
+    validate_managed_pr_files(&files, &expected_changed)?;
     println!("created reviewable managed-files PR #{number} at {head_sha} from base {base_sha}");
     Ok(())
 }
@@ -465,6 +1776,254 @@ fn env_u64(name: &str) -> Result<u64> {
 
 fn api() -> Result<GitHub> {
     GitHub::from_env("GH_TOKEN")
+}
+
+const INSTANCE_SETTINGS_FILES: &[&str] = &[
+    "repo-settings/repository.json",
+    "repo-settings/collaborator.json",
+    "repo-settings/rulesets/default-branch.json",
+    "repo-settings/rulesets/review-and-checks.json",
+    "repo-settings/rulesets/controlled-merges.json",
+    "repo-settings/rulesets/all-tags.json",
+];
+
+fn load_instance_settings(
+    config_path: &str,
+) -> Result<(
+    securefix::api::NativeServerInstanceAuthority,
+    BTreeMap<String, Vec<u8>>,
+)> {
+    securefix::api::validate_native_instance_config_path(config_path)?;
+    let reader = GitHub::from_env("GITHUB_TOKEN")?;
+    let repository = std::env::var("GITHUB_REPOSITORY").context("missing settings instance")?;
+    let instance =
+        reader.capture_remote_native_server_instance_authority(&repository, config_path)?;
+    let reference: Value = reader.get_uncached(&format!(
+        "/repos/{repository}/git/ref/heads/{}",
+        instance.config.instance.default_branch
+    ))?;
+    let source = reference["object"]["sha"]
+        .as_str()
+        .context("settings source SHA missing")?;
+    crate::policy::validate_sha(source)?;
+    let workflow = instance
+        .config
+        .workflow_roles
+        .get(&securefix::instance_config::WorkflowRole::Settings)
+        .context("settings role missing")?;
+    let mut files = BTreeMap::new();
+    for path in INSTANCE_SETTINGS_FILES
+        .iter()
+        .copied()
+        .chain(std::iter::once(workflow.as_str()))
+    {
+        let bytes = reader.content(&repository, path, source)?;
+        ensure!(
+            bytes.len() <= 256 * 1024,
+            "settings source exceeds limit: {path}"
+        );
+        files.insert(path.to_owned(), bytes);
+    }
+    instance_settings_target(
+        &instance,
+        &files,
+        instance
+            .config
+            .repositories
+            .iter()
+            .find(|entry| entry.capabilities.contains(&Capability::Settings))
+            .context("instance has no settings destination")?
+            .repository
+            .as_str(),
+    )?;
+    Ok((instance, files))
+}
+
+fn instance_settings_target(
+    instance: &securefix::api::NativeServerInstanceAuthority,
+    files: &BTreeMap<String, Vec<u8>>,
+    repository: &str,
+) -> Result<securefix::api::NativeRepositorySettingsTarget> {
+    let configured = instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == repository)
+        .context("settings destination is not configured")?;
+    configured.policy().require(Capability::Settings)?;
+    let read = |path: &str| -> Result<Value> {
+        serde_json::from_slice(
+            files
+                .get(path)
+                .with_context(|| format!("missing protected settings {path}"))?,
+        )
+        .with_context(|| format!("invalid protected settings {path}"))
+    };
+    let repository_settings = read("repo-settings/repository.json")?;
+    validate_repository_merge_settings(&repository_settings, repository)?;
+    let collaborator = read("repo-settings/collaborator.json")?;
+    ensure!(
+        collaborator["permission"] == "push"
+            && collaborator.as_object().is_some_and(|object| object
+                .keys()
+                .all(|key| matches!(key.as_str(), "permission" | "username"))),
+        "collaborator settings must grant only push"
+    );
+    let collaborator = json!({"permission":"push"});
+    let mut rulesets = BTreeMap::new();
+    for name in [
+        "default-branch",
+        "review-and-checks",
+        "controlled-merges",
+        "all-tags",
+    ] {
+        let mut ruleset = read(&format!("{RULESET_DIR}/{name}.json"))?;
+        ensure!(ruleset["name"] == name, "settings ruleset name mismatch");
+        match name {
+            "default-branch" => validate_default_ruleset(&ruleset, repository)?,
+            "review-and-checks" | "controlled-merges" => {
+                let actors = ruleset["bypass_actors"]
+                    .as_array_mut()
+                    .context("settings bypass actors missing")?;
+                ensure!(
+                    actors.len() == 1,
+                    "settings ruleset must have exactly one Server App bypass"
+                );
+                actors[0]["actor_id"] = json!(instance.config.apps.server_id);
+                if name == "controlled-merges" {
+                    validate_controlled_merges(
+                        &ruleset,
+                        repository,
+                        instance.config.apps.server_id,
+                    )?;
+                } else {
+                    let statuses = ruleset["rules"]
+                        .as_array_mut()
+                        .context("settings rules missing")?
+                        .iter_mut()
+                        .find(|rule| rule["type"] == "required_status_checks")
+                        .and_then(|rule| {
+                            rule["parameters"]["required_status_checks"].as_array_mut()
+                        })
+                        .context("settings status checks missing")?;
+                    for check in statuses {
+                        match check["context"].as_str() {
+                            Some("status-check") => {
+                                check["integration_id"] =
+                                    json!(instance.config.apps.status_check_id)
+                            }
+                            Some(
+                                "securefix-policy-check" | "securefix-native-request-policy-check",
+                            ) => {
+                                check["context"] = json!("securefix-native-request-policy-check");
+                                check["integration_id"] =
+                                    json!(instance.config.apps.policy_check_id);
+                            }
+                            _ => bail!("unexpected settings required check"),
+                        }
+                    }
+                    validate_review_and_checks_named(
+                        &ruleset,
+                        repository,
+                        instance.config.apps.server_id,
+                        &Checks {
+                            status_app_id: instance.config.apps.status_check_id,
+                            policy_app_id: instance.config.apps.policy_check_id,
+                        },
+                        "securefix-native-request-policy-check",
+                    )?;
+                }
+            }
+            "all-tags" => ensure!(
+                ruleset["target"] == "tag"
+                    && ruleset["enforcement"] == "active"
+                    && ruleset["bypass_actors"] == json!([]),
+                "tag protections must be active without bypass"
+            ),
+            _ => unreachable!(),
+        }
+        rulesets.insert(name.to_owned(), ruleset);
+    }
+    Ok(securefix::api::NativeRepositorySettingsTarget {
+        instance: instance.clone(),
+        repository: repository.to_owned(),
+        repository_id: configured.id,
+        source_files: files.clone(),
+        repository_settings,
+        rulesets,
+        collaborator,
+    })
+}
+
+fn reconcile_instance_settings(config_path: &str, repository: &str) -> Result<()> {
+    let (instance, files) = load_instance_settings(config_path)?;
+    let target = instance_settings_target(&instance, &files, repository)?;
+    let api = GitHub::native_repository_settings_from_env(
+        "SECUREFIX_SETTINGS_ADMIN_TOKEN",
+        target.clone(),
+    )?;
+    let configured = instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == repository)
+        .unwrap();
+    api.patch::<Value>(&format!("/repos/{repository}"), &target.repository_settings)?;
+    upsert_ruleset(&api, repository, &target.rulesets["review-and-checks"])?;
+    upsert_ruleset(&api, repository, &target.rulesets["default-branch"])?;
+    if configured.protect_tags {
+        upsert_ruleset(&api, repository, &target.rulesets["all-tags"])?;
+    }
+    if configured.capabilities.contains(&Capability::Release)
+        || repository == instance.config.instance.repository
+    {
+        let path = format!("/repos/{repository}/immutable-releases");
+        let state: Value = api.get(&path)?;
+        if state["enabled"] != true {
+            api.put::<Value>(&path, &json!({}))?;
+        }
+        let state: Value = api.get_uncached(&path)?;
+        ensure!(
+            state["enabled"] == true,
+            "immutable releases were not enabled"
+        );
+    }
+    if instance.config.policy.merge_controls_enabled {
+        let existing = repository_rulesets(&api, repository, "controlled-merges")?;
+        ensure!(existing.len() <= 1, "multiple controlled merge rulesets");
+        if let Some(existing) = existing
+            .first()
+            .filter(|entry| entry["enforcement"] == "active")
+        {
+            let id = existing["id"]
+                .as_u64()
+                .context("controlled merge ID missing")?;
+            api.put::<Value>(
+                &format!("/repos/{repository}/rulesets/{id}"),
+                &target.rulesets["controlled-merges"],
+            )?;
+        }
+    }
+    let reviewer = &instance.config.identities.approval_reviewer;
+    api.put::<Value>(
+        &format!("/repos/{repository}/collaborators/{}", reviewer.login),
+        &target.collaborator,
+    )?;
+    validate_collaborator(&api, repository, &reviewer.login)?;
+    validate_native_merge_settings(&api, repository)?;
+    validate_default_branch_ruleset(&api, repository)?;
+    validate_review_and_checks_named(
+        &repository_ruleset(&api, repository, "review-and-checks")?,
+        repository,
+        instance.config.apps.server_id,
+        &Checks {
+            status_app_id: instance.config.apps.status_check_id,
+            policy_app_id: instance.config.apps.policy_check_id,
+        },
+        "securefix-native-request-policy-check",
+    )?;
+    println!("reconciled protected repository settings for {repository}");
+    Ok(())
 }
 
 fn prepare() -> Result<()> {
@@ -1153,6 +2712,22 @@ fn validate_review_and_checks(
     server_app_id: u64,
     checks: &Checks,
 ) -> Result<()> {
+    validate_review_and_checks_named(
+        ruleset,
+        repository,
+        server_app_id,
+        checks,
+        "securefix-policy-check",
+    )
+}
+
+fn validate_review_and_checks_named(
+    ruleset: &Value,
+    repository: &str,
+    server_app_id: u64,
+    checks: &Checks,
+    policy_check_name: &str,
+) -> Result<()> {
     validate_ruleset_scope(ruleset, repository, "review-and-checks")?;
     ensure!(
         ruleset["bypass_actors"]
@@ -1204,7 +2779,7 @@ fn validate_review_and_checks(
     );
     for (name, integration_id) in [
         ("status-check", checks.status_app_id),
-        ("securefix-policy-check", checks.policy_app_id),
+        (policy_check_name, checks.policy_app_id),
     ] {
         ensure!(
             statuses.iter().any(|check| check["context"] == name
@@ -1549,6 +3124,93 @@ fn env_bool(name: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn instance_settings_uses_external_identities_and_native_check_contract() {
+        let bytes = include_bytes!("../tests/fixtures/instance-config.toml");
+        let config = securefix::instance_config::InstanceConfig::parse(bytes).unwrap();
+        let instance = securefix::api::NativeServerInstanceAuthority {
+            config,
+            config_bytes: bytes.to_vec(),
+            authority: securefix::api::NativeAuthoritySnapshot {
+                instance_repository: "example-org/securefix-server".into(),
+                instance_id: 404,
+                default_branch: "main".into(),
+                config_path: "securefix-server.toml".into(),
+                config_sha256: "a".repeat(64),
+                epoch: "b".repeat(40),
+                workflows: vec![],
+            },
+        };
+        let mut files: BTreeMap<String, Vec<u8>> = INSTANCE_SETTINGS_FILES
+            .iter()
+            .map(|path| ((*path).to_owned(), std::fs::read(path).unwrap()))
+            .collect();
+        let target = instance_settings_target(&instance, &files, "example-org/project").unwrap();
+        assert_eq!(target.repository_id, 987654);
+        assert_eq!(
+            target.rulesets["review-and-checks"]["bypass_actors"][0]["actor_id"],
+            instance.config.apps.server_id
+        );
+        let statuses = &target.rulesets["review-and-checks"]["rules"][1]["parameters"]["required_status_checks"];
+        assert_eq!(
+            statuses[1]["context"],
+            "securefix-native-request-policy-check"
+        );
+        assert_eq!(
+            statuses[1]["integration_id"],
+            instance.config.apps.policy_check_id
+        );
+        assert!(instance_settings_target(&instance, &files, "other-org/project").is_err());
+        files.insert(
+            "repo-settings/collaborator.json".into(),
+            br#"{"permission":"admin"}"#.to_vec(),
+        );
+        assert!(instance_settings_target(&instance, &files, "example-org/project").is_err());
+    }
+
+    #[test]
+    fn native_settings_deployment_matches_its_protected_desired_manifest() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-settings-test-instance.toml"
+        ))
+        .unwrap();
+        let manifest = parse_managed_file_manifest(include_bytes!(
+            "../repo-settings/native-settings-test-managed-files.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            config.workflow_roles[&securefix::instance_config::WorkflowRole::Settings],
+            ".github/workflows/testing-native-settings.yml"
+        );
+        config
+            .repositories
+            .iter()
+            .find(|entry| {
+                entry.repository == manifest.repository && entry.id == manifest.repository_id
+            })
+            .unwrap()
+            .policy()
+            .require(Capability::Settings)
+            .unwrap();
+        assert_eq!(manifest.files.len(), 14);
+        for file in &manifest.files {
+            let bytes = fs::read(&file.source).unwrap();
+            assert!(!bytes.is_empty(), "{}", file.source);
+            if file.target.ends_with(".yml") {
+                let _: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("@CLIENT_"));
+                assert!(!String::from_utf8_lossy(&bytes).contains("@SERVER_"));
+            } else if file.target == "securefix-server.toml" {
+                securefix::instance_config::InstanceConfig::parse(&bytes).unwrap();
+            } else {
+                assert_eq!(file.target, MANAGED_ACTIONS_LOCK_TARGET);
+                let lock: serde_yaml::Value = serde_yaml::from_slice(&bytes).unwrap();
+                assert_eq!(lock["version"].as_str(), Some("v0.0.3"));
+                assert!(lock["workflows"].as_mapping().is_some());
+            }
+        }
+    }
+
     use super::*;
     use crate::fixtures::{Fixture, Route};
 
@@ -1560,6 +3222,110 @@ mod tests {
             ),
             target: target.to_owned(),
         }
+    }
+
+    fn managed_instance_config() -> securefix::instance_config::InstanceConfig {
+        securefix::instance_config::InstanceConfig::parse(
+            include_str!("../repo-settings/managed-files/securefix-server.toml").as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn managed_role_entries() -> Vec<ManagedFileEntry> {
+        let instance_config = managed_instance_config();
+        expected_managed_targets(&instance_config)
+            .iter()
+            .map(|path| managed_entry(path))
+            .collect()
+    }
+
+    fn canonical_managed_policy_check_caller() -> Vec<u8> {
+        include_bytes!("../repo-settings/managed-files/policy-check.yml").to_vec()
+    }
+
+    fn canonical_managed_securefix_request_caller() -> Vec<u8> {
+        include_bytes!("../repo-settings/managed-files/securefix-request.yml").to_vec()
+    }
+
+    #[test]
+    fn managed_securefix_request_preserves_the_verified_cross_repository_caller() {
+        let manifest =
+            parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let instance_config = managed_instance_config();
+        let config = include_bytes!("../repo-settings/native-securefix-write-test-instance.toml");
+        let desired = BTreeMap::from([(
+            MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned(),
+            canonical_managed_securefix_request_caller(),
+        )]);
+        validate_managed_securefix_request_caller(
+            &manifest,
+            &desired,
+            &instance_config,
+            Some(config),
+        )
+        .unwrap();
+        assert!(
+            validate_managed_securefix_request_caller(&manifest, &desired, &instance_config, None)
+                .is_err()
+        );
+        let caller =
+            std::str::from_utf8(&desired[MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET]).unwrap();
+        for (from, to) in [
+            ("github.actor_id == '4525500'", "github.actor_id == '1'"),
+            (
+                "server_repository: civitaspo/securefix-server",
+                "server_repository: civitaspo/testing-securefix-server",
+            ),
+            (
+                "repo-settings/native-securefix-write-test-instance.toml",
+                "securefix-server.toml",
+            ),
+            ("2179c5566b1cc84bd7d53082f028f00f5f046b60", "main"),
+        ] {
+            assert!(caller.contains(from));
+            let changed = BTreeMap::from([(
+                MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET.to_owned(),
+                caller.replace(from, to).into_bytes(),
+            )]);
+            assert!(
+                validate_managed_securefix_request_caller(
+                    &manifest,
+                    &changed,
+                    &instance_config,
+                    Some(config)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn protected_managed_manifest_uses_declared_identity_without_scratch_defaults() {
+        let mut value: Value =
+            serde_json::from_slice(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        value["repository"] = json!("example-org/project");
+        value["repository_id"] = json!(987654);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            parse_managed_file_manifest(&bytes).unwrap().repository,
+            "example-org/project"
+        );
+        assert!(
+            parse_managed_manifest(&bytes).is_err(),
+            "the scratch-only contract stays bounded"
+        );
+        for target in [
+            "Cargo.toml",
+            "control/active.json",
+            ".github/workflows/../policy.json",
+        ] {
+            let mut changed = value.clone();
+            changed["files"][0]["target"] = json!(target);
+            assert!(parse_managed_file_manifest(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let duplicate = value["files"][0].clone();
+        value["files"].as_array_mut().unwrap().push(duplicate);
+        assert!(parse_managed_file_manifest(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]
@@ -1629,13 +3395,700 @@ mod tests {
     }
 
     #[test]
-    fn managed_manifest_rejects_duplicate_targets() {
-        let files = vec![
-            managed_entry(".github/workflows/policy-check.yml"),
-            managed_entry("securefix-server.toml"),
-            managed_entry(".github/workflows/policy-check.yml"),
-        ];
-        assert!(validate_managed_targets(&files).is_err());
+    fn managed_policy_check_migrates_only_observed_prior_callers() {
+        let manifest =
+            parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let desired = BTreeMap::from([
+            (
+                MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned(),
+                canonical_managed_policy_check_caller(),
+            ),
+        ]);
+        let instance_config = validate_managed_instance_config(&manifest, &desired).unwrap();
+
+        let caller = &desired[MANAGED_CLIENT_POLICY_CHECK_TARGET];
+        let policy_check_instance_config =
+            include_bytes!("../repo-settings/native-role-events-test-instance.toml");
+        assert!(
+            validate_managed_policy_check_caller(&manifest, &desired, &instance_config, None)
+                .is_err()
+        );
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &desired,
+                &instance_config,
+                Some(include_bytes!(
+                    "../repo-settings/managed-files/securefix-server.toml"
+                )),
+            )
+            .is_err()
+        );
+        validate_managed_policy_check_caller(
+            &manifest,
+            &desired,
+            &instance_config,
+            Some(policy_check_instance_config),
+        )
+        .unwrap();
+        let legacy = include_bytes!("../tests/fixtures/managed-legacy-policy-check.yml");
+        assert_eq!(
+            crate::hex_encode(sha2::Sha256::digest(legacy)),
+            OBSERVED_LEGACY_POLICY_CHECK_SHA256
+        );
+        assert!(
+            validate_supported_pin_state(MANAGED_CLIENT_POLICY_CHECK_TARGET, legacy, caller)
+                .is_ok()
+        );
+
+        let probe = include_bytes!("../tests/fixtures/managed-policy-check-probe.yml");
+        assert_eq!(
+            crate::hex_encode(sha2::Sha256::digest(probe)),
+            OBSERVED_PROBE_POLICY_CHECK_SHA256
+        );
+        assert!(
+            validate_supported_pin_state(MANAGED_CLIENT_POLICY_CHECK_TARGET, probe, caller).is_ok()
+        );
+
+        let mut changed_legacy = legacy.to_vec();
+        changed_legacy.extend_from_slice(b"\n# changed\n");
+        assert!(
+            validate_supported_pin_state(
+                MANAGED_CLIENT_POLICY_CHECK_TARGET,
+                &changed_legacy,
+                caller
+            )
+            .is_err()
+        );
+
+        let mut changed_probe = probe.to_vec();
+        changed_probe.extend_from_slice(b"\n# changed\n");
+        assert!(
+            validate_supported_pin_state(
+                MANAGED_CLIENT_POLICY_CHECK_TARGET,
+                &changed_probe,
+                caller
+            )
+            .is_err()
+        );
+
+        let wrong_pin = String::from_utf8(caller.clone())
+            .unwrap()
+            .replace("2719567ddd2cb9e13294e12cb9537780c6643263", "main");
+        let wrong_pin_desired = BTreeMap::from([
+            (
+                MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned(),
+                wrong_pin.into_bytes(),
+            ),
+        ]);
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &wrong_pin_desired,
+                &instance_config,
+                Some(policy_check_instance_config),
+            )
+            .is_err()
+        );
+
+        let wrong_secret = String::from_utf8(caller.clone()).unwrap().replace(
+            "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}",
+            "${{ secrets.UNEXPECTED_KEY }}",
+        );
+        let wrong_secret_desired = BTreeMap::from([
+            (
+                MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned(),
+                wrong_secret.into_bytes(),
+            ),
+        ]);
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &wrong_secret_desired,
+                &instance_config,
+                Some(policy_check_instance_config),
+            )
+            .is_err()
+        );
+
+        let mut wrong_event = String::from_utf8(caller.clone()).unwrap();
+        wrong_event = wrong_event.replace("pull_request_target:", "workflow_dispatch:");
+        let invalid_desired = BTreeMap::from([
+            (
+                MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned(),
+                wrong_event.into_bytes(),
+            ),
+        ]);
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &invalid_desired,
+                &instance_config,
+                Some(policy_check_instance_config),
+            )
+            .is_err()
+        );
+
+        let wrong_config_path = String::from_utf8(caller.clone()).unwrap().replace(
+            "instance_config_path: repo-settings/native-role-events-test-instance.toml",
+            "instance_config_path: securefix-server.toml",
+        );
+        let wrong_config_path_desired = BTreeMap::from([
+            (
+                MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned(),
+                wrong_config_path.into_bytes(),
+            ),
+        ]);
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &wrong_config_path_desired,
+                &instance_config,
+                Some(policy_check_instance_config),
+            )
+            .is_err()
+        );
+
+        let wrong_signer_config = String::from_utf8(policy_check_instance_config.to_vec())
+            .unwrap()
+            .replace(
+                MANAGED_POLICY_CHECK_SIGNER_PATH,
+                ".github/workflows/request-producer-probe.yml",
+            );
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &desired,
+                &instance_config,
+                Some(wrong_signer_config.as_bytes()),
+            )
+            .is_err()
+        );
+
+        let wrong_server = String::from_utf8(caller.clone()).unwrap().replace(
+            "server_repository: civitaspo/securefix-server",
+            "server_repository: civitaspo/testing-securefix-server",
+        );
+        let wrong_server_desired = BTreeMap::from([
+            (
+                MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned(),
+                wrong_server.into_bytes(),
+            ),
+        ]);
+        assert!(
+            validate_managed_policy_check_caller(
+                &manifest,
+                &wrong_server_desired,
+                &instance_config,
+                Some(policy_check_instance_config),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_command_callers_preserve_exact_owner_scope_and_credentials() {
+        let manifest =
+            parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let config = managed_instance_config();
+        let server_config =
+            include_bytes!("../repo-settings/native-role-events-test-instance.toml");
+        let callers = BTreeMap::from([
+            (
+                MANAGED_CLIENT_APPROVE_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/approve-request.yml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_MERGE_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/merge-request.yml").to_vec(),
+            ),
+        ]);
+        validate_managed_command_callers(&manifest, &callers, &config, Some(server_config))
+            .unwrap();
+        assert!(validate_managed_command_callers(&manifest, &callers, &config, None).is_err());
+        for target in [MANAGED_CLIENT_APPROVE_TARGET, MANAGED_CLIENT_MERGE_TARGET] {
+            for (from, to) in [
+                ("2719567ddd2cb9e13294e12cb9537780c6643263", "main"),
+                ("comment.user.id == 4525500", "comment.user.id == 1"),
+                (
+                    "SECUREFIX_CLIENT_PRIVATE_KEY",
+                    "SECUREFIX_SERVER_PRIVATE_KEY",
+                ),
+                (
+                    "instance_config_path: repo-settings/native-role-events-test-instance.toml",
+                    "instance_config_path: securefix-server.toml",
+                ),
+                ("attestations: write", "attestations: read"),
+            ] {
+                let mut changed = callers.clone();
+                let caller = std::str::from_utf8(&callers[target]).unwrap();
+                assert!(caller.contains(from));
+                changed.insert(target.to_owned(), caller.replace(from, to).into_bytes());
+                assert!(
+                    validate_managed_command_callers(
+                        &manifest,
+                        &changed,
+                        &config,
+                        Some(server_config)
+                    )
+                    .is_err(),
+                    "{target}: {from}"
+                );
+            }
+        }
+        let unscoped = std::str::from_utf8(server_config).unwrap().replace(
+            "event = \"issue_comment\"",
+            "event = \"pull_request_target\"",
+        );
+        assert!(
+            validate_managed_command_callers(
+                &manifest,
+                &callers,
+                &config,
+                Some(unscoped.as_bytes())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_manifest_requires_exactly_the_configured_role_files() {
+        let instance_config = managed_instance_config();
+        let files = managed_role_entries();
+        assert!(validate_managed_targets(&files, &instance_config).is_ok());
+        assert!(
+            files
+                .iter()
+                .any(|file| file.target == MANAGED_CLIENT_RELEASE_TAG_TARGET)
+        );
+
+        let omitted_role = instance_config
+            .workflow_roles
+            .values()
+            .next()
+            .expect("fixture must configure at least one workflow role");
+        let missing_role = files
+            .iter()
+            .filter(|file| file.target.as_str() != omitted_role.as_str())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(validate_managed_targets(&missing_role, &instance_config).is_err());
+
+        let mut duplicate = files;
+        duplicate.push(managed_entry(".github/workflows/policy-check.yml"));
+        assert!(validate_managed_targets(&duplicate, &instance_config).is_err());
+
+        let mut unexpected = managed_role_entries();
+        unexpected.push(managed_entry(".github/workflows/unmanaged.yml"));
+        assert!(validate_managed_targets(&unexpected, &instance_config).is_err());
+    }
+
+    #[test]
+    fn managed_pr_file_validation_accounts_for_github_rename_rows() {
+        let previous = ".github/workflows/testing-release-tag.yml".to_owned();
+        let current = ".github/workflows/release-tag.yml".to_owned();
+        let expected = BTreeSet::from([previous.clone(), current.clone()]);
+        let files = vec![json!({
+            "filename": current,
+            "previous_filename": previous,
+            "status": "renamed"
+        })];
+
+        assert!(validate_managed_pr_files(&files, &expected).is_ok());
+
+        let unexpected_rename = vec![json!({
+            "filename": ".github/workflows/release-tag.yml",
+            "previous_filename": ".github/workflows/unmanaged.yml",
+            "status": "renamed"
+        })];
+        assert!(validate_managed_pr_files(&unexpected_rename, &expected).is_err());
+    }
+
+    #[test]
+    fn managed_role_templates_render_full_candidate_source_pins() {
+        let instance_config = securefix::instance_config::InstanceConfig::parse(
+            include_str!("../repo-settings/managed-files/securefix-server.toml").as_bytes(),
+        )
+        .unwrap();
+        let mut desired = BTreeMap::from([
+            (
+                ".github/workflows/server-approve.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-approve.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-merge.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-merge.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-policy-check.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-policy-check.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-release.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-release.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-securefix.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-securefix.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ]);
+        let source_sha = "a".repeat(40);
+        render_managed_role_workflows(
+            &mut desired,
+            &instance_config,
+            "civitaspo/securefix-server",
+            &source_sha,
+            "v0.2.45-pre.23 (candidate source)",
+        )
+        .unwrap();
+
+        for (role, path) in &instance_config.workflow_roles {
+            let rendered = desired.get(path).unwrap();
+            assert!(!String::from_utf8_lossy(rendered).contains("@SECUREFIX_RUNTIME_SHA@"));
+            let role_slug = workflow_role_slug(*role);
+            let expected_label_prefix =
+                if *role == securefix::instance_config::WorkflowRole::Release {
+                    "testing-securefix-native-release-".to_owned()
+                } else {
+                    format!("securefix-native-{role_slug}-")
+                };
+            let parsed: serde_yaml::Value = serde_yaml::from_slice(rendered).unwrap();
+            let condition = if *role == securefix::instance_config::WorkflowRole::Release {
+                format!(
+                    "startsWith(github.event.label.name, '{expected_label_prefix}') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')"
+                )
+            } else {
+                format!("startsWith(github.event.label.name, '{expected_label_prefix}')")
+            };
+            assert_eq!(
+                parsed["jobs"]["handler"]["if"].as_str(),
+                Some(condition.as_str())
+            );
+            assert_eq!(
+                workflow_uses(rendered).unwrap(),
+                BTreeSet::from([format!(
+                    "civitaspo/securefix-server/.github/workflows/reusable-server-{}.yml@{source_sha}",
+                    workflow_role_slug(*role)
+                )])
+            );
+        }
+
+        let path = instance_config
+            .workflow_roles
+            .get(&securefix::instance_config::WorkflowRole::Release)
+            .unwrap();
+        let broken = desired.get_mut(path).unwrap();
+        *broken = include_str!("../repo-settings/managed-files/server-release.yml")
+            .replace("@RUNTIME_VERSION@", "")
+            .into_bytes();
+        assert!(
+            render_managed_role_workflows(
+                &mut desired,
+                &instance_config,
+                "civitaspo/securefix-server",
+                &source_sha,
+                "v0.2.45-pre.23 (candidate source)",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_role_templates_reject_broader_permissions_or_secret_sources() {
+        let instance_config = securefix::instance_config::InstanceConfig::parse(
+            include_str!("../repo-settings/managed-files/securefix-server.toml").as_bytes(),
+        )
+        .unwrap();
+        let mut desired = BTreeMap::from([
+            (
+                ".github/workflows/server-approve.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-approve.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-merge.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-merge.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-policy-check.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-policy-check.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-release.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-release.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                ".github/workflows/server-securefix.yml".to_owned(),
+                include_str!("../repo-settings/managed-files/server-securefix.yml")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ]);
+        let source_sha = "b".repeat(40);
+        render_managed_role_workflows(
+            &mut desired,
+            &instance_config,
+            "civitaspo/securefix-server",
+            &source_sha,
+            "v0.2.45-pre.23 (candidate source)",
+        )
+        .unwrap();
+
+        let role = securefix::instance_config::WorkflowRole::Approve;
+        let path = instance_config.workflow_roles.get(&role).unwrap();
+        let uses = workflow_uses(desired.get(path).unwrap()).unwrap();
+        let expected_uses = uses.iter().next().unwrap();
+        let mut workflow: serde_yaml::Value =
+            serde_yaml::from_slice(desired.get(path).unwrap()).unwrap();
+        for group in [
+            serde_yaml::Value::Null,
+            serde_yaml::Value::String("other".to_owned()),
+        ] {
+            let mut altered = workflow.clone();
+            altered["jobs"]["handler"]["concurrency"]["group"] = group;
+            assert!(
+                validate_rendered_managed_role_workflow(
+                    role,
+                    expected_uses,
+                    &instance_config,
+                    serde_yaml::to_string(&altered).unwrap().as_bytes()
+                )
+                .is_err()
+            );
+        }
+        workflow["jobs"]["handler"]["permissions"]["contents"] =
+            serde_yaml::Value::String("write".to_owned());
+        assert!(
+            validate_rendered_managed_role_workflow(
+                role,
+                expected_uses,
+                &instance_config,
+                serde_yaml::to_string(&workflow).unwrap().as_bytes(),
+            )
+            .is_err()
+        );
+
+        workflow["jobs"]["handler"]["permissions"]["contents"] =
+            serde_yaml::Value::String("read".to_owned());
+        workflow["jobs"]["handler"]["secrets"]["APPROVAL_TOKEN"] =
+            serde_yaml::Value::String("${{ secrets.OTHER_TOKEN }}".to_owned());
+        assert!(
+            validate_rendered_managed_role_workflow(
+                role,
+                expected_uses,
+                &instance_config,
+                serde_yaml::to_string(&workflow).unwrap().as_bytes(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_client_release_tag_uses_its_own_accepted_full_sha_pin() {
+        let manifest: ManagedFilesManifest =
+            serde_json::from_slice(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let instance_config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../repo-settings/native-role-events-test-instance.toml"
+        ))
+        .unwrap();
+        let pin_sha = "c".repeat(40);
+        let pin = crate::distribution::caller::ClientImplementationPin::new(
+            "civitaspo/securefix-server",
+            &pin_sha,
+            "0.2.45",
+        )
+        .unwrap();
+        let template = include_bytes!("../repo-settings/managed-files/release-tag.yml");
+        assert_eq!(
+            template.as_slice(),
+            include_bytes!("distribution_templates/managed-client-release-tag.yml")
+        );
+        let rendered =
+            render_managed_release_tag(&manifest, &instance_config, &pin, template).unwrap();
+        let workflow: serde_yaml::Value = serde_yaml::from_slice(&rendered).unwrap();
+        assert_eq!(
+            workflow["permissions"],
+            serde_yaml::Value::Mapping(Default::default())
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["uses"].as_str(),
+            Some(
+                format!(
+                    "civitaspo/securefix-server/.github/workflows/reusable-release-tag.yml@{pin_sha}"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["with"].as_mapping().unwrap().len(),
+            3,
+            "managed caller passes only the release PR and protected instance locator"
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["with"]["release_pr_number"],
+            r"${{ fromJSON(format('{0}', inputs.release_pr_number || github.event.pull_request.number || 0)) }}"
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["with"]["server_repository"],
+            "civitaspo/securefix-server"
+        );
+        assert_eq!(
+            workflow["jobs"]["tag"]["with"]["instance_config_path"],
+            MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH
+        );
+        assert!(String::from_utf8_lossy(&rendered).contains("# v0.2.45"));
+        assert_eq!(
+            workflow["jobs"]["tag"]["secrets"]["SECUREFIX_CLIENT_PRIVATE_KEY"],
+            "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"
+        );
+
+        let wrong_repository = crate::distribution::caller::ClientImplementationPin::new(
+            "civitaspo/other-client",
+            &pin_sha,
+            "0.2.45",
+        )
+        .unwrap();
+        assert!(
+            render_managed_release_tag(&manifest, &instance_config, &wrong_repository, template,)
+                .is_err()
+        );
+        let wrong_version = crate::distribution::caller::ClientImplementationPin::new(
+            "civitaspo/securefix-server",
+            &pin_sha,
+            "0.0.9",
+        )
+        .unwrap();
+        assert!(
+            render_managed_release_tag(&manifest, &instance_config, &wrong_version, template,)
+                .is_err()
+        );
+
+        let mut wrong_authority = instance_config.clone();
+        wrong_authority.instance.repository = manifest.repository.clone();
+        wrong_authority.instance.id = manifest.repository_id;
+        assert!(render_managed_release_tag(&manifest, &wrong_authority, &pin, template).is_err());
+    }
+
+    #[test]
+    fn managed_removals_are_exact_inactive_workflow_paths() {
+        let instance_config = managed_instance_config();
+        let retired = vec![".github/workflows/old-server-approve.yml".to_owned()];
+        assert!(validate_managed_removals(&retired, &instance_config).is_ok());
+
+        let active_role = instance_config
+            .workflow_roles
+            .values()
+            .next()
+            .expect("fixture must configure at least one workflow role")
+            .clone();
+        assert!(validate_managed_removals(&[active_role], &instance_config).is_err());
+        assert!(
+            validate_managed_removals(&["securefix-server.toml".to_owned()], &instance_config)
+                .is_err()
+        );
+        assert!(
+            validate_managed_removals(
+                &[MANAGED_CLIENT_RELEASE_TAG_TARGET.to_owned()],
+                &instance_config
+            )
+            .is_err()
+        );
+        assert!(
+            validate_managed_removals(
+                &[
+                    ".github/workflows/old-server-approve.yml".to_owned(),
+                    ".github/workflows/OLD-SERVER-APPROVE.yml".to_owned(),
+                ],
+                &instance_config
+            )
+            .is_err()
+        );
+        assert!(
+            validate_managed_removals(
+                &[".github/workflows/nested/old.yml".to_owned()],
+                &instance_config
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn adopted_manifest_retires_only_the_observed_legacy_test_callers() {
+        let manifest =
+            parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let desired = BTreeMap::from([(
+            MANAGED_INSTANCE_CONFIG_TARGET.to_owned(),
+            include_bytes!("../repo-settings/managed-files/securefix-server.toml").to_vec(),
+        )]);
+        let instance_config = validate_managed_instance_config(&manifest, &desired).unwrap();
+        assert!(validate_managed_targets(&manifest.files, &instance_config).is_ok());
+        assert!(validate_managed_removals(&manifest.remove, &instance_config).is_ok());
+
+        let actual = manifest.remove.into_iter().collect::<BTreeSet<_>>();
+        let expected = [
+            ".github/workflows/native-securefix-producer.yml",
+            ".github/workflows/native-approval-producer.yml",
+            ".github/workflows/native-merge-producer.yml",
+            ".github/workflows/testing-approve-request.yml",
+            ".github/workflows/testing-merge-request.yml",
+            ".github/workflows/testing-policy-check.yml",
+            ".github/workflows/testing-release-pr-sync.yml",
+            ".github/workflows/testing-release-pr.yml",
+            ".github/workflows/testing-release-tag.yml",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .map(|file| file.target.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_managed_targets(&instance_config)
+        );
     }
 
     fn installation_repository(id: u64, full_name: &str, owner_id: u64) -> Value {
@@ -2309,6 +4762,7 @@ mod tests {
             repository: "civitaspo/example".into(),
             capabilities: vec![Capability::Settings],
             release: None,
+            native_binaries: Vec::new(),
             sensitive_paths: vec![".github/**".into()],
             protect_tags: false,
         };
@@ -2338,6 +4792,7 @@ mod tests {
                 .clone(),
             capabilities: vec![Capability::Settings],
             release: None,
+            native_binaries: Vec::new(),
             sensitive_paths: vec![".github/**".into()],
             protect_tags: false,
         };
@@ -2375,6 +4830,7 @@ mod tests {
             repository: "civitaspo/example".into(),
             capabilities: vec![Capability::Release],
             release: Some(crate::policy::ReleaseStrategy::GithubRelease),
+            native_binaries: Vec::new(),
             sensitive_paths: vec![".github/**".into()],
             protect_tags: false,
         };

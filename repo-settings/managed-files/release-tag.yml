@@ -1,0 +1,36 @@
+name: Release Tag
+
+on:
+  pull_request:
+    types:
+      - closed
+  workflow_dispatch:
+    inputs:
+      release_pr_number:
+        description: Merged release PR to retry
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: release-tag-${{ github.event.pull_request.number || inputs.release_pr_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+      issues: write
+      pull-requests: read
+    uses: @CLIENT_REPOSITORY@/.github/workflows/reusable-release-tag.yml@@CLIENT_IMPLEMENTATION_SHA@ # @CLIENT_IMPLEMENTATION_VERSION@
+    with:
+      release_pr_number: ${{ fromJSON(format('{0}', inputs.release_pr_number || github.event.pull_request.number || 0)) }}
+      server_repository: "@SERVER_REPOSITORY@"
+      instance_config_path: "@INSTANCE_CONFIG_PATH@"
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

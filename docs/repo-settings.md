@@ -17,3 +17,38 @@ The readiness input is an operator attestation, not a substitute for those API c
 Every privileged command verifies the active control identity. The active descriptor selects the source-bound attested runtime and policy snapshot; an ordinary main update does not activate a new runtime. Publication and caller distribution are separately dispatched after review and activation. See [migration and rollout](migration.md) and [ADR 0009](adr/0009-active-control-revision.md) for the proposed lifecycle and bootstrap constraint.
 
 Require lockfile enforcement belongs to this settings flow. The currently documented API limitation and rollout prerequisite are recorded in [workflow lockfile maintenance](workflow-lockfiles.md#enforce-through-repository-settings).
+
+Managed scratch callers keep literal implementation pins in their desired YAML files. Reconciliation does not replace the Securefix Client pin with the renderer source revision. The cross-repository Securefix caller selects `civitaspo/securefix-server` and `repo-settings/native-securefix-write-test-instance.toml`; the policy, approval, and merge callers select that Server and `repo-settings/native-role-events-test-instance.toml`. Validation reads those exact configurations from the selected source snapshot and checks Server identity, target capability, trusted Client source and request scope. Release Tag uses the same Server and protected configuration as policy, approval, and merge, so its merged-PR approval proof is checked under that authority. The package destination and the managed repository do not select the approval Server. These files describe scratch deployment only. The running Server reads its configuration from its protected default branch.
+
+The scratch managed-file set includes `.github/workflows/actions.lock`. Generate it with the pinned `gh-actions-lock` tool against the assembled target workflows before committing the desired state, and run `--verify` on that tree. The workflow definitions and their generated lock are reviewed in the same reconcile PR.
+
+The native managed-file path uses `settings managed-prepare --config-path PATH
+--manifest-path PATH` to resolve the destination and App ID before requesting a
+repository-scoped workflow writer, then `settings managed-reconcile` with the
+same inputs to propose the exact signed file changes. The explicit `workflow_roles.settings` path binds the executing protected caller. Both paths read the
+manifest and desired bytes from the Server instance's protected default branch;
+there is no candidate source or runtime-version input. The destination must have
+`settings` capability in the protected external TOML. The writer can create only
+its managed branch, signed commit and reviewable PR; it cannot merge, administer
+repository settings, or modify unrelated files. Each write revalidates the
+Server authority, settings workflow and desired source bytes, destination identity,
+default head, and any previously created signed branch. Administrator settings
+reconciliation remains a separate job. The owner-selected `*-scratch` commands
+remain development probes and do not qualify this path as deployed.
+
+The native administrator path uses `settings instance-prepare --config-path PATH`
+to select Settings-capable destinations and `settings instance-reconcile
+--config-path PATH --repository OWNER/NAME` for each existing destination. It
+reads the six repository/collaborator/ruleset definitions from protected instance
+main. Identity and App values come from the external TOML, including the native
+policy-check App binding. The legacy collaborator template's username is not an
+identity source in this path. The dedicated `SECUREFIX_SETTINGS_ADMIN_TOKEN`
+must authenticate as the configured owner and is separate from the managed-file
+PR job. Every write checks current configuration, settings deployment, protected
+desired bytes and destination identity, and is restricted to repository settings,
+configured rulesets, immutable-release enablement and the configured reviewer.
+It cannot write code or PRs, create or reactivate merge controls, or disable
+immutable releases. Reconciliation reads back merge methods, protection rules,
+review/check bindings and reviewer access. Repository creation and full-list
+merge-control activation still use the existing management path until separately
+migrated; these commands do not replace those operations.

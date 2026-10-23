@@ -150,7 +150,9 @@ pub fn run(command: Command) -> Result<()> {
         Command::Prepare { plan } => prepare(&plan.unwrap_or_else(default_plan_path)),
         Command::Apply { plan } => apply(&plan.unwrap_or_else(default_plan_path)),
         Command::Cleanup => cleanup(),
-        Command::ClientPrepare(args) => client_prepare(*args),
+        Command::ClientPrepare(args) => {
+            client_prepare(*args, &crate::config::trusted()?.deployment.workflow_prefix)
+        }
         Command::ClientDispatch {
             artifact_name,
             server_repository,
@@ -165,7 +167,7 @@ fn default_plan_path() -> PathBuf {
         .join("securefix-apply-plan.json")
 }
 
-fn client_prepare(args: ClientPrepareArgs) -> Result<()> {
+pub(crate) fn client_prepare(args: ClientPrepareArgs, artifact_prefix: &str) -> Result<()> {
     let ClientPrepareArgs {
         root_dir,
         files: files_arg,
@@ -329,10 +331,7 @@ fn client_prepare(args: ClientPrepareArgs) -> Result<()> {
         .take(6)
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let artifact_name = format!(
-        "{}securefix-{run_id}-{suffix}",
-        crate::config::trusted()?.deployment.workflow_prefix
-    );
+    let artifact_name = format!("{artifact_prefix}securefix-{run_id}-{suffix}");
     let stage = output_dir.join(&artifact_name);
     let cwd = std::env::current_dir()?;
     ensure_no_symlink_components(&cwd, &output_dir)?;
@@ -930,6 +929,16 @@ pub(crate) fn destination_head(
 
     p.repository(source.repository)?
         .require(Capability::Release)?;
+    release_destination_head(api, source, fix, default_branch, p.server_bot_id)
+}
+
+pub(crate) fn release_destination_head(
+    api: &GitHub,
+    source: &SourceRequest<'_>,
+    fix: &artifact::FixArtifact,
+    default_branch: &str,
+    server_bot_id: u64,
+) -> Result<DestinationHead> {
     ensure!(
         fix.repository.eq_ignore_ascii_case(source.repository),
         "release fixes may only update their source repository"
@@ -974,6 +983,10 @@ pub(crate) fn destination_head(
         path_component(&fix.branch),
         path_component(default_branch)
     ))?;
+    ensure!(
+        pulls.len() < 100,
+        "release pull request listing is incomplete"
+    );
     let matching: Vec<_> = pulls
         .iter()
         .filter(|pr| {
@@ -998,7 +1011,7 @@ pub(crate) fn destination_head(
         "/repos/{}/compare/{}...{head}",
         source.repository, source.sha
     ))?;
-    validate_release_comparison(&comparison, p.server_bot_id)?;
+    validate_release_comparison(&comparison, server_bot_id)?;
     let changed = comparison["files"]
         .as_array()
         .context("release branch comparison has no changed-file list")?;
@@ -1015,7 +1028,7 @@ pub(crate) fn destination_head(
         source,
         None,
         fix,
-        p.server_bot_id,
+        server_bot_id,
     )?;
     if matching.is_empty() {
         ensure!(
@@ -1024,7 +1037,7 @@ pub(crate) fn destination_head(
         );
     } else {
         ensure!(
-            matching[0]["user"]["id"].as_u64() == Some(p.server_bot_id),
+            matching[0]["user"]["id"].as_u64() == Some(server_bot_id),
             "existing release pull request is not owned by the Securefix Server bot"
         );
     }
@@ -1076,6 +1089,10 @@ fn release_pull_request(
         path_component(branch),
         path_component(base)
     ))?;
+    ensure!(
+        pulls.len() < 100,
+        "release pull request listing is incomplete"
+    );
     let matching: Vec<_> = pulls
         .iter()
         .filter(|pr| {

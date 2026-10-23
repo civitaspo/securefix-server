@@ -1,0 +1,63 @@
+[
+  {
+    "event": "committed"
+  },
+  {
+    "event": "reviewed",
+    "submitted_at": "2026-10-23T10:11:47Z",
+    "commit_id": "2fc6a2978798b7b46797e5bcd5ef1008986f18f9"
+  },
+  {
+    "event": "commented",
+    "created_at": "2026-10-23T10:11:48Z",
+    "actor": {
+      "id": 4525500,
+      "login": "civitaspo",
+      "type": "User"
+    }
+  },
+  {
+    "event": "reviewed",
+    "submitted_at": "2026-10-23T10:14:07Z",
+    "commit_id": "2fc6a2978798b7b46797e5bcd5ef1008986f18f9"
+  },
+  {
+    "event": "commented",
+    "created_at": "2026-10-23T10:16:23Z",
+    "actor": {
+      "id": 4525500,
+      "login": "civitaspo",
+      "type": "User"
+    }
+  },
+  {
+    "event": "merged",
+    "created_at": "2026-10-23T10:19:45Z",
+    "actor": {
+      "id": 288069019,
+      "login": "civitaspo-securefix-server[bot]",
+      "type": "Bot"
+    },
+    "commit_id": "3845f9810414bd818dfd2c9c818aa9014652fb3b"
+  },
+  {
+    "event": "closed",
+    "created_at": "2026-10-23T10:19:45Z",
+    "actor": {
+      "id": 288069019,
+      "login": "civitaspo-securefix-server[bot]",
+      "type": "Bot"
+    },
+    "commit_id": null
+  },
+  {
+    "event": "head_ref_deleted",
+    "created_at": "2026-10-23T10:19:48Z",
+    "actor": {
+      "id": 288069019,
+      "login": "civitaspo-securefix-server[bot]",
+      "type": "Bot"
+    },
+    "commit_id": null
+  }
+]

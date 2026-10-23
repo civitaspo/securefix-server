@@ -1,0 +1,77 @@
+name: Reusable Server Securefix
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
+    secrets:
+      SERVER_PRIVATE_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  receive:
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: read
+    timeout-minutes: 20
+    steps:
+      - name: Load the fixed Securefix Server package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@5c4effcaefca77e8c3750bc82ff82156f60cd74b # v0.2.45-pre.103
+        with:
+          token: ${{ github.token }}
+      - name: Resolve the authenticated Client request label
+        id: request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" new-server locate-instance-event --operation securefix --config-path "$CONFIG_PATH"
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-read
+        with:
+          app-id: ${{ steps.request.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ steps.request.outputs.producer_owner }}
+          repositories: ${{ steps.request.outputs.producer_repository_name }}
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+          permission-statuses: read
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-writer
+        with:
+          app-id: ${{ steps.request.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ steps.request.outputs.producer_owner }}
+          repositories: ${{ steps.request.outputs.producer_repository_name }}
+          permission-contents: write
+      - name: Revalidate and apply the exact Securefix request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.client-read.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.client-writer.outputs.token }}
+          CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+          PRODUCER_REPOSITORY: ${{ steps.request.outputs.producer_repository }}
+          PRODUCER_RUN_ID: ${{ steps.request.outputs.producer_run_id }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" new-server instance-securefix-apply --config-path "$CONFIG_PATH" \
+            --producer-repository "$PRODUCER_REPOSITORY" --producer-run-id "$PRODUCER_RUN_ID"

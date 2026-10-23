@@ -97,3 +97,11 @@ repository = "example-org/securefix-client"
 id = 654321
 producer_workflow = ".github/workflows/request-producer.yml"
 version = ">=1.4.0"
+
+[[scratch_request_callers]]
+repository = "example-org/requester"
+id = 765432
+workflow_path = ".github/workflows/policy-check.yml"
+workflow_ref = "refs/heads/main"
+event = "pull_request_target"
+operation = "policy_check"

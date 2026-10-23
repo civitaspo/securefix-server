@@ -24,9 +24,13 @@ jobs:
     permissions:
       actions: read
       contents: read
-      attestations: read
+      attestations: write
+      id-token: write
       issues: read
       pull-requests: read
     uses: @SERVER_REPOSITORY@/.github/workflows/reusable-merge-request.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
+    with:
+      server_repository: @SERVER_REPOSITORY@
+      instance_config_path: securefix-server.toml
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}

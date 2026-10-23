@@ -364,6 +364,76 @@ pub(crate) fn approve_native_current_head(
     let repository = &manifest.repository.full_name;
     let pull_number = manifest.pull_request.number;
     let expected_head = &manifest.pull_request.head_sha;
+    let request_sha256 = securefix::hex_encode(sha2::Sha256::digest(request_bytes));
+    let body = securefix::api::native_approval_body(
+        &manifest.server_authority,
+        expected_head,
+        &request_sha256,
+    )?;
+    post_and_confirm_native_approval(
+        read,
+        review_api,
+        repository,
+        pull_number,
+        expected_head,
+        reviewer,
+        body,
+    )
+}
+
+pub(crate) fn approve_native_instance_current_head(
+    read: &GitHub,
+    review_api: &GitHub,
+    manifest: &crate::native_client::RequestManifest,
+    reviewer: &config::Principal,
+    request_bytes: &[u8],
+) -> Result<String> {
+    let body = native_instance_approval_body_for_manifest(manifest, request_bytes)?;
+    post_and_confirm_native_approval(
+        read,
+        review_api,
+        &manifest.repository.full_name,
+        manifest.pull_request.number,
+        &manifest.pull_request.head_sha,
+        reviewer,
+        body,
+    )
+}
+
+fn native_instance_approval_body_for_manifest(
+    manifest: &crate::native_client::RequestManifest,
+    request_bytes: &[u8],
+) -> Result<Value> {
+    manifest.validate()?;
+    ensure!(
+        manifest.operation == "approval"
+            && manifest.producer.event == "issue_comment"
+            && manifest.producer.run_attempt == 1
+            && manifest.command_comment.is_some(),
+        "ordinary native instance approval requires its original /approve request"
+    );
+    let request_sha256 = securefix::hex_encode(sha2::Sha256::digest(request_bytes));
+    securefix::api::native_instance_approval_body(
+        &manifest.server_authority,
+        &manifest.pull_request.head_sha,
+        &request_sha256,
+        manifest.producer.run_id,
+        manifest.producer.run_attempt,
+    )
+}
+
+fn post_and_confirm_native_approval(
+    read: &GitHub,
+    review_api: &GitHub,
+    repository: &str,
+    pull_number: u64,
+    expected_head: &str,
+    reviewer: &config::Principal,
+    body: Value,
+) -> Result<String> {
+    let marker = body["body"]
+        .as_str()
+        .context("native approval marker is missing")?;
     let identity: Value = review_api.get("/user")?;
     ensure!(
         identity["id"].as_u64() == Some(reviewer.id)
@@ -373,15 +443,6 @@ pub(crate) fn approve_native_current_head(
     );
     let pull: Value = read.get(&format!("/repos/{repository}/pulls/{pull_number}"))?;
     validate_review_target(&pull, expected_head, reviewer.id)?;
-    let request_sha256 = securefix::hex_encode(sha2::Sha256::digest(request_bytes));
-    let body = securefix::api::native_approval_body(
-        &manifest.server_authority,
-        expected_head,
-        &request_sha256,
-    )?;
-    let marker = body["body"]
-        .as_str()
-        .context("native approval marker is missing")?;
     let path = format!("/repos/{repository}/pulls/{pull_number}/reviews");
     let reviews = read.paginate(&path)?;
     if !latest_reviewer_approval(&reviews, reviewer, "User", expected_head)
@@ -1143,6 +1204,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_instance_approval_binds_its_producer_run_for_merge_lookup() {
+        let repository = "example-org/project";
+        let number = 28;
+        let head = "a".repeat(40);
+        let request_bytes = br#"{"request":"owner approval"}"#;
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "example-org/securefix-server".to_owned(),
+            instance_id: 404,
+            default_branch: "main".to_owned(),
+            config_path: "repo-settings/managed-files/securefix-server.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![securefix::api::NativeWorkflowAuthority {
+                role: securefix::instance_config::WorkflowRole::Approve,
+                path: ".github/workflows/approve.yml".to_owned(),
+                sha256: "d".repeat(64),
+                pins: vec![],
+            }],
+        };
+        let mut manifest = native_approval_manifest(repository, number, &head, &authority);
+        manifest.protocol = "securefix-native-request/v1".to_owned();
+        manifest.producer.event = "issue_comment".to_owned();
+        manifest.producer.run_id = 42;
+        manifest.command_comment = Some(crate::native_client::CommandCommentIdentity {
+            id: 91,
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-10-22T01:02:03Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2026-10-22T01:02:03Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        });
+        let body = native_instance_approval_body_for_manifest(&manifest, request_bytes).unwrap();
+        let marker = body["body"].as_str().unwrap();
+        let parsed = securefix::api::parse_native_instance_approval_marker(marker).unwrap();
+        assert_eq!(parsed.producer_run_id, 42);
+        assert_eq!(parsed.producer_run_attempt, 1);
+    }
+
     fn native_approval_manifest(
         repository: &str,
         number: u64,
@@ -1166,6 +1267,7 @@ mod tests {
                 author_id: 7,
                 author_login: "owner".to_owned(),
             },
+            command_comment: None,
             producer: crate::native_client::ProducerIdentity {
                 run_id: 1,
                 run_attempt: 1,
@@ -1173,7 +1275,7 @@ mod tests {
                 context_sha: head.to_owned(),
                 source_sha: head.to_owned(),
                 workflow_path: ".github/workflows/request-producer-probe.yml".to_owned(),
-                workflow_ref: "civitaspo/securefix-server/.github/workflows/request-producer-probe.yml@refs/heads/main".to_owned(),
+                workflow_ref: "refs/heads/main".to_owned(),
                 workflow_sha: "f".repeat(40),
                 actor_id: 7,
                 actor_login: "owner".to_owned(),

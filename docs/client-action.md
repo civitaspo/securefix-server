@@ -56,6 +56,14 @@ new default-branch commit rather than relying on pre-merge PR checks.
 
 The generated Merge Request wrapper permits the configured owner and the exact configured Renovate Bot on its own PRs. The runtime records bot requests separately from owner authorization and revalidates their provenance and accepted head. See [Renovate requests](merging.md#renovate-requests); changing a wrapper alone cannot authorize a bot in an older active runtime.
 
+The native package prepares source artifacts with `securefix new-client securefix prepare`.
+It reuses the bounded file staging and metadata validation of the legacy Client,
+but uses the protocol artifact prefix without loading deployment policy.
+The subsequent capture and Server verification bind the artifact to the run,
+exact PR head and protected instance configuration; staging does not authorize a write.
+
+Native requests bind the Actions run head and branch to the target PR. For `pull_request_target`, the attested `GITHUB_SHA` is the base-branch execution snapshot; it can differ from the PR API's persisted base SHA. The Server verifies that execution snapshot against the attestation certificate, and separately checks the artifact event against the PR head and base. Current Client workflow and Server authority checks still run before writes.
+
 ## Fixed package loader
 
 Server and Client jobs use the same `load-package` composite Action pinned to a
@@ -80,3 +88,5 @@ stale authority checks. Download permission does not authorize a mutation.
 The current development mapping explicitly selects the verified scratch
 prerelease `v0.2.45-pre.42` in `civitaspo/testing-securefix-server`. It does not
 change the production `load-cli` or `load-runtime` path or activate a runtime.
+
+Scratch package admission accepts only configured owner or Server Bot PR authors. Producers must be the owner, except that the configured Server Bot may produce policy checks. This does not authorize approval or merge commands; those still require the exact-head, current-authority owner command and review. All identities are checked by both ID and login against the protected instance configuration.

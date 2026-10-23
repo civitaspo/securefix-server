@@ -12,15 +12,65 @@ sequenceDiagram
   Owner->>Client: Merge release/next PR into main
   Client->>Server: Call pinned Release Tag reusable
   Server->>Client: Validate merged PR and owner marker
-  Server->>Client: Build fixed provider target matrix without secrets
-  Server->>Client: Create annotated tag and upload v2 manifest
+  Server->>Client: Build configured native target matrix without credentials
+  Server->>Client: Create annotated tag and upload v2 manifest plus bundle artifact
   Client->>Server: Create release-request-RUN label
   Server->>Client: Validate successful run, reusable pin, PR, tag, artifacts
+  Server->>Server: Validate source-bound bundle and exact asset contract
   Server->>Server: Sign canonical checksum (provider strategy)
-  Server->>Client: Publish draft, verify assets, publish once
+  Server->>Client: Upload exact assets to draft, verify, publish, reread immutable assets
 ```
 
-The active control revision supplies the policy used for privileged effects. The source Release Tag run must be successful, originate in the exact client repository, expose a confined caller workflow path, and reference the runtime source selected by the active descriptor. For PR runs, the run SHA must match the associated PR head SHA; the server reads the caller workflow from the PR's base SHA, which must be on the default branch, and requires its reusable call to pin the active runtime source. Owner-dispatched retries read the workflow at the run SHA and require that SHA on the default branch. The v2 manifest binds its run ID/attempt, full control identity, runtime source, release PR, merge commit, tag, and provider artifact ID. The PR must be merged `release/next` → `main` by the server bot. The server also reads `.release-version` from the merged commit and requires it to match the tag. Sensitive owner authorization is represented by a server-authored marker bound to the exact PR head SHA and full control identity.
+The active control revision supplies the policy used for privileged effects. The source Release Tag run must be successful, originate in the exact client repository, expose a confined caller workflow path, and reference the runtime source selected by the active descriptor. For PR runs, the run SHA must match the associated PR head SHA; the server reads the caller workflow from the PR's base SHA, which must be on the default branch, and requires its reusable call to pin the active runtime source. Owner-dispatched retries read the workflow at the run SHA and require that SHA on the default branch. The v2 manifest binds its run ID/attempt, full control identity, runtime source, release PR, merge commit, tag, and configured release-bundle artifact ID. The PR must be merged `release/next` → `main` by the server bot. The server also reads `.release-version` from the merged commit and requires it to match the tag. Sensitive owner authorization is represented by a server-authored marker bound to the exact PR head SHA and full control identity.
+
+## Development instance release path
+
+The new `reusable-server-release.yml` path reads the Server instance's protected
+TOML. It does not use `control/active.json` or the binary's bundled policy.
+The Server wrapper pin and the Client Release Tag signer pin are independent.
+The source manifest must identify the actual accepted Client signer, exact
+producer run and attempt, merged release PR, and annotated tag. The plan binds
+the protected configuration and Server deployment authority. Signing and
+publication reject changes to those identities, the approved PR head, or the
+accepted package.
+
+Client package source and release storage are separate identities. Normal
+admission requires formal releases in `[acceptable_clients]`'s version range.
+Only an explicitly configured `scratch_package_repository` enables the existing
+prerelease verifier. The publisher requalifies that exact pinned Action manifest
+and package before scratch writes. A scratch destination never becomes the OSS
+distributor. Acquisition does not authorize publication.
+
+Draft inspection uses a single-Client token with Contents write permission in a
+read-only Rust API context. In the isolated publication job, draft and asset
+reads use the publication token; source, PR, and provenance reads use the reader
+token. Neither token reaches Client build hooks or the signing job. Request label
+cleanup can delete only the authenticated event's label in the current protected
+Server deployment. These candidate connections require scratch qualification
+before deployment; the existing production path above remains active meanwhile.
+
+### Release preparation and metadata synchronization
+
+The development `reusable-release-pr.yml` prepares a bounded metadata artifact
+without signing or publishing credentials. Its separate attestation job signs
+the captured source run, artifact identity, caller workflow epoch and protected
+Server authority. The Client App dispatch job can only create the exact request
+label. The Release receiver verifies that proof and the accepted fixed package,
+then reuses the signed commit and PR writer for the configured release branch.
+Only `.release-version`, `CHANGELOG.md` and version-only Cargo, Python or dbt
+metadata changes are accepted. Cargo preparation updates the matching root
+package in both manifest and lockfile; dependency changes are rejected.
+
+Each write rechecks the captured main source, release branch head, caller epoch,
+configuration and Server deployment. A changed head or authority requires a new
+request. `reusable-release-pr-sync.yml` runs on pushes to the configured release
+branch and can update only the exact Server-owned PR title and body. Its caller
+must exactly match the protected main workflow. The release-branch revision need
+not be an ancestor of main; the protected main workflow epoch remains the stale
+fence and is rechecked immediately before the metadata write. The managed
+Release PR, Sync and Tag callers are reconciled independently by repo-settings.
+These development connections still require qualification with their matching
+immutable binary before adoption.
 
 ## Runtime distribution
 
@@ -67,7 +117,52 @@ The build job compiles the fixed provider target matrix from the validated merge
 
 [`policy.json`](../policy.json) is the exact allowlist and strategy source. Supported strategies are `github-release` and `terraform-provider`; no client-provided release configuration is evaluated. A policy change requires review and a merge to this repository.
 
+For a `github-release` repository with an empty `native_binaries` list, Release Tag retains its existing zero-asset behavior. A configured native matrix is built from the validated release merge commit before the tag manifest and server request are created. The Linux Rust controller resolves the allowed target/runner matrix; each build job checks out that exact merge commit and runs only the fixed `cargo build --locked --release --bin <repository> --target <target>` command on the configured GitHub-hosted runner. The job reads `.release-version` from the checked-out commit, executes the resulting binary's `--version` on that runner, and uploads the binary with runner and version evidence. Those build jobs receive no app token or signing key, and checkout credentials are disabled. The Linux Rust assembler checks the current run and attempt, exact artifact names and target set, and binds each artifact's configured runner, actual runner OS/CPU, executed version output, filename, size, and digest to the source run, release PR, and package version. For ordinary releases the package version and release tag version come from the same `.release-version` value; the scratch rehearsal uses a unique prerelease tag while keeping the binary version bound to the pinned Client source. Preflight validates the artifact's source run and exact target set; the publisher rechecks local bytes, uploads only missing exact-name, digest, and size assets to the draft, verifies the complete set before publishing, and rereads the published immutable release and every asset digest. It never overwrites or mutates a published release.
+
+For a merged-PR Release Tag run, the Actions API head identifies the approved PR head while the execution and attestation source context identifies its exact merge commit. The resolver supplies the verified API head to the credential-free native builders; assembly and attestation validation bind both identities separately. A manually dispatched retry uses its verified run head as the execution context. Release approval validation ignores non-transition timeline records, requires the configured Server App's exact merge and close events, and permits its subsequent automatic release-branch deletion. Other post-command invalidating transitions remain rejected.
+
+The `herdr-linear-agent` package uses four native targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-musl`, and `x86_64-unknown-linux-musl`. Published filenames are `<repository>-<target>`. The existing client-side `release-assets.yml` workflow builds and uploads after `release.published`; it must be retired or converted as part of caller migration before this path is enabled because immutable releases reject late asset uploads.
+
 For `terraform-provider`, the server builds 13 ZIP assets using Go 1.26.5 and fixed Go build flags/targets. Each ZIP contains exactly `CHANGELOG.md`, `LICENSE`, `README.md`, and `${project}_v${version}` (with `.exe` on Windows); this matches the existing Sigma provider archive contract. Asset names are `${project}_${version}_${os}_${arch}.zip`, and the manifest is `${project}_${version}_manifest.json`. The server generates `${project}_${version}_SHA256SUMS` for all ZIPs and the manifest and its detached `.sig`. These names and archive contents are part of the Terraform Registry compatibility contract.
+
+## Securefix CLI package publication
+
+The Server's own `securefix-linux-x86_64` package has a separate producer and
+publisher. The owner-dispatched `native-package-build.yml` runs on the selected
+source commit with no publication credential. It tests and builds the CLI,
+uploads only the raw executable, and attests that exact file. The protected-main
+`publish-native-package.yml` builds its Rust publisher host from the workflow
+revision; the publisher treats the producer artifact as data and never executes
+it with a write token.
+
+Dispatch the publisher with the exact producer run ID and `channel`. The
+source revision carries a strict schema-v2 build manifest at
+`.github/actions/load-package/source-package.json`; it fixes the producer
+workflow, publisher workflow, package version, size limit, and asset name. Rust
+validates that manifest against `Cargo.toml`, the producer run and attempt, the
+exact artifact and attestation, and the actual owner-dispatched publisher run.
+The release body records the source-manifest digest, source revision, producer
+and publisher run identities, tag, and exact asset name, size, and digest.
+
+The package loader Action has a separate strict schema-v3 `package.json` at its
+pinned Action revision. It maps that Action revision to the executable's source
+revision, the source-manifest path and digest, and the immutable release and
+asset record. Rust derives the local Action references from the authenticated
+Client producer workflow and rejects missing or mixed mappings; the Action
+revision may differ from the executable source revision. The caller passes only
+the token to the loader, which verifies the mapping before downloading the
+executable. The publisher rechecks the protected destination branch before each
+write, uploads the single `securefix-linux-x86_64` asset to a draft, publishes
+it, then rereads the release and asset and requires immutable state and matching
+bytes and digests.
+
+`stable` targets the Server repository and uses a canonical stable SemVer tag.
+`scratch` targets only the repository fixed in the protected publisher workflow
+and uses a prerelease tag. Neither destination is accepted from dispatch input.
+The scratch token is scoped to the test repository; the stable token is scoped
+to the Server repository. The build and attestation jobs receive no release
+write token, and the publisher does not inspect repository settings or request
+Administration permission.
 
 ## Client wrappers
 
@@ -79,7 +174,7 @@ Pin each reusable to a full commit SHA and give its caller the minimum `permissi
 | `reusable-release-pr-sync.yml` | `actions: read`, `contents: read`, `attestations: read`, `pull-requests: write` |
 | `reusable-release-tag.yml` | `actions: read`, `contents: write`, `attestations: read`, `pull-requests: read`, `issues: write` |
 
-A release PR wrapper passes `SECUREFIX_CLIENT_PRIVATE_KEY` and may provide an explicit version. The Rust CLI updates `.release-version`, `CHANGELOG.md`, and supported root package version metadata before Securefix opens or updates `release/next`. When reusing an existing Server App-owned release PR, the apply step also synchronizes its title and body from the validated artifact options, including on idempotent retries.
+A release PR wrapper passes `SECUREFIX_CLIENT_PRIVATE_KEY` and may provide an explicit version. The Rust CLI updates `.release-version`, `CHANGELOG.md`, and supported root package version metadata before Securefix opens or updates `release/next`. When reusing an existing Server App-owned release PR, the apply step also synchronizes its title and body from the validated artifact options, including on idempotent retries. Native metadata sync uses the protected external Server configuration and the authenticated Client workflow/package mapping. Its Client repository token may PATCH only the validated title and body of the exact Server-owned release PR; current run, release-branch head, caller epoch and Server authority are rechecked immediately before that write. A release-request label existence read does not require a POST payload; label creation retains its exact run-bound payload and pre-write Server authority check.
 
 ```yaml
 name: Release PR
@@ -161,3 +256,9 @@ The `release/next` PR must contain `.release-version` and the release changelog.
 Immutable releases must be enabled for every release-capable repository through settings reconciliation or organization policy before publication. The publisher relies on that setup and does not read administrative repository settings. After publishing, it re-fetches the release and requires the expected tag, published state, and `immutable: true`. The publishing App does not need Administration permission. GitHub does not enable immutable releases by default.
 
 Caller migrations include the official workflow dependency lockfile in the exact generated file set. See [workflow lockfile maintenance](workflow-lockfiles.md).
+
+The native publisher revalidates its selected draft by its exact release ID with
+the isolated publication credential. GitHub's tag lookup exposes only published
+releases, so an absent tag lookup is valid only before selection or while that
+exact selected release is still a verified draft. A different published release
+on the tag, a missing selected ID, or changed release identity stops publication.

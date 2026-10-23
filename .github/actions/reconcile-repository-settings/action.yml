@@ -1,0 +1,44 @@
+name: Reconcile repository settings
+description: Reconcile protected instance settings with an isolated administrator credential
+inputs:
+  token:
+    description: Read-only token for the Server instance and fixed package
+    required: true
+  administrator_token:
+    description: Dedicated repository-settings administrator token
+    required: true
+  config_path:
+    description: Root-relative TOML path in protected Server instance main
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Load the fixed Securefix package
+      id: package
+      uses: civitaspo/securefix-server/.github/actions/load-package@5c4effcaefca77e8c3750bc82ff82156f60cd74b # v0.2.45-pre.103
+      with:
+        token: ${{ inputs.token }}
+    - name: Select protected settings destinations
+      id: prepare
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        CONFIG_PATH: ${{ inputs.config_path }}
+        CLI_BINARY: ${{ steps.package.outputs.binary }}
+      run: |
+        set -euo pipefail
+        "$CLI_BINARY" settings instance-prepare --config-path "$CONFIG_PATH"
+    - name: Reconcile repository settings
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        SECUREFIX_SETTINGS_ADMIN_TOKEN: ${{ inputs.administrator_token }}
+        CONFIG_PATH: ${{ inputs.config_path }}
+        CLI_BINARY: ${{ steps.package.outputs.binary }}
+        REPOSITORIES: ${{ steps.prepare.outputs.repositories }}
+      run: |
+        set -euo pipefail
+        repositories=$(jq -er '.[]' <<< "$REPOSITORIES")
+        while IFS= read -r repository; do
+          "$CLI_BINARY" settings instance-reconcile --config-path "$CONFIG_PATH" --repository "$repository"
+        done <<< "$repositories"

@@ -1,0 +1,94 @@
+{
+  "run": {
+    "id": 39926038334,
+    "event": "pull_request",
+    "head_sha": "b1a7b1a006db1eb0cd6d4f69706d8c483bdf4a76",
+    "head_branch": "testing/native-role-events-token-loader-pre47",
+    "pull_requests": [],
+    "actor": {
+      "login": "civitaspo-securefix-server[bot]",
+      "id": 288069019,
+      "node_id": "BOT_kgDOESuVmw",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3872533?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D",
+      "html_url": "https://github.com/apps/civitaspo-securefix-server",
+      "followers_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    }
+  },
+  "pull": {
+    "number": 437,
+    "state": "closed",
+    "merged_at": "2026-10-23T08:38:06Z",
+    "merge_commit_sha": "6fcbfac0c98799daa3e23ae17a6a07ddc1415ab9",
+    "head": {
+      "ref": "testing/native-role-events-token-loader-pre47",
+      "sha": "b1a7b1a006db1eb0cd6d4f69706d8c483bdf4a76",
+      "repo": {
+        "full_name": "civitaspo/testing-securefix-server"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "dd681e2f34b5188ef584db1a90d98c108586e9ee",
+      "repo": {
+        "full_name": "civitaspo/testing-securefix-server"
+      }
+    },
+    "merged": true,
+    "merged_by": {
+      "login": "civitaspo-securefix-server[bot]",
+      "id": 288069019,
+      "node_id": "BOT_kgDOESuVmw",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3872533?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D",
+      "html_url": "https://github.com/apps/civitaspo-securefix-server",
+      "followers_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/civitaspo-securefix-server%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    }
+  },
+  "associated": [
+    {
+      "number": 437,
+      "state": "closed",
+      "merged_at": "2026-10-23T08:38:06Z",
+      "merge_commit_sha": "6fcbfac0c98799daa3e23ae17a6a07ddc1415ab9",
+      "head": {
+        "ref": "testing/native-role-events-token-loader-pre47",
+        "sha": "b1a7b1a006db1eb0cd6d4f69706d8c483bdf4a76",
+        "repo": {
+          "full_name": "civitaspo/testing-securefix-server"
+        }
+      },
+      "base": {
+        "ref": "main",
+        "sha": "dd681e2f34b5188ef584db1a90d98c108586e9ee",
+        "repo": {
+          "full_name": "civitaspo/testing-securefix-server"
+        }
+      }
+    }
+  ]
+}

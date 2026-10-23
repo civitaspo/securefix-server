@@ -28,14 +28,19 @@ id = 308696683
 
 [apps]
 client_id = 3872492
-server_id = 15368
+server_id = 3872533
 status_check_id = 15368
-policy_check_id = 15368
+policy_check_id = 3872533
 
 [workflow_roles]
-approve = ".github/workflows/testing-approve-request.yml"
-merge = ".github/workflows/testing-merge-request.yml"
-policy_check = ".github/workflows/policy-check.yml"
+approve = ".github/workflows/server-approve.yml"
+merge = ".github/workflows/server-merge.yml"
+policy_check = ".github/workflows/server-policy-check.yml"
+release = ".github/workflows/server-release.yml"
+securefix = ".github/workflows/server-securefix.yml"
+
+[branches]
+release = "release/next"
 
 [policy]
 trusted_committers = [
@@ -58,11 +63,26 @@ github_apps = []
 [[repositories]]
 repository = "civitaspo/testing-securefix-server"
 id = 1410312556
-capabilities = ["merge"]
+capabilities = ["approve", "merge", "release", "securefix"]
+release = "github-release"
+native_binaries = [
+  { target = "aarch64-apple-darwin", runner = "macos-15" },
+  { target = "x86_64-apple-darwin", runner = "macos-15-intel" },
+  { target = "aarch64-unknown-linux-musl", runner = "ubuntu-24.04-arm" },
+  { target = "x86_64-unknown-linux-musl", runner = "ubuntu-24.04" },
+]
 protect_tags = false
 
 [acceptable_clients]
 repository = "civitaspo/securefix-server"
 id = 1250079425
-producer_workflow = ".github/workflows/request-producer-probe.yml"
-version = ">=0.1.0"
+producer_workflow = ".github/workflows/reusable-client-request-scratch.yml"
+version = ">=0.2.45-pre.23"
+
+[[scratch_request_callers]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+workflow_path = ".github/workflows/securefix-request.yml"
+workflow_ref = "refs/heads/main"
+event = "pull_request_target"
+operation = "securefix"

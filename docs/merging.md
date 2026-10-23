@@ -39,13 +39,16 @@ Approval uses the machine-user PAT only after validation and explicitly sends th
 The machine user's identity must be `civitaspo-bot`, and it cannot approve its own PR.
 Only a non-author approval for the current head counts; a reviewer's later dismissal or change request supersedes an earlier approval.
 
-The separate `policy-check.yml` client wrapper calls `reusable-policy-check.yml` on PR-target events and default-branch pushes, granting `contents: read`, `attestations: read`, `actions: read`, and `pull-requests: read`.
-The server workflow handles its own PR-target events and Client App request labels; default-branch push requests are supported only for callers. Server-local pushes do not invoke that caller-only capture path.
+The separate `policy-check.yml` Client wrapper calls `reusable-policy-check.yml` on `pull_request_target` events. That reusable captures and attests a native policy-check request, then dispatches its exact label to the configured Server instance. The caller grants `actions: read`, `contents: read`, `pull-requests: read`, `attestations: write`, and `id-token: write`; the Client App token is scoped to the Server repository and only receives `issues: write`.
 The Server App alone publishes the stable required `securefix-policy-check` result for that SHA; its check metadata binds the full active control identity, and merge validation requires that identity for the same head.
 It verifies source signatures, sensitive-path owner authorization, and current-head approval.
 Approval and merge authorization can refresh that check after an owner command.
 The default-branch ruleset binds this check to Server App ID `3872533` and dismisses stale reviews.
 Thus a green check and approval for head A do not authorize sensitive head B, including Renovate direct merges.
+
+For the external-config instance path, `securefix-native-request-policy-check` uses `native:v1:<head>:<authority SHA-256>:<request SHA-256>` as its external identity. Each authenticated fresh request creates a new check; an existing check for that exact request rejects replay. Previous authority results remain unchanged and cannot authorize the current authority. Both publication and merge read every page with `filter=all`, validate counts and reject duplicate check IDs.
+
+Merge selects the greatest check-run ID among results for the exact head, configured App and current authority. The ID orders creation, independent of completion time and API list order. A newer failed or incomplete request blocks merge even if an earlier request succeeded. A request-only legacy scratch result never satisfies the instance authority check. Fresh owner commands and authority-bound approval are still required after configuration or Server placement changes; the writer revalidates authority, head, checks and approval immediately before writing.
 
 ## Merge readiness
 
@@ -55,6 +58,7 @@ Before every merge attempt it rechecks the exact head, comment, timeline, signat
 `securefix-policy-check` must come from the Server App with a completed success.
 Duplicate matching policy check runs, pending checks, and missing approvals cannot pass.
 GitHub's GraphQL review decision must also be `APPROVED`.
+Immediately before the merge request, the processor rereads the configured required checks, the authority-bound policy result, the latest exact-head approval marker and review ID, and GraphQL's review decision; it compares them with the accepted merge fence.
 
 The contents-write token is created after readiness succeeds and is scoped to the target repository.
 The Merge API receives the accepted SHA as its optimistic precondition.
@@ -70,7 +74,7 @@ Successful client merges receive a completion comment with the squash SHA and Se
 
 ## Renovate requests
 
-`renovate_merge_bot` in [`src/renovate_merge_policy.json`](../src/renovate_merge_policy.json) configures one exact bot account ID/login independently of sensitive-path exemptions. Omission disables bot merge requests. This policy is embedded in the executable and bound to its reviewed source and attested archive. The base `policy.json` retains the predecessor controller's strict schema. A new, unedited `/merge` comment must come from that Bot account and trigger a successful first-attempt intake run by the same account. The current PR author must be that bot, the PR must be open, ready, same-repository and target the default branch, and every effective committer must match the bot. Verified GitHub web commits retain the additional GraphQL signature proof. The manifest records a separate `renovate-comment` authorization, accepted head and full control revision. It never creates an owner authorization receipt.
+For ordinary instance-bound merge roles, optional `[identities.renovate_merge_bot]` in the protected external instance TOML identifies one exact Bot account by immutable ID and login; omission disables bot merge requests. The identity must be a trusted committer and remains separate from sensitive-path approval exemptions. The generic executable contains no compiled deployment bot identity, and the predecessor `policy.json` schema remains unchanged. A new, unedited `/merge` comment must come from the configured Bot account and trigger a successful first-attempt intake run by the same account. The current PR author must be that bot, the PR must be open, ready, same-repository and target the default branch, and every effective committer must match the bot. Verified GitHub web commits retain the additional GraphQL signature proof. This request never creates owner authorization.
 
 The normal signature, sensitive-path policy, current-head review, required checks, timeline, expiry, replay and expected-head conditions apply throughout authorization, wait and apply. A bot merge request alone does not exempt sensitive paths; the separately configured author/committer exemption must still hold, or real owner authorization is required.
 

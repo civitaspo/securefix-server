@@ -119,6 +119,22 @@ pub(crate) fn require_renovate_author(policy: &Policy, pr: &Value) -> Result<()>
     Ok(())
 }
 
+pub(crate) fn require_renovate_author_for_instance(
+    config: &securefix::instance_config::InstanceConfig,
+    pr: &Value,
+) -> Result<()> {
+    let bot = config
+        .identities
+        .renovate_merge_bot
+        .as_ref()
+        .context("Renovate merge requests are disabled")?;
+    ensure!(
+        matches_principal(&pr["user"], bot.id, &bot.login, "Bot"),
+        "Renovate may only request merging its own pull requests"
+    );
+    Ok(())
+}
+
 pub(crate) fn command_matches(
     policy: &Policy,
     authorization: &Authorization,
@@ -1034,6 +1050,220 @@ pub(crate) fn validate_native_pr_commit_policy(
     Ok(())
 }
 
+/// Apply ordinary merge authorization using the explicit external instance
+/// configuration and an already-verified paired approval manifest. The
+/// caller must verify both producer artifacts, runs, and attestations before
+/// passing their manifests here.
+pub(crate) fn validate_native_instance_merge_policy(
+    api: &GitHub,
+    config: &securefix::instance_config::InstanceConfig,
+    merge: &crate::native_client::RequestManifest,
+    approval: &crate::native_client::RequestManifest,
+) -> Result<bool> {
+    merge.validate()?;
+    approval.validate()?;
+    ensure!(
+        merge.operation == "merge"
+            && approval.operation == "approval"
+            && merge.producer.run_id != approval.producer.run_id
+            && merge.repository == approval.repository
+            && merge.pull_request == approval.pull_request
+            && merge.server_authority == approval.server_authority,
+        "native merge and approval proofs do not bind the same PR and Server authority"
+    );
+    ensure!(
+        merge.producer.run_attempt == 1 && approval.producer.run_attempt == 1,
+        "native approval and merge commands must use their original producer attempts"
+    );
+
+    let repository = &merge.repository.full_name;
+    validate_repository(repository)?;
+    validate_sha(&merge.pull_request.head_sha)?;
+    let configured = config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == *repository && entry.id == merge.repository.id)
+        .context("native merge target repository is not configured")?;
+    configured
+        .policy()
+        .require(Capability::Merge)
+        .context("native merge target repository lacks the Merge capability")?;
+
+    let owner = &config.identities.owner;
+    let merge_is_owner = instance_manifest_actor_is(merge, owner);
+    let merge_bot = config.identities.renovate_merge_bot.as_ref();
+    let merge_is_renovate = merge_bot.is_some_and(|bot| instance_manifest_actor_is(merge, bot));
+    ensure!(
+        merge_is_owner || merge_is_renovate,
+        "native merge command actor is not the configured owner or Renovate bot"
+    );
+    validate_native_instance_command_comment(
+        api,
+        merge,
+        "/merge",
+        if merge_is_owner {
+            owner
+        } else {
+            merge_bot.unwrap()
+        },
+        if merge_is_owner { "User" } else { "Bot" },
+    )?;
+    ensure!(
+        instance_manifest_actor_is(approval, owner),
+        "native approval command actor is not the configured owner"
+    );
+    validate_native_instance_command_comment(api, approval, "/approve", owner, "User")?;
+
+    let repo: Value = api.get(&format!("/repos/{repository}"))?;
+    ensure!(
+        repo["id"].as_u64() == Some(merge.repository.id)
+            && repo["full_name"].as_str() == Some(repository.as_str())
+            && repo["default_branch"].as_str() == Some(merge.pull_request.base_ref.as_str()),
+        "native merge repository identity or default branch changed"
+    );
+    let number = merge.pull_request.number;
+    let head_sha = &merge.pull_request.head_sha;
+    let pull: Value = api.get(&format!("/repos/{repository}/pulls/{number}"))?;
+    ensure!(
+        pull["number"].as_u64() == Some(number)
+            && pull["state"] == "open"
+            && pull["base"]["repo"]["id"].as_u64() == Some(merge.repository.id)
+            && pull["base"]["repo"]["full_name"].as_str() == Some(repository.as_str())
+            && pull["base"]["sha"].as_str() == Some(merge.pull_request.base_sha.as_str())
+            && pull["base"]["ref"].as_str() == Some(merge.pull_request.base_ref.as_str())
+            && pull["head"]["sha"].as_str() == Some(head_sha.as_str())
+            && pull["head"]["ref"].as_str() == Some(merge.pull_request.head_branch.as_str())
+            && pull["head"]["repo"]["id"].as_u64() == Some(merge.pull_request.head_repository_id)
+            && pull["head"]["repo"]["full_name"].as_str() == Some(repository.as_str())
+            && pull["user"]["id"].as_u64() == Some(merge.pull_request.author_id)
+            && pull["user"]["login"].as_str() == Some(merge.pull_request.author_login.as_str()),
+        "native merge pull request is closed, retargeted, from a fork, or has a different head or author"
+    );
+
+    let commits = api.paginate(&format!("/repos/{repository}/pulls/{number}/commits"))?;
+    let github_signed = validate_pr_commit_entries(
+        api,
+        repository,
+        head_sha,
+        &commits,
+        &config.policy.trusted_committers,
+    )?;
+    if merge_is_renovate {
+        require_renovate_author_for_instance(config, &pull)?;
+        let bot = merge_bot.context("Renovate merge requests are disabled")?;
+        ensure!(
+            commits_match_principal(&commits, &github_signed, bot.id, &bot.login, "Bot"),
+            "Renovate merge requires every effective committer to be the configured bot"
+        );
+    }
+
+    let files = api.paginate(&format!("/repos/{repository}/pulls/{number}/files"))?;
+    ensure!(
+        files.len() < 3000,
+        "pull request file list is incomplete or exceeds the API limit"
+    );
+    let paths = files
+        .iter()
+        .flat_map(|file| {
+            [
+                file["filename"].as_str(),
+                file["previous_filename"].as_str(),
+            ]
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    let matching_paths = configured
+        .policy()
+        .matching_sensitive_paths(paths.iter().copied())?;
+    let sensitive = !matching_paths.is_empty();
+    let exempt = sensitive_path_approval_exempt_for(
+        &config.policy.sensitive_path_approval_exemptions,
+        &pull["user"],
+        &commits,
+        &github_signed,
+    );
+    if sensitive && !merge_is_owner && !exempt {
+        ensure!(
+            instance_manifest_actor_is(approval, owner),
+            "sensitive path changes require an exact owner approval request and native review"
+        );
+    }
+    Ok(sensitive)
+}
+
+fn instance_manifest_actor_is(
+    manifest: &crate::native_client::RequestManifest,
+    principal: &config::Principal,
+) -> bool {
+    manifest.producer.actor_id == principal.id
+        && manifest
+            .producer
+            .actor_login
+            .eq_ignore_ascii_case(&principal.login)
+}
+
+fn validate_native_instance_command_comment(
+    api: &GitHub,
+    manifest: &crate::native_client::RequestManifest,
+    command: &str,
+    principal: &config::Principal,
+    principal_type: &str,
+) -> Result<()> {
+    ensure!(
+        matches!(manifest.operation.as_str(), "approval" | "merge")
+            && manifest.producer.event == "issue_comment"
+            && manifest.producer.run_attempt == 1,
+        "native command must be bound to its original issue-comment event"
+    );
+    let locator = manifest
+        .command_comment
+        .as_ref()
+        .context("native command request lacks its event-derived comment locator")?;
+    ensure!(
+        locator.id > 0 && locator.created_at == locator.updated_at,
+        "native command comment locator is invalid or edited"
+    );
+    ensure!(
+        instance_manifest_actor_is(manifest, principal),
+        "native command run actor differs from its configured authorization principal"
+    );
+    let repository = &manifest.repository.full_name;
+    let number = manifest.pull_request.number;
+    let comment: Value = api.get(&format!(
+        "/repos/{repository}/issues/comments/{}",
+        locator.id
+    ))?;
+    let issue_url_suffix = format!("/repos/{repository}/issues/{number}");
+    let created_at = comment["created_at"]
+        .as_str()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let updated_at = comment["updated_at"]
+        .as_str()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    ensure!(
+        comment["id"].as_u64() == Some(locator.id)
+            && comment["body"]
+                .as_str()
+                .is_some_and(|body| body.trim_ascii() == command)
+            && comment["issue_url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with(&issue_url_suffix))
+            && created_at == Some(locator.created_at)
+            && updated_at == Some(locator.updated_at)
+            && created_at == updated_at
+            && matches_principal(
+                &comment["user"],
+                principal.id,
+                &principal.login,
+                principal_type
+            ),
+        "native command comment is missing, changed, edited, or unauthorized"
+    );
+    Ok(())
+}
+
 pub(crate) fn validate_merge_policy(
     api: &GitHub,
     policy: &Policy,
@@ -1164,7 +1394,20 @@ fn sensitive_path_approval_exempt(
     commits: &[Value],
     github_signed: &HashSet<String>,
 ) -> bool {
-    let exemptions = &policy.sensitive_path_approval_exemptions;
+    sensitive_path_approval_exempt_for(
+        &policy.sensitive_path_approval_exemptions,
+        author,
+        commits,
+        github_signed,
+    )
+}
+
+fn sensitive_path_approval_exempt_for(
+    exemptions: &crate::policy::SensitivePathApprovalExemptions,
+    author: &Value,
+    commits: &[Value],
+    github_signed: &HashSet<String>,
+) -> bool {
     let principal = exemptions
         .users
         .iter()
@@ -2148,6 +2391,185 @@ mod tests {
             "commit committer is not an allowed committer"
         );
         fixture.finish();
+    }
+
+    #[test]
+    fn native_instance_merge_policy_uses_external_renovate_and_owner_rules() {
+        let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let repository = "example-org/project";
+        let repository_id = 987654;
+        let number = 7;
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let created_at = DateTime::parse_from_rfc3339("2026-10-22T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let authority = securefix::api::NativeAuthoritySnapshot {
+            instance_repository: "example-org/securefix-server".to_owned(),
+            instance_id: 404,
+            default_branch: "main".to_owned(),
+            config_path: "repo-settings/managed-files/securefix-server.toml".to_owned(),
+            config_sha256: "b".repeat(64),
+            epoch: "c".repeat(40),
+            workflows: vec![securefix::api::NativeWorkflowAuthority {
+                role: securefix::instance_config::WorkflowRole::Merge,
+                path: ".github/workflows/merge.yml".to_owned(),
+                sha256: "d".repeat(64),
+                pins: vec![],
+            }],
+        };
+
+        let run_case = |merge_actor: &config::Principal,
+                        pr_author: (&str, u64, &str),
+                        committer: &config::Principal,
+                        path: &str,
+                        expected: Option<bool>| {
+            let make_manifest =
+                |operation: &str, run_id: u64, actor: &config::Principal, comment_id: u64| {
+                    let (author_login, author_id, _) = pr_author;
+                    crate::native_client::RequestManifest {
+                        protocol: "securefix-native-request/v1".to_owned(),
+                        operation: operation.to_owned(),
+                        repository: crate::native_client::RepositoryIdentity {
+                            id: repository_id,
+                            full_name: repository.to_owned(),
+                        },
+                        pull_request: crate::native_client::PullRequestIdentity {
+                            number,
+                            head_sha: head.clone(),
+                            head_branch: "feature/update".to_owned(),
+                            head_repository_id: repository_id,
+                            base_sha: base.clone(),
+                            base_ref: "main".to_owned(),
+                            author_id,
+                            author_login: author_login.to_owned(),
+                        },
+                        command_comment: Some(crate::native_client::CommandCommentIdentity {
+                            id: comment_id,
+                            created_at,
+                            updated_at: created_at,
+                        }),
+                        producer: crate::native_client::ProducerIdentity {
+                            run_id,
+                            run_attempt: 1,
+                            event: "issue_comment".to_owned(),
+                            context_sha: head.clone(),
+                            source_sha: head.clone(),
+                            workflow_path: ".github/workflows/request-producer.yml".to_owned(),
+                            workflow_ref: "refs/heads/main".to_owned(),
+                            workflow_sha: "e".repeat(40),
+                            actor_id: actor.id,
+                            actor_login: actor.login.clone(),
+                        },
+                        securefix_artifact: None,
+                        client_workflow_epoch: "f".repeat(40),
+                        server_authority: authority.clone(),
+                    }
+                };
+            let merge = make_manifest("merge", 42, merge_actor, 101);
+            let approval = make_manifest("approval", 43, &config.identities.owner, 102);
+            let merge_kind = if merge_actor.id == config.identities.owner.id {
+                "User"
+            } else {
+                "Bot"
+            };
+            let author_kind = pr_author.2;
+            let principal_json = |principal: &config::Principal, kind: &str| json!({"id":principal.id,"login":principal.login,"type":kind});
+            let comment = |id: u64, body: &str, actor: &config::Principal, kind: &str| {
+                json!({
+                    "id":id,
+                    "body":body,
+                    "issue_url":format!("https://api.github.com/repos/{repository}/issues/{number}"),
+                    "created_at":"2026-10-22T01:02:03Z",
+                    "updated_at":"2026-10-22T01:02:03Z",
+                    "user":principal_json(actor, kind),
+                })
+            };
+            let author = json!({
+                "id":pr_author.1,
+                "login":pr_author.0,
+                "type":author_kind,
+            });
+            let commit_actor = principal_json(
+                committer,
+                if committer.id == config.identities.renovate_merge_bot.as_ref().unwrap().id {
+                    "Bot"
+                } else {
+                    "User"
+                },
+            );
+            let routes = vec![
+                Route::get(
+                    format!("/repos/{repository}/issues/comments/101"),
+                    comment(101, "/merge", merge_actor, merge_kind),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/issues/comments/102"),
+                    comment(102, "/approve", &config.identities.owner, "User"),
+                ),
+                Route::get(
+                    format!("/repos/{repository}"),
+                    json!({"id":repository_id,"full_name":repository,"default_branch":"main"}),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/pulls/{number}"),
+                    json!({
+                        "number":number,
+                        "state":"open",
+                        "base":{"repo":{"id":repository_id,"full_name":repository},"sha":base,"ref":"main"},
+                        "head":{"sha":head,"ref":"feature/update","repo":{"id":repository_id,"full_name":repository}},
+                        "user":author,
+                    }),
+                ),
+                Route::get(
+                    format!("/repos/{repository}/pulls/{number}/commits?per_page=100&page=1"),
+                    json!([{
+                        "sha":head,
+                        "commit":{"verification":{"verified":true}},
+                        "author":commit_actor,
+                        "committer":commit_actor,
+                    }]),
+                ),
+            ];
+            let mut routes = routes;
+            if expected.is_some() {
+                routes.push(Route::get(
+                    format!("/repos/{repository}/pulls/{number}/files?per_page=100&page=1"),
+                    json!([{"filename":path}]),
+                ));
+            }
+            let fixture = Fixture::new(routes);
+            let result =
+                validate_native_instance_merge_policy(&fixture.api, &config, &merge, &approval);
+            if let Some(sensitive) = expected {
+                assert_eq!(result.unwrap(), sensitive);
+            } else {
+                assert!(result.is_err());
+            }
+            fixture.finish();
+        };
+
+        let owner = &config.identities.owner;
+        let bot = config.identities.renovate_merge_bot.as_ref().unwrap();
+        run_case(
+            owner,
+            ("contributor", 700, "User"),
+            owner,
+            "README.md",
+            Some(false),
+        );
+        run_case(
+            bot,
+            (&bot.login, bot.id, "Bot"),
+            bot,
+            "Cargo.lock",
+            Some(true),
+        );
+        run_case(bot, ("other-user", 701, "User"), bot, "Cargo.lock", None);
+        run_case(bot, (&bot.login, bot.id, "Bot"), owner, "Cargo.lock", None);
     }
 
     #[test]

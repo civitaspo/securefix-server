@@ -11,9 +11,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 
-pub(crate) const SOURCE_BUILD_MANIFEST_PATH: &str =
-    ".github/actions/load-package/source-package.json";
-
 const MAX_CARGO_TOML_BYTES: usize = 64 * 1024;
 const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PACKAGE_ARTIFACT_BYTES: usize = 160 * 1024 * 1024;
@@ -21,13 +18,261 @@ const MAX_PACKAGE_BUNDLE_BYTES: u64 = 16 * 1024 * 1024;
 const PACKAGE_ARTIFACT_NAME: &str = "native-package-attested";
 const PACKAGE_BINARY_NAME: &str = "securefix-linux-x86_64";
 const PACKAGE_BUNDLE_NAME: &str = "bundle.json";
+const MAX_PACKAGE_WORKFLOW_BYTES: usize = 64 * 1024;
+pub(crate) const SOURCE_BUILD_MANIFEST_PATH: &str =
+    ".github/actions/load-package/source-package.json";
 const PACKAGE_PRODUCER_WORKFLOW: &str = ".github/workflows/testing-native-package-build.yml";
 const PACKAGE_PUBLISHER_WORKFLOW: &str = ".github/workflows/testing-publish-native-package.yml";
-const NATIVE_CLIENT_PROTOCOL: &str = "securefix-native-request/v1";
 pub(crate) const NATIVE_PACKAGE_PRODUCER_WORKFLOW: &str =
     ".github/workflows/native-package-build.yml";
 pub(crate) const NATIVE_PACKAGE_PUBLISHER_WORKFLOW: &str =
     ".github/workflows/publish-native-package.yml";
+
+/// One local package action selected by an authenticated Client workflow's
+/// literal `uses: owner/repo/path@<full SHA>` reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedPackageAction {
+    repository: String,
+    path: String,
+    sha: String,
+}
+
+impl PinnedPackageAction {
+    pub fn new(repository: String, path: String, sha: String) -> Result<Self> {
+        crate::policy::validate_repository(&repository)?;
+        validate_package_action_path(&path)?;
+        crate::policy::validate_sha(&sha)?;
+        Ok(Self {
+            repository,
+            path,
+            sha,
+        })
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.sha
+    }
+
+    fn manifest_path(&self) -> String {
+        format!("{}/package.json", self.path)
+    }
+}
+
+fn validate_package_action_path(path: &str) -> Result<()> {
+    validate_repository_relative_path(path)?;
+    ensure!(!path.is_empty(), "Client package action path is empty");
+    Ok(())
+}
+
+fn validate_source_package_manifest_path(path: &str) -> Result<()> {
+    validate_repository_relative_path(path)?;
+    ensure!(
+        path.ends_with(".json"),
+        "source package manifest path must name a JSON file"
+    );
+    Ok(())
+}
+
+fn validate_repository_relative_path(path: &str) -> Result<()> {
+    ensure!(
+        !path.is_empty()
+            && path.len() <= 200
+            && !path.starts_with('/')
+            && !path.ends_with('/')
+            && !path
+                .as_bytes()
+                .get(..2)
+                .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':')
+            && path.split('/').all(|part| {
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && part
+                        .bytes()
+                        .all(|byte| byte >= 0x20 && byte != 0x7f && !b"\\?#".contains(&byte))
+            }),
+        "repository-relative path is invalid"
+    );
+    Ok(())
+}
+
+fn encode_repository_path(path: &str) -> String {
+    path.split('/')
+        .map(crate::api::encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClientPackageChannel {
+    Stable,
+    Scratch,
+}
+
+/// Strict v3 map bundled with the immutable Client package action. It binds
+/// that action revision to one binary source revision and its publication.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeClientPackageManifest {
+    schema_version: u8,
+    channel: ClientPackageChannel,
+    component: String,
+    protocol: String,
+    version: String,
+    max_bytes: u64,
+    source_repository: String,
+    source_repository_id: u64,
+    source_sha: String,
+    source_branch: String,
+    source_default_branch: String,
+    source_manifest_path: String,
+    source_manifest_sha256: String,
+    destination_repository: String,
+    destination_repository_id: u64,
+    tag: String,
+    release_id: u64,
+    target_branch: String,
+    immutable: bool,
+    prerelease: bool,
+    asset_id: u64,
+    asset_name: String,
+    asset_size: u64,
+    asset_sha256: String,
+    producer_workflow: String,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
+    publisher_workflow: String,
+    publisher_sha: String,
+    publisher_branch: String,
+    publisher_run_id: u64,
+    publisher_run_attempt: u64,
+}
+
+impl NativeClientPackageManifest {
+    fn scratch_publication(&self) -> ScratchPackagePublication {
+        ScratchPackagePublication {
+            source_repository: self.source_repository.clone(),
+            source_repository_id: self.source_repository_id,
+            destination_repository: self.destination_repository.clone(),
+            destination_repository_id: self.destination_repository_id,
+            source_sha: self.source_sha.clone(),
+            source_branch: self.source_branch.clone(),
+            tag: self.tag.clone(),
+            release_id: self.release_id,
+            asset_id: self.asset_id,
+            asset_sha256: self.asset_sha256.clone(),
+            asset_size: self.asset_size,
+            producer_run_id: self.producer_run_id,
+            producer_run_attempt: self.producer_run_attempt,
+            publisher_workflow: self.publisher_workflow.clone(),
+            publisher_branch: self.publisher_branch.clone(),
+            publisher_sha: self.publisher_sha.clone(),
+            publisher_run_id: self.publisher_run_id,
+            publisher_run_attempt: self.publisher_run_attempt,
+        }
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= 16 * 1024,
+            "pinned Client package action manifest is empty or exceeds its size limit"
+        );
+        serde_json::from_slice(bytes).context("parse strict Client package action manifest")
+    }
+
+    fn validate(
+        &self,
+        expected_channel: ClientPackageChannel,
+        source: &TrustedPublisher,
+        destination: &TrustedPublisher,
+        expected_protocol: &str,
+        source_default_branch: Option<&str>,
+    ) -> Result<String> {
+        crate::policy::validate_repository(&self.source_repository)?;
+        crate::policy::validate_repository(&self.destination_repository)?;
+        crate::policy::validate_sha(&self.source_sha)?;
+        crate::policy::validate_sha(&self.publisher_sha)?;
+        validate_source_package_manifest_path(&self.source_manifest_path)?;
+        validate_package_workflow(&self.producer_workflow)?;
+        validate_package_workflow(&self.publisher_workflow)?;
+        crate::config::validate_branch(&self.source_branch)?;
+        crate::config::validate_branch(&self.source_default_branch)?;
+        crate::config::validate_branch(&self.target_branch)?;
+        crate::config::validate_branch(&self.publisher_branch)?;
+
+        let version = Version::parse(&self.version).context("Client package version is invalid")?;
+        let stable_version = version.pre.is_empty()
+            && version.build.is_empty()
+            && version.to_string() == self.version;
+        let prerelease_version = !version.pre.is_empty() && version.build.is_empty();
+        ensure!(
+            self.schema_version == 3
+                && self.channel == expected_channel
+                && self.component == "securefix-server"
+                && self.protocol == expected_protocol
+                && expected_protocol == NATIVE_CLIENT_PROTOCOL
+                && self.source_repository == source.repository
+                && self.source_repository_id == source.repository_id
+                && self.destination_repository == destination.repository
+                && self.destination_repository_id == destination.repository_id
+                && source.repository_id > 0
+                && destination.repository_id > 0
+                && self.immutable
+                && self.release_id > 0
+                && self.asset_id > 0
+                && self.asset_name == PACKAGE_BINARY_NAME
+                && self.asset_size > 0
+                && self.asset_size <= self.max_bytes
+                && self.max_bytes > 0
+                && self.max_bytes <= MAX_ASSET_BYTES
+                && self.producer_run_id > 0
+                && self.producer_run_attempt == 1
+                && self.publisher_run_id > 0
+                && self.publisher_run_attempt == 1
+                && self.source_manifest_sha256.len() == 64
+                && self
+                    .source_manifest_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && self.asset_sha256.len() == 64
+                && self
+                    .asset_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && self.tag == format!("v{version}"),
+            "Client package action mapping contains an invalid identity or publication claim"
+        );
+        match expected_channel {
+            ClientPackageChannel::Stable => ensure!(
+                stable_version
+                    && !self.prerelease
+                    && self.source_branch == self.source_default_branch
+                    && self.target_branch == self.source_default_branch
+                    && self.publisher_branch == self.source_default_branch,
+                "stable Client package mapping is not a stable default-branch release"
+            ),
+            ClientPackageChannel::Scratch => ensure!(
+                prerelease_version && self.prerelease,
+                "scratch Client package mapping is not a prerelease"
+            ),
+        }
+        if let Some(default_branch) = source_default_branch {
+            crate::config::validate_branch(default_branch)?;
+            ensure!(
+                self.source_default_branch == default_branch,
+                "Client package mapping source default branch differs from the authenticated repository"
+            );
+        }
+        if expected_channel == ClientPackageChannel::Scratch {
+            ensure!(
+                self.publisher_workflow == NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
+                "scratch Client package mapping names an unexpected publisher workflow"
+            );
+        }
+        Ok(self.source_sha.clone())
+    }
+}
 
 /// Publisher identity supplied by authenticated deployment configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +301,9 @@ pub struct ResolvedRelease {
     pub version: Version,
     pub tag: String,
     pub release_id: u64,
+    /// Raw GitHub release body. Stable native packages require a canonical
+    /// publication record here; generic release resolution does not.
+    pub release_body: Option<String>,
     pub asset: ResolvedAsset,
 }
 
@@ -91,13 +339,13 @@ impl DownloadedAsset {
     }
 }
 
-/// A release asset whose bytes and exact publisher run/source attestation passed.
+/// A release asset whose bytes and producer/source attestation passed.
 /// This type is the only package result a host consumer should use before execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPackage {
     asset: DownloadedAsset,
-    publisher_run_id: u64,
-    publisher_run_attempt: u64,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
 }
 
 impl VerifiedPackage {
@@ -109,9 +357,990 @@ impl VerifiedPackage {
         self.asset.bytes()
     }
 
-    pub fn publisher_run(&self) -> (u64, u64) {
-        (self.publisher_run_id, self.publisher_run_attempt)
+    pub fn producer_run(&self) -> (u64, u64) {
+        (self.producer_run_id, self.producer_run_attempt)
     }
+}
+
+/// Authenticated identity chain for one fixed Client workflow and its package.
+/// The `package` field is the execution-ready result; the other fields explain
+/// which implementation, loader mapping, binary source, and protocol it binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedNativeClientPackage {
+    pub implementation_sha: String,
+    pub implementation_version: Version,
+    pub loader_action_sha: String,
+    pub loader_action_path: String,
+    pub binary_source_sha: String,
+    pub binary_version: Version,
+    pub protocol: String,
+    /// Workflow and branch declared by the fixed loader manifest whose
+    /// release publisher record. These are distinct from the producer whose
+    /// artifact attestation binds the executable bytes.
+    pub package_publisher_workflow: String,
+    pub package_publisher_branch: String,
+    pub package_publisher_sha: String,
+    pub package_publisher_run_id: u64,
+    pub package_publisher_run_attempt: u64,
+    pub package_producer_workflow: String,
+    pub package_producer_branch: String,
+    pub package_producer_run_id: u64,
+    pub package_producer_run_attempt: u64,
+    pub package: VerifiedPackage,
+}
+
+#[cfg(test)]
+pub(crate) fn native_client_package_api_test_fixture() -> VerifiedNativeClientPackage {
+    let publisher = TrustedPublisher {
+        repository: "example-org/securefix-client".to_owned(),
+        repository_id: 654_321,
+    };
+    let source_sha = "3".repeat(40);
+    let version = Version::parse("1.4.1").unwrap();
+    let asset = ResolvedAsset {
+        component: "securefix".to_owned(),
+        platform: "linux-x86_64".to_owned(),
+        id: 8_766,
+        name: "securefix-linux-x86_64".to_owned(),
+        size: 16,
+        sha256: "d".repeat(64),
+    };
+    let release = ResolvedRelease {
+        publisher,
+        implementation_sha: source_sha.clone(),
+        source_sha: source_sha.clone(),
+        version: version.clone(),
+        tag: format!("v{version}"),
+        release_id: 8_765,
+        release_body: None,
+        asset,
+    };
+    VerifiedNativeClientPackage {
+        implementation_sha: "1".repeat(40),
+        implementation_version: Version::parse("1.4.2").unwrap(),
+        loader_action_sha: "2".repeat(40),
+        loader_action_path: ".github/actions/load-package".to_owned(),
+        binary_source_sha: source_sha,
+        binary_version: version,
+        protocol: NATIVE_CLIENT_PROTOCOL.to_owned(),
+        package_publisher_workflow: ".github/workflows/publish-native-package.yml".to_owned(),
+        package_publisher_branch: "main".to_owned(),
+        package_publisher_sha: "4".repeat(40),
+        package_publisher_run_id: 8_767,
+        package_publisher_run_attempt: 1,
+        package_producer_workflow: ".github/workflows/native-package-build.yml".to_owned(),
+        package_producer_branch: "main".to_owned(),
+        package_producer_run_id: 8_768,
+        package_producer_run_attempt: 1,
+        package: VerifiedPackage {
+            asset: DownloadedAsset {
+                release,
+                bytes: b"synthetic-test-binary".to_vec(),
+            },
+            producer_run_id: 8_768,
+            producer_run_attempt: 1,
+        },
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn native_client_package_api_scratch_test_fixture() -> VerifiedNativeClientPackage {
+    let mut package = native_client_package_api_test_fixture();
+    package.implementation_version = Version::parse("1.4.3-pre.1").unwrap();
+    package.binary_version = Version::parse("1.4.1-pre.1").unwrap();
+    package.package_producer_branch = "candidate/source".to_owned();
+    let release = &mut package.package.asset.release;
+    release.publisher = TrustedPublisher {
+        repository: "example-org/package-scratch".to_owned(),
+        repository_id: 987_655,
+    };
+    release.version = package.binary_version.clone();
+    release.tag = format!("v{}", package.binary_version);
+    package
+}
+
+/// Verify the configured Client implementation release and the separate
+/// binary package selected by the fixed package loader in that implementation.
+///
+/// The Client implementation version is checked against deployment policy at
+/// its authenticated signer SHA. The binary's source revision and version come
+/// from the loader manifest pinned by that workflow. This function accepts
+/// only stable immutable releases; scratch prereleases remain a separate path.
+pub fn verify_native_client_package(
+    api: &GitHub,
+    acceptable: &crate::instance_config::AcceptableClients,
+    signer_sha: &str,
+    loader_action: &PinnedPackageAction,
+    expected_protocol: &str,
+    source_default_branch: &str,
+) -> Result<VerifiedNativeClientPackage> {
+    crate::policy::validate_repository(&acceptable.repository)?;
+    ensure!(acceptable.id > 0, "Client repository ID is invalid");
+    crate::policy::validate_sha(signer_sha)?;
+    validate_pinned_package_action(loader_action, &acceptable.repository)?;
+    crate::config::validate_branch(source_default_branch)?;
+    ensure!(
+        expected_protocol == NATIVE_CLIENT_PROTOCOL,
+        "requested Client protocol is not supported by this Server"
+    );
+    validate_package_workflow(&acceptable.producer_workflow)?;
+
+    let publisher = TrustedPublisher {
+        repository: acceptable.repository.clone(),
+        repository_id: acceptable.id,
+    };
+    let implementation_version = resolve_native_client_implementation(
+        api,
+        &publisher,
+        signer_sha,
+        &acceptable.version,
+        source_default_branch,
+    )?;
+
+    let (_, manifest) = fetch_native_client_action_manifest(api, loader_action)?;
+    manifest.validate(
+        ClientPackageChannel::Stable,
+        &publisher,
+        &publisher,
+        expected_protocol,
+        Some(source_default_branch),
+    )?;
+    let binary_version = Version::parse(&manifest.version)
+        .context("fixed Client package version is invalid SemVer")?;
+    ensure!(
+        binary_version.build.is_empty()
+            && binary_version.pre.is_empty()
+            && binary_version.to_string() == manifest.version,
+        "fixed Client package version must be canonical stable SemVer"
+    );
+    let binary_source_sha = manifest.source_sha.clone();
+    ensure!(
+        manifest.source_branch == source_default_branch
+            && manifest.source_default_branch == source_default_branch
+            && manifest.target_branch == source_default_branch,
+        "stable Client package mapping does not select the protected default branch"
+    );
+
+    let source_manifest_bytes = fetch_source_package_manifest(
+        api,
+        &publisher.repository,
+        &binary_source_sha,
+        &manifest.source_manifest_path,
+    )?;
+    let source_manifest: SourcePackageManifest = serde_json::from_slice(&source_manifest_bytes)
+        .context("binary source package manifest is invalid JSON")?;
+    validate_client_source_package_manifest(
+        &manifest,
+        &source_manifest,
+        &source_manifest_bytes,
+        &binary_version,
+        expected_protocol,
+    )?;
+
+    let asset_name = manifest.asset_name.clone();
+    let expected_asset = ExpectedAsset {
+        component: manifest.component.clone(),
+        platform: "linux-x86_64".to_owned(),
+        name: asset_name,
+    };
+    let exact_binary_version = VersionReq::parse(&format!("={binary_version}"))
+        .context("fixed Client package version cannot form an exact version requirement")?;
+    let downloaded = download_release_asset_bounded(
+        api,
+        &publisher,
+        &binary_source_sha,
+        &expected_asset,
+        &exact_binary_version,
+        manifest.max_bytes,
+    )?;
+    ensure!(
+        downloaded.release().release_id == manifest.release_id
+            && downloaded.release().asset.id == manifest.asset_id
+            && downloaded.release().tag == manifest.tag
+            && downloaded.release().asset.size == manifest.asset_size
+            && downloaded.release().asset.sha256 == manifest.asset_sha256,
+        "stable Client package mapping differs from the resolved immutable release"
+    );
+    let release_record = parse_native_package_release_record(
+        downloaded
+            .release()
+            .release_body
+            .as_deref()
+            .context("stable Client package release has no publication record")?,
+    )?;
+    validate_native_package_release_record(
+        &release_record,
+        downloaded.release(),
+        &source_manifest,
+        &source_manifest_bytes,
+        &binary_source_sha,
+        &expected_asset,
+    )?;
+    validate_client_package_manifest_record(&manifest, &release_record)?;
+    let producer_owner_id = package_workflow_owner_id(
+        api,
+        &publisher.repository,
+        &manifest.producer_workflow,
+        &binary_source_sha,
+    )?;
+    let package = verify_downloaded_release_from_with_actor(
+        api,
+        downloaded,
+        &publisher,
+        &manifest.producer_workflow,
+        source_default_branch,
+        Some(producer_owner_id),
+    )?;
+    ensure!(
+        package.producer_run()
+            == (
+                release_record.producer_run_id,
+                release_record.producer_run_attempt
+            ),
+        "package attestation differs from the exact producer run in its release record"
+    );
+    let publisher_workflow = manifest.publisher_workflow.as_str();
+    let publisher_dispatcher_id = package_workflow_owner_id(
+        api,
+        &publisher.repository,
+        publisher_workflow,
+        &manifest.publisher_sha,
+    )?;
+    let publisher_run: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{}/attempts/{}",
+        publisher.repository, manifest.publisher_run_id, manifest.publisher_run_attempt
+    ))?;
+    validate_native_package_publisher_run(
+        api,
+        &publisher,
+        source_default_branch,
+        &release_record,
+        publisher_dispatcher_id,
+        &publisher_run,
+    )?;
+
+    Ok(VerifiedNativeClientPackage {
+        implementation_sha: signer_sha.to_owned(),
+        implementation_version,
+        loader_action_sha: loader_action.sha.clone(),
+        loader_action_path: loader_action.path.clone(),
+        binary_source_sha,
+        binary_version,
+        protocol: manifest.protocol,
+        package_publisher_workflow: publisher_workflow.to_owned(),
+        package_publisher_branch: manifest.publisher_branch,
+        package_publisher_sha: manifest.publisher_sha,
+        package_publisher_run_id: manifest.publisher_run_id,
+        package_publisher_run_attempt: manifest.publisher_run_attempt,
+        package_producer_workflow: manifest.producer_workflow,
+        package_producer_branch: manifest.source_branch,
+        package_producer_run_id: manifest.producer_run_id,
+        package_producer_run_attempt: manifest.producer_run_attempt,
+        package,
+    })
+}
+
+/// Qualify a scratch package only when the authenticated Server instance
+/// explicitly configures its destination. This path also requires the owner
+/// selected caller policy. The immutable Action mapping selects the package;
+/// dispatch probes may additionally assert an exact publication record.
+// Preserve separate authority inputs so each boundary is checked explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_native_client_package_scratch(
+    api: &GitHub,
+    instance: &crate::instance_config::InstanceConfig,
+    acceptable: &crate::instance_config::AcceptableClients,
+    signer_sha: &str,
+    loader_action: &PinnedPackageAction,
+    expected_protocol: &str,
+    publication: Option<&ScratchPackagePublication>,
+) -> Result<VerifiedNativeClientPackage> {
+    crate::policy::validate_repository(&acceptable.repository)?;
+    ensure!(acceptable.id > 0, "Client repository ID is invalid");
+    crate::policy::validate_sha(signer_sha)?;
+    validate_pinned_package_action(loader_action, &acceptable.repository)?;
+    ensure!(
+        expected_protocol == NATIVE_CLIENT_PROTOCOL,
+        "requested Client protocol is not supported by this Server"
+    );
+    let destination_config = configured_scratch_package_repository(instance)?;
+    crate::policy::validate_repository(&destination_config.repository)?;
+    crate::config::validate_branch(&destination_config.default_branch)?;
+
+    let source = TrustedPublisher {
+        repository: acceptable.repository.clone(),
+        repository_id: acceptable.id,
+    };
+    let destination = TrustedPublisher {
+        repository: destination_config.repository.clone(),
+        repository_id: destination_config.id,
+    };
+    let (_, manifest) = fetch_native_client_action_manifest(api, loader_action)?;
+    let mapped_publication = manifest.scratch_publication();
+    let publication = publication.unwrap_or(&mapped_publication);
+    validate_scratch_publication_repositories(publication, &source, &destination)?;
+    ensure!(
+        publication.producer_run_id > 0
+            && publication.producer_run_attempt == 1
+            && publication.publisher_run_id > 0
+            && publication.publisher_run_attempt == 1
+            && publication.release_id > 0
+            && publication.asset_id > 0
+            && publication.asset_size > 0
+            && publication.asset_size <= MAX_ASSET_BYTES,
+        "scratch publication record has invalid run or release identity"
+    );
+    crate::config::validate_branch(&publication.source_branch)?;
+    crate::policy::validate_sha(&publication.source_sha)?;
+    crate::policy::validate_sha(&publication.publisher_sha)?;
+    ensure!(
+        publication.asset_sha256.len() == 64
+            && publication
+                .asset_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "scratch publication record has an invalid asset digest"
+    );
+
+    let source_repository: Value = api.get(&format!("/repos/{}", source.repository))?;
+    validate_remote_repository_identity(&source_repository, &source)?;
+    let source_default_branch = source_repository["default_branch"]
+        .as_str()
+        .context("scratch Client package source has no default branch")?;
+    crate::config::validate_branch(source_default_branch)?;
+    let source_repository = crate::config::Repository {
+        repository: source.repository.clone(),
+        id: source.repository_id,
+        default_branch: source_default_branch.to_owned(),
+    };
+    ensure!(
+        publication.publisher_workflow == NATIVE_PACKAGE_PUBLISHER_WORKFLOW
+            && publication.publisher_branch == source_default_branch,
+        "scratch package publisher workflow or branch differs from the configured Client source"
+    );
+    let publisher_run: Value = api.get(&format!(
+        "/repos/{}/actions/runs/{}/attempts/{}",
+        source.repository, publication.publisher_run_id, publication.publisher_run_attempt
+    ))?;
+    validate_scratch_package_completed_writer_run(
+        &publisher_run,
+        &source_repository,
+        &publication.publisher_workflow,
+        &publication.publisher_sha,
+        publication.publisher_run_id,
+        publication.publisher_run_attempt,
+        instance.identities.owner.id,
+    )?;
+    let destination_repository: Value = api.get(&format!("/repos/{}", destination.repository))?;
+    validate_remote_repository_identity(&destination_repository, &destination)?;
+    let destination_default_branch = destination_repository["default_branch"]
+        .as_str()
+        .context("scratch destination default branch is missing")?;
+    ensure!(
+        destination_default_branch == destination_config.default_branch
+            && destination_repository["owner"]["id"].as_u64()
+                == Some(instance.identities.repository_owner.id),
+        "scratch destination differs from the authenticated Server instance"
+    );
+
+    // The request attestation and configured owner-only scratch caller bind this
+    // unreleased implementation SHA. Its version is recorded for diagnostics;
+    // stable deployment ranges remain enforced only by the normal verifier.
+    let signer_cargo: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={signer_sha}",
+        source.repository
+    ))?;
+    let implementation_version = source_version_with_prerelease(&signer_cargo, true)?;
+
+    let binary_source_sha = manifest.validate(
+        ClientPackageChannel::Scratch,
+        &source,
+        &destination,
+        expected_protocol,
+        Some(source_default_branch),
+    )?;
+    ensure!(
+        binary_source_sha == publication.source_sha,
+        "scratch publication source differs from the pinned action mapping"
+    );
+    let binary_version =
+        Version::parse(&manifest.version).context("scratch package version is invalid SemVer")?;
+    ensure!(
+        !binary_version.pre.is_empty() && publication.tag == format!("v{binary_version}"),
+        "scratch package must use the exact canonical prerelease version and tag"
+    );
+    ensure!(
+        publication.asset_size <= manifest.max_bytes,
+        "scratch package asset exceeds its fixed source manifest limit"
+    );
+    ensure!(
+        manifest.source_branch == publication.source_branch
+            && manifest.source_default_branch == source_default_branch
+            && manifest.target_branch == destination_default_branch
+            && manifest.tag == publication.tag
+            && manifest.release_id == publication.release_id
+            && manifest.asset_id == publication.asset_id
+            && manifest.asset_name == PACKAGE_BINARY_NAME
+            && manifest.asset_size == publication.asset_size
+            && manifest.asset_sha256 == publication.asset_sha256
+            && manifest.producer_run_id == publication.producer_run_id
+            && manifest.producer_run_attempt == publication.producer_run_attempt
+            && manifest.publisher_workflow == publication.publisher_workflow
+            && manifest.publisher_sha == publication.publisher_sha
+            && manifest.publisher_branch == publication.publisher_branch
+            && manifest.publisher_run_id == publication.publisher_run_id
+            && manifest.publisher_run_attempt == publication.publisher_run_attempt,
+        "scratch package mapping differs from the explicit publication record"
+    );
+    let source_manifest_bytes = fetch_source_package_manifest(
+        api,
+        &source.repository,
+        &binary_source_sha,
+        &manifest.source_manifest_path,
+    )?;
+    let source_manifest: SourcePackageManifest = serde_json::from_slice(&source_manifest_bytes)
+        .context("scratch binary source package manifest is invalid JSON")?;
+    validate_client_source_package_manifest(
+        &manifest,
+        &source_manifest,
+        &source_manifest_bytes,
+        &binary_version,
+        expected_protocol,
+    )?;
+    let source_cargo: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={binary_source_sha}",
+        source.repository
+    ))?;
+    ensure!(
+        source_version_with_prerelease(&source_cargo, true)? == binary_version,
+        "scratch package version differs from its source Cargo manifest"
+    );
+
+    let asset_name = &manifest.asset_name;
+    let release: Value = api.get(&format!(
+        "/repos/{}/releases/{}",
+        destination.repository, publication.release_id
+    ))?;
+    let release_record = parse_native_package_release_record(
+        release["body"]
+            .as_str()
+            .context("scratch release publication record is missing")?,
+    )?;
+    validate_client_package_manifest_record(&manifest, &release_record)?;
+    ensure!(
+        release["id"].as_u64() == Some(publication.release_id)
+            && release["tag_name"].as_str() == Some(publication.tag.as_str())
+            && release["target_commitish"].as_str() == Some(destination_default_branch)
+            && release["draft"] == false
+            && release["prerelease"] == true
+            && release["immutable"] == true,
+        "scratch package release is not the exact immutable prerelease"
+    );
+    let assets = release["assets"]
+        .as_array()
+        .filter(|assets| assets.len() == 1)
+        .context("scratch package release must contain exactly one asset")?;
+    let asset = &assets[0];
+    ensure!(
+        asset["id"].as_u64() == Some(publication.asset_id)
+            && asset["name"].as_str() == Some(asset_name.as_str())
+            && asset["state"] == "uploaded"
+            && asset["size"].as_u64() == Some(publication.asset_size)
+            && asset["digest"] == format!("sha256:{}", publication.asset_sha256),
+        "scratch package release asset differs from the publication record"
+    );
+    let tag_ref: Value = api.get(&format!(
+        "/repos/{}/git/ref/tags/{}",
+        destination.repository, publication.tag
+    ))?;
+    ensure!(
+        tag_ref["ref"].as_str() == Some(format!("refs/tags/{}", publication.tag).as_str()),
+        "scratch package tag ref identity is invalid"
+    );
+    let tag_commit = match tag_ref["object"]["type"].as_str() {
+        Some("commit") => tag_ref["object"]["sha"]
+            .as_str()
+            .context("scratch package tag commit is missing")?
+            .to_owned(),
+        Some("tag") => {
+            let object_sha = tag_ref["object"]["sha"]
+                .as_str()
+                .context("scratch package annotated tag object is missing")?;
+            crate::policy::validate_sha(object_sha)?;
+            let tag_object: Value = api.get(&format!(
+                "/repos/{}/git/tags/{object_sha}",
+                destination.repository
+            ))?;
+            ensure!(
+                tag_object["object"]["type"] == "commit",
+                "scratch package tag does not point directly to a commit"
+            );
+            tag_object["object"]["sha"]
+                .as_str()
+                .context("scratch package tag commit is missing")?
+                .to_owned()
+        }
+        _ => anyhow::bail!("scratch package tag object type is invalid"),
+    };
+    crate::policy::validate_sha(&tag_commit)?;
+    let compare: Value = api.get(&format!(
+        "/repos/{}/compare/{}...{}",
+        destination.repository, tag_commit, destination_default_branch
+    ))?;
+    ensure!(
+        matches!(compare["status"].as_str(), Some("ahead" | "identical"))
+            && compare["base_commit"]["sha"].as_str() == Some(tag_commit.as_str())
+            && compare["merge_base_commit"]["sha"].as_str() == Some(tag_commit.as_str())
+            && compare["ahead_by"].as_u64().is_some()
+            && compare["behind_by"].as_u64() == Some(0),
+        "scratch package release tag is not reachable from the integration default branch"
+    );
+
+    let resolved = ResolvedRelease {
+        publisher: destination.clone(),
+        implementation_sha: binary_source_sha.clone(),
+        source_sha: binary_source_sha.clone(),
+        version: binary_version.clone(),
+        tag: publication.tag.clone(),
+        release_id: publication.release_id,
+        release_body: None,
+        asset: ResolvedAsset {
+            component: manifest.component.clone(),
+            platform: "linux-x86_64".to_owned(),
+            id: publication.asset_id,
+            name: asset_name.clone(),
+            size: publication.asset_size,
+            sha256: publication.asset_sha256.clone(),
+        },
+    };
+    let bytes = api.download(
+        &format!(
+            "/repos/{}/releases/assets/{}",
+            destination.repository, publication.asset_id
+        ),
+        usize::try_from(publication.asset_size)
+            .context("scratch asset size does not fit this platform")?,
+    )?;
+    ensure!(
+        bytes.len() as u64 == publication.asset_size
+            && crate::hex_encode(Sha256::digest(&bytes)) == publication.asset_sha256,
+        "scratch package bytes differ from the publication record"
+    );
+    let package = verify_downloaded_release_from(
+        api,
+        DownloadedAsset {
+            release: resolved,
+            bytes,
+        },
+        &source,
+        &manifest.producer_workflow,
+        &manifest.source_branch,
+    )?;
+    ensure!(
+        package.producer_run() == (manifest.producer_run_id, manifest.producer_run_attempt),
+        "scratch package attestation differs from the exact producer run mapping"
+    );
+
+    Ok(VerifiedNativeClientPackage {
+        implementation_sha: signer_sha.to_owned(),
+        implementation_version,
+        loader_action_sha: loader_action.sha.clone(),
+        loader_action_path: loader_action.path.clone(),
+        binary_source_sha,
+        binary_version,
+        protocol: manifest.protocol,
+        package_publisher_workflow: manifest.publisher_workflow,
+        package_publisher_branch: manifest.publisher_branch,
+        package_publisher_sha: manifest.publisher_sha,
+        package_publisher_run_id: manifest.publisher_run_id,
+        package_publisher_run_attempt: manifest.publisher_run_attempt,
+        package_producer_workflow: manifest.producer_workflow,
+        package_producer_branch: manifest.source_branch,
+        package_producer_run_id: manifest.producer_run_id,
+        package_producer_run_attempt: manifest.producer_run_attempt,
+        package,
+    })
+}
+
+/// Scratch admission is enabled only for the separately configured destination.
+/// Stable admission continues to require formal versions in the owner's range.
+pub fn validate_native_client_package_destination(
+    instance: &crate::instance_config::InstanceConfig,
+    destination: &TrustedPublisher,
+    implementation_version: &Version,
+    binary_version: &Version,
+) -> Result<bool> {
+    ensure!(
+        implementation_version.build.is_empty() && binary_version.build.is_empty(),
+        "Client package versions must not contain build metadata"
+    );
+    if destination.repository == instance.acceptable_clients.repository {
+        ensure!(
+            destination.repository_id == instance.acceptable_clients.id
+                && implementation_version.pre.is_empty()
+                && binary_version.pre.is_empty()
+                && instance
+                    .acceptable_clients
+                    .version
+                    .matches(implementation_version),
+            "Client package is not a formal release in the accepted range"
+        );
+        return Ok(false);
+    }
+    let scratch = configured_scratch_package_repository(instance)?;
+    ensure!(
+        destination.repository == scratch.repository
+            && destination.repository_id == scratch.id
+            && !binary_version.pre.is_empty(),
+        "Client package does not match the explicitly configured scratch destination"
+    );
+    Ok(true)
+}
+
+fn validate_remote_repository_identity(
+    repository: &Value,
+    expected: &TrustedPublisher,
+) -> Result<()> {
+    let expected_owner = expected
+        .repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .context("repository owner is invalid")?;
+    ensure!(
+        repository["id"].as_u64() == Some(expected.repository_id)
+            && repository["full_name"].as_str() == Some(expected.repository.as_str())
+            && repository["owner"]["id"].as_u64().is_some_and(|id| id > 0)
+            && repository["owner"]["login"].as_str() == Some(expected_owner),
+        "repository identity mismatch"
+    );
+    Ok(())
+}
+
+fn validate_scratch_publication_repositories(
+    publication: &ScratchPackagePublication,
+    source: &TrustedPublisher,
+    destination: &TrustedPublisher,
+) -> Result<()> {
+    ensure!(
+        publication.source_repository == source.repository
+            && publication.source_repository_id == source.repository_id
+            && publication.destination_repository == destination.repository
+            && publication.destination_repository_id == destination.repository_id,
+        "scratch publication record does not match the configured source and destination"
+    );
+    Ok(())
+}
+
+fn configured_scratch_package_repository(
+    instance: &crate::instance_config::InstanceConfig,
+) -> Result<&crate::config::Repository> {
+    instance
+        .scratch_package_repository
+        .as_ref()
+        .context("scratch package acceptance is not enabled by the Server instance")
+}
+
+fn validate_pinned_package_action(
+    action: &PinnedPackageAction,
+    expected_repository: &str,
+) -> Result<()> {
+    crate::policy::validate_repository(&action.repository)?;
+    validate_package_action_path(&action.path)?;
+    crate::policy::validate_sha(&action.sha)?;
+    ensure!(
+        action.repository == expected_repository,
+        "Client package action repository differs from the configured Client repository"
+    );
+    Ok(())
+}
+
+fn fetch_native_client_action_manifest(
+    api: &GitHub,
+    action: &PinnedPackageAction,
+) -> Result<(Vec<u8>, NativeClientPackageManifest)> {
+    validate_pinned_package_action(action, &action.repository)?;
+    let manifest_path = action.manifest_path();
+    let encoded_manifest_path = encode_repository_path(&manifest_path);
+    let response: Value = api.get(&format!(
+        "/repos/{}/contents/{encoded_manifest_path}?ref={}",
+        action.repository, action.sha
+    ))?;
+    let bytes = source_file_bytes(&response, &manifest_path)?;
+    let manifest = NativeClientPackageManifest::parse(&bytes)
+        .context("pinned Client package action manifest is invalid")?;
+    Ok((bytes, manifest))
+}
+
+fn fetch_source_package_manifest(
+    api: &GitHub,
+    repository: &str,
+    source_sha: &str,
+    manifest_path: &str,
+) -> Result<Vec<u8>> {
+    crate::policy::validate_repository(repository)?;
+    crate::policy::validate_sha(source_sha)?;
+    validate_source_package_manifest_path(manifest_path)?;
+    let encoded_manifest_path = encode_repository_path(manifest_path);
+    let response: Value = api.get(&format!(
+        "/repos/{repository}/contents/{encoded_manifest_path}?ref={source_sha}"
+    ))?;
+    source_file_bytes(&response, manifest_path)
+}
+
+fn validate_client_source_package_manifest(
+    action_manifest: &NativeClientPackageManifest,
+    source_manifest: &SourcePackageManifest,
+    source_manifest_bytes: &[u8],
+    version: &Version,
+    expected_protocol: &str,
+) -> Result<()> {
+    source_manifest.validate(version, expected_protocol, &action_manifest.source_sha)?;
+    let source_asset = source_manifest
+        .assets
+        .get("linux-x86_64")
+        .context("binary source package manifest has no linux-x86_64 asset")?;
+    let publisher_workflow = source_manifest
+        .publisher_workflow
+        .as_deref()
+        .context("binary source package manifest has no publisher workflow")?;
+    ensure!(
+        source_manifest.schema_version == 2
+            && action_manifest.source_manifest_sha256
+                == crate::hex_encode(Sha256::digest(source_manifest_bytes))
+            && action_manifest.component == source_manifest.component
+            && action_manifest.protocol == source_manifest.protocol
+            && action_manifest.version == source_manifest.version
+            && action_manifest.max_bytes == source_manifest.max_bytes
+            && action_manifest.asset_name == *source_asset
+            && action_manifest.producer_workflow == source_manifest.producer_workflow
+            && action_manifest.publisher_workflow == publisher_workflow,
+        "Client package action mapping differs from the exact binary-source manifest"
+    );
+    Ok(())
+}
+
+fn validate_client_package_manifest_record(
+    manifest: &NativeClientPackageManifest,
+    record: &NativePackageReleaseRecord,
+) -> Result<()> {
+    crate::policy::validate_sha(&manifest.publisher_sha)?;
+    ensure!(
+        record.source_sha == manifest.source_sha
+            && record.source_manifest_sha256 == manifest.source_manifest_sha256
+            && record.producer_workflow == manifest.producer_workflow
+            && record.producer_run_id == manifest.producer_run_id
+            && record.producer_run_attempt == manifest.producer_run_attempt
+            && record.publisher_workflow == manifest.publisher_workflow
+            && record.publisher_sha == manifest.publisher_sha
+            && record.publisher_run_id == manifest.publisher_run_id
+            && record.publisher_run_attempt == manifest.publisher_run_attempt
+            && record.tag == manifest.tag
+            && record.asset_name == manifest.asset_name
+            && record.asset_size == manifest.asset_size
+            && record.asset_sha256 == manifest.asset_sha256,
+        "Client package action mapping differs from the immutable release publication record"
+    );
+    Ok(())
+}
+
+const NATIVE_CLIENT_PROTOCOL: &str = "securefix-native-request/v1";
+
+fn resolve_native_client_implementation(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    signer_sha: &str,
+    acceptable_versions: &VersionReq,
+    source_default_branch: &str,
+) -> Result<Version> {
+    crate::policy::validate_repository(&publisher.repository)?;
+    ensure!(
+        publisher.repository_id > 0,
+        "Client repository ID is invalid"
+    );
+    crate::policy::validate_sha(signer_sha)?;
+
+    let repository: Value = api.get(&format!("/repos/{}", publisher.repository))?;
+    let (owner_name, _) = publisher
+        .repository
+        .split_once('/')
+        .context("Client repository owner is invalid")?;
+    ensure!(
+        repository["id"].as_u64() == Some(publisher.repository_id)
+            && repository["full_name"].as_str() == Some(publisher.repository.as_str())
+            && repository["owner"]["id"].as_u64().is_some_and(|id| id > 0)
+            && repository["owner"]["login"].as_str() == Some(owner_name)
+            && repository["default_branch"].as_str() == Some(source_default_branch),
+        "Client repository identity mismatch"
+    );
+    let source: Value = api.get(&format!(
+        "/repos/{}/contents/Cargo.toml?ref={signer_sha}",
+        publisher.repository
+    ))?;
+    let version = source_version(&source)?;
+    ensure!(
+        acceptable_versions.matches(&version),
+        "Client implementation version is outside the accepted range"
+    );
+    let tag = format!("v{version}");
+    let tag_ref: Value = api.get(&format!(
+        "/repos/{}/git/ref/tags/{tag}",
+        publisher.repository
+    ))?;
+    ensure!(
+        tag_ref["ref"].as_str() == Some(format!("refs/tags/{tag}").as_str())
+            && tag_ref["object"]["type"] == "commit"
+            && tag_ref["object"]["sha"].as_str() == Some(signer_sha),
+        "Client implementation tag is not a lightweight ref to the attested signer revision"
+    );
+    let release: Value = api.get(&format!(
+        "/repos/{}/releases/tags/{tag}",
+        publisher.repository
+    ))?;
+    ensure!(
+        release["id"].as_u64().is_some_and(|id| id > 0)
+            && release["tag_name"].as_str() == Some(tag.as_str())
+            && release["target_commitish"].as_str() == Some(signer_sha)
+            && release["draft"] == false
+            && release["prerelease"] == false
+            && release["immutable"] == true,
+        "Client implementation release is not published, immutable, and bound to its signer revision"
+    );
+    Ok(version)
+}
+
+fn validate_package_workflow(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with(".github/workflows/")
+            && path.ends_with(".yml")
+            && path.len() <= 200
+            && !path.contains("..")
+            && path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        "Client package producer workflow path is invalid"
+    );
+    Ok(())
+}
+
+fn package_workflow_owner_id(api: &GitHub, repository: &str, path: &str, sha: &str) -> Result<u64> {
+    crate::policy::validate_repository(repository)?;
+    crate::policy::validate_sha(sha)?;
+    validate_package_workflow(path)?;
+    let bytes = api.content_uncached(repository, path, sha)?;
+    package_workflow_owner_id_from_bytes(&bytes)
+}
+
+fn package_workflow_owner_id_from_bytes(bytes: &[u8]) -> Result<u64> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_PACKAGE_WORKFLOW_BYTES,
+        "package publisher workflow is empty or exceeds its size limit"
+    );
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_slice(bytes).context("package publisher workflow is invalid YAML")?;
+    let env_key = serde_yaml::Value::String("env".to_owned());
+    let owner_key = serde_yaml::Value::String("SECUREFIX_PACKAGE_OWNER_ID".to_owned());
+    let workflow_env = workflow
+        .as_mapping()
+        .and_then(|mapping| mapping.get(&env_key))
+        .and_then(serde_yaml::Value::as_mapping)
+        .context("package publisher workflow has no workflow-level env mapping")?;
+    let raw_owner = workflow_env
+        .get(&owner_key)
+        .and_then(serde_yaml::Value::as_str)
+        .context("package publisher workflow has no literal owner ID")?;
+    let owner_id = parse_positive_decimal(raw_owner)?;
+    ensure!(
+        owner_id.to_string() == raw_owner,
+        "package publisher workflow owner ID is not canonical"
+    );
+
+    fn collect_owner_overrides(
+        value: &serde_yaml::Value,
+        env_key: &serde_yaml::Value,
+        owner_key: &serde_yaml::Value,
+        declarations: &mut Vec<String>,
+    ) -> Result<()> {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                if let Some(env) = mapping.get(env_key).and_then(serde_yaml::Value::as_mapping)
+                    && let Some(owner) = env.get(owner_key)
+                {
+                    declarations.push(
+                        owner
+                            .as_str()
+                            .context("package publisher workflow overrides its owner ID")?
+                            .to_owned(),
+                    );
+                }
+                for child in mapping.values() {
+                    collect_owner_overrides(child, env_key, owner_key, declarations)?;
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for child in items {
+                    collect_owner_overrides(child, env_key, owner_key, declarations)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let mut declarations = Vec::new();
+    collect_owner_overrides(&workflow, &env_key, &owner_key, &mut declarations)?;
+    ensure!(
+        declarations.len() == 1 && declarations[0] == raw_owner,
+        "package publisher workflow has duplicate or overridden owner ID declarations"
+    );
+    Ok(owner_id)
+}
+
+fn validate_native_package_publisher_run(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    default_branch: &str,
+    record: &NativePackageReleaseRecord,
+    dispatcher_id: u64,
+    run: &Value,
+) -> Result<()> {
+    ensure!(dispatcher_id > 0, "package publisher owner ID is invalid");
+    let repository: Value = api.get(&format!("/repos/{}", publisher.repository))?;
+    validate_remote_repository_identity(&repository, publisher)?;
+    let repository_owner_id = repository["owner"]["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("package publisher repository owner ID is invalid")?;
+    ensure!(
+        repository["default_branch"].as_str() == Some(default_branch),
+        "package publisher repository default branch changed"
+    );
+    let (owner_login, _) = publisher
+        .repository
+        .split_once('/')
+        .context("package publisher repository owner is invalid")?;
+    ensure!(
+        run["id"].as_u64() == Some(record.publisher_run_id)
+            && run["run_attempt"].as_u64() == Some(record.publisher_run_attempt)
+            && run["run_attempt"].as_u64() == Some(1)
+            && run["repository"]["id"].as_u64() == Some(publisher.repository_id)
+            && run["repository"]["full_name"].as_str() == Some(publisher.repository.as_str())
+            && run["repository"]["owner"]["id"].as_u64() == Some(repository_owner_id)
+            && run["repository"]["owner"]["login"].as_str() == Some(owner_login)
+            && run["head_repository"]["id"].as_u64() == Some(publisher.repository_id)
+            && run["head_repository"]["full_name"].as_str() == Some(publisher.repository.as_str())
+            && run["path"].as_str() == Some(record.publisher_workflow.as_str())
+            && run["event"] == "workflow_dispatch"
+            && run["head_branch"].as_str() == Some(default_branch)
+            && run["head_sha"].as_str() == Some(record.publisher_sha.as_str())
+            && run["status"] == "completed"
+            && run["conclusion"] == "success"
+            && run["actor"]["id"].as_u64() == Some(dispatcher_id)
+            && run["actor"]["type"] == "User"
+            && run["triggering_actor"]["id"].as_u64() == Some(dispatcher_id)
+            && run["triggering_actor"]["type"] == "User",
+        "package publisher run is not the successful protected owner-dispatched workflow"
+    );
+    Ok(())
 }
 
 /// Resolve the release whose implementation is already selected by a trusted
@@ -237,6 +1466,7 @@ pub fn resolve_release(
         version,
         tag,
         release_id,
+        release_body: release["body"].as_str().map(str::to_owned),
         asset: ResolvedAsset {
             component: expected_asset.component.clone(),
             platform: expected_asset.platform.clone(),
@@ -260,6 +1490,28 @@ pub fn download_release_asset(
     expected_asset: &ExpectedAsset,
     acceptable_versions: &VersionReq,
 ) -> Result<DownloadedAsset> {
+    download_release_asset_bounded(
+        api,
+        publisher,
+        implementation_sha,
+        expected_asset,
+        acceptable_versions,
+        MAX_ASSET_BYTES,
+    )
+}
+
+fn download_release_asset_bounded(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    implementation_sha: &str,
+    expected_asset: &ExpectedAsset,
+    acceptable_versions: &VersionReq,
+    max_asset_bytes: u64,
+) -> Result<DownloadedAsset> {
+    ensure!(
+        max_asset_bytes > 0 && max_asset_bytes <= MAX_ASSET_BYTES,
+        "package asset limit is outside the supported bounds"
+    );
     let release = resolve_release(
         api,
         publisher,
@@ -267,6 +1519,10 @@ pub fn download_release_asset(
         expected_asset,
         acceptable_versions,
     )?;
+    ensure!(
+        release.asset.size <= max_asset_bytes,
+        "package asset exceeds the source manifest limit"
+    );
     let max_size = usize::try_from(release.asset.size)
         .context("package asset size does not fit this platform")?;
     let path = format!(
@@ -298,13 +1554,38 @@ pub fn download_verified_release(
     publisher_workflow: &str,
     publisher_branch: &str,
 ) -> Result<VerifiedPackage> {
-    crate::config::validate_branch(publisher_branch)?;
-    let downloaded = download_release_asset(
+    download_verified_release_bounded(
         api,
         publisher,
         implementation_sha,
         expected_asset,
         acceptable_versions,
+        publisher_workflow,
+        publisher_branch,
+        MAX_ASSET_BYTES,
+    )
+}
+
+// These independent package and publisher constraints are validated at this boundary.
+#[allow(clippy::too_many_arguments)]
+fn download_verified_release_bounded(
+    api: &GitHub,
+    publisher: &TrustedPublisher,
+    implementation_sha: &str,
+    expected_asset: &ExpectedAsset,
+    acceptable_versions: &VersionReq,
+    publisher_workflow: &str,
+    publisher_branch: &str,
+    max_asset_bytes: u64,
+) -> Result<VerifiedPackage> {
+    crate::config::validate_branch(publisher_branch)?;
+    let downloaded = download_release_asset_bounded(
+        api,
+        publisher,
+        implementation_sha,
+        expected_asset,
+        acceptable_versions,
+        max_asset_bytes,
     )?;
     verify_downloaded_release(api, downloaded, publisher_workflow, publisher_branch)
 }
@@ -315,14 +1596,51 @@ fn verify_downloaded_release(
     publisher_workflow: &str,
     publisher_branch: &str,
 ) -> Result<VerifiedPackage> {
+    let attestation_publisher = downloaded.release().publisher.clone();
+    verify_downloaded_release_from(
+        api,
+        downloaded,
+        &attestation_publisher,
+        publisher_workflow,
+        publisher_branch,
+    )
+}
+
+fn verify_downloaded_release_from(
+    api: &GitHub,
+    downloaded: DownloadedAsset,
+    attestation_publisher: &TrustedPublisher,
+    publisher_workflow: &str,
+    publisher_branch: &str,
+) -> Result<VerifiedPackage> {
+    verify_downloaded_release_from_with_actor(
+        api,
+        downloaded,
+        attestation_publisher,
+        publisher_workflow,
+        publisher_branch,
+        None,
+    )
+}
+
+fn verify_downloaded_release_from_with_actor(
+    api: &GitHub,
+    downloaded: DownloadedAsset,
+    attestation_publisher: &TrustedPublisher,
+    publisher_workflow: &str,
+    publisher_branch: &str,
+    expected_actor_id: Option<u64>,
+) -> Result<VerifiedPackage> {
     let release = downloaded.release();
-    let repository = &release.publisher.repository;
+    let repository = &attestation_publisher.repository;
     let digest = &release.asset.sha256;
     let attestation_response: Value = api.get(&format!(
         "/repos/{repository}/attestations/sha256:{digest}?per_page=100"
     ))?;
-    let bundle_bytes =
-        crate::attestation::public_bundles(&attestation_response, release.publisher.repository_id)?;
+    let bundle_bytes = crate::attestation::public_bundles(
+        &attestation_response,
+        attestation_publisher.repository_id,
+    )?;
     let mut bundle = tempfile::Builder::new().suffix(".jsonl").tempfile()?;
     std::io::Write::write_all(&mut bundle, &bundle_bytes)?;
     let mut subject = tempfile::NamedTempFile::new()?;
@@ -339,30 +1657,38 @@ fn verify_downloaded_release(
             source: Some((&release.source_sha, &source_ref)),
         },
     )?;
-    let (publisher_run_id, publisher_run_attempt, publisher_owner_id) =
-        validate_provenance_result(&verified, release, publisher_workflow, publisher_branch)?;
-    let run: Value = api.get(&format!(
-        "/repos/{repository}/actions/runs/{publisher_run_id}/attempts/{publisher_run_attempt}"
-    ))?;
-    validate_publisher_run(
-        &run,
+    let (producer_run_id, producer_run_attempt, producer_owner_id) = validate_provenance_result(
+        &verified,
         release,
+        attestation_publisher,
         publisher_workflow,
         publisher_branch,
-        publisher_run_id,
-        publisher_run_attempt,
-        publisher_owner_id,
+    )?;
+    let run: Value = api.get(&format!(
+        "/repos/{repository}/actions/runs/{producer_run_id}/attempts/{producer_run_attempt}"
+    ))?;
+    validate_publisher_run_with_actor(
+        &run,
+        release,
+        attestation_publisher,
+        publisher_workflow,
+        publisher_branch,
+        producer_run_id,
+        producer_run_attempt,
+        producer_owner_id,
+        expected_actor_id,
     )?;
     Ok(VerifiedPackage {
         asset: downloaded,
-        publisher_run_id,
-        publisher_run_attempt,
+        producer_run_id,
+        producer_run_attempt,
     })
 }
 
 fn validate_provenance_result(
     verified: &Value,
     release: &ResolvedRelease,
+    attestation_publisher: &TrustedPublisher,
     publisher_workflow: &str,
     publisher_branch: &str,
 ) -> Result<(u64, u64, u64)> {
@@ -376,10 +1702,9 @@ fn validate_provenance_result(
     let source_ref = format!("refs/heads/{publisher_branch}");
     let signer = format!(
         "https://github.com/{}/{publisher_workflow}@{source_ref}",
-        release.publisher.repository
+        attestation_publisher.repository
     );
-    let owner = release
-        .publisher
+    let owner = attestation_publisher
         .repository
         .split_once('/')
         .context("publisher repository owner is invalid")?
@@ -396,7 +1721,7 @@ fn validate_provenance_result(
             && certificate["subjectAlternativeName"] == signer
             && certificate["buildSignerURI"] == signer
             && certificate["buildSignerDigest"] == release.source_sha
-            && certificate["githubWorkflowRepository"] == release.publisher.repository
+            && certificate["githubWorkflowRepository"] == attestation_publisher.repository
             && certificate["githubWorkflowSHA"] == release.source_sha
             && certificate["githubWorkflowRef"] == source_ref
             && certificate["githubWorkflowTrigger"] == "workflow_dispatch"
@@ -404,13 +1729,13 @@ fn validate_provenance_result(
             && certificate["buildConfigDigest"] == release.source_sha
             && certificate["buildTrigger"] == "workflow_dispatch"
             && certificate["sourceRepositoryURI"]
-                == format!("https://github.com/{}", release.publisher.repository)
+                == format!("https://github.com/{}", attestation_publisher.repository)
             && certificate["sourceRepositoryDigest"] == release.source_sha
             && certificate["sourceRepositoryRef"] == source_ref
             && certificate["sourceRepositoryIdentifier"]
                 .as_str()
                 .and_then(|id| id.parse::<u64>().ok())
-                == Some(release.publisher.repository_id)
+                == Some(attestation_publisher.repository_id)
             && certificate["sourceRepositoryOwnerURI"] == format!("https://github.com/{owner}"),
         "package attestation certificate does not match the configured publisher workflow and source"
     );
@@ -419,7 +1744,8 @@ fn validate_provenance_result(
     let invocation = certificate["runInvocationURI"]
         .as_str()
         .context("package attestation run invocation is missing")?;
-    let (run_id, run_attempt) = parse_run_invocation(invocation, &release.publisher.repository)?;
+    let (run_id, run_attempt) =
+        parse_run_invocation(invocation, &attestation_publisher.repository)?;
     let subject = statement["subject"]
         .as_array()
         .filter(|subjects| subjects.len() == 1)
@@ -476,17 +1802,45 @@ fn parse_positive_decimal(value: &str) -> Result<u64> {
     Ok(parsed)
 }
 
+// Keep run, repository, workflow, and source identities independently bound.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn validate_publisher_run(
     run: &Value,
     release: &ResolvedRelease,
+    attestation_publisher: &TrustedPublisher,
     publisher_workflow: &str,
     publisher_branch: &str,
     run_id: u64,
     run_attempt: u64,
     publisher_owner_id: u64,
 ) -> Result<()> {
-    let expected_owner = release
-        .publisher
+    validate_publisher_run_with_actor(
+        run,
+        release,
+        attestation_publisher,
+        publisher_workflow,
+        publisher_branch,
+        run_id,
+        run_attempt,
+        publisher_owner_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_publisher_run_with_actor(
+    run: &Value,
+    release: &ResolvedRelease,
+    attestation_publisher: &TrustedPublisher,
+    publisher_workflow: &str,
+    publisher_branch: &str,
+    run_id: u64,
+    run_attempt: u64,
+    publisher_owner_id: u64,
+    expected_actor_id: Option<u64>,
+) -> Result<()> {
+    let expected_owner = attestation_publisher
         .repository
         .split_once('/')
         .map(|(owner, _)| owner)
@@ -494,17 +1848,23 @@ fn validate_publisher_run(
     ensure!(
         run["id"].as_u64() == Some(run_id)
             && run["run_attempt"].as_u64() == Some(run_attempt)
-            && run["repository"]["id"].as_u64() == Some(release.publisher.repository_id)
+            && run["repository"]["id"].as_u64() == Some(attestation_publisher.repository_id)
             && run["repository"]["owner"]["id"].as_u64() == Some(publisher_owner_id)
             && run["repository"]["owner"]["login"] == expected_owner
-            && run["head_repository"]["id"].as_u64() == Some(release.publisher.repository_id)
+            && run["head_repository"]["id"].as_u64() == Some(attestation_publisher.repository_id)
             && run["path"] == publisher_workflow
             && run["event"] == "workflow_dispatch"
             && run["head_branch"] == publisher_branch
             && run["head_sha"] == release.source_sha
+            && expected_actor_id
+                .is_none_or(|actor_id| run["actor"]["id"].as_u64() == Some(actor_id))
+            && expected_actor_id.is_none_or(|_| run["actor"]["type"] == "User")
+            && expected_actor_id
+                .is_none_or(|actor_id| run["triggering_actor"]["id"].as_u64() == Some(actor_id))
+            && expected_actor_id.is_none_or(|_| run["triggering_actor"]["type"] == "User")
             && run["status"] == "completed"
             && run["conclusion"] == "success",
-        "attested package publisher run is not the successful configured source run"
+        "attested package producer run is not the successful configured source run"
     );
     Ok(())
 }
@@ -601,6 +1961,74 @@ fn source_version_with_prerelease(manifest: &Value, allow_prerelease: bool) -> R
     Ok(version)
 }
 
+pub(crate) struct NativePackageReleaseSourceBinding<'a> {
+    pub source_sha: &'a str,
+    pub version: &'a str,
+    pub producer_workflow: &'a str,
+    pub publisher_workflow: &'a str,
+    pub asset_name: &'a str,
+    pub max_asset_bytes: u64,
+    pub stable: bool,
+}
+
+pub(crate) fn validate_native_package_release_source(
+    cargo_bytes: &[u8],
+    manifest_bytes: &[u8],
+    binding: &NativePackageReleaseSourceBinding<'_>,
+) -> Result<()> {
+    ensure!(
+        cargo_bytes.len() <= MAX_CARGO_TOML_BYTES && manifest_bytes.len() <= 16 * 1024,
+        "package source inputs exceed their bounds"
+    );
+    let cargo = std::str::from_utf8(cargo_bytes).context("source Cargo.toml is not UTF-8")?;
+    let document = cargo
+        .parse::<toml_edit::DocumentMut>()
+        .context("source Cargo.toml is invalid TOML")?;
+    let package = document
+        .as_table()
+        .get("package")
+        .and_then(|item| item.as_table())
+        .context("source Cargo.toml package table is missing or invalid")?;
+    ensure!(
+        package.get("name").and_then(|item| item.as_str()) == Some("securefix"),
+        "source Cargo.toml package name is not securefix"
+    );
+    let cargo_version = package
+        .get("version")
+        .and_then(|item| item.as_str())
+        .context("source Cargo.toml package.version is missing or invalid")?;
+    let parsed_version =
+        Version::parse(cargo_version).context("source package version is invalid")?;
+    ensure!(
+        parsed_version.to_string() == cargo_version
+            && parsed_version.build.is_empty()
+            && parsed_version.pre.is_empty() == binding.stable
+            && cargo_version == binding.version,
+        "source package version differs from the exact release channel or tag"
+    );
+    let manifest: SourcePackageManifest = serde_json::from_slice(manifest_bytes)
+        .context("source package manifest is invalid JSON")?;
+    manifest.validate(&parsed_version, NATIVE_CLIENT_PROTOCOL, binding.source_sha)?;
+    ensure!(
+        manifest.producer_workflow == binding.producer_workflow
+            && manifest.producer_workflow == NATIVE_PACKAGE_PRODUCER_WORKFLOW
+            && binding.publisher_workflow == NATIVE_PACKAGE_PUBLISHER_WORKFLOW
+            && manifest.assets.get("linux-x86_64").map(String::as_str) == Some(binding.asset_name)
+            && manifest.max_bytes == binding.max_asset_bytes,
+        "source package manifest differs from the selected producer or asset contract"
+    );
+    ensure!(
+        manifest.schema_version == 2
+            && manifest
+                .source_sha
+                .as_deref()
+                .is_none_or(|manifest_sha| manifest_sha == binding.source_sha)
+            && manifest.publisher_workflow.as_deref() == Some(binding.publisher_workflow),
+        "package source manifest does not bind this exact publisher and source"
+    );
+    Ok(())
+}
+
 /// Publish one policy-free raw executable to the configured scratch repository.
 /// The source repository and release destination are authenticated independently;
 /// the destination token is installation-scoped to the scratch repository.
@@ -629,6 +2057,7 @@ pub fn publish_scratch_prerelease(
         "scratch package publication must run from its first owner-dispatched source-repository attempt"
     );
     let writer_run_id = parse_positive_decimal(&std::env::var("GITHUB_RUN_ID")?)?;
+    let writer_sha = std::env::var("GITHUB_SHA")?;
     let asset_name = PACKAGE_BINARY_NAME;
     let read_token = std::env::var("GITHUB_TOKEN").context("missing read-only GITHUB_TOKEN")?;
     ensure!(!read_token.is_empty(), "read-only GITHUB_TOKEN is empty");
@@ -653,16 +2082,22 @@ pub fn publish_scratch_prerelease(
     );
     let tag = format!("v{version}");
     let source_package_manifest: Value = source_api.get(&format!(
-        "/repos/{}/contents/.github/actions/load-package/source-package.json?ref={source_sha}",
-        source.repository
+        "/repos/{}/contents/{SOURCE_BUILD_MANIFEST_PATH}?ref={source_sha}",
+        source.repository,
     ))?;
-    let manifest_bytes = source_file_bytes(
-        &source_package_manifest,
-        ".github/actions/load-package/source-package.json",
-    )?;
+    let manifest_bytes = source_file_bytes(&source_package_manifest, SOURCE_BUILD_MANIFEST_PATH)?;
     let package_manifest: SourcePackageManifest = serde_json::from_slice(&manifest_bytes)
         .context("source package manifest is invalid JSON")?;
-    package_manifest.validate(&version, asset_name, PACKAGE_PRODUCER_WORKFLOW)?;
+    package_manifest.validate(&version, NATIVE_CLIENT_PROTOCOL, source_sha)?;
+    ensure!(
+        package_manifest.producer_workflow == PACKAGE_PRODUCER_WORKFLOW
+            && package_manifest
+                .assets
+                .get("linux-x86_64")
+                .map(String::as_str)
+                == Some(asset_name),
+        "source package manifest does not match the scratch publisher contract"
+    );
     let producer_run: Value = source_api.get(&format!(
         "/repos/{}/actions/runs/{producer_run_id}/attempts/1",
         source.repository
@@ -742,7 +2177,7 @@ pub fn publish_scratch_prerelease(
         &current_run,
         source,
         &deployment.server.default_branch,
-        &std::env::var("GITHUB_SHA")?,
+        &writer_sha,
         writer_run_id,
         config.owner_id,
     )?;
@@ -896,6 +2331,11 @@ pub fn publish_scratch_prerelease(
         asset_size: bytes.len() as u64,
         producer_run_id: run_id,
         producer_run_attempt: run_attempt,
+        publisher_workflow: PACKAGE_PUBLISHER_WORKFLOW.to_owned(),
+        publisher_branch: deployment.server.default_branch.clone(),
+        publisher_sha: writer_sha,
+        publisher_run_id: writer_run_id,
+        publisher_run_attempt: 1,
     })
 }
 
@@ -923,6 +2363,11 @@ pub struct ScratchPackagePublication {
     pub asset_size: u64,
     pub producer_run_id: u64,
     pub producer_run_attempt: u64,
+    pub publisher_workflow: String,
+    pub publisher_branch: String,
+    pub publisher_sha: String,
+    pub publisher_run_id: u64,
+    pub publisher_run_attempt: u64,
 }
 
 fn validate_scratch_package_attestation(
@@ -1193,6 +2638,113 @@ fn validate_scratch_package_writer_run(
     Ok(())
 }
 
+fn validate_scratch_package_completed_writer_run(
+    run: &Value,
+    source: &crate::config::Repository,
+    workflow: &str,
+    writer_sha: &str,
+    run_id: u64,
+    run_attempt: u64,
+    owner_id: u64,
+) -> Result<()> {
+    let default_branch = source.default_branch.as_str();
+    validate_package_workflow(workflow)?;
+    ensure!(
+        run["id"].as_u64() == Some(run_id)
+            && run["run_attempt"].as_u64() == Some(run_attempt)
+            && run_attempt == 1
+            && run["status"] == "completed"
+            && run["conclusion"] == "success"
+            && run["event"] == "workflow_dispatch"
+            && run["head_branch"] == default_branch
+            && run["head_sha"] == writer_sha
+            && run["repository"]["id"].as_u64() == Some(source.id)
+            && run["repository"]["full_name"] == source.repository
+            && run["head_repository"]["id"].as_u64() == Some(source.id)
+            && run["head_repository"]["full_name"] == source.repository
+            && matches!(run["path"].as_str(), Some(actual) if actual == workflow || actual == format!("{workflow}@refs/heads/{default_branch}"))
+            && run["actor"]["id"].as_u64() == Some(owner_id)
+            && run["actor"]["type"] == "User"
+            && run["triggering_actor"]["id"].as_u64() == Some(owner_id)
+            && run["triggering_actor"]["type"] == "User",
+        "scratch package publication record is not bound to the successful protected owner-dispatched writer run"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct NativePackageReleaseRecord {
+    schema_version: u8,
+    source_sha: String,
+    source_manifest_sha256: String,
+    producer_workflow: String,
+    producer_run_id: u64,
+    producer_run_attempt: u64,
+    publisher_workflow: String,
+    publisher_sha: String,
+    publisher_run_id: u64,
+    publisher_run_attempt: u64,
+    tag: String,
+    asset_name: String,
+    asset_size: u64,
+    asset_sha256: String,
+}
+
+fn parse_native_package_release_record(body: &str) -> Result<NativePackageReleaseRecord> {
+    let record: NativePackageReleaseRecord = serde_json::from_str(body)
+        .context("stable Client package release body is not a valid publication record")?;
+    ensure!(
+        serde_json::to_string(&record)? == body,
+        "stable Client package release body is not canonical compact JSON"
+    );
+    Ok(record)
+}
+
+fn validate_native_package_release_record(
+    record: &NativePackageReleaseRecord,
+    release: &ResolvedRelease,
+    manifest: &SourcePackageManifest,
+    manifest_bytes: &[u8],
+    source_sha: &str,
+    expected_asset: &ExpectedAsset,
+) -> Result<()> {
+    let manifest_digest = crate::hex_encode(Sha256::digest(manifest_bytes));
+    let publisher_workflow = manifest
+        .publisher_workflow
+        .as_deref()
+        .context("stable package manifest has no publisher workflow")?;
+    crate::policy::validate_sha(&record.source_sha)?;
+    crate::policy::validate_sha(&record.publisher_sha)?;
+    ensure!(
+        record.schema_version == 1
+            && record.source_sha == source_sha
+            && record.source_sha == release.source_sha
+            && record.source_manifest_sha256 == manifest_digest
+            && record.producer_workflow == manifest.producer_workflow
+            && record.producer_run_id > 0
+            && record.producer_run_attempt == 1
+            && record.publisher_workflow == publisher_workflow
+            && record.publisher_run_id > 0
+            && record.publisher_run_attempt == 1
+            && record.tag == release.tag
+            && record.tag == format!("v{}", release.version)
+            && record.asset_name == expected_asset.name
+            && record.asset_name == release.asset.name
+            && record.asset_size == release.asset.size
+            && record.asset_size > 0
+            && record.asset_size <= manifest.max_bytes
+            && record.asset_sha256 == release.asset.sha256
+            && record.asset_sha256.len() == 64
+            && record
+                .asset_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "stable Client package release record differs from the verified source, workflow, or asset"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourcePackageManifest {
@@ -1201,7 +2753,11 @@ struct SourcePackageManifest {
     protocol: String,
     version: String,
     producer_workflow: String,
+    #[serde(default)]
+    publisher_workflow: Option<String>,
     max_bytes: u64,
+    #[serde(default)]
+    source_sha: Option<String>,
     assets: std::collections::BTreeMap<String, String>,
 }
 
@@ -1209,231 +2765,51 @@ impl SourcePackageManifest {
     fn validate(
         &self,
         version: &Version,
-        expected_asset: &str,
-        signer_workflow: &str,
+        expected_protocol: &str,
+        expected_source_sha: &str,
     ) -> Result<()> {
+        let asset = self
+            .assets
+            .get("linux-x86_64")
+            .context("source package manifest has no linux-x86_64 asset")?;
+        validate_expected_asset(&ExpectedAsset {
+            component: self.component.clone(),
+            platform: "linux-x86_64".to_owned(),
+            name: asset.clone(),
+        })?;
+        validate_package_workflow(&self.producer_workflow)?;
+        match self.schema_version {
+            1 => ensure!(
+                self.publisher_workflow.is_none(),
+                "legacy package manifest unexpectedly declares a publisher workflow"
+            ),
+            2 => validate_package_workflow(
+                self.publisher_workflow
+                    .as_deref()
+                    .context("package manifest has no publisher workflow")?,
+            )?,
+            _ => anyhow::bail!("unsupported package manifest schema"),
+        }
+        if let Some(source_sha) = &self.source_sha {
+            crate::policy::validate_sha(source_sha)?;
+            ensure!(
+                source_sha == expected_source_sha,
+                "source package manifest binary source differs from the resolved source revision"
+            );
+        }
         ensure!(
-            self.schema_version == 1
+            matches!(self.schema_version, 1 | 2)
                 && self.component == "securefix-server"
-                && self.protocol == "securefix-native-request/v1"
+                && self.protocol == expected_protocol
                 && self.version == version.to_string()
-                && self.producer_workflow == signer_workflow
                 && self.max_bytes > 0
                 && self.max_bytes <= MAX_ASSET_BYTES
                 && self.assets.len() == 1
-                && self.assets.get("linux-x86_64").map(String::as_str) == Some(expected_asset),
+                && !asset.is_empty(),
             "source package manifest does not match the selected executable or Cargo version"
         );
         Ok(())
     }
-}
-
-fn source_file_bytes(manifest: &Value, expected_path: &str) -> Result<Vec<u8>> {
-    ensure!(
-        manifest["path"].as_str() == Some(expected_path)
-            && manifest["type"].as_str() == Some("file")
-            && manifest["encoding"].as_str() == Some("base64"),
-        "source package manifest identity or encoding is invalid"
-    );
-    let size = manifest["size"]
-        .as_u64()
-        .filter(|size| *size > 0 && *size <= 16 * 1024)
-        .context("source package manifest size is invalid")?;
-    let encoded = manifest["content"]
-        .as_str()
-        .context("source package manifest contents are missing")?;
-    ensure!(
-        encoded.len() <= 24 * 1024,
-        "source package manifest is too large"
-    );
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded.replace('\n', ""))
-        .context("source package manifest is invalid base64")?;
-    ensure!(
-        bytes.len() as u64 == size,
-        "source package manifest size changed"
-    );
-    Ok(bytes)
-}
-
-fn validate_single_package_asset(
-    assets: &[Value],
-    name: &str,
-    size: u64,
-    sha256: &str,
-) -> Result<Value> {
-    ensure!(
-        assets.len() == 1,
-        "scratch package release must contain exactly one asset"
-    );
-    let asset = &assets[0];
-    ensure!(
-        asset["id"].as_u64().is_some_and(|id| id > 0)
-            && asset["name"] == name
-            && asset["state"] == "uploaded"
-            && asset["size"].as_u64() == Some(size)
-            && asset["digest"] == format!("sha256:{sha256}"),
-        "scratch package release asset does not match the verified executable"
-    );
-    Ok(asset.clone())
-}
-
-fn canonical_sha256_digest(value: &str) -> Result<String> {
-    let digest = value
-        .strip_prefix("sha256:")
-        .context("package asset digest must use sha256")?;
-    ensure!(
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "package asset SHA-256 digest is not canonical lowercase hex"
-    );
-    Ok(digest.to_owned())
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NativePackageReleaseManifest {
-    schema_version: u8,
-    component: String,
-    protocol: String,
-    version: String,
-    producer_workflow: String,
-    publisher_workflow: Option<String>,
-    max_bytes: u64,
-    source_sha: Option<String>,
-    assets: std::collections::BTreeMap<String, String>,
-}
-
-impl NativePackageReleaseManifest {
-    fn validate(&self, version: &Version, source_sha: &str) -> Result<()> {
-        let asset = self
-            .assets
-            .get("linux-x86_64")
-            .context("package release manifest has no linux-x86_64 asset")?;
-        ensure!(
-            self.schema_version == 2
-                && self.component == "securefix-server"
-                && self.protocol == NATIVE_CLIENT_PROTOCOL
-                && self.version == version.to_string()
-                && self.producer_workflow == NATIVE_PACKAGE_PRODUCER_WORKFLOW
-                && self.publisher_workflow.as_deref() == Some(NATIVE_PACKAGE_PUBLISHER_WORKFLOW)
-                && self.max_bytes > 0
-                && self.max_bytes <= MAX_ASSET_BYTES
-                && self.assets.len() == 1
-                && asset == PACKAGE_BINARY_NAME
-                && self
-                    .source_sha
-                    .as_deref()
-                    .is_none_or(|sha| sha == source_sha),
-            "package release manifest does not bind the exact source, workflow, asset, and Cargo version"
-        );
-        crate::policy::validate_sha(source_sha)?;
-        Ok(())
-    }
-}
-
-pub(crate) struct NativePackageReleaseSourceBinding<'a> {
-    pub source_sha: &'a str,
-    pub version: &'a str,
-    pub producer_workflow: &'a str,
-    pub publisher_workflow: &'a str,
-    pub asset_name: &'a str,
-    pub max_asset_bytes: u64,
-    pub stable: bool,
-}
-
-pub(crate) fn validate_native_package_release_source(
-    cargo_bytes: &[u8],
-    manifest_bytes: &[u8],
-    binding: &NativePackageReleaseSourceBinding<'_>,
-) -> Result<()> {
-    ensure!(
-        cargo_bytes.len() <= MAX_CARGO_TOML_BYTES && manifest_bytes.len() <= 16 * 1024,
-        "package source inputs exceed their bounds"
-    );
-    let cargo = std::str::from_utf8(cargo_bytes).context("source Cargo.toml is not UTF-8")?;
-    let document = cargo
-        .parse::<toml_edit::DocumentMut>()
-        .context("source Cargo.toml is invalid TOML")?;
-    let package = document
-        .as_table()
-        .get("package")
-        .and_then(|item| item.as_table())
-        .context("source Cargo.toml package table is missing or invalid")?;
-    ensure!(
-        package.get("name").and_then(|item| item.as_str()) == Some("securefix"),
-        "source Cargo.toml package name is not securefix"
-    );
-    let raw_version = package
-        .get("version")
-        .and_then(|item| item.as_str())
-        .context("source Cargo.toml package.version is missing or invalid")?;
-    let version = Version::parse(raw_version).context("source package version is invalid")?;
-    ensure!(
-        version.to_string() == raw_version
-            && version.build.is_empty()
-            && version.pre.is_empty() == binding.stable
-            && raw_version == binding.version,
-        "source package version differs from the exact release channel or tag"
-    );
-    crate::policy::validate_sha(binding.source_sha)?;
-    ensure!(
-        binding.producer_workflow == NATIVE_PACKAGE_PRODUCER_WORKFLOW
-            && binding.publisher_workflow == NATIVE_PACKAGE_PUBLISHER_WORKFLOW
-            && binding.asset_name == PACKAGE_BINARY_NAME,
-        "package release binding differs from the fixed workflow or asset contract"
-    );
-    let manifest: NativePackageReleaseManifest = serde_json::from_slice(manifest_bytes)
-        .context("package release source manifest is invalid JSON")?;
-    manifest.validate(&version, binding.source_sha)?;
-    ensure!(
-        manifest.producer_workflow == binding.producer_workflow
-            && manifest.publisher_workflow.as_deref() == Some(binding.publisher_workflow)
-            && manifest.assets.get("linux-x86_64").map(String::as_str) == Some(binding.asset_name)
-            && manifest.max_bytes == binding.max_asset_bytes,
-        "package source manifest differs from the selected producer or asset contract"
-    );
-    Ok(())
-}
-
-pub(crate) fn validate_package_source_ancestor_comparison(
-    comparison: &Value,
-    source_sha: &str,
-    publisher_sha: &str,
-) -> Result<()> {
-    crate::policy::validate_sha(source_sha)?;
-    crate::policy::validate_sha(publisher_sha)?;
-    ensure!(
-        comparison["base_commit"]["sha"] == source_sha
-            && comparison["merge_base_commit"]["sha"] == source_sha
-            && comparison["behind_by"].as_u64() == Some(0)
-            && matches!(comparison["status"].as_str(), Some("ahead" | "identical")),
-        "stable package source is not an ancestor of the current protected publisher"
-    );
-    Ok(())
-}
-
-fn validate_package_source_ancestor(
-    api: &GitHub,
-    repository: &str,
-    source_sha: &str,
-    publisher_sha: &str,
-) -> Result<()> {
-    let comparison: Value = api.get_uncached(&format!(
-        "/repos/{repository}/compare/{source_sha}...{publisher_sha}"
-    ))?;
-    validate_package_source_ancestor_comparison(&comparison, source_sha, publisher_sha)
-}
-
-fn validate_package_workflow(path: &str) -> Result<()> {
-    ensure!(
-        path == NATIVE_PACKAGE_PRODUCER_WORKFLOW || path == NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
-        "package release workflow path is outside the fixed producer/publisher contract"
-    );
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1576,6 +2952,35 @@ fn native_package_scratch_destination() -> Result<crate::config::Repository> {
         id: parse_positive_decimal(&id)?,
         default_branch,
     })
+}
+
+fn validate_package_source_ancestor(
+    api: &GitHub,
+    repository: &str,
+    source_sha: &str,
+    publisher_sha: &str,
+) -> Result<()> {
+    let comparison: Value = api.get_uncached(&format!(
+        "/repos/{repository}/compare/{source_sha}...{publisher_sha}"
+    ))?;
+    validate_package_source_ancestor_comparison(&comparison, source_sha, publisher_sha)
+}
+
+pub(crate) fn validate_package_source_ancestor_comparison(
+    comparison: &Value,
+    source_sha: &str,
+    publisher_sha: &str,
+) -> Result<()> {
+    crate::policy::validate_sha(source_sha)?;
+    crate::policy::validate_sha(publisher_sha)?;
+    ensure!(
+        comparison["base_commit"]["sha"] == source_sha
+            && comparison["merge_base_commit"]["sha"] == source_sha
+            && comparison["behind_by"].as_u64() == Some(0)
+            && matches!(comparison["status"].as_str(), Some("ahead" | "identical")),
+        "stable package source is not an ancestor of the current protected publisher"
+    );
+    Ok(())
 }
 
 fn native_package_publisher_identity(repository: &str) -> Result<(String, String, String)> {
@@ -1782,10 +3187,10 @@ fn publish_native_package(
     );
     let manifest_value: Value = source_api.get_uncached(&format!(
         "/repos/{}/contents/{SOURCE_BUILD_MANIFEST_PATH}?ref={source_sha}",
-        source.repository
+        source.repository,
     ))?;
     let manifest_bytes = source_file_bytes(&manifest_value, SOURCE_BUILD_MANIFEST_PATH)?;
-    let manifest: NativePackageReleaseManifest = serde_json::from_slice(&manifest_bytes)
+    let manifest: SourcePackageManifest = serde_json::from_slice(&manifest_bytes)
         .context("source package manifest is invalid JSON")?;
     let producer_branch = validate_scratch_package_run(
         &producer,
@@ -2100,6 +3505,71 @@ fn publish_native_package(
     ))
 }
 
+fn source_file_bytes(manifest: &Value, expected_path: &str) -> Result<Vec<u8>> {
+    ensure!(
+        manifest["path"].as_str() == Some(expected_path)
+            && manifest["type"].as_str() == Some("file")
+            && manifest["encoding"].as_str() == Some("base64"),
+        "source package manifest identity or encoding is invalid"
+    );
+    let size = manifest["size"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= 16 * 1024)
+        .context("source package manifest size is invalid")?;
+    let encoded = manifest["content"]
+        .as_str()
+        .context("source package manifest contents are missing")?;
+    ensure!(
+        encoded.len() <= 24 * 1024,
+        "source package manifest is too large"
+    );
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.replace('\n', ""))
+        .context("source package manifest is invalid base64")?;
+    ensure!(
+        bytes.len() as u64 == size,
+        "source package manifest size changed"
+    );
+    Ok(bytes)
+}
+
+fn validate_single_package_asset(
+    assets: &[Value],
+    name: &str,
+    size: u64,
+    sha256: &str,
+) -> Result<Value> {
+    ensure!(
+        assets.len() == 1,
+        "scratch package release must contain exactly one asset"
+    );
+    let asset = &assets[0];
+    ensure!(
+        asset["id"].as_u64().is_some_and(|id| id > 0)
+            && asset["name"] == name
+            && asset["state"] == "uploaded"
+            && asset["size"].as_u64() == Some(size)
+            && asset["digest"] == format!("sha256:{sha256}"),
+        "scratch package release asset does not match the verified executable"
+    );
+    Ok(asset.clone())
+}
+
+fn canonical_sha256_digest(value: &str) -> Result<String> {
+    let digest = value
+        .strip_prefix("sha256:")
+        .context("package asset digest must use sha256")?;
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "package asset SHA-256 digest is not canonical lowercase hex"
+    );
+    Ok(digest.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2110,6 +3580,43 @@ mod tests {
     const SOURCE_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const CARGO_TOML: &str = "[package]\nname = \"securefix\"\nversion = \"1.2.3\"\n";
     const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn native_client_destination_never_implicitly_accepts_prereleases() {
+        let mut instance = crate::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let stable = native_client_package_api_test_fixture();
+        let scratch = native_client_package_api_scratch_test_fixture();
+        let validate = |config: &crate::instance_config::InstanceConfig,
+                        package: &VerifiedNativeClientPackage| {
+            validate_native_client_package_destination(
+                config,
+                &package.package.release().publisher,
+                &package.implementation_version,
+                &package.binary_version,
+            )
+        };
+        assert!(!validate(&instance, &stable).unwrap());
+        assert!(validate(&instance, &scratch).is_err());
+        instance.scratch_package_repository = Some(crate::config::Repository {
+            repository: "example-org/package-scratch".to_owned(),
+            id: 987_655,
+            default_branch: "main".to_owned(),
+        });
+        assert!(validate(&instance, &scratch).unwrap());
+        assert!(!validate(&instance, &stable).unwrap());
+        let mut wrong_id = instance.clone();
+        wrong_id.scratch_package_repository.as_mut().unwrap().id += 1;
+        assert!(validate(&wrong_id, &scratch).is_err());
+        let mut wrong_range = instance.clone();
+        wrong_range.acceptable_clients.version = VersionReq::parse(">=2.0.0").unwrap();
+        assert!(validate(&wrong_range, &stable).is_err());
+        let mut unreleased = stable.clone();
+        unreleased.implementation_version = scratch.implementation_version.clone();
+        assert!(validate(&instance, &unreleased).is_err());
+    }
 
     fn publisher() -> TrustedPublisher {
         TrustedPublisher {
@@ -2148,7 +3655,54 @@ mod tests {
     }
 
     fn repository() -> Value {
-        json!({"id":42,"full_name":REPOSITORY,"owner":{"id":84,"login":"example-org"}})
+        json!({"id":42,"full_name":REPOSITORY,"default_branch":"main","owner":{"id":84,"login":"example-org"}})
+    }
+
+    fn signer_release() -> Value {
+        json!({
+            "id":11,
+            "tag_name":"v1.2.3",
+            "target_commitish":SOURCE_SHA,
+            "draft":false,
+            "immutable":true,
+            "prerelease":false
+        })
+    }
+
+    fn resolve_signer_fixture(
+        source_response: Value,
+        tag_response: Value,
+        release_response: Value,
+        range: &str,
+        expected_requests: usize,
+    ) -> Result<Version> {
+        let mut routes = vec![
+            Route::get(format!("/repos/{REPOSITORY}"), repository()),
+            Route::get(
+                format!("/repos/{REPOSITORY}/contents/Cargo.toml?ref={SOURCE_SHA}"),
+                source_response,
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/git/ref/tags/v1.2.3"),
+                tag_response,
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/releases/tags/v1.2.3"),
+                release_response,
+            ),
+        ];
+        routes.truncate(expected_requests);
+        let fixture = Fixture::new(routes);
+        let requirement = VersionReq::parse(range).unwrap();
+        let result = resolve_native_client_implementation(
+            &fixture.api,
+            &publisher(),
+            SOURCE_SHA,
+            &requirement,
+            "main",
+        );
+        fixture.finish();
+        result
     }
 
     fn tag_ref() -> Value {
@@ -2281,6 +3835,578 @@ mod tests {
         assert_eq!(resolved.asset.name, "securefix-linux-x86_64");
         assert_eq!(resolved.asset.size, 1234);
         assert_eq!(resolved.asset.sha256, DIGEST);
+    }
+
+    #[test]
+    fn client_package_asset_is_bounded_by_its_source_manifest_before_download() {
+        let fixture = Fixture::new(vec![
+            Route::get(format!("/repos/{REPOSITORY}"), repository()),
+            Route::get(
+                format!("/repos/{REPOSITORY}/contents/Cargo.toml?ref={SOURCE_SHA}"),
+                source_manifest(CARGO_TOML),
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/git/ref/tags/v1.2.3"),
+                tag_ref(),
+            ),
+            Route::get(
+                format!("/repos/{REPOSITORY}/releases/tags/v1.2.3"),
+                release(),
+            ),
+        ]);
+        let result = download_release_asset_bounded(
+            &fixture.api,
+            &publisher(),
+            SOURCE_SHA,
+            &expected_asset(),
+            &VersionReq::parse(">=1.0.0").unwrap(),
+            1233,
+        );
+        assert!(result.is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn client_implementation_must_have_an_accepted_immutable_release_at_signer_sha() {
+        assert_eq!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                tag_ref(),
+                signer_release(),
+                ">=1.2.0",
+                4,
+            )
+            .unwrap(),
+            Version::parse("1.2.3").unwrap()
+        );
+        assert!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                tag_ref(),
+                signer_release(),
+                ">=2.0.0",
+                2,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_signer_fixture(
+                source_manifest("[package]\nname = \"securefix\"\nversion = \"1.2.3-pre.1\"\n"),
+                tag_ref(),
+                signer_release(),
+                ">=1.0.0",
+                2,
+            )
+            .is_err()
+        );
+        let mut wrong_tag = tag_ref();
+        wrong_tag["object"]["sha"] = json!("b".repeat(40));
+        assert!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                wrong_tag,
+                signer_release(),
+                ">=1.0.0",
+                3,
+            )
+            .is_err()
+        );
+        let mut mutable_release = signer_release();
+        mutable_release["immutable"] = json!(false);
+        assert!(
+            resolve_signer_fixture(
+                source_manifest(CARGO_TOML),
+                tag_ref(),
+                mutable_release,
+                ">=1.0.0",
+                4,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_client_protocol_mismatch_rejects_before_remote_resolution() {
+        let fixture = Fixture::new(vec![]);
+        let acceptable = crate::instance_config::AcceptableClients {
+            repository: REPOSITORY.into(),
+            id: 42,
+            producer_workflow: ".github/workflows/request-producer.yml".into(),
+            version: VersionReq::parse(">=1.2.0").unwrap(),
+        };
+        let result = verify_native_client_package(
+            &fixture.api,
+            &acceptable,
+            SOURCE_SHA,
+            &PinnedPackageAction::new(
+                REPOSITORY.to_owned(),
+                ".github/actions/load-package".to_owned(),
+                SOURCE_SHA.to_owned(),
+            )
+            .unwrap(),
+            "securefix-native-request/v999",
+            "main",
+        );
+        assert!(result.is_err());
+        fixture.finish();
+    }
+
+    #[test]
+    fn source_package_manifest_paths_are_bounded_and_repository_relative() {
+        assert!(validate_package_action_path("actions/packages/Native Client loader").is_ok());
+        assert!(
+            validate_source_package_manifest_path(".github/actions/load-package/package.json")
+                .is_ok()
+        );
+        assert!(
+            validate_source_package_manifest_path(
+                ".github/actions/load-package/source-package.json"
+            )
+            .is_ok()
+        );
+        assert!(validate_source_package_manifest_path(".github/actions/../package.json").is_err());
+        assert!(
+            validate_source_package_manifest_path(
+                ".github/actions/load-package/package.json?ref=main"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_source_package_manifest_path("build artifacts/source package.json").is_ok()
+        );
+        assert!(validate_source_package_manifest_path("C:/absolute/package.json").is_err());
+        assert!(validate_source_package_manifest_path("build\\package.json").is_err());
+        assert!(validate_source_package_manifest_path("build\n/package.json").is_err());
+        assert!(validate_source_package_manifest_path("build/source%20package.json").is_ok());
+    }
+
+    #[test]
+    fn bundled_v3_action_mapping_binds_the_verified_binary_receipt() {
+        const BINARY_SOURCE_SHA: &str = "07d6adfbfb037c83fdbe95e19a1b564d6275c483";
+        let action_bytes = include_bytes!("../.github/actions/load-package/package.json");
+        let manifest = NativeClientPackageManifest::parse(action_bytes).unwrap();
+        let source = TrustedPublisher {
+            repository: "civitaspo/securefix-server".to_owned(),
+            repository_id: 1_250_079_425,
+        };
+        let destination = TrustedPublisher {
+            repository: "civitaspo/testing-securefix-server".to_owned(),
+            repository_id: 1_410_312_556,
+        };
+        assert_eq!(
+            manifest
+                .validate(
+                    ClientPackageChannel::Scratch,
+                    &source,
+                    &destination,
+                    NATIVE_CLIENT_PROTOCOL,
+                    Some("main"),
+                )
+                .unwrap(),
+            BINARY_SOURCE_SHA
+        );
+
+        let source_manifest_bytes =
+            include_bytes!("../tests/fixtures/native-package-source-manifest-v2.json");
+        assert_eq!(
+            manifest.source_manifest_sha256,
+            crate::hex_encode(Sha256::digest(source_manifest_bytes))
+        );
+        assert_eq!(
+            manifest.source_manifest_path,
+            ".github/actions/load-package/source-package.json"
+        );
+        let source_manifest: SourcePackageManifest =
+            serde_json::from_slice(source_manifest_bytes).unwrap();
+        let binary_version = Version::parse(&manifest.version).unwrap();
+        validate_client_source_package_manifest(
+            &manifest,
+            &source_manifest,
+            source_manifest_bytes,
+            &binary_version,
+            NATIVE_CLIENT_PROTOCOL,
+        )
+        .unwrap();
+
+        let action = PinnedPackageAction::new(
+            source.repository.clone(),
+            "actions/package loader/nested".to_owned(),
+            "a".repeat(40),
+        )
+        .unwrap();
+        let action_manifest_path = action.manifest_path();
+        assert_eq!(
+            encode_repository_path(&action_manifest_path),
+            "actions/package%20loader/nested/package.json"
+        );
+        assert_ne!(action.revision(), BINARY_SOURCE_SHA);
+        assert_ne!(manifest.source_sha, action.revision());
+
+        use base64::Engine;
+        let manifest_path = action.manifest_path();
+        let encoded_manifest_path = encode_repository_path(&manifest_path);
+        let action_sha = action.revision().to_owned();
+        let route = Route::get(
+            format!(
+                "/repos/{}/contents/{encoded_manifest_path}?ref={action_sha}",
+                action.repository
+            ),
+            json!({
+                "path": manifest_path,
+                "type": "file",
+                "encoding": "base64",
+                "size": action_bytes.len(),
+                "content": base64::engine::general_purpose::STANDARD.encode(action_bytes)
+            }),
+        );
+        let source_path = manifest.source_manifest_path.clone();
+        let source_sha = manifest.source_sha.clone();
+        let source_route = Route::get(
+            format!(
+                "/repos/{}/contents/{source_path}?ref={source_sha}",
+                source.repository
+            ),
+            json!({
+                "path": source_path,
+                "type": "file",
+                "encoding": "base64",
+                "size": source_manifest_bytes.len(),
+                "content": base64::engine::general_purpose::STANDARD.encode(source_manifest_bytes)
+            }),
+        );
+        let fixture = Fixture::new(vec![route, source_route]);
+        let (fetched_bytes, fetched_manifest) =
+            fetch_native_client_action_manifest(&fixture.api, &action).unwrap();
+        assert_eq!(fetched_bytes, action_bytes);
+        assert_eq!(fetched_manifest.source_sha, BINARY_SOURCE_SHA);
+        assert_eq!(
+            fetch_source_package_manifest(
+                &fixture.api,
+                &source.repository,
+                &manifest.source_sha,
+                &manifest.source_manifest_path,
+            )
+            .unwrap(),
+            source_manifest_bytes
+        );
+        fixture.finish();
+
+        let spaced_source_path = "build artifacts/source package.json";
+        let encoded_spaced_source_path = encode_repository_path(spaced_source_path);
+        assert_eq!(
+            encoded_spaced_source_path,
+            "build%20artifacts/source%20package.json"
+        );
+        let spaced_source_route = Route::get(
+            format!(
+                "/repos/{}/contents/{encoded_spaced_source_path}?ref={source_sha}",
+                source.repository
+            ),
+            json!({
+                "path": spaced_source_path,
+                "type": "file",
+                "encoding": "base64",
+                "size": source_manifest_bytes.len(),
+                "content": base64::engine::general_purpose::STANDARD.encode(source_manifest_bytes)
+            }),
+        );
+        let spaced_fixture = Fixture::new(vec![spaced_source_route]);
+        assert_eq!(
+            fetch_source_package_manifest(
+                &spaced_fixture.api,
+                &source.repository,
+                &manifest.source_sha,
+                spaced_source_path,
+            )
+            .unwrap(),
+            source_manifest_bytes
+        );
+        spaced_fixture.finish();
+
+        let mut unknown = serde_json::from_slice::<Value>(action_bytes).unwrap();
+        unknown["unexpected"] = json!(true);
+        assert!(
+            NativeClientPackageManifest::parse(&serde_json::to_vec(&unknown).unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn stable_v3_mapping_and_release_record_must_match_exactly() {
+        let manifest = NativeClientPackageManifest {
+            schema_version: 3,
+            channel: ClientPackageChannel::Stable,
+            component: "securefix-server".to_owned(),
+            protocol: NATIVE_CLIENT_PROTOCOL.to_owned(),
+            version: "1.2.3".to_owned(),
+            max_bytes: 128,
+            source_repository: REPOSITORY.to_owned(),
+            source_repository_id: 42,
+            source_sha: SOURCE_SHA.to_owned(),
+            source_branch: "main".to_owned(),
+            source_default_branch: "main".to_owned(),
+            source_manifest_path: ".github/actions/load-package/source-package.json".to_owned(),
+            source_manifest_sha256: "a".repeat(64),
+            destination_repository: REPOSITORY.to_owned(),
+            destination_repository_id: 42,
+            tag: "v1.2.3".to_owned(),
+            release_id: 7,
+            target_branch: "main".to_owned(),
+            immutable: true,
+            prerelease: false,
+            asset_id: 9,
+            asset_name: PACKAGE_BINARY_NAME.to_owned(),
+            asset_size: 64,
+            asset_sha256: DIGEST.to_owned(),
+            producer_workflow: ".github/workflows/native-package-build.yml".to_owned(),
+            producer_run_id: 3,
+            producer_run_attempt: 1,
+            publisher_workflow: ".github/workflows/publish-native-package.yml".to_owned(),
+            publisher_sha: "b".repeat(40),
+            publisher_branch: "main".to_owned(),
+            publisher_run_id: 4,
+            publisher_run_attempt: 1,
+        };
+        let record = NativePackageReleaseRecord {
+            schema_version: 1,
+            source_sha: manifest.source_sha.clone(),
+            source_manifest_sha256: manifest.source_manifest_sha256.clone(),
+            producer_workflow: manifest.producer_workflow.clone(),
+            producer_run_id: manifest.producer_run_id,
+            producer_run_attempt: manifest.producer_run_attempt,
+            publisher_workflow: manifest.publisher_workflow.clone(),
+            publisher_sha: manifest.publisher_sha.clone(),
+            publisher_run_id: manifest.publisher_run_id,
+            publisher_run_attempt: manifest.publisher_run_attempt,
+            tag: manifest.tag.clone(),
+            asset_name: manifest.asset_name.clone(),
+            asset_size: manifest.asset_size,
+            asset_sha256: manifest.asset_sha256.clone(),
+        };
+        validate_client_package_manifest_record(&manifest, &record).unwrap();
+        let mut wrong_run = record.clone();
+        wrong_run.publisher_run_id += 1;
+        assert!(validate_client_package_manifest_record(&manifest, &wrong_run).is_err());
+        let mut wrong_digest = record;
+        wrong_digest.asset_sha256 = "d".repeat(64);
+        assert!(validate_client_package_manifest_record(&manifest, &wrong_digest).is_err());
+    }
+
+    #[test]
+    fn stable_package_record_binds_manifest_publisher_and_exact_asset() {
+        const PUBLISHER_WORKFLOW: &str = ".github/workflows/publish-native-package.yml";
+        const PUBLISHER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let manifest_bytes = format!(
+            "{{\"schema_version\":2,\"component\":\"securefix\",\"protocol\":\"{}\",\"version\":\"1.2.3-pre.4\",\"producer_workflow\":\".github/workflows/native-package-build.yml\",\"publisher_workflow\":\"{PUBLISHER_WORKFLOW}\",\"max_bytes\":100,\"assets\":{{\"linux-x86_64\":\"securefix-linux-x86_64\"}}}}",
+            NATIVE_CLIENT_PROTOCOL
+        );
+        let manifest: SourcePackageManifest = serde_json::from_str(&manifest_bytes).unwrap();
+        let version = Version::parse("1.2.3-pre.4").unwrap();
+        let expected_asset = ExpectedAsset {
+            component: "securefix".to_owned(),
+            platform: "linux-x86_64".to_owned(),
+            name: "securefix-linux-x86_64".to_owned(),
+        };
+        let release = ResolvedRelease {
+            publisher: publisher(),
+            implementation_sha: SOURCE_SHA.to_owned(),
+            source_sha: SOURCE_SHA.to_owned(),
+            version: version.clone(),
+            tag: format!("v{version}"),
+            release_id: 1,
+            release_body: None,
+            asset: ResolvedAsset {
+                component: expected_asset.component.clone(),
+                platform: expected_asset.platform.clone(),
+                id: 2,
+                name: expected_asset.name.clone(),
+                size: 7,
+                sha256: DIGEST.to_owned(),
+            },
+        };
+        let record = NativePackageReleaseRecord {
+            schema_version: 1,
+            source_sha: SOURCE_SHA.to_owned(),
+            source_manifest_sha256: crate::hex_encode(Sha256::digest(&manifest_bytes)),
+            producer_workflow: manifest.producer_workflow.clone(),
+            producer_run_id: 3,
+            producer_run_attempt: 1,
+            publisher_workflow: PUBLISHER_WORKFLOW.to_owned(),
+            publisher_sha: PUBLISHER_SHA.to_owned(),
+            publisher_run_id: 4,
+            publisher_run_attempt: 1,
+            tag: release.tag.clone(),
+            asset_name: expected_asset.name.clone(),
+            asset_size: release.asset.size,
+            asset_sha256: DIGEST.to_owned(),
+        };
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert_eq!(
+            parse_native_package_release_record(&encoded).unwrap(),
+            record
+        );
+        assert!(parse_native_package_release_record(&format!("{encoded} ")).is_err());
+        validate_native_package_release_record(
+            &record,
+            &release,
+            &manifest,
+            manifest_bytes.as_bytes(),
+            SOURCE_SHA,
+            &expected_asset,
+        )
+        .unwrap();
+
+        let mut wrong_publisher_sha = record.clone();
+        wrong_publisher_sha.publisher_sha = "not-a-sha".to_owned();
+        let mut wrong_manifest = record.clone();
+        wrong_manifest.source_manifest_sha256 = "d".repeat(64);
+        let mut wrong_publisher_workflow = record;
+        wrong_publisher_workflow.publisher_workflow = ".github/workflows/other.yml".to_owned();
+        for invalid in [
+            wrong_publisher_sha,
+            wrong_manifest,
+            wrong_publisher_workflow,
+        ] {
+            assert!(
+                validate_native_package_release_record(
+                    &invalid,
+                    &release,
+                    &manifest,
+                    manifest_bytes.as_bytes(),
+                    SOURCE_SHA,
+                    &expected_asset,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn stable_publisher_run_is_bound_separately_from_binary_source() {
+        const PUBLISHER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let record = NativePackageReleaseRecord {
+            schema_version: 1,
+            source_sha: SOURCE_SHA.to_owned(),
+            source_manifest_sha256: "d".repeat(64),
+            producer_workflow: ".github/workflows/native-package-build.yml".to_owned(),
+            producer_run_id: 3,
+            producer_run_attempt: 1,
+            publisher_workflow: ".github/workflows/publish-native-package.yml".to_owned(),
+            publisher_sha: PUBLISHER_SHA.to_owned(),
+            publisher_run_id: 4,
+            publisher_run_attempt: 1,
+            tag: "v1.2.3".to_owned(),
+            asset_name: "securefix-linux-x86_64".to_owned(),
+            asset_size: 7,
+            asset_sha256: DIGEST.to_owned(),
+        };
+        assert_ne!(record.source_sha, record.publisher_sha);
+
+        let valid = json!({
+            "id": 4,
+            "run_attempt": 1,
+            "repository": {"id":42,"full_name":REPOSITORY,"owner":{"id":84,"login":"example-org"}},
+            "head_repository": {"id":42,"full_name":REPOSITORY},
+            "path": record.publisher_workflow,
+            "event": "workflow_dispatch",
+            "head_branch": "main",
+            "head_sha": PUBLISHER_SHA,
+            "actor": {"id":84,"type":"User"},
+            "triggering_actor": {"id":84,"type":"User"},
+            "status": "completed",
+            "conclusion": "success"
+        });
+        let fixture = Fixture::new(vec![Route::get(
+            format!("/repos/{REPOSITORY}"),
+            repository(),
+        )]);
+        validate_native_package_publisher_run(
+            &fixture.api,
+            &publisher(),
+            "main",
+            &record,
+            84,
+            &valid,
+        )
+        .unwrap();
+        fixture.finish();
+
+        let mut wrong_actor = valid.clone();
+        wrong_actor["actor"]["id"] = json!(85);
+        let mut wrong_triggering_actor = valid.clone();
+        wrong_triggering_actor["triggering_actor"]["id"] = json!(85);
+        let mut invalids = vec![
+            ("head_sha", json!(SOURCE_SHA)),
+            ("head_branch", json!("release/other")),
+            ("event", json!("push")),
+            ("run_attempt", json!(2)),
+            ("path", json!(".github/workflows/other.yml")),
+        ]
+        .into_iter()
+        .map(|(path, value)| {
+            let mut invalid = valid.clone();
+            invalid[path] = value;
+            (path, invalid)
+        })
+        .collect::<Vec<_>>();
+        invalids.push(("actor.id", wrong_actor));
+        invalids.push(("triggering_actor.id", wrong_triggering_actor));
+        for (path, invalid) in invalids {
+            let fixture = Fixture::new(vec![Route::get(
+                format!("/repos/{REPOSITORY}"),
+                repository(),
+            )]);
+            assert!(
+                validate_native_package_publisher_run(
+                    &fixture.api,
+                    &publisher(),
+                    "main",
+                    &record,
+                    84,
+                    &invalid,
+                )
+                .is_err(),
+                "publisher run must reject modified {path}"
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn package_workflow_owner_is_one_protected_literal() {
+        let valid = br#"name: publish
+env:
+  SECUREFIX_PACKAGE_OWNER_ID: "84"
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+"#;
+        assert_eq!(package_workflow_owner_id_from_bytes(valid).unwrap(), 84);
+
+        let expression = br#"env:
+  SECUREFIX_PACKAGE_OWNER_ID: "${{ vars.OWNER_ID }}"
+jobs: {}
+"#;
+        let workflow_override = br#"env:
+  SECUREFIX_PACKAGE_OWNER_ID: "84"
+jobs:
+  publish:
+    env:
+      SECUREFIX_PACKAGE_OWNER_ID: "85"
+"#;
+        let duplicate = br#"env:
+  SECUREFIX_PACKAGE_OWNER_ID: "84"
+jobs:
+  publish:
+    env:
+      SECUREFIX_PACKAGE_OWNER_ID: "84"
+"#;
+        for invalid in [
+            expression.as_slice(),
+            workflow_override.as_slice(),
+            duplicate.as_slice(),
+        ] {
+            assert!(package_workflow_owner_id_from_bytes(invalid).is_err());
+        }
     }
 
     #[test]
@@ -2560,11 +4686,13 @@ mod tests {
     #[test]
     fn package_provenance_binds_subject_workflow_source_and_exact_run() {
         let release = valid_resolve(">=1.0.0").unwrap();
+        let provenance_publisher = publisher();
         let verified = valid_provenance_result();
         assert_eq!(
             validate_provenance_result(
                 &verified,
                 &release,
+                &provenance_publisher,
                 ".github/workflows/release.yml",
                 "main"
             )
@@ -2586,6 +4714,7 @@ mod tests {
         validate_publisher_run(
             &run,
             &release,
+            &provenance_publisher,
             ".github/workflows/release.yml",
             "main",
             123,
@@ -2620,6 +4749,7 @@ mod tests {
                 validate_provenance_result(
                     &result,
                     &release,
+                    &provenance_publisher,
                     ".github/workflows/release.yml",
                     "main"
                 )
@@ -2630,6 +4760,7 @@ mod tests {
             validate_publisher_run(
                 &wrong_attempt,
                 &release,
+                &provenance_publisher,
                 ".github/workflows/release.yml",
                 "main",
                 123,
@@ -2643,6 +4774,7 @@ mod tests {
                 validate_publisher_run(
                     wrong_run,
                     &release,
+                    &provenance_publisher,
                     ".github/workflows/release.yml",
                     "main",
                     123,
@@ -2819,6 +4951,125 @@ mod tests {
     }
 
     #[test]
+    fn scratch_package_record_requires_the_successful_exact_writer_run() {
+        const SOURCE: &str = "example-org/source";
+        const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const WORKFLOW: &str = ".github/workflows/publish-native-package.yml";
+        let source = crate::config::Repository {
+            repository: SOURCE.to_owned(),
+            id: 99,
+            default_branch: "main".to_owned(),
+        };
+        let run = json!({
+            "id": 456,
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "success",
+            "event": "workflow_dispatch",
+            "head_branch": "main",
+            "head_sha": SHA,
+            "repository": {"id": 99, "full_name": SOURCE},
+            "head_repository": {"id": 99, "full_name": SOURCE},
+            "path": WORKFLOW,
+            "actor": {"id": 84, "type": "User"},
+            "triggering_actor": {"id": 84, "type": "User"}
+        });
+        validate_scratch_package_completed_writer_run(&run, &source, WORKFLOW, SHA, 456, 1, 84)
+            .unwrap();
+
+        let mut wrong_source = run.clone();
+        wrong_source["head_sha"] = json!("b".repeat(40));
+        let mut wrong_actor = run.clone();
+        wrong_actor["triggering_actor"]["id"] = json!(85);
+        let mut failed = run.clone();
+        failed["conclusion"] = json!("failure");
+        let mut wrong_path = run.clone();
+        wrong_path["path"] = json!(".github/workflows/other.yml");
+        for invalid in [&wrong_source, &wrong_actor, &failed, &wrong_path] {
+            assert!(
+                validate_scratch_package_completed_writer_run(
+                    invalid, &source, WORKFLOW, SHA, 456, 1, 84,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn scratch_publication_must_match_configured_source_and_destination_identities() {
+        let source = TrustedPublisher {
+            repository: "example-org/client".to_owned(),
+            repository_id: 42,
+        };
+        let destination = TrustedPublisher {
+            repository: "example-org/testing-server".to_owned(),
+            repository_id: 99,
+        };
+        let publication = ScratchPackagePublication {
+            source_repository: source.repository.clone(),
+            source_repository_id: source.repository_id,
+            destination_repository: destination.repository.clone(),
+            destination_repository_id: destination.repository_id,
+            source_sha: "a".repeat(40),
+            source_branch: "testing/package".to_owned(),
+            tag: "v1.2.3-pre.1".to_owned(),
+            release_id: 123,
+            asset_id: 456,
+            asset_sha256: "b".repeat(64),
+            asset_size: 1024,
+            producer_run_id: 789,
+            producer_run_attempt: 1,
+            publisher_workflow: NATIVE_PACKAGE_PUBLISHER_WORKFLOW.to_owned(),
+            publisher_branch: "main".to_owned(),
+            publisher_sha: "c".repeat(40),
+            publisher_run_id: 987,
+            publisher_run_attempt: 1,
+        };
+
+        validate_scratch_publication_repositories(&publication, &source, &destination).unwrap();
+
+        let mut wrong_destination_name = publication.clone();
+        wrong_destination_name.destination_repository = "attacker/other".to_owned();
+        let mut wrong_destination_id = publication.clone();
+        wrong_destination_id.destination_repository_id += 1;
+        let mut wrong_source_name = publication.clone();
+        wrong_source_name.source_repository = "attacker/client".to_owned();
+        let mut wrong_source_id = publication.clone();
+        wrong_source_id.source_repository_id += 1;
+        for invalid in [
+            wrong_destination_name,
+            wrong_destination_id,
+            wrong_source_name,
+            wrong_source_id,
+        ] {
+            assert!(
+                validate_scratch_publication_repositories(&invalid, &source, &destination).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn scratch_package_acceptance_requires_an_explicit_instance_destination() {
+        let mut instance = crate::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        assert!(configured_scratch_package_repository(&instance).is_err());
+
+        instance.scratch_package_repository = Some(crate::config::Repository {
+            repository: "example-org/testing-server".to_owned(),
+            id: 99,
+            default_branch: "main".to_owned(),
+        });
+        assert_eq!(
+            configured_scratch_package_repository(&instance)
+                .unwrap()
+                .repository,
+            "example-org/testing-server"
+        );
+    }
+
+    #[test]
     fn scratch_package_artifact_is_bound_to_exact_run_source_and_bytes() {
         const SOURCE: &str = "example-org/source";
         const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -2912,37 +5163,6 @@ mod tests {
     }
 
     #[test]
-    fn native_package_release_manifest_binds_exact_workflows_and_source() {
-        let cargo = b"[package]\nname = \"securefix\"\nversion = \"1.2.3-pre.4\"\n";
-        let manifest = serde_json::json!({
-            "schema_version": 2,
-            "component": "securefix-server",
-            "protocol": NATIVE_CLIENT_PROTOCOL,
-            "version": "1.2.3-pre.4",
-            "producer_workflow": NATIVE_PACKAGE_PRODUCER_WORKFLOW,
-            "publisher_workflow": NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
-            "max_bytes": 1024,
-            "assets": {"linux-x86_64": PACKAGE_BINARY_NAME}
-        });
-        let bytes = serde_json::to_vec(&manifest).unwrap();
-        let binding = NativePackageReleaseSourceBinding {
-            source_sha: SOURCE_SHA,
-            version: "1.2.3-pre.4",
-            producer_workflow: NATIVE_PACKAGE_PRODUCER_WORKFLOW,
-            publisher_workflow: NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
-            asset_name: PACKAGE_BINARY_NAME,
-            max_asset_bytes: 1024,
-            stable: false,
-        };
-        validate_native_package_release_source(cargo, &bytes, &binding).unwrap();
-
-        let mut changed = manifest.clone();
-        changed["publisher_workflow"] = serde_json::json!(".github/workflows/other.yml");
-        let changed = serde_json::to_vec(&changed).unwrap();
-        assert!(validate_native_package_release_source(cargo, &changed, &binding).is_err());
-    }
-
-    #[test]
     fn scratch_package_manifest_and_release_asset_are_exact() {
         let manifest = SourcePackageManifest {
             schema_version: 1,
@@ -2950,7 +5170,9 @@ mod tests {
             protocol: "securefix-native-request/v1".to_owned(),
             version: "1.2.3-pre.4".to_owned(),
             producer_workflow: ".github/workflows/testing-native-package-build.yml".to_owned(),
+            publisher_workflow: None,
             max_bytes: 134217728,
+            source_sha: None,
             assets: [(
                 "linux-x86_64".to_owned(),
                 "securefix-linux-x86_64".to_owned(),
@@ -2961,25 +5183,38 @@ mod tests {
         manifest
             .validate(
                 &Version::parse("1.2.3-pre.4").unwrap(),
-                "securefix-linux-x86_64",
-                ".github/workflows/testing-native-package-build.yml",
+                NATIVE_CLIENT_PROTOCOL,
+                SOURCE_SHA,
             )
             .unwrap();
         assert!(
             manifest
                 .validate(
                     &Version::parse("1.2.3").unwrap(),
-                    "securefix-linux-x86_64",
-                    ".github/workflows/testing-native-package-build.yml"
+                    NATIVE_CLIENT_PROTOCOL,
+                    SOURCE_SHA,
                 )
                 .is_err()
         );
+        let mut wrong_protocol = manifest.clone();
+        wrong_protocol.protocol = "other/v1".to_owned();
         assert!(
-            manifest
+            wrong_protocol
                 .validate(
                     &Version::parse("1.2.3-pre.4").unwrap(),
-                    "securefix-linux-x86_64",
-                    ".github/workflows/other.yml"
+                    NATIVE_CLIENT_PROTOCOL,
+                    SOURCE_SHA,
+                )
+                .is_err()
+        );
+        let mut wrong_source = manifest.clone();
+        wrong_source.source_sha = Some("b".repeat(40));
+        assert!(
+            wrong_source
+                .validate(
+                    &Version::parse("1.2.3-pre.4").unwrap(),
+                    NATIVE_CLIENT_PROTOCOL,
+                    SOURCE_SHA,
                 )
                 .is_err()
         );
@@ -3010,5 +5245,408 @@ mod tests {
             .is_err()
         );
         assert!(validate_single_package_asset(&[asset], "other", 3, DIGEST).is_err());
+    }
+
+    #[test]
+    fn source_bound_package_release_requires_schema_two_cargo_and_workflow_binding() {
+        let source_sha = SOURCE_SHA;
+        let producer = ".github/workflows/native-package-build.yml";
+        let publisher = ".github/workflows/publish-native-package.yml";
+        let cargo = b"[package]\nname = \"securefix\"\nversion = \"1.2.3\"\n";
+        let manifest = serde_json::to_vec(&json!({
+            "schema_version": 2,
+            "component": "securefix-server",
+            "protocol": NATIVE_CLIENT_PROTOCOL,
+            "version": "1.2.3",
+            "producer_workflow": producer,
+            "publisher_workflow": publisher,
+            "max_bytes": 1024,
+            "assets": {"linux-x86_64": PACKAGE_BINARY_NAME}
+        }))
+        .unwrap();
+        let binding = NativePackageReleaseSourceBinding {
+            source_sha,
+            version: "1.2.3",
+            producer_workflow: producer,
+            publisher_workflow: publisher,
+            asset_name: PACKAGE_BINARY_NAME,
+            max_asset_bytes: 1024,
+            stable: true,
+        };
+        assert!(validate_native_package_release_source(cargo, &manifest, &binding).is_ok());
+
+        for (cargo, source, version, producer, publisher, asset, max_bytes) in [
+            (
+                cargo.as_slice(),
+                source_sha,
+                "1.2.4",
+                producer,
+                publisher,
+                PACKAGE_BINARY_NAME,
+                1024,
+            ),
+            (
+                cargo.as_slice(),
+                source_sha,
+                "1.2.3",
+                producer,
+                ".github/workflows/other.yml",
+                PACKAGE_BINARY_NAME,
+                1024,
+            ),
+            (
+                cargo.as_slice(),
+                source_sha,
+                "1.2.3",
+                producer,
+                publisher,
+                "other",
+                1024,
+            ),
+            (
+                cargo.as_slice(),
+                source_sha,
+                "1.2.3",
+                producer,
+                publisher,
+                PACKAGE_BINARY_NAME,
+                1023,
+            ),
+        ] {
+            let binding = NativePackageReleaseSourceBinding {
+                source_sha: source,
+                version,
+                producer_workflow: producer,
+                publisher_workflow: publisher,
+                asset_name: asset,
+                max_asset_bytes: max_bytes,
+                stable: true,
+            };
+            assert!(validate_native_package_release_source(cargo, &manifest, &binding).is_err());
+        }
+        let mut wrong_source_manifest: serde_json::Value =
+            serde_json::from_slice(&manifest).unwrap();
+        wrong_source_manifest["source_sha"] = serde_json::json!("b".repeat(40));
+        let wrong_source_manifest = serde_json::to_vec(&wrong_source_manifest).unwrap();
+        let wrong_source_binding = NativePackageReleaseSourceBinding {
+            source_sha,
+            version: "1.2.3",
+            producer_workflow: producer,
+            publisher_workflow: publisher,
+            asset_name: PACKAGE_BINARY_NAME,
+            max_asset_bytes: 1024,
+            stable: true,
+        };
+        assert!(
+            validate_native_package_release_source(
+                cargo,
+                &wrong_source_manifest,
+                &wrong_source_binding
+            )
+            .is_err()
+        );
+        let prerelease_cargo = b"[package]\nname = \"securefix\"\nversion = \"1.2.3-pre.4\"\n";
+        let prerelease_binding = NativePackageReleaseSourceBinding {
+            source_sha,
+            version: "1.2.3-pre.4",
+            producer_workflow: producer,
+            publisher_workflow: publisher,
+            asset_name: PACKAGE_BINARY_NAME,
+            max_asset_bytes: 1024,
+            stable: false,
+        };
+        assert!(
+            validate_native_package_release_source(
+                prerelease_cargo,
+                &manifest,
+                &prerelease_binding
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn checked_in_package_manifest_passes_the_release_source_validator() {
+        let cargo = include_bytes!("../Cargo.toml");
+        let manifest = include_bytes!("../.github/actions/load-package/source-package.json");
+        let binding = NativePackageReleaseSourceBinding {
+            source_sha: SOURCE_SHA,
+            version: env!("CARGO_PKG_VERSION"),
+            producer_workflow: NATIVE_PACKAGE_PRODUCER_WORKFLOW,
+            publisher_workflow: NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
+            asset_name: PACKAGE_BINARY_NAME,
+            max_asset_bytes: 134217728,
+            stable: false,
+        };
+        validate_native_package_release_source(cargo, manifest, &binding).unwrap();
+
+        let mut explicit_wrong_source: serde_json::Value =
+            serde_json::from_slice(manifest).unwrap();
+        explicit_wrong_source["source_sha"] = serde_json::json!("b".repeat(40));
+        let explicit_wrong_source = serde_json::to_vec(&explicit_wrong_source).unwrap();
+        assert!(
+            validate_native_package_release_source(cargo, &explicit_wrong_source, &binding)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn package_source_ancestor_accepts_the_github_compare_response_shape() {
+        let source_sha = SOURCE_SHA;
+        let compare = serde_json::json!({
+            "status": "identical",
+            "ahead_by": 0,
+            "behind_by": 0,
+            "base_commit": {"sha": source_sha},
+            "merge_base_commit": {"sha": source_sha},
+            "head_commit": null
+        });
+        validate_package_source_ancestor_comparison(&compare, source_sha, source_sha).unwrap();
+
+        let mut stale = compare.clone();
+        stale["behind_by"] = serde_json::json!(1);
+        assert!(
+            validate_package_source_ancestor_comparison(&stale, source_sha, source_sha).is_err()
+        );
+        let mut divergent = compare;
+        divergent["merge_base_commit"]["sha"] = serde_json::json!("b".repeat(40));
+        assert!(
+            validate_package_source_ancestor_comparison(&divergent, source_sha, source_sha)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn package_publisher_owner_and_scratch_target_come_from_workflow_declaration() {
+        let destination = crate::config::Repository {
+            repository: "civitaspo/testing-securefix-server".to_owned(),
+            id: 1410312556,
+            default_branch: "main".to_owned(),
+        };
+        let workflow = include_bytes!("../.github/workflows/publish-native-package.yml");
+        validate_native_package_publisher_declaration(workflow, 4525500, &destination).unwrap();
+        assert!(
+            validate_native_package_publisher_declaration(workflow, 4525501, &destination).is_err()
+        );
+        let wrong_destination = crate::config::Repository {
+            repository: "civitaspo/other".to_owned(),
+            id: 99,
+            default_branch: "main".to_owned(),
+        };
+        assert!(
+            validate_native_package_publisher_declaration(workflow, 4525500, &wrong_destination)
+                .is_err()
+        );
+        let producer = include_bytes!("../.github/workflows/native-package-build.yml");
+        assert_eq!(
+            package_workflow_owner_declaration(producer, "package producer").unwrap(),
+            4525500
+        );
+    }
+
+    #[test]
+    fn native_package_workflows_keep_build_attestation_and_publication_credentials_separate() {
+        let producer: serde_yaml::Value = serde_yaml::from_slice(include_bytes!(
+            "../.github/workflows/native-package-build.yml"
+        ))
+        .unwrap();
+        let producer_build = &producer["jobs"]["build"];
+        let producer_attest = &producer["jobs"]["attest"];
+        assert_eq!(producer_build["permissions"]["contents"], "read");
+        assert_eq!(producer_attest["permissions"]["attestations"], "write");
+        assert_eq!(producer_attest["permissions"]["id-token"], "write");
+        assert!(producer_build["permissions"]["contents"] != "write");
+        let producer_guard = producer_build["if"].as_str().unwrap();
+        for required in [
+            "github.repository == 'civitaspo/securefix-server'",
+            "github.actor_id == '4525500'",
+            "github.event_name == 'workflow_dispatch'",
+            "github.run_attempt == 1",
+            "github.sha == github.workflow_sha",
+        ] {
+            assert!(producer_guard.contains(required));
+        }
+        let producer_steps = producer_build["steps"].as_sequence().unwrap();
+        let producer_checkout = producer_steps
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            })
+            .unwrap();
+        assert_eq!(producer_checkout["with"]["ref"], "${{ github.sha }}");
+        assert_eq!(producer_checkout["with"]["persist-credentials"], false);
+        let producer_build_step = producer_steps
+            .iter()
+            .find(|step| step["name"] == "Test and build the selected source")
+            .unwrap();
+        assert!(
+            producer_build_step["run"]
+                .as_str()
+                .unwrap()
+                .contains("cargo +1.99.0 test --locked")
+        );
+        assert!(
+            producer_build_step["run"]
+                .as_str()
+                .unwrap()
+                .contains("cargo +1.99.0 build --locked --release --bin securefix")
+        );
+        assert!(
+            !serde_json::to_string(producer_build)
+                .unwrap()
+                .contains("secrets.")
+        );
+        assert_eq!(producer_attest["needs"], "build");
+
+        let publisher: serde_yaml::Value = serde_yaml::from_slice(include_bytes!(
+            "../.github/workflows/publish-native-package.yml"
+        ))
+        .unwrap();
+        let host = &publisher["jobs"]["host-build"];
+        let publish = &publisher["jobs"]["publish"];
+        assert_eq!(host["permissions"]["contents"], "read");
+        assert_eq!(publish["environment"], "main");
+        assert_eq!(publish["permissions"]["contents"], "read");
+        assert_eq!(publish["permissions"]["actions"], "read");
+        assert_eq!(publish["permissions"]["attestations"], "read");
+        let host_guard = host["if"].as_str().unwrap();
+        for required in [
+            "github.repository == 'civitaspo/securefix-server'",
+            "github.actor_id == '4525500'",
+            "github.ref == 'refs/heads/main'",
+            "github.event_name == 'workflow_dispatch'",
+            "github.run_attempt == 1",
+            "github.sha == github.workflow_sha",
+        ] {
+            assert!(host_guard.contains(required));
+        }
+        let host_steps = host["steps"].as_sequence().unwrap();
+        let host_checkout = host_steps
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|v| v.starts_with("actions/checkout@"))
+            })
+            .unwrap();
+        assert_eq!(host_checkout["with"]["ref"], "${{ github.workflow_sha }}");
+        assert_eq!(host_checkout["with"]["persist-credentials"], false);
+        let host_build = host_steps
+            .iter()
+            .find(|step| {
+                step["name"] == "Build the publisher host from the protected workflow source"
+            })
+            .unwrap();
+        assert!(
+            host_build["run"]
+                .as_str()
+                .unwrap()
+                .contains("cargo +1.99.0 build --locked --release --bin securefix")
+        );
+        assert!(!serde_json::to_string(host).unwrap().contains("secrets."));
+        assert_eq!(
+            host["outputs"]["artifact-id"],
+            "${{ steps.upload.outputs.artifact-id }}"
+        );
+        let publish_guard = publish["if"].as_str().unwrap();
+        assert!(publish_guard.contains("needs.host-build.result == 'success'"));
+        assert!(publish_guard.contains("github.sha == github.workflow_sha"));
+        let steps = publish["steps"].as_sequence().unwrap();
+        let host_download_index = steps
+            .iter()
+            .position(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+                    && step["with"]["artifact-ids"] == "${{ needs.host-build.outputs.artifact-id }}"
+            })
+            .unwrap();
+        let step_index = |name: &str| {
+            steps
+                .iter()
+                .position(|step| step["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing package publisher step {name}"))
+        };
+        let preflight_index = step_index(
+            "Qualify the exact producer artifact and attestation before minting a writer token",
+        );
+        let writer_index = steps
+            .iter()
+            .position(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/create-github-app-token@"))
+            })
+            .unwrap();
+        assert_eq!(steps[writer_index]["with"]["permission-contents"], "write");
+        assert_eq!(
+            steps[writer_index]["with"]["repositories"],
+            "${{ inputs.channel == 'stable' && 'securefix-server' || 'testing-securefix-server' }}"
+        );
+        let package_publish_index = step_index("Publish the exact attested executable");
+        assert!(
+            host_download_index < preflight_index
+                && preflight_index < writer_index
+                && writer_index < package_publish_index
+        );
+        assert_eq!(
+            steps[preflight_index]["env"]["GITHUB_TOKEN"],
+            "${{ github.token }}"
+        );
+        assert_eq!(
+            steps[preflight_index]["env"]["GITHUB_ACTOR_ID"],
+            "${{ github.actor_id }}"
+        );
+        assert!(steps[preflight_index]["env"]["SECUREFIX_PACKAGE_PUBLISH_TOKEN"].is_null());
+        assert!(steps[preflight_index]["env"]["SECUREFIX_PACKAGE_TOKEN"].is_null());
+        assert!(
+            steps[preflight_index]["run"]
+                .as_str()
+                .unwrap()
+                .contains("package preflight")
+        );
+        assert!(
+            steps[package_publish_index]["run"]
+                .as_str()
+                .unwrap()
+                .contains("package publish")
+        );
+        let publish_yaml = std::str::from_utf8(include_bytes!(
+            "../.github/workflows/publish-native-package.yml"
+        ))
+        .unwrap();
+        assert!(publish_yaml.contains("SECUREFIX_PACKAGE_PUBLISH_TOKEN"));
+        assert!(publish_yaml.contains("SECUREFIX_PACKAGE_TOKEN"));
+        assert!(publish_yaml.contains("steps.writer.outputs.token"));
+        let approval: serde_yaml::Value = serde_yaml::from_slice(include_bytes!(
+            "../.github/workflows/testing-native-approve.yml"
+        ))
+        .unwrap();
+        assert!(
+            approval["on"]["workflow_dispatch"]["inputs"]
+                .get("package_publication_json")
+                .is_none()
+        );
+        for job in ["validate-request", "apply-approval"] {
+            let loaders: Vec<_> = approval["jobs"][job]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.contains("/.github/actions/load-package@"))
+                })
+                .collect();
+            assert!(!loaders.is_empty());
+            for loader in loaders {
+                assert_eq!(
+                    serde_json::to_value(&loader["with"]).unwrap(),
+                    serde_json::json!({"token":"${{ github.token }}"})
+                );
+            }
+        }
     }
 }

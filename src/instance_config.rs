@@ -22,8 +22,65 @@ pub struct InstanceConfig {
     pub branches: Branches,
     pub policy: InstancePolicy,
     pub repositories: Vec<ConfiguredRepository>,
+    #[serde(default)]
+    pub scratch_request_callers: Vec<ScratchRequestCaller>,
+    /// Dedicated repository for explicitly enabled scratch Client package acceptance.
+    /// Omission disables that path; there is no deployment fallback.
+    #[serde(default)]
+    pub scratch_package_repository: Option<crate::config::Repository>,
     pub workflow_roles: BTreeMap<WorkflowRole, String>,
     pub acceptable_clients: AcceptableClients,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScratchRequestCaller {
+    pub repository: String,
+    pub id: u64,
+    pub workflow_path: String,
+    pub workflow_ref: String,
+    pub event: ScratchRequestEvent,
+    pub operation: ScratchRequestOperation,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchRequestEvent {
+    PullRequestTarget,
+    PullRequest,
+    IssueComment,
+    WorkflowDispatch,
+}
+
+impl ScratchRequestEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PullRequestTarget => "pull_request_target",
+            Self::PullRequest => "pull_request",
+            Self::IssueComment => "issue_comment",
+            Self::WorkflowDispatch => "workflow_dispatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchRequestOperation {
+    PolicyCheck,
+    Approval,
+    Merge,
+    Securefix,
+}
+
+impl ScratchRequestOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyCheck => "policy_check",
+            Self::Approval => "approval",
+            Self::Merge => "merge",
+            Self::Securefix => "securefix",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -34,6 +91,7 @@ pub enum WorkflowRole {
     PolicyCheck,
     Release,
     Securefix,
+    Settings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +141,8 @@ pub struct ConfiguredRepository {
     #[serde(default)]
     pub release: Option<crate::policy::ReleaseStrategy>,
     #[serde(default)]
+    pub native_binaries: Vec<crate::policy::NativeBinaryTarget>,
+    #[serde(default)]
     pub sensitive_paths: Vec<String>,
     pub protect_tags: bool,
 }
@@ -93,6 +153,7 @@ impl ConfiguredRepository {
             repository: self.repository.clone(),
             capabilities: self.capabilities.clone(),
             release: self.release,
+            native_binaries: self.native_binaries.clone(),
             sensitive_paths: self.sensitive_paths.clone(),
             protect_tags: self.protect_tags,
         }
@@ -162,6 +223,24 @@ impl InstanceConfig {
                 == Some(self.identities.repository_owner.login.as_str()),
             "instance repository owner differs from configured account"
         );
+        if let Some(repository) = &self.scratch_package_repository {
+            crate::policy::validate_repository(&repository.repository)?;
+            ensure!(
+                repository.id > 0,
+                "scratch package repository ID must be nonzero"
+            );
+            crate::config::validate_branch(&repository.default_branch)?;
+            ensure!(
+                repository.repository.split('/').next()
+                    == Some(self.identities.repository_owner.login.as_str()),
+                "scratch package repository must belong to the configured account"
+            );
+            ensure!(
+                repository.repository != self.instance.repository
+                    && repository.repository != self.acceptable_clients.repository,
+                "scratch package repository must differ from the Server and Client repositories"
+            );
+        }
         if let Some(bot) = &self.identities.renovate_merge_bot {
             validate_principal(bot)?;
             ensure!(
@@ -247,12 +326,42 @@ impl InstanceConfig {
                         .contains(&crate::policy::Capability::Release),
                 "release strategy/capability mismatch"
             );
+            crate::policy::validate_native_binary_targets(
+                repository.release,
+                &repository.native_binaries,
+            )?;
             if repository.sensitive_paths.is_empty() {
                 repository
                     .sensitive_paths
                     .clone_from(&self.policy.default_sensitive_paths);
             }
             validate_sensitive_paths(&repository.sensitive_paths)?;
+        }
+
+        let mut scratch_callers = HashSet::new();
+        for caller in &self.scratch_request_callers {
+            crate::policy::validate_repository(&caller.repository)?;
+            ensure!(
+                caller.id > 0,
+                "scratch request caller repository ID must be nonzero"
+            );
+            validate_workflow_path(&caller.workflow_path)?;
+            let branch = caller
+                .workflow_ref
+                .strip_prefix("refs/heads/")
+                .context("scratch request caller ref must name a branch")?;
+            crate::config::validate_branch(branch)?;
+            ensure!(
+                scratch_callers.insert((
+                    caller.repository.to_ascii_lowercase(),
+                    caller.id,
+                    caller.workflow_path.clone(),
+                    caller.workflow_ref.clone(),
+                    caller.event,
+                    caller.operation,
+                )),
+                "duplicate scratch request caller"
+            );
         }
 
         let mut normalized_workflow_paths = HashSet::new();
@@ -310,8 +419,29 @@ impl InstanceConfig {
             &self.instance,
             &self.repositories,
             &self.acceptable_clients,
+            &self.scratch_request_callers,
+            self.scratch_package_repository.as_ref(),
         )?;
         Ok(())
+    }
+
+    pub fn allows_scratch_request_caller(
+        &self,
+        repository: &str,
+        id: u64,
+        workflow_path: &str,
+        workflow_ref: &str,
+        event: &str,
+        operation: &str,
+    ) -> bool {
+        self.scratch_request_callers.iter().any(|caller| {
+            caller.repository.eq_ignore_ascii_case(repository)
+                && caller.id == id
+                && caller.workflow_path == workflow_path
+                && caller.workflow_ref == workflow_ref
+                && caller.event.as_str() == event
+                && caller.operation.as_str() == operation
+        })
     }
 }
 
@@ -321,11 +451,9 @@ fn validate_release_request_label_prefix(prefix: &str) -> Result<()> {
             || (prefix.len() <= 32
                 && prefix.ends_with('-')
                 && prefix.as_bytes()[0].is_ascii_lowercase()
-                && prefix[..prefix.len() - 1]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase()
-                        || byte.is_ascii_digit()
-                        || byte == b'-')),
+                && prefix[..prefix.len() - 1].bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                })),
         "release request label prefix is invalid"
     );
     Ok(())
@@ -351,6 +479,8 @@ fn validate_repository_identity_consistency(
     instance: &crate::config::Repository,
     repositories: &[ConfiguredRepository],
     acceptable_clients: &AcceptableClients,
+    scratch_request_callers: &[ScratchRequestCaller],
+    scratch_package_repository: Option<&crate::config::Repository>,
 ) -> Result<()> {
     let mut ids_by_name = HashMap::new();
     let mut names_by_id = HashMap::new();
@@ -376,6 +506,12 @@ fn validate_repository_identity_consistency(
         add(&configured.repository, configured.id)?;
     }
     add(&acceptable_clients.repository, acceptable_clients.id)?;
+    if let Some(repository) = scratch_package_repository {
+        add(&repository.repository, repository.id)?;
+    }
+    for caller in scratch_request_callers {
+        add(&caller.repository, caller.id)?;
+    }
     Ok(())
 }
 
@@ -464,6 +600,7 @@ mod tests {
     fn parses_synthetic_configuration_without_defaulting_optional_authority() {
         let config = InstanceConfig::parse(FIXTURE).unwrap();
         assert_eq!(config.schema_version, 1);
+        assert_eq!(config.release_request_label_prefix, "");
         assert_eq!(config.instance.repository, "example-org/securefix-server");
         assert_eq!(config.identities.owner.login, "maintainer");
         assert_eq!(
@@ -482,6 +619,15 @@ mod tests {
         );
         assert!(config.policy.merge_controls_enabled);
         assert_eq!(config.repositories.len(), 1);
+        assert_eq!(config.scratch_request_callers.len(), 1);
+        assert!(config.allows_scratch_request_caller(
+            "example-org/requester",
+            765432,
+            ".github/workflows/policy-check.yml",
+            "refs/heads/main",
+            "pull_request_target",
+            "policy_check",
+        ));
         assert_eq!(
             config.repositories[0].sensitive_paths,
             config.policy.default_sensitive_paths
@@ -523,6 +669,151 @@ mod tests {
     }
 
     #[test]
+    fn scratch_request_callers_default_empty_and_match_the_declared_tuple() {
+        let fixture = fixture_text();
+        let caller = "[[scratch_request_callers]]\nrepository = \"example-org/requester\"\nid = 765432\nworkflow_path = \".github/workflows/policy-check.yml\"\nworkflow_ref = \"refs/heads/main\"\nevent = \"pull_request_target\"\noperation = \"policy_check\"\n";
+        let without_callers = changed(&fixture, caller, "");
+        assert!(
+            InstanceConfig::parse(without_callers.as_bytes())
+                .unwrap()
+                .scratch_request_callers
+                .is_empty()
+        );
+
+        let config = InstanceConfig::parse(FIXTURE).unwrap();
+        assert!(config.allows_scratch_request_caller(
+            "EXAMPLE-ORG/requester",
+            765432,
+            ".github/workflows/policy-check.yml",
+            "refs/heads/main",
+            "pull_request_target",
+            "policy_check",
+        ));
+        for (repository, id, workflow_path, workflow_ref, event, operation) in [
+            (
+                "example-org/other",
+                765432,
+                ".github/workflows/policy-check.yml",
+                "refs/heads/main",
+                "pull_request_target",
+                "policy_check",
+            ),
+            (
+                "example-org/requester",
+                765433,
+                ".github/workflows/policy-check.yml",
+                "refs/heads/main",
+                "pull_request_target",
+                "policy_check",
+            ),
+            (
+                "example-org/requester",
+                765432,
+                ".github/workflows/other.yml",
+                "refs/heads/main",
+                "pull_request_target",
+                "policy_check",
+            ),
+            (
+                "example-org/requester",
+                765432,
+                ".github/workflows/policy-check.yml",
+                "refs/heads/release",
+                "pull_request_target",
+                "policy_check",
+            ),
+            (
+                "example-org/requester",
+                765432,
+                ".github/workflows/policy-check.yml",
+                "refs/heads/main",
+                "workflow_dispatch",
+                "policy_check",
+            ),
+            (
+                "example-org/requester",
+                765432,
+                ".github/workflows/policy-check.yml",
+                "refs/heads/main",
+                "pull_request_target",
+                "merge",
+            ),
+        ] {
+            assert!(!config.allows_scratch_request_caller(
+                repository,
+                id,
+                workflow_path,
+                workflow_ref,
+                event,
+                operation,
+            ));
+        }
+    }
+
+    #[test]
+    fn scratch_package_repository_is_optional_and_strictly_validated() {
+        let without_destination = InstanceConfig::parse(FIXTURE).unwrap();
+        assert!(without_destination.scratch_package_repository.is_none());
+
+        let configured = format!(
+            "{}\n[scratch_package_repository]\nrepository = \"example-org/package-scratch\"\nid = 987655\ndefault_branch = \"main\"\n",
+            fixture_text()
+        );
+        let config = InstanceConfig::parse(configured.as_bytes()).unwrap();
+        let destination = config.scratch_package_repository.unwrap();
+        assert_eq!(destination.repository, "example-org/package-scratch");
+        assert_eq!(destination.id, 987655);
+        assert_eq!(destination.default_branch, "main");
+
+        let scratch_branch = "id = 987655\ndefault_branch = \"main\"";
+        let scratch_unknown = "id = 987655\ndefault_branch = \"main\"";
+        for invalid in [
+            configured.replace("id = 987655", "id = 0"),
+            configured.replace(
+                scratch_branch,
+                "id = 987655\ndefault_branch = \"bad..branch\"",
+            ),
+            configured.replace(
+                "repository = \"example-org/package-scratch\"",
+                "repository = \"other-org/package-scratch\"",
+            ),
+            configured.replace("id = 987655", "id = 987654"),
+            configured.replace(
+                scratch_unknown,
+                "id = 987655\ndefault_branch = \"main\"\nunlisted = true",
+            ),
+        ] {
+            assert!(InstanceConfig::parse(invalid.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn scratch_request_callers_are_closed_unique_and_source_bound() {
+        let fixture = fixture_text();
+        let caller = "[[scratch_request_callers]]\nrepository = \"example-org/requester\"\nid = 765432\nworkflow_path = \".github/workflows/policy-check.yml\"\nworkflow_ref = \"refs/heads/main\"\nevent = \"pull_request_target\"\noperation = \"policy_check\"\n";
+
+        rejects(&(fixture.clone() + caller));
+        for (before, after) in [
+            ("event = \"pull_request_target\"", "event = \"push\""),
+            ("operation = \"policy_check\"", "operation = \"settings\""),
+            (
+                "workflow_path = \".github/workflows/policy-check.yml\"",
+                "workflow_path = \".github/workflows/nested/policy-check.yml\"",
+            ),
+            (
+                "workflow_ref = \"refs/heads/main\"",
+                "workflow_ref = \"refs/tags/v1.0.0\"",
+            ),
+            ("id = 765432", "id = 0"),
+        ] {
+            rejects(&changed(&fixture, before, after));
+        }
+
+        let conflicting_identity = fixture + &caller.replace("id = 765432", "id = 765433");
+        rejects(&conflicting_identity);
+    }
+
+    #[test]
     fn release_request_label_prefix_is_explicit_bounded_and_namespaced() {
         rejects(&changed(
             &fixture_text(),
@@ -549,6 +840,25 @@ mod tests {
             );
             rejects(&source);
         }
+    }
+
+    #[test]
+    fn settings_role_is_explicit_and_shares_no_operation_wrapper() {
+        let source = changed(
+            &fixture_text(),
+            "[workflow_roles]",
+            "[workflow_roles]\nsettings = \".github/workflows/repo-settings.yml\"",
+        );
+        let parsed = InstanceConfig::parse(source.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.workflow_roles[&WorkflowRole::Settings],
+            ".github/workflows/repo-settings.yml"
+        );
+        rejects(&changed(
+            &source,
+            ".github/workflows/repo-settings.yml",
+            ".github/workflows/approve.yml",
+        ));
     }
 
     #[test]
@@ -865,6 +1175,41 @@ mod tests {
                 .version
                 .matches(&semver::Version::parse("2.0.0").unwrap())
         );
+    }
+
+    #[test]
+    fn native_binaries_are_optional_and_release_strategy_is_checked() {
+        assert!(
+            InstanceConfig::parse(FIXTURE).unwrap().repositories[0]
+                .native_binaries
+                .is_empty()
+        );
+
+        let with_native_targets = changed(
+            &fixture_text(),
+            "release = \"github-release\"\nprotect_tags = true",
+            "release = \"github-release\"\nnative_binaries = [{ target = \"x86_64-unknown-linux-musl\", runner = \"ubuntu-24.04\" }]\nprotect_tags = true",
+        );
+        let parsed = InstanceConfig::parse(with_native_targets.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.repositories[0].native_binaries[0].target,
+            "x86_64-unknown-linux-musl"
+        );
+
+        let missing_release = changed(
+            &with_native_targets,
+            "capabilities = [\"approve\", \"merge\", \"securefix\", \"release\", \"settings\"]",
+            "capabilities = [\"approve\", \"merge\", \"securefix\", \"settings\"]",
+        );
+        let missing_release = changed(&missing_release, "release = \"github-release\"\n", "");
+        rejects(&missing_release);
+
+        let mismatched_runner = changed(
+            &with_native_targets,
+            "runner = \"ubuntu-24.04\"",
+            "runner = \"macos-15\"",
+        );
+        rejects(&mismatched_runner);
     }
 
     #[test]

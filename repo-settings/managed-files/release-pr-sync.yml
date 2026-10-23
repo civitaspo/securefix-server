@@ -1,0 +1,21 @@
+name: Release PR Sync
+
+on:
+  push:
+    branches: ["@RELEASE_BRANCH@"]
+
+permissions: {}
+concurrency:
+  group: release-pr-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    permissions:
+      actions: read
+      contents: read
+      attestations: write
+      pull-requests: write
+    uses: @CLIENT_REPOSITORY@/.github/workflows/reusable-release-pr-sync.yml@@CLIENT_IMPLEMENTATION_SHA@ # @CLIENT_IMPLEMENTATION_VERSION@
+    with:
+      server_repository: @SERVER_REPOSITORY@
+      instance_config_path: @INSTANCE_CONFIG_PATH@

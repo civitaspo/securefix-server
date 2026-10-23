@@ -3427,27 +3427,27 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(mapping["channel"], "scratch");
     assert_eq!(
         mapping["source_sha"],
-        "d84c178ac49ffb21bdc49e816a1285ff873fe259"
+        "07d6adfbfb037c83fdbe95e19a1b564d6275c483"
     );
     assert_eq!(
         mapping["source_manifest_sha256"],
-        "204152c788f6d6e922b26649cb2bff7133df99c71b647f25518a3dddfca2d98e"
+        "a7161ae6ec0660c42f43bcc1e6256f4ac056d14badc57d59f46b8febc45bbf39"
     );
-    assert_eq!(mapping["version"], "0.2.45-pre.42");
-    assert_eq!(mapping["tag"], "v0.2.45-pre.42");
-    assert_eq!(mapping["release_id"], 421458267);
-    assert_eq!(mapping["asset_id"], 667986180);
+    assert_eq!(mapping["version"], "0.2.45-pre.102");
+    assert_eq!(mapping["tag"], "v0.2.45-pre.102");
+    assert_eq!(mapping["release_id"], 422163866);
+    assert_eq!(mapping["asset_id"], 669965445);
     assert_eq!(
         mapping["asset_sha256"],
-        "a9b90725a751b8a18f67af39fe6e5831c610f5ea56ae1acdbf4f4c2f4990cada"
+        "e7845a801d25d608f9f5aa4a867083e6546b9e196fc28a8da23a91ed56690841"
     );
     assert_eq!(
         mapping["producer_run_id"],
-        serde_json::json!(39901232125_u64)
+        serde_json::json!(40000279212_u64)
     );
     assert_eq!(
         mapping["publisher_run_id"],
-        serde_json::json!(39901637756_u64)
+        serde_json::json!(40000944395_u64)
     );
 }
 
@@ -3917,6 +3917,62 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
+            if matches!(
+                path.as_str(),
+                ".github/workflows/reusable-client-request.yml"
+                    | ".github/workflows/reusable-client-request-scratch.yml"
+            ) && job_id == "attest"
+            {
+                assert!(steps.iter().any(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+                        && step["with"]["artifact-ids"]
+                            == "${{ needs.capture.outputs.artifact-id }}"
+                        && step["with"]["path"] == "native-request"
+                }));
+                assert!(steps.iter().any(|step| {
+                    step["uses"]
+                        .as_str()
+                        .is_some_and(|uses| uses.starts_with("actions/attest@"))
+                        && step["with"]["subject-path"] == "native-request/manifest.json"
+                }));
+                assert!(!serde_json::to_string(job).unwrap().contains("secrets."));
+                assert!(!steps.iter().any(|step| {
+                    step["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("$CLI_BINARY"))
+                }));
+                continue;
+            }
+            if path == ".github/workflows/reusable-client-request-scratch.yml"
+                && job_id == "dispatch"
+            {
+                let package = steps.iter().find(|step| step["id"] == "package").unwrap();
+                assert!(
+                    package["uses"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d")
+                );
+                assert_eq!(
+                    package["with"],
+                    serde_json::json!({"token": "${{ github.token }}"})
+                );
+                let invocation = steps
+                    .iter()
+                    .find(|step| {
+                        step["run"].as_str().is_some_and(|run| {
+                            run.contains("new-client dispatch") && run.contains("$CLI_BINARY")
+                        })
+                    })
+                    .unwrap();
+                assert_eq!(
+                    invocation["env"]["CLI_BINARY"],
+                    "${{ steps.package.outputs.binary }}"
+                );
+                continue;
+            }
             let downloads_request_manifest = path == ".github/workflows/request-producer-probe.yml"
                 && job_id == "attest"
                 && steps.iter().any(|step| {
@@ -3958,6 +4014,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 continue;
             }
             let downloads_cli = path != ".github/workflows/control-bootstrap.yml"
+                && path != ".github/workflows/reusable-server-release.yml"
                 && !downloads_request_manifest
                 && steps.iter().any(|step| {
                     step["uses"]
@@ -4048,6 +4105,24 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                 continue;
             }
             if downloads_cli {
+                if path == ".github/workflows/reusable-client-request.yml" {
+                    let package_loader = steps.iter().find(|step| step["id"] == "package").unwrap();
+                    assert!(
+                        package_loader["uses"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with("@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d")
+                    );
+                    assert!(
+                        steps
+                            .iter()
+                            .filter_map(|step| step["run"].as_str())
+                            .any(|run| run.contains("$CLI_BINARY")),
+                        "{path}/{job_id}: verified package binary must be invoked"
+                    );
+                    continue;
+                }
+
                 assert!(
                     installer.is_some(),
                     "{path}/{job_id}: downloaded CLI must use the installer"
