@@ -1,0 +1,24 @@
+name: testing-native-securefix-event
+
+on:
+  label:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  handler:
+    if: startsWith(github.event.label.name, 'securefix-native-securefix-')
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@d2d4b47781fcb40ca64e356af107ea8395f3e3f1 # v0.2.45-pre.41
+    with:
+      config_path: repo-settings/native-securefix-write-test-instance.toml
+    secrets:
+      SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}

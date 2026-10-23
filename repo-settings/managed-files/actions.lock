@@ -3,9 +3,11 @@
 # Docs: https://gh.io/actions-lockfile
 version: 'v0.0.3'
 workflows:
+    '.github/workflows/approve-request.yml': []
     '.github/workflows/ci.yml': []
     '.github/workflows/fixture-validation.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+    '.github/workflows/merge-request.yml': []
     '.github/workflows/native-approval-producer.yml': []
     '.github/workflows/native-merge-producer.yml': []
     '.github/workflows/native-securefix-producer.yml': []

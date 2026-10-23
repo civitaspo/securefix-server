@@ -21,7 +21,7 @@ const MANAGED_FILES_LIMIT: u64 = 1024 * 1024;
 const MANAGED_INSTANCE_CONFIG_TARGET: &str = "securefix-server.toml";
 const MANAGED_ACTIONS_LOCK_TARGET: &str = ".github/workflows/actions.lock";
 const MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH: &str =
-    "repo-settings/native-securefix-test-instance.toml";
+    "repo-settings/native-role-events-test-instance.toml";
 const MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH: &str = MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH;
 const MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH: &str =
     "repo-settings/native-securefix-write-test-instance.toml";
@@ -29,6 +29,8 @@ const MANAGED_POLICY_CHECK_SIGNER_PATH: &str = ".github/workflows/reusable-clien
 const MANAGED_POLICY_CHECK_WORKFLOW_PATH: &str = ".github/workflows/reusable-policy-check.yml";
 const MANAGED_CLIENT_RELEASE_TAG_TARGET: &str = ".github/workflows/release-tag.yml";
 const MANAGED_CLIENT_POLICY_CHECK_TARGET: &str = ".github/workflows/policy-check.yml";
+const MANAGED_CLIENT_APPROVE_TARGET: &str = ".github/workflows/approve-request.yml";
+const MANAGED_CLIENT_MERGE_TARGET: &str = ".github/workflows/merge-request.yml";
 const MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET: &str = ".github/workflows/securefix-request.yml";
 const MANAGED_CLIENT_SECUREFIX_SIGNER_PATH: &str =
     ".github/workflows/reusable-client-request-scratch.yml";
@@ -175,6 +177,12 @@ fn managed_desired_files() -> Result<(ManagedFilesManifest, BTreeMap<String, Vec
         &instance_config,
         policy_check_instance_config.as_deref(),
     )?;
+    validate_managed_command_callers(
+        &manifest,
+        &desired,
+        &instance_config,
+        policy_check_instance_config.as_deref(),
+    )?;
     let securefix_config = if expected_managed_targets(&instance_config)
         .contains(MANAGED_CLIENT_SECUREFIX_REQUEST_TARGET)
     {
@@ -251,6 +259,32 @@ fn validate_managed_targets(
                 .all(|target| targets.contains(target.as_str())),
         "managed-files manifest must contain exactly the instance config, configured workflow roles, and capability-scoped Client callers"
     );
+    for (target, source) in [
+        (
+            MANAGED_CLIENT_APPROVE_TARGET,
+            "repo-settings/managed-files/approve-request.yml",
+        ),
+        (
+            MANAGED_CLIENT_MERGE_TARGET,
+            "repo-settings/managed-files/merge-request.yml",
+        ),
+    ] {
+        if expected.contains(target) {
+            ensure!(
+                files
+                    .iter()
+                    .any(|file| file.target == target && file.source == source),
+                "managed command caller must use its canonical desired-state source"
+            );
+            ensure!(
+                !instance_config
+                    .workflow_roles
+                    .values()
+                    .any(|path| path == target),
+                "managed command caller collides with a Server role"
+            );
+        }
+    }
     if expected.contains(MANAGED_CLIENT_RELEASE_TAG_TARGET) {
         ensure!(
             files.iter().any(|file| {
@@ -308,6 +342,13 @@ fn expected_managed_targets(
     if instance_config
         .repositories
         .iter()
+        .any(|repository| repository.capabilities.contains(&Capability::Approve))
+    {
+        expected.insert(MANAGED_CLIENT_APPROVE_TARGET.to_owned());
+    }
+    if instance_config
+        .repositories
+        .iter()
         .any(|repository| repository.capabilities.contains(&Capability::Release))
     {
         expected.insert(MANAGED_CLIENT_RELEASE_TAG_TARGET.to_owned());
@@ -318,6 +359,7 @@ fn expected_managed_targets(
         .any(|repository| repository.capabilities.contains(&Capability::Merge))
     {
         expected.insert(MANAGED_CLIENT_POLICY_CHECK_TARGET.to_owned());
+        expected.insert(MANAGED_CLIENT_MERGE_TARGET.to_owned());
     }
     if instance_config
         .repositories
@@ -786,6 +828,70 @@ fn validate_managed_policy_check_caller(
     Ok(())
 }
 
+fn validate_managed_command_callers(
+    manifest: &ManagedFilesManifest,
+    desired: &BTreeMap<String, Vec<u8>>,
+    instance_config: &securefix::instance_config::InstanceConfig,
+    config_bytes: Option<&[u8]>,
+) -> Result<()> {
+    let targets = expected_managed_targets(instance_config);
+    for (role, operation, target) in [
+        ("approve", "approval", MANAGED_CLIENT_APPROVE_TARGET),
+        ("merge", "merge", MANAGED_CLIENT_MERGE_TARGET),
+    ] {
+        if !targets.contains(target) {
+            continue;
+        }
+        let config = securefix::instance_config::InstanceConfig::parse(
+            config_bytes.context("managed command caller Server config is missing")?,
+        )?;
+        ensure!(
+            config.allows_scratch_request_caller(
+                &manifest.repository,
+                manifest.repository_id,
+                target,
+                "refs/heads/main",
+                "issue_comment",
+                operation,
+            ),
+            "managed command caller is not authorized by its exact scratch scope"
+        );
+        let workflow: serde_yaml::Value = serde_yaml::from_slice(
+            desired
+                .get(target)
+                .context("managed command caller is missing")?,
+        )?;
+        let uses = workflow["jobs"]["request"]["uses"]
+            .as_str()
+            .context("managed command caller has no implementation pin")?;
+        let prefix = format!(
+            "{}/.github/workflows/reusable-{role}-request.yml@",
+            config.acceptable_clients.repository
+        );
+        crate::policy::validate_sha(
+            uses.strip_prefix(&prefix)
+                .context("managed command caller uses an unexpected implementation")?,
+        )?;
+        let expected: serde_yaml::Value = serde_yaml::to_value(json!({
+            "name": format!("testing-{} Request", if role == "approve" { "Approve" } else { "Merge" }),
+            "on": {"issue_comment": {"types": ["created"]}},
+            "permissions": {},
+            "jobs": {"request": {
+                "if": format!("github.repository == '{}' && github.event.issue.pull_request && github.event.comment.user.id == {} && github.event.comment.body == '/{role}' && github.run_attempt == 1", manifest.repository, config.identities.owner.id),
+                "uses": uses,
+                "with": {"server_repository": config.instance.repository, "instance_config_path": MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH},
+                "permissions": {"actions": "read", "attestations": "write", "contents": "read", "id-token": "write", "issues": "read", "pull-requests": "read"},
+                "secrets": {"SECUREFIX_CLIENT_PRIVATE_KEY": "${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}"}
+            }}
+        }))?;
+        ensure!(
+            workflow == expected,
+            "managed command caller has an unexpected event, condition, input, credential or permission"
+        );
+    }
+    Ok(())
+}
+
 fn validate_managed_securefix_request_caller(
     manifest: &ManagedFilesManifest,
     desired: &BTreeMap<String, Vec<u8>>,
@@ -1009,6 +1115,12 @@ fn managed_desired_files_from_source(
         None
     };
     validate_managed_policy_check_caller(
+        &manifest,
+        &desired,
+        &instance_config,
+        policy_check_instance_config_bytes.as_deref(),
+    )?;
+    validate_managed_command_callers(
         &manifest,
         &desired,
         &instance_config,
@@ -2512,7 +2624,7 @@ mod tests {
 
         let caller = &desired[MANAGED_CLIENT_POLICY_CHECK_TARGET];
         let policy_check_instance_config =
-            include_bytes!("../repo-settings/native-securefix-test-instance.toml");
+            include_bytes!("../repo-settings/native-role-events-test-instance.toml");
         assert!(
             validate_managed_policy_check_caller(&manifest, &desired, &instance_config, None)
                 .is_err()
@@ -2646,7 +2758,7 @@ mod tests {
         );
 
         let wrong_config_path = String::from_utf8(caller.clone()).unwrap().replace(
-            "instance_config_path: repo-settings/native-securefix-test-instance.toml",
+            "instance_config_path: repo-settings/native-role-events-test-instance.toml",
             "instance_config_path: securefix-server.toml",
         );
         let wrong_config_path_desired = BTreeMap::from([
@@ -2705,6 +2817,71 @@ mod tests {
                 &wrong_server_desired,
                 &instance_config,
                 Some(policy_check_instance_config),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_command_callers_preserve_exact_owner_scope_and_credentials() {
+        let manifest =
+            parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        let config = managed_instance_config();
+        let server_config =
+            include_bytes!("../repo-settings/native-role-events-test-instance.toml");
+        let callers = BTreeMap::from([
+            (
+                MANAGED_CLIENT_APPROVE_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/approve-request.yml").to_vec(),
+            ),
+            (
+                MANAGED_CLIENT_MERGE_TARGET.to_owned(),
+                include_bytes!("../repo-settings/managed-files/merge-request.yml").to_vec(),
+            ),
+        ]);
+        validate_managed_command_callers(&manifest, &callers, &config, Some(server_config))
+            .unwrap();
+        assert!(validate_managed_command_callers(&manifest, &callers, &config, None).is_err());
+        for target in [MANAGED_CLIENT_APPROVE_TARGET, MANAGED_CLIENT_MERGE_TARGET] {
+            for (from, to) in [
+                ("13d31194fd2e82da4c6acfda51ad4a160ac0a711", "main"),
+                ("comment.user.id == 4525500", "comment.user.id == 1"),
+                (
+                    "SECUREFIX_CLIENT_PRIVATE_KEY",
+                    "SECUREFIX_SERVER_PRIVATE_KEY",
+                ),
+                (
+                    "instance_config_path: repo-settings/native-role-events-test-instance.toml",
+                    "instance_config_path: securefix-server.toml",
+                ),
+                ("attestations: write", "attestations: read"),
+            ] {
+                let mut changed = callers.clone();
+                let caller = std::str::from_utf8(&callers[target]).unwrap();
+                assert!(caller.contains(from));
+                changed.insert(target.to_owned(), caller.replace(from, to).into_bytes());
+                assert!(
+                    validate_managed_command_callers(
+                        &manifest,
+                        &changed,
+                        &config,
+                        Some(server_config)
+                    )
+                    .is_err(),
+                    "{target}: {from}"
+                );
+            }
+        }
+        let unscoped = std::str::from_utf8(server_config).unwrap().replace(
+            "event = \"issue_comment\"",
+            "event = \"pull_request_target\"",
+        );
+        assert!(
+            validate_managed_command_callers(
+                &manifest,
+                &callers,
+                &config,
+                Some(unscoped.as_bytes())
             )
             .is_err()
         );

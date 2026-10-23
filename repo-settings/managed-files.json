@@ -42,6 +42,14 @@
     {
       "source": "repo-settings/managed-files/actions.lock",
       "target": ".github/workflows/actions.lock"
+    },
+    {
+      "source": "repo-settings/managed-files/approve-request.yml",
+      "target": ".github/workflows/approve-request.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/merge-request.yml",
+      "target": ".github/workflows/merge-request.yml"
     }
   ],
   "remove": [

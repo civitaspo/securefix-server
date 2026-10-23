@@ -1,0 +1,29 @@
+name: testing-Approve Request
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  request:
+    if: >-
+      github.repository == 'civitaspo/testing-securefix-server' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.id == 4525500 &&
+      github.event.comment.body == '/approve' &&
+      github.run_attempt == 1
+    uses: civitaspo/securefix-server/.github/workflows/reusable-approve-request.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711 # v0.2.45-pre.43
+    with:
+      server_repository: civitaspo/securefix-server
+      instance_config_path: repo-settings/native-role-events-test-instance.toml
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      issues: read
+      pull-requests: read
+    secrets:
+      SECUREFIX_CLIENT_PRIVATE_KEY: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
