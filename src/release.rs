@@ -1235,8 +1235,12 @@ fn sync_native_release_pr(api: &GitHub, server_repository: &str, config_path: &s
             .as_str()
             .context("release sync caller path is missing")?,
     )?;
-    let workflow_sha = env("GITHUB_WORKFLOW_SHA")?;
-    let workflow_epoch = securefix::api::capture_native_client_workflow_epoch(
+    let workflow_sha = env("SECUREFIX_CALLER_WORKFLOW_SHA")?;
+    ensure!(
+        workflow_sha == head.as_str(),
+        "release sync caller revision differs from its pushed head"
+    );
+    let workflow_epoch = securefix::api::capture_native_release_sync_workflow_epoch(
         api,
         repository.as_str(),
         repository_id,

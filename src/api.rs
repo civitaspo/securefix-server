@@ -3530,7 +3530,7 @@ impl GitHub {
         );
         self.require_remote_native_server_instance_authority_unchanged(&write.instance)?;
         require_single_repository_installation(self, write.repository_id, &write.repository)?;
-        let current_epoch = capture_native_client_workflow_epoch(
+        let current_epoch = capture_native_release_sync_workflow_epoch(
             self,
             &write.repository,
             write.repository_id,
@@ -5055,6 +5055,40 @@ fn first_parent_path_epoch(
     )
 }
 
+pub fn capture_native_release_sync_workflow_epoch(
+    api: &GitHub,
+    repository_name: &str,
+    repository_id: u64,
+    default_branch: &str,
+    workflow_path: &str,
+    workflow_revision: &str,
+) -> Result<String> {
+    crate::policy::validate_repository(repository_name)?;
+    crate::config::validate_branch(default_branch)?;
+    crate::policy::validate_sha(workflow_revision)?;
+    validate_native_release_workflow_path(workflow_path)?;
+    let protected_revision = api.branch_head(repository_name, default_branch)?;
+    let protected_workflow = api.content(repository_name, workflow_path, &protected_revision)?;
+    let release_workflow = api.content(repository_name, workflow_path, workflow_revision)?;
+    ensure!(
+        protected_workflow == release_workflow,
+        "release sync caller differs from its protected default-branch version"
+    );
+    let epoch = capture_native_client_workflow_epoch(
+        api,
+        repository_name,
+        repository_id,
+        default_branch,
+        workflow_path,
+        &protected_revision,
+    )?;
+    ensure!(
+        api.branch_head(repository_name, default_branch)? == protected_revision,
+        "default branch moved during release sync authority capture"
+    );
+    Ok(epoch)
+}
+
 pub fn capture_native_client_workflow_epoch(
     api: &GitHub,
     repository_name: &str,
@@ -5430,6 +5464,7 @@ fn validate_native_release_pr_metadata_target(write: &NativeReleasePrMetadataTar
         write.pull_number > 0
             && write.run_id > 0
             && write.run_attempt == 1
+            && write.workflow_sha == write.head_sha
             && write.workflow_path.starts_with(".github/workflows/")
             && !write.workflow_path[18..].contains('/')
             && write.workflow_path.ends_with(".yml")
@@ -11632,6 +11667,40 @@ mod tests {
     }
 
     #[test]
+    fn release_sync_rejects_a_caller_changed_only_on_the_release_branch() {
+        use crate::fixtures::{Fixture, Route};
+        use base64::Engine;
+        let protected = "a".repeat(40);
+        let release = "b".repeat(40);
+        let path = ".github/workflows/release-pr-sync.yml";
+        let fixture = Fixture::new(vec![
+            Route::get(
+                "/repos/example-org/project/commits/main",
+                serde_json::json!({"sha":protected}),
+            ),
+            Route::get(
+                format!("/repos/example-org/project/contents/{path}?ref={protected}"),
+                serde_json::json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(b"name: protected sync\n")}),
+            ),
+            Route::get(
+                format!("/repos/example-org/project/contents/{path}?ref={release}"),
+                serde_json::json!({"encoding":"base64","content":base64::engine::general_purpose::STANDARD.encode(b"name: unreviewed sync\n")}),
+            ),
+        ]);
+        let error = capture_native_release_sync_workflow_epoch(
+            &fixture.api,
+            "example-org/project",
+            987_654,
+            "main",
+            path,
+            &release,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("differs from its protected"));
+        fixture.finish();
+    }
+
+    #[test]
     fn native_release_metadata_binds_exact_pr_head_authority_and_payload() {
         use crate::fixtures::Fixture;
         let instance =
@@ -11643,7 +11712,7 @@ mod tests {
             head_sha: "a".repeat(40),
             default_branch: "main".into(),
             workflow_path: ".github/workflows/release-pr-sync.yml".into(),
-            workflow_sha: "b".repeat(40),
+            workflow_sha: "a".repeat(40),
             workflow_epoch: "c".repeat(40),
             run_id: 123,
             run_attempt: 1,
@@ -11681,6 +11750,9 @@ mod tests {
         assert!(validate_native_release_pr_metadata_target(&changed).is_err());
         let mut changed = write.clone();
         changed.run_attempt = 2;
+        assert!(validate_native_release_pr_metadata_target(&changed).is_err());
+        let mut changed = write.clone();
+        changed.workflow_sha = "b".repeat(40);
         assert!(validate_native_release_pr_metadata_target(&changed).is_err());
         let mut fixture = Fixture::new(vec![]);
         fixture.api.writes = WriteContext::NativeReleasePrMetadata(Box::new(write));

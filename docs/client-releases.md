@@ -64,7 +64,10 @@ package in both manifest and lockfile; dependency changes are rejected.
 Each write rechecks the captured main source, release branch head, caller epoch,
 configuration and Server deployment. A changed head or authority requires a new
 request. `reusable-release-pr-sync.yml` runs on pushes to the configured release
-branch and can update only the exact Server-owned PR title and body. The managed
+branch and can update only the exact Server-owned PR title and body. Its caller
+must exactly match the protected main workflow. The release-branch revision need
+not be an ancestor of main; the protected main workflow epoch remains the stale
+fence and is rechecked immediately before the metadata write. The managed
 Release PR, Sync and Tag callers are reconciled independently by repo-settings.
 These development connections still require qualification with their matching
 immutable binary before adoption.
