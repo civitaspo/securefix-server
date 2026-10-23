@@ -3875,28 +3875,7 @@ impl GitHub {
                     == Some(write.target_default_branch.as_str()),
             "native release destination identity or default branch changed"
         );
-        match self.get_uncached::<Value>(&format!(
-            "/repos/{}/releases/tags/{}",
-            write.target_repository, write.tag
-        )) {
-            Ok(existing) => ensure!(
-                write.release_id.is_some()
-                    && existing["id"].as_u64() == write.release_id
-                    && existing["tag_name"] == write.tag,
-                "a different release now occupies the native release tag"
-            ),
-            Err(error)
-                if error
-                    .downcast_ref::<ApiError>()
-                    .is_some_and(|api_error| api_error.status == StatusCode::NOT_FOUND) =>
-            {
-                ensure!(
-                    write.release_id.is_none(),
-                    "selected native release is no longer present for its tag"
-                );
-            }
-            Err(error) => return Err(error),
-        }
+        self.require_native_release_identity_current(write)?;
         let pull: Value = self.get_uncached(&format!(
             "/repos/{}/pulls/{}",
             write.target_repository, write.release_pr_number
@@ -3943,13 +3922,22 @@ impl GitHub {
                 && tag_object["object"]["type"] == "commit",
             "native release tag no longer targets the authorized merge commit"
         );
-        if let Some(release_id) = write.release_id {
-            let release: Value = self.get_uncached(&format!(
-                "/repos/{}/releases/{release_id}",
-                write.target_repository
-            ))?;
+        Ok(())
+    }
+
+    fn require_native_release_identity_current(&self, write: &NativeReleaseWrite) -> Result<()> {
+        let selected: Option<Value> = write
+            .release_id
+            .map(|release_id| {
+                self.get_uncached(&format!(
+                    "/repos/{}/releases/{release_id}",
+                    write.target_repository
+                ))
+            })
+            .transpose()?;
+        if let Some(release) = &selected {
             ensure!(
-                release["id"].as_u64() == Some(release_id)
+                release["id"].as_u64() == write.release_id
                     && release["tag_name"] == write.tag
                     && release["name"] == write.tag
                     && release["target_commitish"] == write.target_default_branch
@@ -3962,6 +3950,31 @@ impl GitHub {
                     && (release["draft"] == true || release["immutable"] == true),
                 "native release identity changed"
             );
+        }
+        match self.get_uncached::<Value>(&format!(
+            "/repos/{}/releases/tags/{}",
+            write.target_repository, write.tag
+        )) {
+            Ok(existing) => ensure!(
+                write.release_id.is_some()
+                    && existing["id"].as_u64() == write.release_id
+                    && existing["tag_name"] == write.tag,
+                "a different release now occupies the native release tag"
+            ),
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|e| e.status == StatusCode::NOT_FOUND) =>
+            {
+                // Tag lookup returns published releases; a selected draft is bound by ID.
+                ensure!(
+                    selected
+                        .as_ref()
+                        .is_none_or(|release| release["draft"] == true),
+                    "selected published native release is no longer present for its tag"
+                );
+            }
+            Err(error) => return Err(error),
         }
         Ok(())
     }
@@ -11217,15 +11230,29 @@ mod tests {
     #[test]
     fn native_release_draft_reads_use_only_the_isolated_publisher_token() {
         use crate::fixtures::{Fixture, Route};
-        let write = native_release_write_fixture();
+        let mut write = native_release_write_fixture();
+        write.release_id = Some(42);
         let release_path = format!("/repos/{}/releases/42", write.target_repository);
+        let tag_path = format!(
+            "/repos/{}/releases/tags/{}",
+            write.target_repository, write.tag
+        );
         let pull_path = format!(
             "/repos/{}/pulls/{}",
             write.target_repository, write.release_pr_number
         );
+        let draft = serde_json::json!({"id":42,"draft":true,"tag_name":write.tag,
+            "name":write.tag,"target_commitish":write.target_default_branch,"prerelease":false});
         let fixture = Fixture::new(vec![
-            Route::get(&release_path, serde_json::json!({"id":42,"draft":true}))
+            Route::get(&release_path, draft)
                 .with_request_header("Authorization", "Bearer publisher-token"),
+            Route::request(
+                "GET",
+                &tag_path,
+                404,
+                serde_json::json!({"message":"Not Found"}),
+            )
+            .with_request_header("Authorization", "Bearer publisher-token"),
             Route::get(
                 &pull_path,
                 serde_json::json!({"number":write.release_pr_number}),
@@ -11234,10 +11261,82 @@ mod tests {
         ]);
         let mut api = GitHub::new(&fixture.base, "reader-token".to_owned()).unwrap();
         api.write_token = Some("publisher-token".to_owned());
-        api.writes = WriteContext::NativeRelease(Box::new(write));
-        assert_eq!(api.get::<Value>(&release_path).unwrap()["draft"], true);
+        api.writes = WriteContext::NativeRelease(Box::new(write.clone()));
+        api.require_native_release_identity_current(&write).unwrap();
         api.get::<Value>(&pull_path).unwrap();
         fixture.finish();
+    }
+
+    #[test]
+    fn native_release_identity_rejects_missing_replaced_and_unpublished_results_without_writes() {
+        use crate::fixtures::{Fixture, Route};
+        for case in [
+            "missing",
+            "wrong_tag",
+            "collision",
+            "published_missing",
+            "published_ok",
+        ] {
+            let mut write = native_release_write_fixture();
+            write.release_id = Some(42);
+            let release_path = format!("/repos/{}/releases/42", write.target_repository);
+            let tag_path = format!(
+                "/repos/{}/releases/tags/{}",
+                write.target_repository, write.tag
+            );
+            let mut release = serde_json::json!({"id":42,"draft":true,"tag_name":write.tag,
+                "name":write.tag,"target_commitish":write.target_default_branch,"prerelease":false});
+            if case == "wrong_tag" {
+                release["tag_name"] = serde_json::json!("v9.9.9");
+            }
+            if case.starts_with("published_") {
+                release["draft"] = serde_json::json!(false);
+                release["immutable"] = serde_json::json!(true);
+            }
+            let mut routes = vec![
+                if case == "missing" {
+                    Route::request(
+                        "GET",
+                        &release_path,
+                        404,
+                        serde_json::json!({"message":"Not Found"}),
+                    )
+                } else {
+                    Route::get(&release_path, release)
+                }
+                .with_request_header("Authorization", "Bearer publisher-token"),
+            ];
+            if case == "collision" {
+                routes.push(Route::get(
+                    &tag_path,
+                    serde_json::json!({"id":99,"tag_name":write.tag}),
+                ));
+            }
+            if case == "published_missing" {
+                routes.push(Route::request(
+                    "GET",
+                    &tag_path,
+                    404,
+                    serde_json::json!({"message":"Not Found"}),
+                ));
+            }
+            if case == "published_ok" {
+                routes.push(Route::get(
+                    &tag_path,
+                    serde_json::json!({"id":42,"tag_name":write.tag}),
+                ));
+            }
+            let fixture = Fixture::new(routes);
+            let mut api = GitHub::new(&fixture.base, "reader-token".to_owned()).unwrap();
+            api.write_token = Some("publisher-token".to_owned());
+            api.writes = WriteContext::NativeRelease(Box::new(write.clone()));
+            assert_eq!(
+                api.require_native_release_identity_current(&write).is_ok(),
+                case == "published_ok",
+                "{case}"
+            );
+            fixture.finish();
+        }
     }
 
     #[test]

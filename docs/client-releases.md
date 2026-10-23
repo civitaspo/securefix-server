@@ -256,3 +256,9 @@ The `release/next` PR must contain `.release-version` and the release changelog.
 Immutable releases must be enabled for every release-capable repository through settings reconciliation or organization policy before publication. The publisher relies on that setup and does not read administrative repository settings. After publishing, it re-fetches the release and requires the expected tag, published state, and `immutable: true`. The publishing App does not need Administration permission. GitHub does not enable immutable releases by default.
 
 Caller migrations include the official workflow dependency lockfile in the exact generated file set. See [workflow lockfile maintenance](workflow-lockfiles.md).
+
+The native publisher revalidates its selected draft by its exact release ID with
+the isolated publication credential. GitHub's tag lookup exposes only published
+releases, so an absent tag lookup is valid only before selection or while that
+exact selected release is still a verified draft. A different published release
+on the tag, a missing selected ID, or changed release identity stops publication.
