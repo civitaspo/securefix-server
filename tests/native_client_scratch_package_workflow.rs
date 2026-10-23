@@ -31,7 +31,7 @@ fn native_client_requests_use_a_fixed_package_across_credential_domains() {
         let package = loaders[0];
         assert_eq!(
             package["uses"],
-            "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
+            "civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a"
         );
         assert!(package.get("if").is_none());
         assert_eq!(

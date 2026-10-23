@@ -4044,7 +4044,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     package["uses"]
                         .as_str()
                         .unwrap()
-                        .ends_with("@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d")
+                        .ends_with("@f704d9ce91629b0a2094191dbcd3cb0ae591c93a")
                 );
                 assert_eq!(
                     package["with"],
@@ -4207,7 +4207,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         package_loader["uses"]
                             .as_str()
                             .unwrap()
-                            .ends_with("@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d")
+                            .ends_with("@f704d9ce91629b0a2094191dbcd3cb0ae591c93a")
                     );
                     assert!(
                         steps
@@ -5335,7 +5335,7 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
             .unwrap();
         assert_eq!(fixed_ref.len(), 40);
         assert!(fixed_ref.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(fixed_ref, "0b4bc206f60c822ffb1ca58d918547f53eac0764");
+        assert_eq!(fixed_ref, "f704d9ce91629b0a2094191dbcd3cb0ae591c93a");
         assert_eq!(
             loader["with"],
             serde_json::json!({"token":"${{ github.token }}"})
