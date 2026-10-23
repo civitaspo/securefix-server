@@ -7,12 +7,55 @@ on:
 permissions: {}
 
 jobs:
-  request:
+  prepare-source:
     if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1
-    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request-scratch.yml@2179c5566b1cc84bd7d53082f028f00f5f046b60 # v0.2.45-pre.52
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      artifact-name: ${{ steps.source.outputs.artifact_name }}
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+        with:
+          token: ${{ github.token }}
+      - name: Prepare a credential-free Securefix source artifact
+        id: source
+        env:
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'native generic Client proof fixture' > native-producer-proof.txt
+          "$CLI_BINARY" new-client securefix prepare \
+            --root-dir '' \
+            --files native-producer-proof.txt \
+            --repository "$GITHUB_REPOSITORY" \
+            --branch "$SOURCE_BRANCH" \
+            --commit-message 'test: exercise native Securefix request' \
+            --custom-json '{}' \
+            --output-dir .securefix-artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          path: ${{ steps.source.outputs.artifact_path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+  request:
+    needs: prepare-source
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1
+    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@e78897bdbf15e7abd0135a879b2774fcbb932091 # v0.2.45-pre.112
     with:
+      operation: securefix
+      artifact_name: ${{ needs.prepare-source.outputs.artifact-name }}
       server_repository: civitaspo/securefix-server
-      instance_config_path: repo-settings/native-securefix-write-test-instance.toml
+      instance_config_path: repo-settings/native-role-events-test-instance.toml
     permissions:
       actions: read
       attestations: write

@@ -59,6 +59,10 @@ The generated Merge Request wrapper permits the configured owner and the exact c
 The native package prepares source artifacts with `securefix new-client securefix prepare`.
 It reuses the bounded file staging and metadata validation of the legacy Client,
 but uses the protocol artifact prefix without loading deployment policy.
+For an existing PR, a credential-free Client job stages and uploads the artifact,
+then calls `reusable-client-request.yml` with `operation: securefix` and the emitted
+`artifact_name`. The reusable workflow captures that artifact from the same run,
+attests the request, and dispatches it using a separate Client App token.
 The subsequent capture and Server verification bind the artifact to the run,
 exact PR head and protected instance configuration; staging does not authorize a write.
 

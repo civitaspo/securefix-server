@@ -3,6 +3,14 @@ name: testing-Reusable Release Tag
 on:
   workflow_call:
     inputs:
+      server_repository:
+        description: Authenticated protected Server instance repository
+        required: true
+        type: string
+      instance_config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
       release_pr_number:
         description: Merged release/next PR to retry
         required: false
@@ -15,59 +23,57 @@ on:
 permissions: {}
 
 jobs:
-  cli:
-    uses: ./.github/workflows/testing-load-cli.yml
-    permissions:
-      actions: read
-      contents: read
-      attestations: read
-
   resolve:
-    needs: cli
     runs-on: ubuntu-latest
     permissions:
+      actions: read
+      attestations: read
       contents: read
       pull-requests: read
     outputs:
       merge_sha: ${{ steps.resolve.outputs.merge_sha }}
+      source_run_sha: ${{ steps.resolve.outputs.source_run_sha }}
       strategy: ${{ steps.resolve.outputs.strategy }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
+      native_targets: ${{ steps.resolve.outputs.native_targets }}
+      server_owner: ${{ steps.resolve.outputs.server_owner }}
+      server_repository_name: ${{ steps.resolve.outputs.server_repository_name }}
+      client_app_id: ${{ steps.resolve.outputs.client_app_id }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
         with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
-          merge-multiple: true
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
+          token: ${{ github.token }}
       - name: Validate merged release PR
         id: resolve
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           RELEASE_PR_NUMBER: ${{ inputs.release_pr_number || github.event.pull_request.number }}
         run: |
+          printf 'Release execution ref=%s sha=%s workflow-sha=%s\n' "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_WORKFLOW_SHA"
           securefix release resolve-pr --release-pr-number "$RELEASE_PR_NUMBER"
           echo "pr_number=$RELEASE_PR_NUMBER" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: [cli, resolve]
+    needs: resolve
     if: needs.resolve.outputs.strategy == 'terraform-provider'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
+      attestations: read
       contents: read
       pull-requests: read
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
         with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
-          merge-multiple: true
+          token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
@@ -76,15 +82,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Build fixed provider target matrix
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
         run: securefix release build-provider --release-pr-number "$RELEASE_PR_NUMBER"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -95,53 +97,228 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tag:
-    needs: [cli, resolve, build]
-    if: always() && needs.resolve.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
-    runs-on: ubuntu-latest
+  build-native:
+    needs: resolve
+    if: needs.resolve.outputs.native_targets != '[]'
+    runs-on: ${{ matrix.target.runner }}
     permissions:
-      contents: write
-      issues: write
-      pull-requests: read
+      contents: read
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.resolve.outputs.native_targets) }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.merge_sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          version: "2026.10.17"
+          install_args: "--locked"
+          cache: false
+      - name: Install the musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build and execute the native binary on its target runner
+        id: target
+        env:
+          NATIVE_SOURCE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+          NATIVE_SOURCE_RUN_SHA: ${{ needs.resolve.outputs.source_run_sha }}
+          RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          NATIVE_TARGET: ${{ matrix.target.target }}
+          NATIVE_RUNNER: ${{ matrix.target.runner }}
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          repository_name="${GITHUB_REPOSITORY##*/}"
+          source_before="$(git rev-parse HEAD)"
+          [[ "$source_before" == "$NATIVE_SOURCE_SHA" ]] || { echo 'native checkout differs from the reviewed release commit' >&2; exit 1; }
+          package_version="$(git show "$NATIVE_SOURCE_SHA:.release-version" | tr -d '\r\n')"
+          [[ -n "$package_version" ]] || { echo 'release source package version is missing' >&2; exit 1; }
+          rustup target add "$NATIVE_TARGET"
+          cargo build --locked --release --bin "$repository_name" --target "$NATIVE_TARGET"
+          source_after="$(git rev-parse HEAD)"
+          [[ "$source_after" == "$NATIVE_SOURCE_SHA" ]] || { echo 'native build changed the checked out release commit' >&2; exit 1; }
+          binary="target/$NATIVE_TARGET/release/$repository_name"
+          [[ -f "$binary" ]] || { echo 'native build did not produce its binary' >&2; exit 1; }
+          version_output="$("$binary" --version)"
+          [[ "$version_output" == "$repository_name $package_version"+* ]] || { echo 'native binary reports a version that differs from the source package version' >&2; exit 1; }
+          artifact_dir="$(mktemp -d "$RUNNER_TEMP/native-target.XXXXXX")"
+          echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
+          filename="$repository_name-$NATIVE_TARGET"
+          install -m 755 "$binary" "$artifact_dir/$filename"
+          jq -n \
+            --argjson source_run_id "$GITHUB_RUN_ID" \
+            --argjson source_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg source_run_sha "$NATIVE_SOURCE_RUN_SHA" \
+            --argjson release_pr_number "$RELEASE_PR_NUMBER" \
+            --arg release_pr_sha "$NATIVE_SOURCE_SHA" \
+            --arg package_version "$package_version" \
+            --arg target "$NATIVE_TARGET" \
+            --arg runner "$NATIVE_RUNNER" \
+            --arg runner_name "$RUNNER_NAME" \
+            --arg runner_os "$RUNNER_OS" \
+            --arg runner_arch "$RUNNER_ARCH" \
+            --arg filename "$filename" \
+            --arg version_output "$version_output" \
+            '{schema_version:1,source_run_id:$source_run_id,source_run_attempt:$source_run_attempt,source_run_sha:$source_run_sha,release_pr_number:$release_pr_number,release_pr_sha:$release_pr_sha,package_version:$package_version,target:$target,runner:$runner,runner_name:$runner_name,runner_os:$runner_os,runner_arch:$runner_arch,filename:$filename,version_output:$version_output}' \
+            > "$artifact_dir/native-target.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-target-${{ matrix.target.target }}-${{ github.run_attempt }}
+          path: ${{ steps.target.outputs.artifact_dir }}/*
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble-native:
+    needs: [resolve, build-native]
+    if: needs.resolve.outputs.native_targets != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+        with:
+          token: ${{ github.token }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.merge_sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
-          merge-multiple: true
-      - uses: $/.github/actions/install-cli
+          pattern: native-target-*-${{ github.run_attempt }}
+          path: native-input
+      - name: Validate and assemble the exact native asset set
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+        run: securefix release assemble-native --release-pr-number "$RELEASE_PR_NUMBER"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
         with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
+          name: native-bundle
+          path: dist/native-release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  tag:
+    needs: [resolve, build, build-native, assemble-native]
+    if: always() && needs.resolve.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-native.result == 'success' || needs.build-native.result == 'skipped') && (needs.assemble-native.result == 'success' || needs.assemble-native.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+      pull-requests: read
+    outputs:
+      manifest_artifact_id: ${{ steps.upload-manifest.outputs.artifact-id }}
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+        with:
+          token: ${{ github.token }}
       - name: Create and verify release tag manifest
         id: manifest
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
-          PROVIDER_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id || '0' }}
-        run: securefix release tag-pr --release-pr-number "$RELEASE_PR_NUMBER" --artifact-id "$PROVIDER_ARTIFACT_ID"
+          RELEASE_BUNDLE_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id || needs.assemble-native.outputs.artifact_id || '0' }}
+        run: securefix release tag-pr --release-pr-number "$RELEASE_PR_NUMBER" --artifact-id "$RELEASE_BUNDLE_ARTIFACT_ID"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload-manifest
         with:
           name: release-manifest
           path: manifest.json
           if-no-files-found: error
           retention-days: 1
+
+  attest-manifest:
+    needs: tag
+    if: always() && needs.tag.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 10
+    outputs:
+      proof_artifact_id: ${{ steps.upload-proof.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.tag.outputs.manifest_artifact_id }}
+          path: release-proof
+          merge-multiple: true
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attestation
+        with:
+          subject-path: release-proof/manifest.json
+          create-storage-record: false
+      - name: Place the attestation bundle beside the manifest
+        env:
+          BUNDLE_PATH: ${{ steps.attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE_PATH"
+          test -s "$BUNDLE_PATH"
+          cp -- "$BUNDLE_PATH" release-proof/bundle.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload-proof
+        with:
+          name: release-manifest-proof
+          path: |
+            release-proof/manifest.json
+            release-proof/bundle.json
+          if-no-files-found: error
+          retention-days: 1
+
+  request-server:
+    needs: [resolve, tag, attest-manifest]
+    if: always() && needs.resolve.result == 'success' && needs.tag.result == 'success' && needs.attest-manifest.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+        with:
+          token: ${{ github.token }}
       - name: Create server-only request token
         id: server-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: "3872492"
+          app-id: ${{ needs.resolve.outputs.client_app_id }}
           private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: securefix-server
+          owner: ${{ needs.resolve.outputs.server_owner }}
+          repositories: ${{ needs.resolve.outputs.server_repository_name }}
           permission-issues: write
       - name: Request server release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ steps.server-token.outputs.token }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+          SECUREFIX_SERVER_TOKEN: ${{ steps.server-token.outputs.token }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
         run: securefix release request-server

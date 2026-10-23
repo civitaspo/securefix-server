@@ -15,6 +15,11 @@ on:
         description: Root-relative protected Server instance TOML path
         required: true
         type: string
+      artifact_name:
+        description: Source artifact uploaded by a credential-free Client job for securefix
+        required: false
+        type: string
+        default: ''
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
@@ -39,7 +44,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
         with:
           token: ${{ github.token }}
       - name: Capture the exact event and authenticated instance authority
@@ -51,17 +56,23 @@ jobs:
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           PULL_REQUEST_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           OPERATION: ${{ inputs.operation }}
+          SOURCE_ARTIFACT_NAME: ${{ inputs.artifact_name }}
           CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           [[ "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          artifact_args=()
           case "$OPERATION" in
+            securefix)
+              command=(new-client securefix capture)
+              artifact_args=(--artifact-name "$SOURCE_ARTIFACT_NAME")
+              ;;
             policy_check) command=(new-client policy-check capture) ;;
             approval) command=(new-client approve capture) ;;
             merge) command=(new-client merge capture) ;;
             *) echo 'unsupported Client request operation' >&2; exit 1 ;;
           esac
-          "$CLI_BINARY" "${command[@]}" --pull-request-number "$PULL_REQUEST_NUMBER" \
+          "$CLI_BINARY" "${command[@]}" "${artifact_args[@]}" --pull-request-number "$PULL_REQUEST_NUMBER" \
             --output native-request/manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: manifest
@@ -120,7 +131,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
         with:
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0

@@ -2,39 +2,42 @@ name: testing-Reusable Release PR Sync
 
 on:
   workflow_call:
+    inputs:
+      server_repository:
+        description: Authenticated Server instance repository locator
+        required: true
+        type: string
+      instance_config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
 permissions: {}
 jobs:
-  cli:
-    uses: ./.github/workflows/testing-load-cli.yml
+  sync:
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
       attestations: read
-
-  sync:
-    needs: cli
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
       pull-requests: write
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
         with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
-          merge-multiple: true
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
+          token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: release/testing-next
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Sync release PR title and summary
+      - name: Sync only the exact Server-owned release PR title and summary
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
-        run: securefix release sync-pr
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release sync-pr

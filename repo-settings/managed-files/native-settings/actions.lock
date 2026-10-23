@@ -8,12 +8,13 @@ workflows:
     '.github/workflows/fixture-validation.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
     '.github/workflows/merge-request.yml': []
-    '.github/workflows/native-approval-producer.yml': []
-    '.github/workflows/native-merge-producer.yml': []
-    '.github/workflows/native-securefix-producer.yml': []
     '.github/workflows/policy-check.yml': []
+    '.github/workflows/release-pr-sync.yml': []
+    '.github/workflows/release-pr.yml': []
     '.github/workflows/release-tag.yml': []
-    '.github/workflows/securefix-request.yml': []
+    '.github/workflows/securefix-request.yml':
+        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        - 'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a'
     '.github/workflows/server-approve.yml': []
     '.github/workflows/server-merge.yml': []
     '.github/workflows/server-policy-check.yml': []
@@ -27,3 +28,20 @@ dependencies:
         commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'
         owner_id: 44036562
         repo_id: 197814629
+    'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd':
+        ref: 'v8.0.0'
+        commit: 'sha1-ed597411d8f924073f98dfc5c65a23a2325f34cd'
+        owner_id: 44036562
+        repo_id: 205262760
+    'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02':
+        ref: 'v4.6.2'
+        commit: 'sha1-ea165f8d65b6e75b540449e92b4886f43607fa02'
+        owner_id: 44036562
+        repo_id: 192625955
+    'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a':
+        ref: 'integration/native-client-adoption-pre111-20261024'
+        commit: 'sha1-f704d9ce91629b0a2094191dbcd3cb0ae591c93a'
+        owner_id: 4525500
+        repo_id: 1250079425
+        uses:
+            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
