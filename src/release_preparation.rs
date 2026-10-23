@@ -144,7 +144,7 @@ pub(super) fn capture(artifact_name: &str, output: &Path) -> Result<()> {
         .as_deref()
         .context("release branch missing")?
         .to_owned();
-    let destination = optional_branch(&api, repo.as_str(), &branch)?;
+    let destination = api.optional_branch_head(repo.as_str(), &branch)?;
     let manifest = PreparationManifest {
         protocol: PROTOCOL.into(),
         operation: "release_prepare".into(),
@@ -306,20 +306,6 @@ fn validate_host(api: &GitHub, instance: &NativeServerInstanceAuthority) -> Resu
     )
 }
 
-fn optional_branch(api: &GitHub, repository: &str, branch: &str) -> Result<Option<String>> {
-    match api.branch_head(repository, branch) {
-        Ok(head) => Ok(Some(head)),
-        Err(error)
-            if error
-                .downcast_ref::<ApiError>()
-                .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 pub(super) fn apply(apply: bool) -> Result<()> {
     let server = api()?;
     let instance = native_release_instance(&server)?;
@@ -431,7 +417,7 @@ pub(super) fn apply(apply: bool) -> Result<()> {
         Some(m.release_branch.as_str()) == instance.config.branches.release.as_deref(),
         "release branch differs from protected config"
     );
-    let actual_branch = optional_branch(&client, &repository, &m.release_branch)?;
+    let actual_branch = client.optional_branch_head(&repository, &m.release_branch)?;
     ensure!(
         actual_branch.is_some() == m.destination_branch_exists
             && actual_branch.as_deref().unwrap_or(&m.producer.source_sha) == m.destination_head,

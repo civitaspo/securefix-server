@@ -3480,22 +3480,15 @@ impl GitHub {
             .lock()
             .map_err(|_| anyhow::anyhow!("release commit state poisoned"))?
             .clone();
-        match self.branch_head(&t.repository, &t.release_branch) {
-            Ok(head) => ensure!(
+        match self.optional_branch_head(&t.repository, &t.release_branch)? {
+            Some(head) => ensure!(
                 head == committed.as_deref().unwrap_or(&t.expected_head),
                 "release preparation branch head is stale or request was replayed"
             ),
-            Err(error)
-                if error
-                    .downcast_ref::<ApiError>()
-                    .is_some_and(|e| e.status == StatusCode::NOT_FOUND) =>
-            {
-                ensure!(
-                    !t.branch_exists && committed.is_none(),
-                    "release preparation branch disappeared"
-                );
-            }
-            Err(error) => return Err(error),
+            None => ensure!(
+                !t.branch_exists && committed.is_none(),
+                "release preparation branch disappeared"
+            ),
         }
         if let Some(number) = t.existing_pull_request {
             let pull: Value =
@@ -4548,6 +4541,30 @@ impl GitHub {
             .context("missing file content")?
             .replace('\n', "");
         Ok(base64::engine::general_purpose::STANDARD.decode(content)?)
+    }
+
+    pub fn optional_branch_head(&self, repository: &str, branch: &str) -> Result<Option<String>> {
+        crate::policy::validate_repository(repository)?;
+        crate::config::validate_branch(branch)?;
+        let branch: Value = match self.get_uncached(&format!(
+            "/repos/{repository}/branches/{}",
+            encode_path_segment(branch)
+        )) {
+            Ok(value) => value,
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|error| error.status == StatusCode::NOT_FOUND) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let sha = branch["commit"]["sha"]
+            .as_str()
+            .context("branch commit SHA is missing")?;
+        crate::policy::validate_sha(sha)?;
+        Ok(Some(sha.to_owned()))
     }
 
     pub fn branch_head(&self, repository: &str, branch: &str) -> Result<String> {
@@ -11431,6 +11448,71 @@ mod tests {
                 fixture
                     .api
                     .patch::<Value>(path, &serde_json::json!({"description":"changed"}))
+                    .is_err()
+            );
+            fixture.finish();
+        }
+    }
+
+    #[test]
+    fn optional_release_branch_reads_current_head_and_only_accepts_404_as_absence() {
+        use crate::fixtures::{Fixture, Route};
+        let path = "/repos/example-org/project/branches/release%2Fnext";
+        let missing: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/native-release-missing-branch.json"
+        ))
+        .unwrap();
+        let fixture = Fixture::new(vec![
+            Route::request("GET", path, 404, missing),
+            Route::get(path, serde_json::json!({"commit":{"sha":"a".repeat(40)}})),
+            Route::get(path, serde_json::json!({"commit":{"sha":"b".repeat(40)}})),
+        ]);
+        assert_eq!(
+            fixture
+                .api
+                .optional_branch_head("example-org/project", "release/next")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            fixture
+                .api
+                .optional_branch_head("example-org/project", "release/next")
+                .unwrap(),
+            Some("a".repeat(40))
+        );
+        assert_eq!(
+            fixture
+                .api
+                .optional_branch_head("example-org/project", "release/next")
+                .unwrap(),
+            Some("b".repeat(40))
+        );
+        fixture.finish();
+        for status in [401, 403, 422] {
+            let fixture = Fixture::new(vec![Route::request(
+                "GET",
+                path,
+                status,
+                serde_json::json!({"message":"failure"}),
+            )]);
+            assert!(
+                fixture
+                    .api
+                    .optional_branch_head("example-org/project", "release/next")
+                    .is_err()
+            );
+            fixture.finish();
+        }
+        for response in [
+            serde_json::json!({}),
+            serde_json::json!({"commit":{"sha":"invalid"}}),
+        ] {
+            let fixture = Fixture::new(vec![Route::get(path, response)]);
+            assert!(
+                fixture
+                    .api
+                    .optional_branch_head("example-org/project", "release/next")
                     .is_err()
             );
             fixture.finish();
