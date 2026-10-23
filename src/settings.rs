@@ -27,6 +27,8 @@ const MANAGED_SECUREFIX_INSTANCE_CONFIG_PATH: &str =
     "repo-settings/native-securefix-write-test-instance.toml";
 const MANAGED_POLICY_CHECK_SIGNER_PATH: &str = ".github/workflows/reusable-client-request.yml";
 const MANAGED_POLICY_CHECK_WORKFLOW_PATH: &str = ".github/workflows/reusable-policy-check.yml";
+const MANAGED_CLIENT_RELEASE_PR_TARGET: &str = ".github/workflows/release-pr.yml";
+const MANAGED_CLIENT_RELEASE_SYNC_TARGET: &str = ".github/workflows/release-pr-sync.yml";
 const MANAGED_CLIENT_RELEASE_TAG_TARGET: &str = ".github/workflows/release-tag.yml";
 const MANAGED_CLIENT_POLICY_CHECK_TARGET: &str = ".github/workflows/policy-check.yml";
 const MANAGED_CLIENT_APPROVE_TARGET: &str = ".github/workflows/approve-request.yml";
@@ -285,14 +287,35 @@ fn validate_managed_targets(
             );
         }
     }
-    if expected.contains(MANAGED_CLIENT_RELEASE_TAG_TARGET) {
-        ensure!(
-            files.iter().any(|file| {
-                file.target == MANAGED_CLIENT_RELEASE_TAG_TARGET
-                    && file.source == "repo-settings/managed-files/release-tag.yml"
-            }),
-            "managed Client release caller must use its canonical desired-state source"
-        );
+    for (target, source) in [
+        (
+            MANAGED_CLIENT_RELEASE_TAG_TARGET,
+            "repo-settings/managed-files/release-tag.yml",
+        ),
+        (
+            MANAGED_CLIENT_RELEASE_PR_TARGET,
+            "repo-settings/managed-files/release-pr.yml",
+        ),
+        (
+            MANAGED_CLIENT_RELEASE_SYNC_TARGET,
+            "repo-settings/managed-files/release-pr-sync.yml",
+        ),
+    ] {
+        if expected.contains(target) {
+            ensure!(
+                files
+                    .iter()
+                    .any(|file| file.target == target && file.source == source),
+                "managed Client release caller must use its canonical desired-state source"
+            );
+            ensure!(
+                !instance_config
+                    .workflow_roles
+                    .values()
+                    .any(|role| role == target),
+                "managed Client release caller collides with a Server role"
+            );
+        }
     }
     if expected.contains(MANAGED_CLIENT_POLICY_CHECK_TARGET) {
         ensure!(
@@ -351,7 +374,14 @@ fn expected_managed_targets(
         .iter()
         .any(|repository| repository.capabilities.contains(&Capability::Release))
     {
-        expected.insert(MANAGED_CLIENT_RELEASE_TAG_TARGET.to_owned());
+        expected.extend(
+            [
+                MANAGED_CLIENT_RELEASE_TAG_TARGET,
+                MANAGED_CLIENT_RELEASE_PR_TARGET,
+                MANAGED_CLIENT_RELEASE_SYNC_TARGET,
+            ]
+            .map(str::to_owned),
+        );
     }
     if instance_config
         .repositories
@@ -1196,15 +1226,22 @@ fn managed_desired_files_from_source(
         "a Client release implementation pin is required exactly when the managed target includes release-tag.yml"
     );
     if let Some(client_pin) = client_pin {
-        let template = desired
-            .get_mut(MANAGED_CLIENT_RELEASE_TAG_TARGET)
-            .context("managed Client release caller is missing")?;
         let server_config = securefix::instance_config::InstanceConfig::parse(
             policy_check_instance_config_bytes
                 .as_deref()
                 .context("managed Release Tag approval authority config is missing")?,
         )?;
-        *template = render_managed_release_tag(&manifest, &server_config, client_pin, template)?;
+        for target in [
+            MANAGED_CLIENT_RELEASE_TAG_TARGET,
+            MANAGED_CLIENT_RELEASE_PR_TARGET,
+            MANAGED_CLIENT_RELEASE_SYNC_TARGET,
+        ] {
+            let template = desired
+                .get_mut(target)
+                .context("managed Client release caller is missing")?;
+            *template =
+                render_managed_release_tag(&manifest, &server_config, client_pin, template)?;
+        }
     }
     Ok((manifest, desired))
 }
@@ -1231,12 +1268,22 @@ fn render_managed_release_tag(
         .context("managed Release Tag target is not configured in its approval Server")?
         .policy()
         .require(Capability::Release)?;
+    let template = std::str::from_utf8(template)?
+        .replace("@DEFAULT_BRANCH@", &manifest.default_branch)
+        .replace(
+            "@RELEASE_BRANCH@",
+            server_config
+                .branches
+                .release
+                .as_deref()
+                .context("managed release branch missing")?,
+        );
     crate::distribution::caller::render_managed_client_release_tag_from_template(
         &server_config.acceptable_clients,
         pin,
         &server_config.instance.repository,
         MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH,
-        template,
+        template.as_bytes(),
     )
 }
 

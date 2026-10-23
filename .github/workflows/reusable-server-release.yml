@@ -19,6 +19,7 @@ permissions: {}
 
 jobs:
   parse:
+    if: "!startsWith(github.event.label.name, 'securefix-native-release-prepare-')"
     runs-on: ubuntu-24.04
     environment: main
     permissions:
@@ -79,7 +80,6 @@ jobs:
           owner: ${{ needs.parse.outputs.repo_owner }}
           repositories: ${{ needs.parse.outputs.repo_name }}
           permission-actions: read
-          permission-attestations: read
           permission-contents: write
           permission-issues: read
           permission-pull-requests: read
@@ -181,7 +181,6 @@ jobs:
           owner: ${{ needs.parse.outputs.repo_owner }}
           repositories: ${{ needs.parse.outputs.repo_name }}
           permission-actions: read
-          permission-attestations: read
           permission-contents: read
           permission-issues: read
           permission-pull-requests: read
@@ -230,3 +229,67 @@ jobs:
         run: |
           set -euo pipefail
           "$CLI_BINARY" release cleanup
+
+  prepare-pr:
+    if: startsWith(github.event.label.name, 'securefix-native-release-prepare-')
+    runs-on: ubuntu-24.04
+    environment: main
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      issues: read
+    timeout-minutes: 20
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@0b4bc206f60c822ffb1ca58d918547f53eac0764 # v0.2.45-pre.74
+        with:
+          token: ${{ github.token }}
+      - name: Locate the authenticated preparation request
+        id: request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release locate-preparation
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-read
+        with:
+          app-id: ${{ steps.request.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ steps.request.outputs.repo_owner }}
+          repositories: ${{ steps.request.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+      - name: Validate the exact release metadata request without write credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.client-read.outputs.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release apply-preparation
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: client-write
+        with:
+          app-id: ${{ steps.request.outputs.server_app_id }}
+          private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+          owner: ${{ steps.request.outputs.repo_owner }}
+          repositories: ${{ steps.request.outputs.repo_name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Revalidate and apply the signed release metadata commit and PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CLIENT_TOKEN: ${{ steps.client-read.outputs.token }}
+          SECUREFIX_WRITE_TOKEN: ${{ steps.client-write.outputs.token }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.config_path }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release apply-preparation --apply

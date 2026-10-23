@@ -412,12 +412,8 @@ fn legacy_release_generation(
                 serde_yaml::Value::String("${{ inputs.release_pr_number }}".to_owned());
         }
         ".github/workflows/release-pr-sync.yml" => {
-            let branch = crate::config::trusted()
-                .ok()?
-                .deployment
-                .release_branch
-                .clone();
-            expected["on"]["push"]["branches"] = serde_yaml::to_value(vec![branch]).ok()?;
+            expected["on"].as_mapping_mut()?.remove("push");
+            expected["on"]["workflow_dispatch"] = serde_yaml::Value::Null;
         }
         _ => return None,
     }

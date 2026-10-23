@@ -4130,6 +4130,48 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
             let Some(steps) = job["steps"].as_array() else {
                 continue;
             };
+            if matches!(
+                path.as_str(),
+                ".github/workflows/reusable-release-pr.yml"
+                    | ".github/workflows/testing-reusable-release-pr.yml"
+            ) {
+                if job_id == "attest" {
+                    assert!(steps.iter().any(|step| {
+                        step["uses"]
+                            .as_str()
+                            .is_some_and(|uses| uses.starts_with("actions/attest@"))
+                            && step["with"]["subject-path"] == "native-request/manifest.json"
+                    }));
+                    assert!(steps.iter().any(|step| step["with"]["artifact-ids"]
+                        == "${{ needs.prepare.outputs.artifact-id }}"
+                        && step["with"]["path"] == "native-request"));
+                    assert!(!serde_json::to_string(job).unwrap().contains("secrets."));
+                    assert!(!steps.iter().any(|step| {
+                        step["run"]
+                            .as_str()
+                            .is_some_and(|run| run.contains("$CLI_BINARY"))
+                    }));
+                } else {
+                    let package = steps.iter().find(|step| step["id"] == "package").unwrap();
+                    assert!(
+                        package["uses"]
+                            .as_str()
+                            .unwrap()
+                            .contains("/.github/actions/load-package@")
+                    );
+                    assert_eq!(
+                        package["with"],
+                        serde_json::json!({"token":"${{ github.token }}"})
+                    );
+                    assert!(
+                        steps
+                            .iter()
+                            .filter_map(|step| step["run"].as_str())
+                            .any(|run| run.contains("$CLI_BINARY"))
+                    );
+                }
+                continue;
+            }
             let downloads_request_manifest = path == ".github/workflows/request-producer-probe.yml"
                 && job_id == "attest"
                 && steps.iter().any(|step| {
@@ -5538,6 +5580,28 @@ fn reusable_callers_grant_required_permissions() {
     managed["jobs"]["tag"]["uses"] =
         Value::String("./.github/workflows/reusable-release-tag.yml".into());
     callers.push(("managed-client-release-tag".into(), managed));
+    for (path, bytes) in [
+        (
+            "managed-client-release-pr",
+            include_bytes!("../repo-settings/managed-files/release-pr.yml").as_slice(),
+        ),
+        (
+            "managed-client-release-pr-sync",
+            include_bytes!("../repo-settings/managed-files/release-pr-sync.yml").as_slice(),
+        ),
+    ] {
+        let rendered = String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .replace("@CLIENT_REPOSITORY@", server)
+            .replace("@CLIENT_IMPLEMENTATION_SHA@", &"a".repeat(40))
+            .replace("@CLIENT_IMPLEMENTATION_VERSION@", "v0.2.45")
+            .replace("@SERVER_REPOSITORY@", server)
+            .replace("@INSTANCE_CONFIG_PATH@", "securefix-server.toml")
+            .replace("@RELEASE_BRANCH@", "release/next")
+            .replace("@DEFAULT_BRANCH@", "main");
+        callers.push((path.into(), serde_yaml::from_str(&rendered).unwrap()));
+    }
+
     for (path, value) in callers {
         for (job_id, job) in value["jobs"].as_object().unwrap() {
             let Some(callee) = job["uses"]
@@ -5713,6 +5777,11 @@ fn server_release_receiver_keeps_read_write_and_cleanup_credentials_separate() {
         .find(|step| step["id"] == "release-read")
         .unwrap();
     assert_eq!(preflight_writer["with"]["permission-contents"], "write");
+    assert!(
+        preflight_writer["with"]
+            .get("permission-attestations")
+            .is_none()
+    );
     assert_eq!(preflight_writer["with"]["permission-issues"], "read");
     assert_eq!(preflight_writer["with"]["permission-pull-requests"], "read");
     let sign = &jobs["sign"];
@@ -5733,6 +5802,7 @@ fn server_release_receiver_keeps_read_write_and_cleanup_credentials_separate() {
         .find(|step| step["id"] == "release-write")
         .unwrap();
     assert_eq!(read["with"]["permission-contents"], "read");
+    assert!(read["with"].get("permission-attestations").is_none());
     assert_eq!(read["with"]["permission-issues"], "read");
     assert_eq!(write["with"]["permission-contents"], "write");
     let publisher = publish

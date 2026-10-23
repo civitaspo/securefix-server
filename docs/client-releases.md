@@ -49,6 +49,26 @@ cleanup can delete only the authenticated event's label in the current protected
 Server deployment. These candidate connections require scratch qualification
 before deployment; the existing production path above remains active meanwhile.
 
+### Release preparation and metadata synchronization
+
+The development `reusable-release-pr.yml` prepares a bounded metadata artifact
+without signing or publishing credentials. Its separate attestation job signs
+the captured source run, artifact identity, caller workflow epoch and protected
+Server authority. The Client App dispatch job can only create the exact request
+label. The Release receiver verifies that proof and the accepted fixed package,
+then reuses the signed commit and PR writer for the configured release branch.
+Only `.release-version`, `CHANGELOG.md` and version-only Cargo, Python or dbt
+metadata changes are accepted. Cargo preparation updates the matching root
+package in both manifest and lockfile; dependency changes are rejected.
+
+Each write rechecks the captured main source, release branch head, caller epoch,
+configuration and Server deployment. A changed head or authority requires a new
+request. `reusable-release-pr-sync.yml` runs on pushes to the configured release
+branch and can update only the exact Server-owned PR title and body. The managed
+Release PR, Sync and Tag callers are reconciled independently by repo-settings.
+These development connections still require qualification with their matching
+immutable binary before adoption.
+
 ## Runtime distribution
 
 After explicit control activation and distribution dispatch, the distributor opens or updates a pull request authored by the Server App for the canonical managed caller-workflow files. It validates the configured branch, fresh PR identity and head, and exact managed-file changes. The PR remains reviewable and follows the normal review and check rules; distribution does not merge it or bypass those rules. Caller pins change only after control activation, not after ordinary publication.

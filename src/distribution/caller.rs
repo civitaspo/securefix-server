@@ -847,20 +847,6 @@ fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut 
                 {
                     dispatch.insert(serde_yaml::Value::String("inputs".into()), inputs.clone());
                 }
-                let actual_job = actual
-                    .get("jobs")
-                    .and_then(serde_yaml::Value::as_mapping)
-                    .and_then(|jobs| jobs.values().next());
-                if actual_job.is_some_and(|job| job.get("with").is_none())
-                    && let Some(job) = expected
-                        .as_mapping_mut()
-                        .and_then(|m| m.get_mut("jobs"))
-                        .and_then(serde_yaml::Value::as_mapping_mut)
-                        .and_then(|jobs| jobs.values_mut().next())
-                        .and_then(serde_yaml::Value::as_mapping_mut)
-                {
-                    job.remove("with");
-                }
             } else {
                 if let Some(dispatch) = expected
                     .as_mapping_mut()
@@ -868,15 +854,6 @@ fn legacy_workflow_shape(path: &str, actual: &serde_yaml::Value, expected: &mut 
                     .and_then(|on| on.get_mut("workflow_dispatch"))
                 {
                     *dispatch = serde_yaml::Value::Null;
-                }
-                if let Some(job) = expected
-                    .as_mapping_mut()
-                    .and_then(|m| m.get_mut("jobs"))
-                    .and_then(serde_yaml::Value::as_mapping_mut)
-                    .and_then(|jobs| jobs.values_mut().next())
-                    .and_then(serde_yaml::Value::as_mapping_mut)
-                {
-                    job.remove("with");
                 }
             }
         }

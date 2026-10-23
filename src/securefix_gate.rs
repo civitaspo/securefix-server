@@ -929,6 +929,16 @@ pub(crate) fn destination_head(
 
     p.repository(source.repository)?
         .require(Capability::Release)?;
+    release_destination_head(api, source, fix, default_branch, p.server_bot_id)
+}
+
+pub(crate) fn release_destination_head(
+    api: &GitHub,
+    source: &SourceRequest<'_>,
+    fix: &artifact::FixArtifact,
+    default_branch: &str,
+    server_bot_id: u64,
+) -> Result<DestinationHead> {
     ensure!(
         fix.repository.eq_ignore_ascii_case(source.repository),
         "release fixes may only update their source repository"
@@ -973,6 +983,10 @@ pub(crate) fn destination_head(
         path_component(&fix.branch),
         path_component(default_branch)
     ))?;
+    ensure!(
+        pulls.len() < 100,
+        "release pull request listing is incomplete"
+    );
     let matching: Vec<_> = pulls
         .iter()
         .filter(|pr| {
@@ -997,7 +1011,7 @@ pub(crate) fn destination_head(
         "/repos/{}/compare/{}...{head}",
         source.repository, source.sha
     ))?;
-    validate_release_comparison(&comparison, p.server_bot_id)?;
+    validate_release_comparison(&comparison, server_bot_id)?;
     let changed = comparison["files"]
         .as_array()
         .context("release branch comparison has no changed-file list")?;
@@ -1014,7 +1028,7 @@ pub(crate) fn destination_head(
         source,
         None,
         fix,
-        p.server_bot_id,
+        server_bot_id,
     )?;
     if matching.is_empty() {
         ensure!(
@@ -1023,7 +1037,7 @@ pub(crate) fn destination_head(
         );
     } else {
         ensure!(
-            matching[0]["user"]["id"].as_u64() == Some(p.server_bot_id),
+            matching[0]["user"]["id"].as_u64() == Some(server_bot_id),
             "existing release pull request is not owned by the Securefix Server bot"
         );
     }
@@ -1075,6 +1089,10 @@ fn release_pull_request(
         path_component(branch),
         path_component(base)
     ))?;
+    ensure!(
+        pulls.len() < 100,
+        "release pull request listing is incomplete"
+    );
     let matching: Vec<_> = pulls
         .iter()
         .filter(|pr| {

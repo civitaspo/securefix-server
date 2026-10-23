@@ -50,6 +50,14 @@
     {
       "source": "repo-settings/managed-files/merge-request.yml",
       "target": ".github/workflows/merge-request.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/release-pr.yml",
+      "target": ".github/workflows/release-pr.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/release-pr-sync.yml",
+      "target": ".github/workflows/release-pr-sync.yml"
     }
   ],
   "remove": [

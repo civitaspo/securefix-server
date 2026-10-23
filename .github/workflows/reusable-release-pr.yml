@@ -8,6 +8,14 @@ on:
         required: false
         type: string
         default: ""
+      server_repository:
+        description: Authenticated Server instance repository locator
+        required: true
+        type: string
+      instance_config_path:
+        description: Root-relative protected Server instance TOML path
+        required: true
+        type: string
     secrets:
       SECUREFIX_CLIENT_PRIVATE_KEY:
         required: true
@@ -15,27 +23,25 @@ on:
 permissions: {}
 
 jobs:
-  cli:
-    uses: ./.github/workflows/load-cli.yml
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):')
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
-      contents: read
       attestations: read
-
-  prepare:
-    needs: cli
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):')
-    runs-on: ubuntu-latest
-    permissions:
       contents: read
-      pull-requests: read
     timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.manifest.outputs.artifact-id }}
+      server-owner: ${{ steps.capture.outputs.server_owner }}
+      server-repository-name: ${{ steps.capture.outputs.server_repository_name }}
+      client-app-id: ${{ steps.capture.outputs.client_app_id }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@0b4bc206f60c822ffb1ca58d918547f53eac0764 # v0.2.45-pre.74
         with:
-          artifact-ids: ${{ needs.cli.outputs.artifact-id }}
-          path: ${{ runner.temp }}/securefix-runtime
-          merge-multiple: true
+          token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -46,69 +52,142 @@ jobs:
           version: "2026.8.3"
           install_args: "--locked"
           cache: false
-      - uses: $/.github/actions/install-cli
-        with:
-          binary: ${{ runner.temp }}/securefix-runtime/securefix
       - name: Prepare release metadata
         id: release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           INPUT_VERSION: ${{ inputs.version }}
-        run: securefix release prepare --version "$INPUT_VERSION"
-      - name: Prepare native Securefix client artifact
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release prepare --version "$INPUT_VERSION"
+      - name: Prepare the bounded release metadata artifact
         id: request
         if: steps.release.outputs.releasable == 'true'
         env:
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
           FILES: ${{ steps.release.outputs.files }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_BRANCH: ${{ steps.release.outputs.release_branch }}
+          DEFAULT_BRANCH: ${{ steps.release.outputs.default_branch }}
           PULL_REQUEST_TITLE: "chore(release): v${{ steps.release.outputs.version }}"
-          PULL_REQUEST_BODY: |
+          PULL_REQUEST_BODY: |-
             ## Summary
             - Prepare release v${{ steps.release.outputs.version }}
             - Update the changelog and ${{ steps.release.outputs.body_extra }}
 
             This pull request is managed by the Release PR workflow.
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
-          securefix securefix client-prepare \
-            --root-dir "" \
-            --files "$FILES" \
-            --repository "$GITHUB_REPOSITORY" \
-            --branch release/next \
+          set -euo pipefail
+          "$CLI_BINARY" new-client securefix prepare --files "$FILES" \
+            --repository "$GITHUB_REPOSITORY" --branch "$RELEASE_BRANCH" \
             --commit-message "chore(release): prepare v$RELEASE_VERSION" \
-            --pull-request-title "$PULL_REQUEST_TITLE" \
-            --pull-request-body "$PULL_REQUEST_BODY" \
-            --pull-request-base main \
-            --custom-json '{}' \
-            --output-dir .securefix-artifacts
+            --pull-request-title "$PULL_REQUEST_TITLE" --pull-request-body "$PULL_REQUEST_BODY" \
+            --pull-request-base "$DEFAULT_BRANCH" --output-dir .securefix-artifacts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: steps.request.outcome == 'success' && steps.request.outputs.artifact_name != ''
+        if: steps.request.outputs.artifact_name != ''
         with:
           name: ${{ steps.request.outputs.artifact_name }}
           path: ${{ steps.request.outputs.artifact_path }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+          overwrite: false
+      - name: Capture the artifact and protected instance authority
+        id: capture
+        if: steps.request.outputs.artifact_name != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SECUREFIX_CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
+          ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release capture-preparation --artifact-name "$ARTIFACT_NAME"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: manifest
+        if: steps.request.outputs.artifact_name != ''
+        with:
+          name: native-request-manifest
+          path: native-request/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  attest:
+    needs: prepare
+    if: needs.prepare.outputs.artifact-id != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: native-request
+          merge-multiple: true
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attestation
+        with:
+          subject-path: native-request/manifest.json
+          create-storage-record: false
+      - name: Place the attestation bundle beside the manifest
+        env:
+          BUNDLE_PATH: ${{ steps.attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -s "$BUNDLE_PATH"
+          cp -- "$BUNDLE_PATH" native-request/bundle.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-request-proof
+          path: |
+            native-request/manifest.json
+            native-request/bundle.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  dispatch:
+    needs: [prepare, attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Load the fixed Securefix package
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@0b4bc206f60c822ffb1ca58d918547f53eac0764 # v0.2.45-pre.74
+        with:
+          token: ${{ github.token }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: native-request
+          merge-multiple: true
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        if: steps.request.outcome == 'success' && steps.request.outputs.artifact_name != ''
         id: client-token
         with:
-          app-id: '3872492'
+          app-id: ${{ needs.prepare.outputs.client-app-id }}
           private-key: ${{ secrets.SECUREFIX_CLIENT_PRIVATE_KEY }}
-          owner: civitaspo
-          repositories: securefix-server
+          owner: ${{ needs.prepare.outputs.server-owner }}
+          repositories: ${{ needs.prepare.outputs.server-repository-name }}
           permission-issues: write
-      - name: Dispatch native Securefix client request
-        if: steps.request.outcome == 'success' && steps.request.outputs.artifact_name != ''
+      - name: Dispatch the attested release preparation request
         env:
-          SECUREFIX_SOURCE_SHA: ${{ needs.cli.outputs.source-sha }}
-          SECUREFIX_CONTROL_ID: ${{ needs.cli.outputs.control-id }}
-          SECUREFIX_WORKFLOW_SHA: ${{ needs.cli.outputs.workflow-sha }}
+          GITHUB_TOKEN: ${{ github.token }}
           SECUREFIX_CLIENT_TOKEN: ${{ steps.client-token.outputs.token }}
-          ARTIFACT_NAME: ${{ steps.request.outputs.artifact_name }}
-        run: securefix securefix client-dispatch --artifact-name "$ARTIFACT_NAME" --server-repository civitaspo/securefix-server
+          SECUREFIX_SERVER_REPOSITORY: ${{ inputs.server_repository }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          set -euo pipefail
+          "$CLI_BINARY" release request-preparation

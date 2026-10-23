@@ -1668,14 +1668,14 @@ fn release_sync_is_manual_only_and_accepts_the_exact_previous_push_trigger() {
     let mut files = caller::rendered_files(&"a".repeat(40), "v0.2.9", "main", true).unwrap();
     let path = ".github/workflows/release-pr-sync.yml";
     let canonical: serde_yaml::Value = serde_yaml::from_slice(&files[path]).unwrap();
-    assert!(canonical["on"].get("push").is_none());
-    assert!(canonical["on"].get("workflow_dispatch").is_some());
+    assert!(canonical["on"].get("push").is_some());
+    assert!(canonical["on"].get("workflow_dispatch").is_none());
     let previous = legacy_release_generation(path, canonical).unwrap();
     let contents = serde_yaml::to_string(&previous).unwrap();
     files.insert(path.to_owned(), contents.as_bytes().to_vec());
     assert!(validate_previous_generation(&files, "main", true).is_ok());
     assert!(caller::validate_existing(path, contents.as_bytes(), "main").is_ok());
-    let unexpected = contents.replace("release/next", "untrusted");
+    let unexpected = contents.replace("reusable-release-pr-sync.yml", "untrusted.yml");
     assert!(caller::validate_existing(path, unexpected.as_bytes(), "main").is_err());
 }
 
@@ -2091,6 +2091,10 @@ fn actual_eight_caller_inventory_keeps_legacy_ops_and_rejects_stale_request_wrap
                 }
                 ".github/workflows/merge-request.yml" => {
                     actual["jobs"]["request"]["uses"].is_string()
+                }
+                ".github/workflows/release-pr.yml" => actual["jobs"]["prepare"]["uses"].is_string(),
+                ".github/workflows/release-pr-sync.yml" => {
+                    actual["jobs"]["sync"]["uses"].is_string()
                 }
                 _ => false,
             };

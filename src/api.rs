@@ -108,6 +108,38 @@ pub struct NativeReleasePrMetadataTarget {
     pub body: String,
 }
 
+/// One attested release-metadata artifact applied to the configured release branch.
+#[derive(Clone)]
+pub struct NativeReleasePreparationTarget {
+    pub instance: NativeServerInstanceAuthority,
+    pub repository: String,
+    pub repository_id: u64,
+    pub source_sha: String,
+    pub default_branch: String,
+    pub release_branch: String,
+    pub expected_head: String,
+    pub branch_exists: bool,
+    pub existing_pull_request: Option<u64>,
+    pub workflow_path: String,
+    pub workflow_sha: String,
+    pub workflow_epoch: String,
+    pub run_id: u64,
+    pub run_attempt: u64,
+    pub additions: BTreeMap<String, Vec<u8>>,
+    pub deletions: Vec<String>,
+    pub commit_message: String,
+    pub title: String,
+    pub body: String,
+    pub client_package: crate::package::VerifiedNativeClientPackage,
+}
+
+#[derive(Clone)]
+struct NativeReleasePreparationWrite {
+    target: NativeReleasePreparationTarget,
+    package: NativeClientPackageIdentity,
+    committed_head: Arc<Mutex<Option<String>>>,
+}
+
 /// The only production mutations permitted through an external-instance
 /// request writer. Release publication has a separate lifecycle and writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,6 +407,7 @@ enum WriteContext {
     NativeClientReleaseLabel(Box<NativeClientReleaseLabelWrite>),
     NativeReleaseTag(Box<NativeReleaseTagWrite>),
     NativeReleasePrMetadata(Box<NativeReleasePrMetadataTarget>),
+    NativeReleasePreparation(Box<NativeReleasePreparationWrite>),
     Production {
         revision: Option<String>,
         control_id: Option<String>,
@@ -685,6 +718,33 @@ impl GitHub {
         write.tag_object_sha = Arc::new(Mutex::new(None));
         let mut api = api;
         api.writes = WriteContext::NativeReleaseTag(Box::new(write));
+        Ok(api)
+    }
+
+    pub fn native_release_preparation_from_env(
+        read_name: &str,
+        write_name: &str,
+        mut target: NativeReleasePreparationTarget,
+    ) -> Result<Self> {
+        target.instance.config =
+            crate::instance_config::InstanceConfig::parse(&target.instance.config_bytes)?;
+        validate_native_release_preparation_target(&target)?;
+        let package =
+            native_client_package_identity(&target.instance.config, &target.client_package)?;
+        let mut api = Self::from_env(read_name)?;
+        require_single_repository_installation(&api, target.repository_id, &target.repository)?;
+        let token = std::env::var(write_name).with_context(|| format!("missing {write_name}"))?;
+        ensure!(!token.is_empty(), "{write_name} is empty");
+        let writer = Self::new("https://api.github.com", token.clone())?;
+        require_single_repository_installation(&writer, target.repository_id, &target.repository)?;
+        api.write_token = Some(token);
+        api.writes =
+            WriteContext::NativeReleasePreparation(Box::new(NativeReleasePreparationWrite {
+                target,
+                package,
+                committed_head: Arc::new(Mutex::new(None)),
+            }));
+        api.require_current_revision()?;
         Ok(api)
     }
 
@@ -2287,6 +2347,23 @@ impl GitHub {
                 "native release cleanup may only delete its authenticated request label"
             );
         }
+        if let WriteContext::NativeReleasePreparation(write) = &self.writes {
+            let t = &write.target;
+            let root = format!("/repos/{}", t.repository);
+            ensure!(
+                (*method == Method::POST
+                    && [
+                        format!("{root}/git/refs"),
+                        format!("{root}/git/commits"),
+                        format!("{root}/pulls")
+                    ]
+                    .contains(&path.to_owned()))
+                    || (*method == Method::PATCH
+                        && t.existing_pull_request
+                            .is_some_and(|n| path == format!("{root}/pulls/{n}"))),
+                "release preparation may only write its exact branch, signed commit and PR"
+            );
+        }
         if let WriteContext::NativeReleasePrMetadata(write) = &self.writes {
             ensure!(
                 *method == Method::PATCH
@@ -2485,6 +2562,11 @@ impl GitHub {
         accept: &str,
     ) -> Result<reqwest::blocking::RequestBuilder> {
         let token = match &self.writes {
+            WriteContext::NativeReleasePreparation(_)
+                if method != Method::GET && method != Method::HEAD =>
+            {
+                self.write_token.as_deref().unwrap_or(&self.token)
+            }
             WriteContext::NativeScratch(write)
                 if (method == Method::POST
                     && match write.mode {
@@ -2630,6 +2712,17 @@ impl GitHub {
                 path,
                 write,
                 body.context("native Client release label body is missing")?,
+            )?;
+        }
+        if let WriteContext::NativeReleasePreparation(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            validate_native_release_preparation_body(
+                write,
+                &method,
+                path,
+                body.context("release preparation body missing")?,
             )?;
         }
         if let WriteContext::NativeReleasePrMetadata(write) = &self.writes
@@ -2920,6 +3013,9 @@ impl GitHub {
             }
             WriteContext::NativeReleaseTag(write) => {
                 return self.require_native_release_tag_current(write);
+            }
+            WriteContext::NativeReleasePreparation(write) => {
+                return self.require_native_release_preparation_current(write);
             }
             WriteContext::NativeReleasePrMetadata(write) => {
                 return self.require_native_release_pr_metadata_current(write);
@@ -3316,6 +3412,109 @@ impl GitHub {
         validate_native_client_release_label_write(write)?;
         validate_native_client_release_label_execution(write)?;
         self.require_remote_native_server_instance_authority_unchanged(&write.instance)
+    }
+
+    fn require_native_release_preparation_current(
+        &self,
+        write: &NativeReleasePreparationWrite,
+    ) -> Result<()> {
+        let t = &write.target;
+        validate_native_release_preparation_target(t)?;
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref()
+                == Ok(t.instance.config.instance.repository.as_str())
+                && std::env::var("GITHUB_REF").as_deref()
+                    == Ok(
+                        format!("refs/heads/{}", t.instance.config.instance.default_branch)
+                            .as_str()
+                    ),
+            "release preparation is outside its protected Server instance"
+        );
+        let token = std::env::var("GITHUB_TOKEN").context("missing Server reader token")?;
+        let server = Self::new("https://api.github.com", token)?;
+        server.require_remote_native_server_instance_authority_unchanged(&t.instance)?;
+        let role = crate::instance_config::WorkflowRole::Release;
+        let path = t
+            .instance
+            .config
+            .workflow_roles
+            .get(&role)
+            .context("Release role missing")?;
+        let sha = std::env::var("GITHUB_WORKFLOW_SHA")?;
+        let bytes = server.content(&t.instance.config.instance.repository, path, &sha)?;
+        validate_native_server_execution_workflow_role(
+            &t.instance.authority,
+            role,
+            &std::env::var("GITHUB_WORKFLOW_REF")?,
+            &sha,
+            &bytes,
+        )?;
+        server.validate_native_client_package_current(&t.instance.config, &write.package)?;
+        let repo: Value = self.get_uncached(&format!("/repos/{}", t.repository))?;
+        ensure!(
+            repo["id"].as_u64() == Some(t.repository_id)
+                && repo["full_name"] == t.repository
+                && repo["default_branch"] == t.default_branch,
+            "release preparation repository identity changed"
+        );
+        ensure!(
+            self.branch_head(&t.repository, &t.default_branch)? == t.source_sha,
+            "release preparation default head is stale"
+        );
+        let epoch = capture_native_client_workflow_epoch(
+            self,
+            &t.repository,
+            t.repository_id,
+            &t.default_branch,
+            &t.workflow_path,
+            &t.workflow_sha,
+        )?;
+        require_native_client_workflow_epoch_unchanged(&t.workflow_epoch, &epoch)?;
+        let run: Value = self.get_uncached(&format!(
+            "/repos/{}/actions/runs/{}",
+            t.repository, t.run_id
+        ))?;
+        validate_native_release_preparation_run(t, &run)?;
+        let committed = write
+            .committed_head
+            .lock()
+            .map_err(|_| anyhow::anyhow!("release commit state poisoned"))?
+            .clone();
+        match self.branch_head(&t.repository, &t.release_branch) {
+            Ok(head) => ensure!(
+                head == committed.as_deref().unwrap_or(&t.expected_head),
+                "release preparation branch head is stale or request was replayed"
+            ),
+            Err(error)
+                if error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|e| e.status == StatusCode::NOT_FOUND) =>
+            {
+                ensure!(
+                    !t.branch_exists && committed.is_none(),
+                    "release preparation branch disappeared"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+        if let Some(number) = t.existing_pull_request {
+            let pull: Value =
+                self.get_uncached(&format!("/repos/{}/pulls/{number}", t.repository))?;
+            ensure!(
+                pull["state"] == "open"
+                    && pull["head"]["ref"] == t.release_branch
+                    && pull["head"]["sha"].as_str()
+                        == Some(committed.as_deref().unwrap_or(&t.expected_head))
+                    && pull["head"]["repo"]["id"].as_u64() == Some(t.repository_id)
+                    && pull["base"]["repo"]["id"].as_u64() == Some(t.repository_id)
+                    && pull["base"]["ref"] == t.default_branch
+                    && pull["user"]["id"].as_u64()
+                        == Some(t.instance.config.identities.server_bot.id)
+                    && pull["user"]["login"] == t.instance.config.identities.server_bot.login,
+                "release preparation PR identity changed"
+            );
+        }
+        Ok(())
     }
 
     fn require_native_release_pr_metadata_current(
@@ -3943,6 +4142,23 @@ impl GitHub {
                 "invalid commit file path"
             );
         }
+        if let WriteContext::NativeReleasePreparation(write) = &self.writes {
+            let t = &write.target;
+            ensure!(
+                repository == t.repository
+                    && branch == t.release_branch
+                    && expected_head == t.expected_head
+                    && message == t.commit_message
+                    && additions == t.additions
+                    && deletions == t.deletions
+                    && write
+                        .committed_head
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("release commit state poisoned"))?
+                        .is_none(),
+                "release preparation commit differs from its verified artifact"
+            );
+        }
         if let WriteContext::NativeScratch(write) = &self.writes {
             ensure!(
                 write.mode == NativeScratchMode::Securefix
@@ -4016,6 +4232,17 @@ impl GitHub {
             parents.len() == 1 && parents[0]["oid"] == expected_head,
             "created commit has unexpected parent"
         );
+        if let WriteContext::NativeReleasePreparation(write) = &self.writes {
+            let mut recorded = write
+                .committed_head
+                .lock()
+                .map_err(|_| anyhow::anyhow!("release commit state poisoned"))?;
+            ensure!(
+                recorded.is_none(),
+                "release preparation commit already recorded"
+            );
+            *recorded = Some(sha.to_owned());
+        }
         Ok(sha.to_owned())
     }
 
@@ -4939,6 +5166,7 @@ pub fn native_client_request_label(operation: &str, run_id: u64) -> Result<Strin
         "securefix" => "securefix",
         "approval" => "approve",
         "merge" => "merge",
+        "release_prepare" => "release-prepare",
         _ => anyhow::bail!("unsupported native request operation"),
     };
     let label = format!("securefix-native-{role}-{run_id}");
@@ -5032,6 +5260,126 @@ fn validate_native_release_tag_target(
         source_run_id,
         tag_object_sha: Arc::new(Mutex::new(None)),
     })
+}
+
+fn validate_native_release_preparation_target(t: &NativeReleasePreparationTarget) -> Result<()> {
+    let config = crate::instance_config::InstanceConfig::parse(&t.instance.config_bytes)?;
+    validate_native_authority_snapshot(&t.instance.authority)?;
+    ensure!(
+        t.instance.authority.config_sha256
+            == crate::hex_encode(sha2::Sha256::digest(&t.instance.config_bytes))
+            && t.instance.authority.instance_repository == config.instance.repository
+            && t.instance.authority.instance_id == config.instance.id,
+        "release preparation config is not bound to its authority"
+    );
+    let repo = config
+        .repositories
+        .iter()
+        .find(|r| r.repository == t.repository && r.id == t.repository_id)
+        .context("release preparation destination is not configured")?;
+    repo.policy().require(crate::policy::Capability::Release)?;
+    crate::policy::validate_sha(&t.source_sha)?;
+    crate::policy::validate_sha(&t.expected_head)?;
+    crate::policy::validate_sha(&t.workflow_sha)?;
+    crate::policy::validate_sha(&t.workflow_epoch)?;
+    crate::config::validate_branch(&t.default_branch)?;
+    crate::config::validate_branch(&t.release_branch)?;
+    ensure!(
+        Some(t.release_branch.as_str()) == config.branches.release.as_deref()
+            && t.release_branch != t.default_branch
+            && (t.branch_exists || t.expected_head == t.source_sha)
+            && t.run_id > 0
+            && t.run_attempt == 1
+            && t.existing_pull_request != Some(0)
+            && t.workflow_path.starts_with(".github/workflows/")
+            && t.workflow_path.ends_with(".yml")
+            && !t.additions.is_empty()
+            && t.deletions.is_empty()
+            && t.additions.keys().all(|p| [
+                ".release-version",
+                "CHANGELOG.md",
+                "Cargo.toml",
+                "Cargo.lock",
+                "dbt_project.yml",
+                "pyproject.toml"
+            ]
+            .contains(&p.as_str()))
+            && !t.title.is_empty()
+            && t.title.len() <= 256
+            && t.body.len() <= 65536,
+        "release preparation target is not bounded to release metadata"
+    );
+    Ok(())
+}
+
+fn validate_native_release_preparation_run(
+    t: &NativeReleasePreparationTarget,
+    run: &Value,
+) -> Result<()> {
+    let owner = &t.instance.config.identities.owner;
+    let bot = &t.instance.config.identities.server_bot;
+    let actor = &run["actor"];
+    let principal = (actor["id"].as_u64() == Some(owner.id)
+        && actor["login"] == owner.login
+        && actor["type"] == "User")
+        || (actor["id"].as_u64() == Some(bot.id)
+            && actor["login"] == bot.login
+            && actor["type"] == "Bot");
+    ensure!(
+        run["id"].as_u64() == Some(t.run_id)
+            && run["run_attempt"].as_u64() == Some(t.run_attempt)
+            && run["repository"]["id"].as_u64() == Some(t.repository_id)
+            && run["repository"]["full_name"] == t.repository
+            && run["head_repository"]["id"].as_u64() == Some(t.repository_id)
+            && run["head_sha"] == t.source_sha
+            && run["head_branch"] == t.default_branch
+            && run["status"] == "completed"
+            && run["conclusion"] == "success"
+            && matches!(run["event"].as_str(), Some("push" | "workflow_dispatch"))
+            && principal,
+        "release preparation source run is unsuccessful, changed or unauthorized"
+    );
+    Ok(())
+}
+
+fn validate_native_release_preparation_body(
+    write: &NativeReleasePreparationWrite,
+    method: &Method,
+    path: &str,
+    body: &Value,
+) -> Result<()> {
+    let t = &write.target;
+    let committed = write
+        .committed_head
+        .lock()
+        .map_err(|_| anyhow::anyhow!("release commit state poisoned"))?;
+    if *method == Method::POST && path == format!("/repos/{}/git/refs", t.repository) {
+        ensure!(
+            !t.branch_exists
+                && committed.is_none()
+                && body
+                    == &serde_json::json!({"ref":format!("refs/heads/{}",t.release_branch),"sha":t.expected_head}),
+            "release preparation ref differs from its expected head"
+        );
+    } else if *method == Method::POST && path == format!("/repos/{}/pulls", t.repository) {
+        ensure!(
+            t.existing_pull_request.is_none()
+                && committed.is_some()
+                && body
+                    == &serde_json::json!({"title":t.title,"body":t.body,"head":t.release_branch,"base":t.default_branch,"draft":false}),
+            "release preparation PR creation differs from its signed commit and metadata"
+        );
+    } else {
+        ensure!(
+            *method == Method::PATCH
+                && t.existing_pull_request
+                    .is_some_and(|n| path == format!("/repos/{}/pulls/{n}", t.repository))
+                && committed.is_some()
+                && body == &serde_json::json!({"title":t.title,"body":t.body}),
+            "release preparation may only update its existing Server-owned PR metadata"
+        );
+    }
+    Ok(())
 }
 
 fn validate_native_release_pr_metadata_target(write: &NativeReleasePrMetadataTarget) -> Result<()> {
@@ -11086,6 +11434,118 @@ mod tests {
                     .is_err()
             );
             fixture.finish();
+        }
+    }
+
+    #[test]
+    fn native_release_preparation_requires_signed_commit_before_exact_pr_creation() {
+        let instance =
+            instance_authority_fixture(include_bytes!("../tests/fixtures/instance-config.toml"));
+        let package = crate::package::native_client_package_api_test_fixture();
+        let target = NativeReleasePreparationTarget {
+            instance,
+            repository: "example-org/project".into(),
+            repository_id: 987654,
+            source_sha: "a".repeat(40),
+            default_branch: "main".into(),
+            release_branch: "release/next".into(),
+            expected_head: "a".repeat(40),
+            branch_exists: false,
+            existing_pull_request: None,
+            workflow_path: ".github/workflows/release-pr.yml".into(),
+            workflow_sha: "b".repeat(40),
+            workflow_epoch: "c".repeat(40),
+            run_id: 42,
+            run_attempt: 1,
+            additions: BTreeMap::from([
+                (".release-version".into(), b"1.2.3\n".to_vec()),
+                ("CHANGELOG.md".into(), b"Changes".to_vec()),
+            ]),
+            deletions: vec![],
+            commit_message: "chore(release): prepare v1.2.3".into(),
+            title: "chore(release): v1.2.3".into(),
+            body: "Prepare release v1.2.3".into(),
+            client_package: package,
+        };
+        validate_native_release_preparation_target(&target).unwrap();
+        let package =
+            native_client_package_identity(&target.instance.config, &target.client_package)
+                .unwrap();
+        let write = NativeReleasePreparationWrite {
+            target: target.clone(),
+            package,
+            committed_head: Arc::new(Mutex::new(None)),
+        };
+        let root = "/repos/example-org/project";
+        let reference =
+            serde_json::json!({"ref":"refs/heads/release/next","sha":target.source_sha});
+        let body = serde_json::json!({"title":target.title,"body":target.body,"head":target.release_branch,"base":"main","draft":false});
+        validate_native_release_preparation_body(
+            &write,
+            &Method::POST,
+            &format!("{root}/git/refs"),
+            &reference,
+        )
+        .unwrap();
+        assert!(
+            validate_native_release_preparation_body(
+                &write,
+                &Method::POST,
+                &format!("{root}/pulls"),
+                &body
+            )
+            .is_err()
+        );
+        *write.committed_head.lock().unwrap() = Some("d".repeat(40));
+        validate_native_release_preparation_body(
+            &write,
+            &Method::POST,
+            &format!("{root}/pulls"),
+            &body,
+        )
+        .unwrap();
+        assert!(
+            validate_native_release_preparation_body(
+                &write,
+                &Method::POST,
+                &format!("{root}/git/refs"),
+                &reference
+            )
+            .is_err()
+        );
+        let mut altered = body;
+        altered["head"] = serde_json::json!("main");
+        assert!(
+            validate_native_release_preparation_body(
+                &write,
+                &Method::POST,
+                &format!("{root}/pulls"),
+                &altered
+            )
+            .is_err()
+        );
+        let mut changed = target.clone();
+        changed.instance.authority.config_sha256 = "f".repeat(64);
+        assert!(validate_native_release_preparation_target(&changed).is_err());
+        let mut changed = target.clone();
+        changed.additions.insert("src/main.rs".into(), vec![1]);
+        assert!(validate_native_release_preparation_target(&changed).is_err());
+        let mut changed = target.clone();
+        changed.run_attempt = 2;
+        assert!(validate_native_release_preparation_target(&changed).is_err());
+        let run = serde_json::json!({"id":42,"run_attempt":1,"repository":{"id":987654,"full_name":target.repository},
+            "head_repository":{"id":987654},"head_sha":target.source_sha,"head_branch":"main", "event":"push",
+            "status":"completed","conclusion":"success","actor":{"id":101,"login":"maintainer","type":"User"}});
+        validate_native_release_preparation_run(&target, &run).unwrap();
+        for (pointer, value) in [
+            ("/head_sha", serde_json::json!("e".repeat(40))),
+            ("/actor/id", serde_json::json!(999)),
+            ("/conclusion", serde_json::json!("failure")),
+            ("/run_attempt", serde_json::json!(2)),
+        ] {
+            let mut changed = run.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(validate_native_release_preparation_run(&target, &changed).is_err());
         }
     }
 

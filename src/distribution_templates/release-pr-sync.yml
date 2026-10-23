@@ -1,8 +1,8 @@
 name: Release PR Sync
 
 on:
-  # Managed release PR updates already synchronize their title and body.
-  workflow_dispatch:
+  push:
+    branches: [release/next]
 
 permissions: {}
 
@@ -18,3 +18,6 @@ jobs:
       attestations: read
       pull-requests: write
     uses: @SERVER_REPOSITORY@/.github/workflows/reusable-release-pr-sync.yml@@SECUREFIX_RUNTIME_SHA@ # @RUNTIME_VERSION@
+    with:
+      server_repository: @SERVER_REPOSITORY@
+      instance_config_path: securefix-server.toml

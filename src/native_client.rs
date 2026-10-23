@@ -695,7 +695,7 @@ fn parse_event_time(value: &Value) -> Result<DateTime<Utc>> {
     )
 }
 
-fn capture_artifact_identity(
+pub(crate) fn capture_artifact_identity(
     api: &GitHub,
     repository: &str,
     run_id: u64,
@@ -831,7 +831,7 @@ fn validate_workflow_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn capture_workflow_ref(repository: &str, workflow_path: &str) -> Result<String> {
+pub(crate) fn capture_workflow_ref(repository: &str, workflow_path: &str) -> Result<String> {
     let full_ref = std::env::var("GITHUB_WORKFLOW_REF").context("missing GITHUB_WORKFLOW_REF")?;
     let prefix = format!("{repository}/{workflow_path}@");
     let reference = full_ref

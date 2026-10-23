@@ -419,7 +419,7 @@ fn native_operation_role(operation: &str) -> Result<&'static str> {
     }
 }
 
-fn native_request_event_locator(payload: &Value, role: &str) -> Result<(String, u64)> {
+pub(crate) fn native_request_event_locator(payload: &Value, role: &str) -> Result<(String, u64)> {
     let label = payload["label"]["name"]
         .as_str()
         .context("native label event has no name")?;
@@ -2783,6 +2783,40 @@ fn download_request_from_run_for_instance(
     producer_run_id: u64,
     capability: securefix::policy::Capability,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
+    let (manifest_bytes, bundle_bytes) = download_request_proof_for_instance(
+        server_api,
+        api,
+        captured,
+        producer_repository,
+        producer_run_id,
+        capability,
+    )?;
+    let manifest: RequestManifest =
+        serde_json::from_slice(&manifest_bytes).context("parse downloaded request manifest")?;
+    manifest.validate()?;
+    let target = captured
+        .config
+        .repositories
+        .iter()
+        .find(|r| r.repository == producer_repository)
+        .context("producer Client repository is not configured")?;
+    ensure!(
+        manifest.producer.run_id == producer_run_id
+            && manifest.repository.id == target.id
+            && manifest.repository.full_name == producer_repository,
+        "downloaded request does not identify the selected producer run and Client repository"
+    );
+    Ok((manifest_bytes, bundle_bytes))
+}
+
+pub(crate) fn download_request_proof_for_instance(
+    server_api: &securefix::api::GitHub,
+    api: &securefix::api::GitHub,
+    captured: &securefix::api::NativeServerInstanceAuthority,
+    producer_repository: &str,
+    producer_run_id: u64,
+    capability: securefix::policy::Capability,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     securefix::policy::validate_repository(producer_repository)?;
     ensure!(producer_run_id > 0, "invalid producer run ID");
     let config = &captured.config;
@@ -2853,15 +2887,6 @@ fn download_request_from_run_for_instance(
         "native request proof artifact bytes differ from GitHub metadata"
     );
     let (manifest_bytes, bundle_bytes) = request_files_from_zip(&bytes)?;
-    let manifest: RequestManifest =
-        serde_json::from_slice(&manifest_bytes).context("parse downloaded request manifest")?;
-    manifest.validate()?;
-    ensure!(
-        manifest.producer.run_id == producer_run_id
-            && manifest.repository.id == target.id
-            && manifest.repository.full_name == producer_repository,
-        "downloaded request does not identify the selected producer run and Client repository"
-    );
     // Keep the Server reader explicit in this helper even though its current
     // checks are already captured above; callers must not substitute a token
     // scoped only to the Client destination for protected instance reads.
@@ -3113,6 +3138,29 @@ fn verify_certificate(
     signer_sha: &str,
     manifest_bytes: &[u8],
 ) -> Result<()> {
+    verify_native_certificate(
+        verified,
+        &manifest.repository,
+        &manifest.producer,
+        run,
+        signer_repository,
+        signer_workflow,
+        signer_sha,
+        manifest_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_native_certificate(
+    verified: &Value,
+    repository: &crate::native_client::RepositoryIdentity,
+    producer: &crate::native_client::ProducerIdentity,
+    run: &Value,
+    signer_repository: &str,
+    signer_workflow: &str,
+    signer_sha: &str,
+    manifest_bytes: &[u8],
+) -> Result<()> {
     ensure!(
         verified
             .as_array()
@@ -3124,18 +3172,18 @@ fn verify_certificate(
     let statement = &result["statement"];
     let expected_run = format!(
         "https://github.com/{}/actions/runs/{}/attempts/{}",
-        manifest.repository.full_name, manifest.producer.run_id, manifest.producer.run_attempt
+        repository.full_name, producer.run_id, producer.run_attempt
     );
     let expected_signer =
         format!("https://github.com/{signer_repository}/{signer_workflow}@{signer_sha}");
     let expected_config_prefix = format!(
         "https://github.com/{}/{}@",
-        manifest.repository.full_name, manifest.producer.workflow_path
+        repository.full_name, producer.workflow_path
     );
     let workflow_ref = certificate["githubWorkflowRef"]
         .as_str()
         .context("attestation caller workflow ref is missing")?;
-    let expected_config = format!("{expected_config_prefix}{}", manifest.producer.workflow_ref);
+    let expected_config = format!("{expected_config_prefix}{}", producer.workflow_ref);
     let owner_id = run["repository"]["owner"]["id"]
         .as_u64()
         .filter(|id| *id > 0)
@@ -3143,22 +3191,19 @@ fn verify_certificate(
     ensure!(
         certificate["issuer"] == "https://token.actions.githubusercontent.com"
             && certificate["githubWorkflowRepository"].as_str()
-                == Some(manifest.repository.full_name.as_str())
-            && certificate["githubWorkflowSHA"].as_str()
-                == Some(manifest.producer.context_sha.as_str())
-            && certificate["buildConfigDigest"].as_str()
-                == Some(manifest.producer.workflow_sha.as_str())
-            && workflow_ref == manifest.producer.workflow_ref
+                == Some(repository.full_name.as_str())
+            && certificate["githubWorkflowSHA"].as_str() == Some(producer.context_sha.as_str())
+            && certificate["buildConfigDigest"].as_str() == Some(producer.workflow_sha.as_str())
+            && workflow_ref == producer.workflow_ref
             && certificate["buildConfigURI"].as_str() == Some(expected_config.as_str())
-            && certificate["githubWorkflowTrigger"].as_str()
-                == Some(manifest.producer.event.as_str())
+            && certificate["githubWorkflowTrigger"].as_str() == Some(producer.event.as_str())
             && certificate["sourceRepositoryURI"]
-                == format!("https://github.com/{}", manifest.repository.full_name)
+                == format!("https://github.com/{}", repository.full_name)
             && certificate["sourceRepositoryDigest"].as_str()
-                == Some(manifest.producer.context_sha.as_str())
+                == Some(producer.context_sha.as_str())
             && certificate["sourceRepositoryIdentifier"]
                 .as_str()
-                .is_some_and(|value| value.parse::<u64>().ok() == Some(manifest.repository.id))
+                .is_some_and(|value| value.parse::<u64>().ok() == Some(repository.id))
             && certificate["sourceRepositoryOwnerIdentifier"]
                 .as_str()
                 .is_some_and(|value| value.parse::<u64>().ok() == Some(owner_id))

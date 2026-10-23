@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "release_preparation.rs"]
+mod preparation;
+
 const MAX_PROVIDER_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PROVIDER_ARCHIVE_FILES: usize = 32;
 const MAX_NATIVE_ASSET_BYTES: u64 = 128 * 1024 * 1024;
@@ -507,6 +510,21 @@ pub enum Command {
         #[arg(long, default_value = "")]
         version: String,
     },
+    CapturePreparation {
+        #[arg(long)]
+        artifact_name: String,
+        #[arg(long, default_value = "native-request/manifest.json")]
+        output: PathBuf,
+    },
+    RequestPreparation {
+        #[arg(long, default_value = "native-request/manifest.json")]
+        manifest: PathBuf,
+    },
+    LocatePreparation,
+    ApplyPreparation {
+        #[arg(long)]
+        apply: bool,
+    },
     SyncPr,
     Classify,
     ResolvePr(PrArgs),
@@ -529,6 +547,13 @@ pub enum Command {
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Prepare { version } => prepare(&version),
+        Command::CapturePreparation {
+            artifact_name,
+            output,
+        } => preparation::capture(&artifact_name, &output),
+        Command::RequestPreparation { manifest } => preparation::dispatch(&manifest),
+        Command::LocatePreparation => preparation::locate(),
+        Command::ApplyPreparation { apply } => preparation::apply(apply),
         Command::SyncPr => sync_pr(),
         Command::Classify => classify(),
         Command::ResolvePr(pr) => resolve_pr_command(pr.release_pr_number),
@@ -889,6 +914,15 @@ fn release_changelog_range(base: &Version) -> Option<String> {
 }
 
 fn prepare(input_version: &str) -> Result<()> {
+    let server = std::env::var("SECUREFIX_SERVER_REPOSITORY").ok();
+    let config = std::env::var("SECUREFIX_INSTANCE_CONFIG_PATH").ok();
+    if server.is_some() || config.is_some() {
+        ensure!(
+            server.is_some() && config.is_some(),
+            "release instance locator is incomplete"
+        );
+        return preparation::prepare(input_version);
+    }
     let api = api()?;
     let policy = current_policy(&api)?;
     policy
@@ -938,6 +972,11 @@ pub(crate) fn prepare_metadata(input_version: &str) -> Result<()> {
         update_pyproject_version(Path::new("pyproject.toml"), &version)?;
     }
     let mut files = vec![".release-version", "CHANGELOG.md"];
+    if Path::new("Cargo.toml").is_file() {
+        update_cargo_version(Path::new("Cargo.toml"), Path::new("Cargo.lock"), &version)?;
+        files.push("Cargo.toml");
+        files.push("Cargo.lock");
+    }
     if Path::new("dbt_project.yml").is_file() {
         files.push("dbt_project.yml");
     }
@@ -955,6 +994,42 @@ pub(crate) fn prepare_metadata(input_version: &str) -> Result<()> {
         },
     )?;
     crate::output("releasable", "true")?;
+    Ok(())
+}
+
+fn update_cargo_version(manifest: &Path, lock: &Path, version: &str) -> Result<()> {
+    let mut document: toml_edit::DocumentMut = std::fs::read_to_string(manifest)?.parse()?;
+    let name = document["package"]["name"]
+        .as_str()
+        .context("Cargo package name must be explicit")?
+        .to_owned();
+    let previous = document["package"]["version"]
+        .as_str()
+        .context("Cargo package version must be explicit")?
+        .to_owned();
+    let mut locked: toml_edit::DocumentMut = std::fs::read_to_string(lock)?.parse()?;
+    let matches: Vec<_> = locked["package"]
+        .as_array_of_tables_mut()
+        .context("Cargo.lock packages missing")?
+        .iter_mut()
+        .filter(|package| {
+            package["name"].as_str() == Some(&name) && package.get("source").is_none()
+        })
+        .collect();
+    ensure!(
+        matches.len() == 1,
+        "Cargo.lock must contain exactly one matching root package"
+    );
+    for package in matches {
+        ensure!(
+            package["version"].as_str() == Some(&previous),
+            "Cargo manifest/lock versions differ"
+        );
+        package["version"] = toml_edit::value(version);
+    }
+    document["package"]["version"] = toml_edit::value(version);
+    std::fs::write(manifest, document.to_string())?;
+    std::fs::write(lock, locked.to_string())?;
     Ok(())
 }
 
@@ -1067,12 +1142,14 @@ fn sync_pr() -> Result<()> {
     let number = pr["number"]
         .as_u64()
         .context("release PR response lacks number")?;
-    let metadata =
-        if Path::new("dbt_project.yml").is_file() || Path::new("pyproject.toml").is_file() {
-            "package version metadata"
-        } else {
-            "release metadata"
-        };
+    let metadata = if Path::new("dbt_project.yml").is_file()
+        || Path::new("pyproject.toml").is_file()
+        || Path::new("Cargo.toml").is_file()
+    {
+        "package version metadata"
+    } else {
+        "release metadata"
+    };
     let body = format!(
         "## Summary\n- Prepare release v{version}\n- Update the changelog and {metadata}\n\nThis pull request is managed by the Release PR workflow."
     );
@@ -1214,12 +1291,14 @@ fn sync_native_release_pr(api: &GitHub, server_repository: &str, config_path: &s
         git_output(&["rev-parse", "HEAD"])? == head.as_str(),
         "release sync checkout differs from its source head"
     );
-    let metadata =
-        if Path::new("dbt_project.yml").is_file() || Path::new("pyproject.toml").is_file() {
-            "package version metadata"
-        } else {
-            "release metadata"
-        };
+    let metadata = if Path::new("dbt_project.yml").is_file()
+        || Path::new("pyproject.toml").is_file()
+        || Path::new("Cargo.toml").is_file()
+    {
+        "package version metadata"
+    } else {
+        "release metadata"
+    };
     let title = format!("chore(release): v{version}");
     let body = format!(
         "## Summary\n- Prepare release v{version}\n- Update the changelog and {metadata}\n\nThis pull request is managed by the Release PR workflow."
