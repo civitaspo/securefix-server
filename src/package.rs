@@ -11,6 +11,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 
+pub(crate) const SOURCE_BUILD_MANIFEST_PATH: &str =
+    ".github/actions/load-package/source-package.json";
+
 const MAX_CARGO_TOML_BYTES: usize = 64 * 1024;
 const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PACKAGE_ARTIFACT_BYTES: usize = 160 * 1024 * 1024;
@@ -1778,13 +1781,10 @@ fn publish_native_package(
         "scratch package publication requires an explicit prerelease version"
     );
     let manifest_value: Value = source_api.get_uncached(&format!(
-        "/repos/{}/contents/.github/actions/load-package/source-package.json?ref={source_sha}",
+        "/repos/{}/contents/{SOURCE_BUILD_MANIFEST_PATH}?ref={source_sha}",
         source.repository
     ))?;
-    let manifest_bytes = source_file_bytes(
-        &manifest_value,
-        ".github/actions/load-package/source-package.json",
-    )?;
+    let manifest_bytes = source_file_bytes(&manifest_value, SOURCE_BUILD_MANIFEST_PATH)?;
     let manifest: NativePackageReleaseManifest = serde_json::from_slice(&manifest_bytes)
         .context("source package manifest is invalid JSON")?;
     let producer_branch = validate_scratch_package_run(
