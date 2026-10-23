@@ -91,6 +91,7 @@ pub enum WorkflowRole {
     PolicyCheck,
     Release,
     Securefix,
+    Settings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -839,6 +840,25 @@ mod tests {
             );
             rejects(&source);
         }
+    }
+
+    #[test]
+    fn settings_role_is_explicit_and_shares_no_operation_wrapper() {
+        let source = changed(
+            &fixture_text(),
+            "[workflow_roles]",
+            "[workflow_roles]\nsettings = \".github/workflows/repo-settings.yml\"",
+        );
+        let parsed = InstanceConfig::parse(source.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.workflow_roles[&WorkflowRole::Settings],
+            ".github/workflows/repo-settings.yml"
+        );
+        rejects(&changed(
+            &source,
+            ".github/workflows/repo-settings.yml",
+            ".github/workflows/approve.yml",
+        ));
     }
 
     #[test]

@@ -21,3 +21,17 @@ Require lockfile enforcement belongs to this settings flow. The currently docume
 Managed scratch callers keep literal implementation pins in their desired YAML files. Reconciliation does not replace the Securefix Client pin with the renderer source revision. The cross-repository Securefix caller selects `civitaspo/securefix-server` and `repo-settings/native-securefix-write-test-instance.toml`; the policy, approval, and merge callers select that Server and `repo-settings/native-role-events-test-instance.toml`. Validation reads those exact configurations from the selected source snapshot and checks Server identity, target capability, trusted Client source and request scope. Release Tag uses the same Server and protected configuration as policy, approval, and merge, so its merged-PR approval proof is checked under that authority. The package destination and the managed repository do not select the approval Server. These files describe scratch deployment only. The running Server reads its configuration from its protected default branch.
 
 The scratch managed-file set includes `.github/workflows/actions.lock`. Generate it with the pinned `gh-actions-lock` tool against the assembled target workflows before committing the desired state, and run `--verify` on that tree. The workflow definitions and their generated lock are reviewed in the same reconcile PR.
+
+The native managed-file path uses `settings managed-prepare --config-path PATH
+--manifest-path PATH` to resolve the destination and App ID before requesting a
+repository-scoped workflow writer, then `settings managed-reconcile` with the
+same inputs to propose the exact signed file changes. The explicit `workflow_roles.settings` path binds the executing protected caller. Both paths read the
+manifest and desired bytes from the Server instance's protected default branch;
+there is no candidate source or runtime-version input. The destination must have
+`settings` capability in the protected external TOML. The writer can create only
+its managed branch, signed commit and reviewable PR; it cannot merge, administer
+repository settings, or modify unrelated files. Each write revalidates the
+Server authority, settings workflow and desired source bytes, destination identity,
+default head, and any previously created signed branch. Administrator settings
+reconciliation remains a separate job. The owner-selected `*-scratch` commands
+remain development probes and do not qualify this path as deployed.

@@ -393,9 +393,31 @@ pub struct NativeWorkflowAuthority {
     pub pins: Vec<String>,
 }
 
+/// One reviewable managed-file PR, selected from protected instance sources.
+/// This writer never changes repository administration settings or merges PRs.
+#[derive(Debug, Clone)]
+pub struct NativeManagedFilesTarget {
+    pub instance: NativeServerInstanceAuthority,
+    pub repository: String,
+    pub repository_id: u64,
+    pub default_branch: String,
+    pub base_sha: String,
+    pub branch: String,
+    pub source_files: BTreeMap<String, Vec<u8>>,
+    pub additions: BTreeMap<String, Vec<u8>>,
+    pub deletions: Vec<String>,
+}
+
+#[derive(Clone)]
+struct NativeManagedFilesWrite {
+    target: NativeManagedFilesTarget,
+    committed_head: Arc<Mutex<Option<String>>>,
+}
+
 #[derive(Clone)]
 enum WriteContext {
     ReadOnly,
+    NativeManagedFiles(Box<NativeManagedFilesWrite>),
     ClientLabel {
         server: String,
     },
@@ -848,6 +870,102 @@ impl GitHub {
             control_id: Some(control.identity()?),
         };
         Ok(self)
+    }
+
+    pub fn native_managed_files_from_env(
+        token_name: &str,
+        target: NativeManagedFilesTarget,
+    ) -> Result<Self> {
+        validate_native_managed_files_target(&target)?;
+        let mut api = Self::from_env(token_name)?;
+        require_single_repository_installation(&api, target.repository_id, &target.repository)?;
+        api.writes = WriteContext::NativeManagedFiles(Box::new(NativeManagedFilesWrite {
+            target,
+            committed_head: Arc::new(Mutex::new(None)),
+        }));
+        api.require_current_revision()?;
+        Ok(api)
+    }
+
+    fn require_native_managed_files_current(&self, write: &NativeManagedFilesWrite) -> Result<()> {
+        let target = &write.target;
+        validate_native_managed_files_target(target)?;
+        let instance = &target.instance.config.instance;
+        let settings_path = target
+            .instance
+            .config
+            .workflow_roles
+            .get(&crate::instance_config::WorkflowRole::Settings)
+            .context("managed-file settings workflow role is missing")?;
+        ensure!(
+            std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(instance.repository.as_str())
+                && std::env::var("GITHUB_REF").as_deref()
+                    == Ok(format!("refs/heads/{}", instance.default_branch).as_str())
+                && std::env::var("GITHUB_WORKFLOW_REF").as_deref()
+                    == Ok(format!(
+                        "{}/{}@refs/heads/{}",
+                        instance.repository, settings_path, instance.default_branch
+                    )
+                    .as_str())
+                && matches!(
+                    std::env::var("GITHUB_EVENT_NAME").as_deref(),
+                    Ok("schedule" | "workflow_dispatch")
+                ),
+            "managed-file writes require the protected repository-settings workflow"
+        );
+        if std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("workflow_dispatch") {
+            ensure!(
+                std::env::var("GITHUB_ACTOR_ID")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    == Some(target.instance.config.identities.owner.id),
+                "managed-file dispatch requires the configured owner"
+            );
+        }
+        let server = Self::from_env("GITHUB_TOKEN")?;
+        server.require_remote_native_server_instance_authority_unchanged(&target.instance)?;
+        let revision = current_branch_sha(&server, &instance.repository, &instance.default_branch)?;
+        for (path, expected) in &target.source_files {
+            ensure!(
+                server.content_uncached(&instance.repository, path, &revision)? == *expected,
+                "managed-file protected source changed: {path}"
+            );
+        }
+        let workflow_sha =
+            std::env::var("GITHUB_WORKFLOW_SHA").context("missing settings workflow SHA")?;
+        crate::policy::validate_sha(&workflow_sha)?;
+        ensure!(
+            server.content_uncached(&instance.repository, settings_path, &workflow_sha)?
+                == *target
+                    .source_files
+                    .get(settings_path)
+                    .context("missing settings workflow source")?,
+            "executing settings workflow differs from protected source"
+        );
+        let repository: Value = self.get_uncached(&format!("/repos/{}", target.repository))?;
+        ensure!(
+            repository["id"].as_u64() == Some(target.repository_id)
+                && repository["full_name"] == target.repository
+                && repository["default_branch"] == target.default_branch,
+            "managed-file destination identity changed"
+        );
+        ensure!(
+            current_branch_sha(self, &target.repository, &target.default_branch)?
+                == target.base_sha,
+            "managed-file destination default branch changed"
+        );
+        if let Some(head) = write
+            .committed_head
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?
+            .as_ref()
+        {
+            ensure!(
+                current_branch_sha(self, &target.repository, &target.branch)? == *head,
+                "managed-file signed branch changed before PR creation"
+            );
+        }
+        Ok(())
     }
 
     pub fn scratch_from_env(name: &str, candidate_sha: &str) -> Result<Self> {
@@ -2316,6 +2434,19 @@ impl GitHub {
     }
 
     fn require_write_target(&self, method: &Method, path: &str) -> Result<()> {
+        if let WriteContext::NativeManagedFiles(write) = &self.writes {
+            let root = format!("/repos/{}", write.target.repository);
+            ensure!(
+                *method == Method::POST
+                    && [
+                        format!("{root}/git/refs"),
+                        format!("{root}/git/commits"),
+                        format!("{root}/pulls")
+                    ]
+                    .contains(&path.to_owned()),
+                "managed-file writer may only create its exact branch, signed commit and reviewable PR"
+            );
+        }
         if let WriteContext::ClientLabel { server } = &self.writes {
             ensure!(
                 path == format!("/repos/{server}/labels"),
@@ -2714,6 +2845,17 @@ impl GitHub {
                 body.context("native Client release label body is missing")?,
             )?;
         }
+        if let WriteContext::NativeManagedFiles(write) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            validate_native_managed_files_body(
+                write,
+                &method,
+                path,
+                body.context("managed-file request body missing")?,
+            )?;
+        }
         if let WriteContext::NativeReleasePreparation(write) = &self.writes
             && method != Method::GET
             && method != Method::HEAD
@@ -3005,6 +3147,9 @@ impl GitHub {
     fn require_current_revision(&self) -> Result<()> {
         let (expected, expected_control) = match &self.writes {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
+            WriteContext::NativeManagedFiles(write) => {
+                return self.require_native_managed_files_current(write);
+            }
             WriteContext::ClientLabel { .. } | WriteContext::NativeClientLabel { .. } => {
                 return Ok(());
             }
@@ -4135,6 +4280,23 @@ impl GitHub {
                 "invalid commit file path"
             );
         }
+        if let WriteContext::NativeManagedFiles(write) = &self.writes {
+            let t = &write.target;
+            ensure!(
+                repository == t.repository
+                    && branch == t.branch
+                    && expected_head == t.base_sha
+                    && message == "Reconcile managed files"
+                    && additions == t.additions
+                    && deletions == t.deletions
+                    && write
+                        .committed_head
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?
+                        .is_none(),
+                "managed-file commit differs from the protected desired state"
+            );
+        }
         if let WriteContext::NativeReleasePreparation(write) = &self.writes {
             let t = &write.target;
             ensure!(
@@ -4225,6 +4387,14 @@ impl GitHub {
             parents.len() == 1 && parents[0]["oid"] == expected_head,
             "created commit has unexpected parent"
         );
+        if let WriteContext::NativeManagedFiles(write) = &self.writes {
+            let mut recorded = write
+                .committed_head
+                .lock()
+                .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?;
+            ensure!(recorded.is_none(), "managed-file commit already recorded");
+            *recorded = Some(sha.to_owned());
+        }
         if let WriteContext::NativeReleasePreparation(write) = &self.writes {
             let mut recorded = write
                 .committed_head
@@ -8539,6 +8709,123 @@ fn bounded_read(reader: impl Read, max: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+pub fn validate_native_managed_file_path(path: &str) -> Result<()> {
+    let workflow = path.strip_prefix(".github/workflows/").is_some_and(|name| {
+        !name.contains('/') && (name.ends_with(".yml") || name == "actions.lock")
+    });
+    ensure!(
+        (workflow || path == "securefix-server.toml")
+            && !path.contains(['\\', '\0', '\r', '\n'])
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != ".."),
+        "invalid managed-file destination"
+    );
+    Ok(())
+}
+
+fn validate_native_managed_files_target(target: &NativeManagedFilesTarget) -> Result<()> {
+    crate::policy::validate_repository(&target.repository)?;
+    crate::policy::validate_sha(&target.base_sha)?;
+    crate::config::validate_branch(&target.default_branch)?;
+    crate::config::validate_branch(&target.branch)?;
+    ensure!(
+        target.branch.starts_with("securefix/managed-files/")
+            && target.branch != target.default_branch,
+        "invalid managed-file PR branch"
+    );
+    target
+        .instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == target.repository && entry.id == target.repository_id)
+        .context("managed-file destination is not configured")?
+        .policy()
+        .require(crate::policy::Capability::Settings)?;
+    let settings_path = target
+        .instance
+        .config
+        .workflow_roles
+        .get(&crate::instance_config::WorkflowRole::Settings)
+        .context("managed-file settings workflow role is missing")?;
+    ensure!(
+        target.source_files.contains_key(settings_path)
+            && !target.source_files.is_empty()
+            && target.source_files.len() <= 1000,
+        "managed-file protected sources missing or excessive"
+    );
+    for (path, bytes) in &target.source_files {
+        ensure!(
+            (path == settings_path || path.starts_with("repo-settings/"))
+                && !path.contains(['\\', '\0'])
+                && path
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+                && bytes.len() <= 1024 * 1024,
+            "invalid protected managed-file source"
+        );
+    }
+    ensure!(
+        !target.additions.is_empty() || !target.deletions.is_empty(),
+        "managed-file plan is empty"
+    );
+    let mut paths = std::collections::BTreeSet::new();
+    for path in target.additions.keys().chain(target.deletions.iter()) {
+        validate_native_managed_file_path(path)?;
+        ensure!(paths.insert(path), "duplicate managed-file destination");
+    }
+    ensure!(
+        paths.len() <= 1000
+            && target
+                .additions
+                .values()
+                .all(|bytes| bytes.len() <= 1024 * 1024),
+        "managed-file plan exceeds bounds"
+    );
+    Ok(())
+}
+
+fn validate_native_managed_files_body(
+    write: &NativeManagedFilesWrite,
+    method: &Method,
+    path: &str,
+    body: &Value,
+) -> Result<()> {
+    let t = &write.target;
+    ensure!(
+        *method == Method::POST,
+        "managed-file writer cannot update or delete existing resources"
+    );
+    if path == format!("/repos/{}/git/refs", t.repository) {
+        ensure!(
+            write
+                .committed_head
+                .lock()
+                .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?
+                .is_none()
+                && *body
+                    == serde_json::json!({"ref":format!("refs/heads/{}", t.branch),"sha":t.base_sha}),
+            "managed-file branch creation differs from the accepted base"
+        );
+    } else if path == format!("/repos/{}/pulls", t.repository) {
+        let head = write
+            .committed_head
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?;
+        ensure!(
+            head.is_some()
+                && *body
+                    == serde_json::json!({"title":"Reconcile managed files","head":t.branch,"base":t.default_branch,
+            "body":"Reconcile the protected repo-settings desired files. This PR does not merge automatically."}),
+            "managed-file PR differs from its signed branch"
+        );
+    } else {
+        bail!("managed-file commits require the validated signed-commit path");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8560,6 +8847,104 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output.stdout
+    }
+
+    fn native_managed_files_fixture() -> NativeManagedFilesWrite {
+        NativeManagedFilesWrite {
+            target: NativeManagedFilesTarget {
+                instance: instance_authority_fixture(
+                    String::from_utf8_lossy(include_bytes!(
+                        "../tests/fixtures/instance-config.toml"
+                    ))
+                    .replace(
+                        "[workflow_roles]",
+                        "[workflow_roles]\nsettings = \".github/workflows/repo-settings.yml\"",
+                    )
+                    .as_bytes(),
+                ),
+                repository: "example-org/project".into(),
+                repository_id: 987654,
+                default_branch: "main".into(),
+                base_sha: "a".repeat(40),
+                branch: "securefix/managed-files/42-1".into(),
+                source_files: BTreeMap::from([
+                    (
+                        ".github/workflows/repo-settings.yml".into(),
+                        b"protected settings".to_vec(),
+                    ),
+                    (
+                        "repo-settings/managed-files/approve.yml".into(),
+                        b"protected desired".to_vec(),
+                    ),
+                ]),
+                additions: BTreeMap::from([(
+                    ".github/workflows/approve.yml".into(),
+                    b"protected desired".to_vec(),
+                )]),
+                deletions: vec![".github/workflows/old.yml".into()],
+            },
+            committed_head: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn native_managed_files_restricts_repository_capability_and_exact_files() {
+        let write = native_managed_files_fixture();
+        validate_native_managed_files_target(&write.target).unwrap();
+        for path in [
+            "../policy.json",
+            ".github/workflows/../policy.json",
+            ".github/workflows/nested/approve.yml",
+            "Cargo.toml",
+            "control/active.json",
+        ] {
+            let mut target = write.target.clone();
+            target.additions.insert(path.into(), b"bad".to_vec());
+            assert!(
+                validate_native_managed_files_target(&target).is_err(),
+                "{path}"
+            );
+        }
+        let mut target = write.target.clone();
+        target.repository_id += 1;
+        assert!(validate_native_managed_files_target(&target).is_err());
+        let mut target = write.target.clone();
+        target.instance.config.repositories[0]
+            .capabilities
+            .retain(|cap| *cap != crate::policy::Capability::Settings);
+        assert!(validate_native_managed_files_target(&target).is_err());
+        let mut target = write.target.clone();
+        target
+            .deletions
+            .push(target.additions.keys().next().unwrap().clone());
+        assert!(validate_native_managed_files_target(&target).is_err());
+    }
+
+    #[test]
+    fn native_managed_files_creates_only_a_reviewable_pr_from_its_signed_branch() {
+        let write = native_managed_files_fixture();
+        let refs = "/repos/example-org/project/git/refs";
+        let pulls = "/repos/example-org/project/pulls";
+        let reference = serde_json::json!({"ref":"refs/heads/securefix/managed-files/42-1","sha":"a".repeat(40)});
+        validate_native_managed_files_body(&write, &Method::POST, refs, &reference).unwrap();
+        let mut wrong = reference.clone();
+        wrong["ref"] = serde_json::json!("refs/heads/main");
+        assert!(validate_native_managed_files_body(&write, &Method::POST, refs, &wrong).is_err());
+        let pull = serde_json::json!({"title":"Reconcile managed files","head":"securefix/managed-files/42-1","base":"main",
+            "body":"Reconcile the protected repo-settings desired files. This PR does not merge automatically."});
+        assert!(validate_native_managed_files_body(&write, &Method::POST, pulls, &pull).is_err());
+        *write.committed_head.lock().unwrap() = Some("b".repeat(40));
+        validate_native_managed_files_body(&write, &Method::POST, pulls, &pull).unwrap();
+        assert!(
+            validate_native_managed_files_body(&write, &Method::POST, refs, &reference).is_err()
+        );
+        for (method, path) in [
+            (Method::PUT, "/repos/example-org/project/pulls/1/merge"),
+            (Method::PATCH, pulls),
+            (Method::POST, "/repos/example-org/project/git/commits"),
+        ] {
+            assert!(validate_native_managed_files_body(&write, &method, path, &pull).is_err());
+        }
     }
 
     #[test]

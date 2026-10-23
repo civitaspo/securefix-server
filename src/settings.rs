@@ -63,6 +63,18 @@ pub enum Command {
     },
     ActivationPreflight,
     ControlledMerges,
+    ManagedPrepare {
+        #[arg(long)]
+        config_path: String,
+        #[arg(long)]
+        manifest_path: String,
+    },
+    ManagedReconcile {
+        #[arg(long)]
+        config_path: String,
+        #[arg(long)]
+        manifest_path: String,
+    },
     ManagedRender {
         #[arg(long)]
         output_dir: PathBuf,
@@ -96,6 +108,28 @@ pub fn run(command: Command) -> Result<()> {
         Command::ActivationPreflight => activation_preflight(),
         Command::ControlledMerges => controlled_merges(),
         Command::ManagedRender { output_dir } => managed_render(&output_dir),
+        Command::ManagedPrepare {
+            config_path,
+            manifest_path,
+        } => {
+            let prepared = load_managed_deployment(&config_path, &manifest_path)?;
+            let (owner, name) = prepared
+                .manifest
+                .repository
+                .split_once('/')
+                .context("managed repository has no owner")?;
+            crate::output("repository", &prepared.manifest.repository)?;
+            crate::output("repo_owner", owner)?;
+            crate::output("repo_name", name)?;
+            crate::output(
+                "server_app_id",
+                prepared.instance.config.apps.server_id.to_string(),
+            )
+        }
+        Command::ManagedReconcile {
+            config_path,
+            manifest_path,
+        } => managed_reconcile(&config_path, &manifest_path),
         Command::ManagedReconcileScratch {
             source_sha,
             client_repository,
@@ -203,26 +237,52 @@ fn managed_desired_files() -> Result<(ManagedFilesManifest, BTreeMap<String, Vec
     Ok((manifest, desired))
 }
 
-fn parse_managed_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
+fn parse_managed_file_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
     ensure!(
         bytes.len() <= 32 * 1024,
         "managed-files manifest exceeds size limit"
     );
     let manifest: ManagedFilesManifest = serde_json::from_slice(bytes)?;
+    validate_repository(&manifest.repository)?;
+    config::validate_branch(&manifest.default_branch)?;
+    ensure!(
+        manifest.repository_id > 0 && !manifest.files.is_empty(),
+        "managed-file identity or files missing"
+    );
+    let mut targets = BTreeSet::new();
+    for file in &manifest.files {
+        ensure!(
+            file.source.starts_with("repo-settings/managed-files/")
+                && safe_relative_path(&file.source),
+            "managed-files manifest contains an unsafe source"
+        );
+        securefix::api::validate_native_managed_file_path(&file.target)?;
+        ensure!(
+            targets.insert(&file.target),
+            "duplicate managed-file target"
+        );
+    }
+    for path in &manifest.remove {
+        securefix::api::validate_native_managed_file_path(path)?;
+        ensure!(
+            targets.insert(path),
+            "duplicate or active managed-file removal"
+        );
+    }
+    ensure!(
+        targets.len() <= 1000,
+        "managed-file target count exceeds bound"
+    );
+    Ok(manifest)
+}
+
+fn parse_managed_manifest(bytes: &[u8]) -> Result<ManagedFilesManifest> {
+    let manifest = parse_managed_file_manifest(bytes)?;
     let scratch = &config::trusted()?.deployment.integration;
     ensure!(
         manifest.repository == scratch.repository && manifest.repository_id == scratch.id,
         "managed-files target differs from the configured scratch repository"
     );
-    config::validate_branch(&manifest.default_branch)?;
-    for file in &manifest.files {
-        ensure!(
-            file.source.starts_with("repo-settings/managed-files/")
-                && safe_relative_path(&file.source)
-                && safe_relative_path(&file.target),
-            "managed-files manifest contains an unsafe source or target"
-        );
-    }
     Ok(manifest)
 }
 
@@ -482,6 +542,7 @@ fn workflow_role_slug(role: securefix::instance_config::WorkflowRole) -> &'stati
         WorkflowRole::PolicyCheck => "policy-check",
         WorkflowRole::Release => "release",
         WorkflowRole::Securefix => "securefix",
+        WorkflowRole::Settings => "settings",
     }
 }
 
@@ -493,6 +554,7 @@ fn workflow_role_name(role: securefix::instance_config::WorkflowRole) -> &'stati
         WorkflowRole::PolicyCheck => "Policy Check",
         WorkflowRole::Release => "Release",
         WorkflowRole::Securefix => "Securefix",
+        WorkflowRole::Settings => "Repository settings",
     }
 }
 
@@ -1331,6 +1393,225 @@ fn read_managed_source_file(
         "managed-file source size differs from its candidate tree entry: {path}"
     );
     Ok(bytes)
+}
+
+/// Reconcile the exact desired files from protected instance main. Unlike the
+/// development probe, this path has no candidate-source or Client pin input.
+struct PreparedManagedDeployment {
+    instance: securefix::api::NativeServerInstanceAuthority,
+    manifest: ManagedFilesManifest,
+    source_files: BTreeMap<String, Vec<u8>>,
+    desired: BTreeMap<String, Vec<u8>>,
+}
+
+fn load_managed_deployment(
+    config_path: &str,
+    manifest_path: &str,
+) -> Result<PreparedManagedDeployment> {
+    securefix::api::validate_native_instance_config_path(config_path)?;
+    ensure!(
+        manifest_path.starts_with("repo-settings/") && safe_relative_path(manifest_path),
+        "managed manifest must be root-relative under repo-settings"
+    );
+    let server = GitHub::from_env("GITHUB_TOKEN")?;
+    let instance_repository =
+        std::env::var("GITHUB_REPOSITORY").context("missing instance repository")?;
+    let instance = server
+        .capture_remote_native_server_instance_authority(&instance_repository, config_path)?;
+    let reference: Value = server.get_uncached(&format!(
+        "/repos/{instance_repository}/git/ref/heads/{}",
+        instance.config.instance.default_branch
+    ))?;
+    let source_sha = reference["object"]["sha"]
+        .as_str()
+        .context("instance main SHA missing")?;
+    crate::policy::validate_sha(source_sha)?;
+    let manifest_bytes = server.content(&instance_repository, manifest_path, source_sha)?;
+    let manifest = parse_managed_file_manifest(&manifest_bytes)?;
+    instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == manifest.repository && entry.id == manifest.repository_id)
+        .context("managed destination is not configured")?
+        .policy()
+        .require(Capability::Settings)?;
+    let settings_path = instance
+        .config
+        .workflow_roles
+        .get(&securefix::instance_config::WorkflowRole::Settings)
+        .context("managed-file settings workflow role is missing")?;
+    let mut source_files = BTreeMap::from([
+        (manifest_path.to_owned(), manifest_bytes),
+        (
+            settings_path.clone(),
+            server.content(&instance_repository, settings_path, source_sha)?,
+        ),
+    ]);
+    let mut desired = BTreeMap::new();
+    for file in &manifest.files {
+        ensure!(
+            file.source.starts_with("repo-settings/managed-files/")
+                && safe_relative_path(&file.source)
+                && safe_relative_path(&file.target),
+            "unsafe managed source or target"
+        );
+        securefix::api::validate_native_managed_file_path(&file.target)?;
+        let bytes = server.content(&instance_repository, &file.source, source_sha)?;
+        ensure!(
+            bytes.len() <= MANAGED_FILES_LIMIT as usize,
+            "managed source exceeds size limit"
+        );
+        ensure!(
+            desired.insert(file.target.clone(), bytes.clone()).is_none(),
+            "duplicate managed target"
+        );
+        source_files.insert(file.source.clone(), bytes);
+    }
+    Ok(PreparedManagedDeployment {
+        instance,
+        manifest,
+        source_files,
+        desired,
+    })
+}
+
+fn managed_reconcile(config_path: &str, manifest_path: &str) -> Result<()> {
+    let PreparedManagedDeployment {
+        instance,
+        manifest,
+        source_files,
+        desired,
+    } = load_managed_deployment(config_path, manifest_path)?;
+    // Reads and workflow-PR writes use a repository-scoped installation token;
+    // the administrator credential is never accepted by this command.
+    let reader = GitHub::from_env("SECUREFIX_SERVER_APP_TOKEN")?;
+    let repository: Value = reader.get(&format!("/repos/{}", manifest.repository))?;
+    ensure!(
+        repository["id"].as_u64() == Some(manifest.repository_id)
+            && repository["full_name"] == manifest.repository
+            && repository["default_branch"] == manifest.default_branch,
+        "managed destination identity changed"
+    );
+    let reference: Value = reader.get_uncached(&format!(
+        "/repos/{}/git/ref/heads/{}",
+        manifest.repository, manifest.default_branch
+    ))?;
+    let base_sha = reference["object"]["sha"]
+        .as_str()
+        .context("managed destination main SHA missing")?
+        .to_owned();
+    crate::policy::validate_sha(&base_sha)?;
+    let mut current = BTreeMap::new();
+    for path in desired.keys() {
+        if let Some(bytes) =
+            optional_managed_content(&reader, &manifest.repository, path, &base_sha)?
+        {
+            current.insert(path.clone(), bytes);
+        }
+    }
+    let additions = managed_changes(&desired, &current);
+    let mut deletions = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in &manifest.remove {
+        securefix::api::validate_native_managed_file_path(path)?;
+        ensure!(
+            !desired.contains_key(path) && seen.insert(path.clone()),
+            "duplicate or active managed removal"
+        );
+        if optional_managed_content(&reader, &manifest.repository, path, &base_sha)?.is_some() {
+            deletions.push(path.clone());
+        }
+    }
+    if additions.is_empty() && deletions.is_empty() {
+        println!("managed files match protected desired state at {base_sha}; no PR created");
+        return Ok(());
+    }
+    let expected_changed = additions
+        .keys()
+        .cloned()
+        .chain(deletions.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let branch = format!(
+        "securefix/managed-files/{}-{}",
+        env_u64("GITHUB_RUN_ID")?,
+        env_u64("GITHUB_RUN_ATTEMPT")?
+    );
+    let target = securefix::api::NativeManagedFilesTarget {
+        instance,
+        repository: manifest.repository.clone(),
+        repository_id: manifest.repository_id,
+        default_branch: manifest.default_branch.clone(),
+        base_sha: base_sha.clone(),
+        branch: branch.clone(),
+        source_files,
+        additions: additions.clone(),
+        deletions: deletions.clone(),
+    };
+    let writer = GitHub::native_managed_files_from_env("SECUREFIX_SERVER_APP_TOKEN", target)?;
+    writer.post::<Value>(
+        &format!("/repos/{}/git/refs", manifest.repository),
+        &json!({"ref":format!("refs/heads/{branch}"),"sha":base_sha}),
+    )?;
+    let head = writer.create_commit(
+        &manifest.repository,
+        &branch,
+        &base_sha,
+        "Reconcile managed files",
+        additions,
+        deletions,
+    )?;
+    let branch_ref: Value = reader.get_uncached(&format!(
+        "/repos/{}/git/ref/heads/{branch}",
+        manifest.repository
+    ))?;
+    ensure!(
+        branch_ref["object"]["sha"] == head,
+        "managed signed branch changed"
+    );
+    let pull: Value = writer.post(&format!("/repos/{}/pulls", manifest.repository), &json!({
+        "title":"Reconcile managed files","head":branch,"base":manifest.default_branch,
+        "body":"Reconcile the protected repo-settings desired files. This PR does not merge automatically."
+    }))?;
+    let number = pull["number"]
+        .as_u64()
+        .context("managed PR number missing")?;
+    ensure!(
+        pull["state"] == "open"
+            && pull["head"]["sha"] == head
+            && pull["head"]["ref"] == branch
+            && pull["head"]["repo"]["id"].as_u64() == Some(manifest.repository_id)
+            && pull["base"]["repo"]["id"].as_u64() == Some(manifest.repository_id)
+            && pull["base"]["ref"] == manifest.default_branch
+            && pull["base"]["sha"] == base_sha,
+        "unexpected managed PR identity"
+    );
+    let files = reader.paginate(&format!(
+        "/repos/{}/pulls/{number}/files",
+        manifest.repository
+    ))?;
+    validate_managed_pr_files(&files, &expected_changed)?;
+    println!("created reviewable managed-file PR #{number} at {head}");
+    Ok(())
+}
+
+fn optional_managed_content(
+    api: &GitHub,
+    repository: &str,
+    path: &str,
+    revision: &str,
+) -> Result<Option<Vec<u8>>> {
+    match api.content(repository, path, revision) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error)
+            if error
+                .downcast_ref::<ApiError>()
+                .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn managed_reconcile_scratch(
@@ -2635,6 +2916,35 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn protected_managed_manifest_uses_declared_identity_without_scratch_defaults() {
+        let mut value: Value =
+            serde_json::from_slice(include_bytes!("../repo-settings/managed-files.json")).unwrap();
+        value["repository"] = json!("example-org/project");
+        value["repository_id"] = json!(987654);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            parse_managed_file_manifest(&bytes).unwrap().repository,
+            "example-org/project"
+        );
+        assert!(
+            parse_managed_manifest(&bytes).is_err(),
+            "the scratch-only contract stays bounded"
+        );
+        for target in [
+            "Cargo.toml",
+            "control/active.json",
+            ".github/workflows/../policy.json",
+        ] {
+            let mut changed = value.clone();
+            changed["files"][0]["target"] = json!(target);
+            assert!(parse_managed_file_manifest(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let duplicate = value["files"][0].clone();
+        value["files"].as_array_mut().unwrap().push(duplicate);
+        assert!(parse_managed_file_manifest(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]
