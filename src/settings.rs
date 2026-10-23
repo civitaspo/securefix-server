@@ -19,6 +19,7 @@ const RULESET_DIR: &str = "repo-settings/rulesets";
 const MANAGED_FILES_MANIFEST: &str = "repo-settings/managed-files.json";
 const MANAGED_FILES_LIMIT: u64 = 1024 * 1024;
 const MANAGED_INSTANCE_CONFIG_TARGET: &str = "securefix-server.toml";
+const MANAGED_ACTIONS_LOCK_TARGET: &str = ".github/workflows/actions.lock";
 const MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH: &str =
     "repo-settings/native-securefix-test-instance.toml";
 const MANAGED_POLICY_CHECK_CALLER_CONFIG_PATH: &str = MANAGED_POLICY_CHECK_INSTANCE_CONFIG_PATH;
@@ -299,7 +300,9 @@ fn expected_managed_targets(
 ) -> BTreeSet<String> {
     use securefix::policy::Capability;
 
-    let mut expected = std::iter::once(MANAGED_INSTANCE_CONFIG_TARGET.to_owned())
+    let mut expected = [MANAGED_INSTANCE_CONFIG_TARGET, MANAGED_ACTIONS_LOCK_TARGET]
+        .into_iter()
+        .map(str::to_owned)
         .chain(instance_config.workflow_roles.values().cloned())
         .collect::<BTreeSet<_>>();
     if instance_config

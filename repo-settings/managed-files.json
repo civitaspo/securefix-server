@@ -38,6 +38,10 @@
     {
       "source": "repo-settings/managed-files/release-tag.yml",
       "target": ".github/workflows/release-tag.yml"
+    },
+    {
+      "source": "repo-settings/managed-files/actions.lock",
+      "target": ".github/workflows/actions.lock"
     }
   ],
   "remove": [
