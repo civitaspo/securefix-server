@@ -121,7 +121,7 @@ fn native_client_capture_passes_the_securefix_artifact_only_to_its_rust_command(
 
 #[test]
 fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() {
-    const SOURCE: &str = "84f939b68b82de70554f98c429d65e077ef4a771";
+    const SOURCE: &str = "9eabce19f60eac5eb281ec0e85abc9913b6d727a";
     let config = securefix::instance_config::InstanceConfig::parse(
         &fs::read("repo-settings/native-role-events-test-instance.toml").unwrap(),
     )

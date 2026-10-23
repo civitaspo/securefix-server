@@ -1147,7 +1147,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "handler");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@84f939b68b82de70554f98c429d65e077ef4a771"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a"
                     );
                     assert_eq!(
                         job["with"]["config_path"],
@@ -1192,7 +1192,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = "84f939b68b82de70554f98c429d65e077ef4a771";
+                    let revision = "9eabce19f60eac5eb281ec0e85abc9913b6d727a";
                     assert_eq!(
                         uses,
                         format!(
@@ -1220,7 +1220,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "reconcile");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@84f939b68b82de70554f98c429d65e077ef4a771"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a"
                     );
                     assert_eq!(
                         job["with"],
@@ -5272,7 +5272,7 @@ fn native_settings_administrator_job_is_separate_from_managed_file_writer() {
     assert_eq!(steps.len(), 1);
     assert_eq!(
         steps[0]["uses"],
-        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@84f939b68b82de70554f98c429d65e077ef4a771"
+        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@9eabce19f60eac5eb281ec0e85abc9913b6d727a"
     );
     assert_eq!(
         steps[0]["with"],

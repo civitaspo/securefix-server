@@ -22,7 +22,7 @@ jobs:
       contents: read
       attestations: write
       id-token: write
-    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@84f939b68b82de70554f98c429d65e077ef4a771 # v0.2.45-pre.116
+    uses: civitaspo/securefix-server/.github/workflows/reusable-release-pr.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a # v0.2.45-pre.121
     with:
       version: ${{ inputs.version || '' }}
       server_repository: civitaspo/securefix-server

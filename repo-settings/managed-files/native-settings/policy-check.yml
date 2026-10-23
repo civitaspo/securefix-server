@@ -9,7 +9,7 @@ permissions: {}
 jobs:
   check:
     if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && (github.event.pull_request.user.id == 4525500 || github.event.pull_request.user.id == 288069019) && github.run_attempt == 1
-    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@84f939b68b82de70554f98c429d65e077ef4a771 # v0.2.45-pre.116
+    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a # v0.2.45-pre.121
     with:
       operation: policy_check
       server_repository: civitaspo/securefix-server
