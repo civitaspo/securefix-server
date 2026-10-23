@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   handler:
-    if: startsWith(github.event.label.name, 'testing-securefix-native-release-')
+    if: startsWith(github.event.label.name, 'testing-securefix-native-release-') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')
     permissions:
       actions: read
       attestations: read
@@ -17,7 +17,7 @@ jobs:
       pull-requests: read
       checks: read
       statuses: read
-    uses: civitaspo/securefix-server/.github/workflows/reusable-server-release.yml@93a05f200f9cd3c8c88036d971965db94eb0c24b # v0.2.45-pre.65
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-release.yml@035a37453cc8b5243abf62ee20d22e284ee681f6 # v0.2.45-pre.79
     with:
       config_path: repo-settings/native-role-events-test-instance.toml
     secrets:
