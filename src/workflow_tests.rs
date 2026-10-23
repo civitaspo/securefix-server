@@ -6507,3 +6507,54 @@ fn native_managed_reconcile_has_a_scoped_pr_writer_without_administrator_credent
         assert!(!serialized.contains(forbidden), "{forbidden}");
     }
 }
+
+#[test]
+fn native_repository_settings_action_keeps_administrator_out_of_read_only_steps() {
+    let action: Value = serde_yaml::from_str(
+        &fs::read_to_string(".github/actions/reconcile-repository-settings/action.yml").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(action["runs"]["using"], "composite");
+    let inputs = action["inputs"].as_object().unwrap();
+    assert_eq!(inputs.len(), 3);
+    for name in ["token", "administrator_token", "config_path"] {
+        assert_eq!(inputs[name]["required"], true);
+    }
+    let steps = action["runs"]["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(
+        steps[0]["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@5c4effcaefca77e8c3750bc82ff82156f60cd74b"
+    );
+    assert_eq!(
+        steps[0]["with"],
+        serde_json::json!({"token":"${{ inputs.token }}"})
+    );
+    for step in &steps[..2] {
+        let encoded = serde_json::to_string(step).unwrap();
+        assert!(!encoded.contains("administrator_token"));
+        assert!(!encoded.contains("SERVER_APP_TOKEN"));
+    }
+    assert_eq!(steps[1]["env"]["CONFIG_PATH"], "${{ inputs.config_path }}");
+    assert!(
+        steps[1]["run"]
+            .as_str()
+            .unwrap()
+            .contains("settings instance-prepare --config-path")
+    );
+    assert_eq!(
+        steps[2]["env"]["SECUREFIX_SETTINGS_ADMIN_TOKEN"],
+        "${{ inputs.administrator_token }}"
+    );
+    assert_eq!(
+        steps[2]["env"]["REPOSITORIES"],
+        "${{ steps.prepare.outputs.repositories }}"
+    );
+    assert!(
+        steps[2]["run"]
+            .as_str()
+            .unwrap()
+            .contains("settings instance-reconcile --config-path")
+    );
+    assert!(!steps[2]["run"].as_str().unwrap().contains("${{"));
+}
