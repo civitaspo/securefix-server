@@ -2531,7 +2531,7 @@ mod tests {
                 "repo-settings/native-securefix-write-test-instance.toml",
                 "securefix-server.toml",
             ),
-            ("0dbeaa7d1afa336722bf820408b69022121d9714", "main"),
+            ("2179c5566b1cc84bd7d53082f028f00f5f046b60", "main"),
         ] {
             assert!(caller.contains(from));
             let changed = BTreeMap::from([(

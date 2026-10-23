@@ -9,7 +9,7 @@ permissions: {}
 jobs:
   request:
     if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1
-    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request-scratch.yml@0dbeaa7d1afa336722bf820408b69022121d9714 # v0.2.45-pre.43
+    uses: civitaspo/securefix-server/.github/workflows/reusable-client-request-scratch.yml@2179c5566b1cc84bd7d53082f028f00f5f046b60 # v0.2.45-pre.52
     with:
       server_repository: civitaspo/securefix-server
       instance_config_path: repo-settings/native-securefix-write-test-instance.toml
