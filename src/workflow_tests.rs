@@ -1140,16 +1140,17 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         job["secrets"]["SERVER_PRIVATE_KEY"],
                         "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
                     );
-                } else if let Some(role) =
-                    ["approve", "merge", "policy-check"]
-                        .into_iter()
-                        .find(|role| {
-                            path == format!(".github/workflows/testing-native-{role}-event.yml")
-                        })
+                } else if let Some(role) = ["approve", "merge", "policy-check", "release"]
+                    .into_iter()
+                    .find(|role| {
+                        path == format!(".github/workflows/testing-native-{role}-event.yml")
+                    })
                 {
                     let config_path = "repo-settings/native-role-events-test-instance.toml";
                     assert_eq!(job_id, "handler");
-                    let revision = if role == "merge" {
+                    let revision = if role == "release" {
+                        "1f08881109a12efa8e7f0331bed3968b553942cf"
+                    } else if role == "merge" {
                         "5c52c7b6f61d58d3d0cafc35456777bc1b1e1ce3"
                     } else {
                         "2719567ddd2cb9e13294e12cb9537780c6643263"
@@ -1163,7 +1164,10 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job["with"]["config_path"], config_path);
                     assert_eq!(
                         job["if"],
-                        format!("startsWith(github.event.label.name, 'securefix-native-{role}-')")
+                        format!(
+                            "startsWith(github.event.label.name, '{}securefix-native-{role}-')",
+                            if role == "release" { "testing-" } else { "" }
+                        )
                     );
                     assert_eq!(
                         job["secrets"]["SERVER_PRIVATE_KEY"],

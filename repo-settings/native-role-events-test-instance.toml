@@ -36,6 +36,10 @@ policy_check_id = 3872533
 approve = ".github/workflows/testing-native-approve-event.yml"
 merge = ".github/workflows/testing-native-merge-event.yml"
 policy_check = ".github/workflows/testing-native-policy-check-event.yml"
+release = ".github/workflows/testing-native-release-event.yml"
+
+[branches]
+release = "release/next"
 
 [policy]
 trusted_committers = [
@@ -58,7 +62,14 @@ github_apps = []
 [[repositories]]
 repository = "civitaspo/testing-securefix-server"
 id = 1410312556
-capabilities = ["approve", "merge"]
+capabilities = ["approve", "merge", "release"]
+release = "github-release"
+native_binaries = [
+  { target = "aarch64-apple-darwin", runner = "macos-15" },
+  { target = "x86_64-apple-darwin", runner = "macos-15-intel" },
+  { target = "aarch64-unknown-linux-musl", runner = "ubuntu-24.04-arm" },
+  { target = "x86_64-unknown-linux-musl", runner = "ubuntu-24.04" },
+]
 protect_tags = false
 
 [scratch_package_repository]
