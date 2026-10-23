@@ -1175,13 +1175,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = if role == "release" {
-                        "93a05f200f9cd3c8c88036d971965db94eb0c24b"
-                    } else if matches!(role, "merge" | "policy-check") {
-                        "046b97b22622f6ca052836303f1f194018fd51a6"
-                    } else {
-                        "2719567ddd2cb9e13294e12cb9537780c6643263"
-                    };
+                    let revision = "035a37453cc8b5243abf62ee20d22e284ee681f6";
                     assert_eq!(
                         uses,
                         format!(
@@ -1189,13 +1183,12 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         )
                     );
                     assert_eq!(job["with"]["config_path"], config_path);
-                    assert_eq!(
-                        job["if"],
-                        format!(
-                            "startsWith(github.event.label.name, '{}securefix-native-{role}-')",
-                            if role == "release" { "testing-" } else { "" }
-                        )
-                    );
+                    let expected_condition = if role == "release" {
+                        "startsWith(github.event.label.name, 'testing-securefix-native-release-') || startsWith(github.event.label.name, 'securefix-native-release-prepare-')".to_owned()
+                    } else {
+                        format!("startsWith(github.event.label.name, 'securefix-native-{role}-')")
+                    };
+                    assert_eq!(job["if"], expected_condition);
                     assert_eq!(
                         job["secrets"]["SERVER_PRIVATE_KEY"],
                         "${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
