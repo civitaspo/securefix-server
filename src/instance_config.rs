@@ -236,10 +236,20 @@ impl InstanceConfig {
                 "scratch package repository must belong to the configured account"
             );
             ensure!(
-                repository.repository != self.instance.repository
-                    && repository.repository != self.acceptable_clients.repository,
-                "scratch package repository must differ from the Server and Client repositories"
+                !repository
+                    .repository
+                    .eq_ignore_ascii_case(&self.acceptable_clients.repository),
+                "scratch package repository must differ from the Client source repository"
             );
+            if repository
+                .repository
+                .eq_ignore_ascii_case(&self.instance.repository)
+            {
+                ensure!(
+                    repository.default_branch == self.instance.default_branch,
+                    "colocated scratch package and Server default branches must match"
+                );
+            }
         }
         if let Some(bot) = &self.identities.renovate_merge_bot {
             validate_principal(bot)?;
@@ -764,6 +774,21 @@ mod tests {
         assert_eq!(destination.repository, "example-org/package-scratch");
         assert_eq!(destination.id, 987655);
         assert_eq!(destination.default_branch, "main");
+
+        let colocated = configured
+            .replace(
+                "example-org/package-scratch",
+                "example-org/securefix-server",
+            )
+            .replace("id = 987655", "id = 404");
+        let parsed = InstanceConfig::parse(colocated.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.scratch_package_repository.as_ref().unwrap().id,
+            parsed.instance.id
+        );
+        let table = "[scratch_package_repository]\nrepository = \"example-org/securefix-server\"\nid = 404\ndefault_branch = \"main\"";
+        rejects(&colocated.replace(table, &table.replace("id = 404", "id = 405")));
+        rejects(&colocated.replace(table, &table.replace("\"main\"", "\"other\"")));
 
         let scratch_branch = "id = 987655\ndefault_branch = \"main\"";
         let scratch_unknown = "id = 987655\ndefault_branch = \"main\"";
