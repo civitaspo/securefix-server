@@ -118,7 +118,7 @@ workflows:
         - 'crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd'
     '.github/workflows/reusable-server-securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97'
+        - 'civitaspo/securefix-server@69dd93cd89596fbaff30b6d03c2c4b9507ce914e'
     '.github/workflows/securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -304,13 +304,6 @@ dependencies:
     'civitaspo/securefix-server@69dd93cd89596fbaff30b6d03c2c4b9507ce914e':
         ref: 'integration/native-server-approve-pre35-20261023'
         commit: 'sha1-69dd93cd89596fbaff30b6d03c2c4b9507ce914e'
-        owner_id: 4525500
-        repo_id: 1250079425
-        uses:
-            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
-    'civitaspo/securefix-server@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97':
-        ref: 'integration/native-server-approve-pre35-20261023'
-        commit: 'sha1-9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97'
         owner_id: 4525500
         repo_id: 1250079425
         uses:

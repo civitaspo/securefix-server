@@ -158,7 +158,7 @@ fn server_securefix_receiver_uses_a_fixed_package_with_scoped_writer() {
     assert_eq!(package["with"]["token"], "${{ github.token }}");
     assert_eq!(
         package["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97"
+        "civitaspo/securefix-server/.github/actions/load-package@69dd93cd89596fbaff30b6d03c2c4b9507ce914e"
     );
     assert!(package["if"].is_null());
     for name in [
