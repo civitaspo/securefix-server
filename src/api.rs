@@ -6085,9 +6085,10 @@ pub fn capture_native_instance_merge_fence(
     let expected_marker = approval_body["body"]
         .as_str()
         .context("native approval marker has no body")?;
+    let reader = GitHub::new(&api.base, api.token.clone())?;
     let mut checks = Vec::new();
     for page in 1..=100 {
-        let response: Value = api.get_uncached(&format!(
+        let response: Value = reader.get_uncached(&format!(
             "/repos/{repository}/commits/{head_sha}/check-runs?per_page=100&page={page}&filter=latest"
         ))?;
         let batch = response["check_runs"]
@@ -6116,7 +6117,7 @@ pub fn capture_native_instance_merge_fence(
 
     let reviewer = &config.identities.approval_reviewer;
     let reviews =
-        api.paginate_uncached(&format!("/repos/{repository}/pulls/{pull_number}/reviews"))?;
+        reader.paginate_uncached(&format!("/repos/{repository}/pulls/{pull_number}/reviews"))?;
     let approval_review_id = native_instance_approval_review_id(
         &reviews,
         reviewer.id,
@@ -6124,7 +6125,7 @@ pub fn capture_native_instance_merge_fence(
         head_sha,
         expected_marker,
     )?;
-    let decision = api.graphql(
+    let decision = reader.graphql(
         "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}",
         serde_json::json!({
             "owner": repository.split('/').next().unwrap_or_default(),
@@ -8208,13 +8209,16 @@ mod tests {
                     serde_json::json!({
                         "data": {"repository": {"pullRequest": {"reviewDecision": "APPROVED"}}}
                     }),
-                ),
+                )
+                .with_request_header("authorization", "Bearer fixture-token"),
             ])
         };
         let accepted_fixture = successful_readiness_fixture();
         let accepted = capture(&accepted_fixture.api).unwrap();
         assert_eq!(accepted.approval_review_id, 42);
-        let current_fixture = successful_readiness_fixture();
+        let mut current_fixture = successful_readiness_fixture();
+        current_fixture.api.writes = native_instance_api(NativeInstanceMode::Merge).writes;
+        current_fixture.api.write_token = Some("merge-writer-token".into());
         let current = capture(&current_fixture.api).unwrap();
         let mut successful_merge_puts = 0;
         send_after_native_instance_merge_fence(&accepted, Ok(current), || {
