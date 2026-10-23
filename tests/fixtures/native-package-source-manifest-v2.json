@@ -2,9 +2,11 @@
   "schema_version": 2,
   "component": "securefix-server",
   "protocol": "securefix-native-request/v1",
-  "version": "0.2.45-pre.38",
+  "version": "0.2.45-pre.39",
   "producer_workflow": ".github/workflows/native-package-build.yml",
   "publisher_workflow": ".github/workflows/publish-native-package.yml",
   "max_bytes": 134217728,
-  "assets": { "linux-x86_64": "securefix-linux-x86_64" }
+  "assets": {
+    "linux-x86_64": "securefix-linux-x86_64"
+  }
 }

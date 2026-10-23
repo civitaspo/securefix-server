@@ -3888,8 +3888,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_v3_action_mapping_binds_h7_loader_to_h6_binary_receipt() {
-        const H6_SOURCE_SHA: &str = "95520b982c915e8a7c20d6a8464aa9d926216573";
+    fn bundled_v3_action_mapping_binds_the_verified_binary_receipt() {
+        const BINARY_SOURCE_SHA: &str = "7ae31ffa7a274fdc3d8491d83e0221f7aaf67a5a";
         let action_bytes = include_bytes!("../.github/actions/load-package/package.json");
         let manifest = NativeClientPackageManifest::parse(action_bytes).unwrap();
         let source = TrustedPublisher {
@@ -3910,7 +3910,7 @@ mod tests {
                     Some("main"),
                 )
                 .unwrap(),
-            H6_SOURCE_SHA
+            BINARY_SOURCE_SHA
         );
 
         let source_manifest_bytes =
@@ -3921,7 +3921,7 @@ mod tests {
         );
         assert_eq!(
             manifest.source_manifest_path,
-            ".github/actions/load-package/package.json"
+            ".github/actions/load-package/source-package.json"
         );
         let source_manifest: SourcePackageManifest =
             serde_json::from_slice(source_manifest_bytes).unwrap();
@@ -3946,7 +3946,7 @@ mod tests {
             encode_repository_path(&action_manifest_path),
             "actions/package%20loader/nested/package.json"
         );
-        assert_ne!(action.revision(), H6_SOURCE_SHA);
+        assert_ne!(action.revision(), BINARY_SOURCE_SHA);
         assert_ne!(manifest.source_sha, action.revision());
 
         use base64::Engine;
@@ -3985,7 +3985,7 @@ mod tests {
         let (fetched_bytes, fetched_manifest) =
             fetch_native_client_action_manifest(&fixture.api, &action).unwrap();
         assert_eq!(fetched_bytes, action_bytes);
-        assert_eq!(fetched_manifest.source_sha, H6_SOURCE_SHA);
+        assert_eq!(fetched_manifest.source_sha, BINARY_SOURCE_SHA);
         assert_eq!(
             fetch_source_package_manifest(
                 &fixture.api,
