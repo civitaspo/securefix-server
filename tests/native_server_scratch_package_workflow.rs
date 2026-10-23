@@ -279,7 +279,7 @@ fn server_merge_receiver_uses_pre35_only_for_its_exact_scratch_label_workflow() 
 }
 
 #[test]
-fn server_securefix_receiver_uses_pre38_only_for_its_exact_scratch_label_workflow() {
+fn server_securefix_receiver_uses_a_fixed_package_with_scoped_writer() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-server-securefix.yml",
@@ -289,58 +289,14 @@ fn server_securefix_receiver_uses_pre38_only_for_its_exact_scratch_label_workflo
     )
     .unwrap();
     let steps = workflow["jobs"]["receive"]["steps"].as_sequence().unwrap();
-    let scratch_context = "github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-securefix.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1";
-    let stable = steps
-        .iter()
-        .find(|step| step["id"] == "package-stable")
-        .unwrap();
-    let scratch = steps
-        .iter()
-        .find(|step| step["id"] == "package-scratch")
-        .unwrap();
-    assert!(
-        stable["if"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("!({scratch_context})"))
-    );
-    assert_eq!(stable["with"]["channel"], "stable");
-    assert_eq!(scratch["if"], format!("${{{{ {scratch_context} }}}}"));
+    let package = steps.iter().find(|step| step["id"] == "package").unwrap();
+    assert_eq!(package["with"].as_mapping().unwrap().len(), 1);
+    assert_eq!(package["with"]["token"], "${{ github.token }}");
     assert_eq!(
-        scratch["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e"
+        package["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97"
     );
-    assert_eq!(
-        scratch["with"]["action-sha"],
-        "119643d5407f97b3589059246d43bd05590a248e"
-    );
-    for (key, expected) in [
-        ("channel", "scratch"),
-        (
-            "manifest-source-sha",
-            "95520b982c915e8a7c20d6a8464aa9d926216573",
-        ),
-        (
-            "publication-source-sha",
-            "95520b982c915e8a7c20d6a8464aa9d926216573",
-        ),
-        (
-            "publication-source-branch",
-            "integration/native-server-approve-pre35-20261023",
-        ),
-        ("publication-tag", "v0.2.45-pre.38"),
-        ("publication-release-id", "421371928"),
-        ("publication-asset-id", "667664206"),
-        (
-            "publication-asset-sha256",
-            "b06fc4c5dc4062c8ab7c49d35052407823c38d297c9ad31767fc574468e01daa",
-        ),
-        ("publication-asset-size", "12147624"),
-        ("publication-producer-run-id", "39885673712"),
-        ("publication-producer-run-attempt", "1"),
-    ] {
-        assert_eq!(scratch["with"][key], expected, "{key}");
-    }
+    assert!(package["if"].is_null());
     for name in [
         "Resolve the authenticated Client request label",
         "Revalidate and apply the exact Securefix request",
@@ -348,7 +304,7 @@ fn server_securefix_receiver_uses_pre38_only_for_its_exact_scratch_label_workflo
         let step = steps.iter().find(|step| step["name"] == name).unwrap();
         assert_eq!(
             step["env"]["CLI_BINARY"],
-            "${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}"
+            "${{ steps.package.outputs.binary }}"
         );
     }
     let writer = steps
@@ -454,7 +410,7 @@ fn server_release_receiver_selects_pre35_only_for_its_exact_scratch_label_workfl
 }
 
 #[test]
-fn scratch_client_signer_uses_one_helper_pin_and_the_fixed_pre35_package_record() {
+fn scratch_client_signer_uses_one_fixed_action_across_isolated_jobs() {
     let workflow: serde_yaml::Value = serde_yaml::from_slice(
         &fs::read(format!(
             "{}/.github/workflows/reusable-client-request-scratch.yml",
@@ -484,7 +440,7 @@ fn scratch_client_signer_uses_one_helper_pin_and_the_fixed_pre35_package_record(
         );
         assert_eq!(sha.len(), 40, "{job_id} helper pin is not a full SHA");
         assert!(sha.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(package["with"]["action-sha"], sha, "{job_id}");
+        assert_eq!(package["with"].as_mapping().unwrap().len(), 1, "{job_id}");
         if let Some(expected) = helper_sha {
             assert_eq!(
                 sha, expected,
@@ -494,42 +450,6 @@ fn scratch_client_signer_uses_one_helper_pin_and_the_fixed_pre35_package_record(
             helper_sha = Some(sha);
         }
 
-        for (key, expected) in [
-            ("source-repository", "civitaspo/securefix-server"),
-            ("source-repository-id", "1250079425"),
-            (
-                "destination-repository",
-                "civitaspo/testing-securefix-server",
-            ),
-            ("destination-repository-id", "1410312556"),
-            ("source-default-branch", "main"),
-            ("owner-id", "4525500"),
-            ("channel", "scratch"),
-            (
-                "manifest-source-sha",
-                "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-            ),
-            (
-                "publication-source-sha",
-                "fa40fc15f4ac79ad97282b83a44d26f6c747311c",
-            ),
-            (
-                "publication-source-branch",
-                "integration/native-consumer-pre35-20261023",
-            ),
-            ("publication-tag", "v0.2.45-pre.35"),
-            ("publication-release-id", "421283713"),
-            ("publication-asset-id", "667334470"),
-            (
-                "publication-asset-sha256",
-                "589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d",
-            ),
-            ("publication-asset-size", "12173384"),
-            ("publication-producer-run-id", "39866598474"),
-            ("publication-producer-run-attempt", "1"),
-        ] {
-            assert_eq!(package["with"][key], expected, "{job_id} {key}");
-        }
         assert_eq!(package["with"]["token"], "${{ github.token }}", "{job_id}");
     }
     assert_eq!(package_steps, 3);

@@ -4299,11 +4299,11 @@ fn cli_jobs_use_verified_artifacts_before_invocation() {
                     package["uses"]
                         .as_str()
                         .unwrap()
-                        .ends_with("@bfa7b7f5356df03546b97cd254a57a596405a91a")
+                        .ends_with("@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97")
                 );
                 assert_eq!(
-                    package["with"]["action-sha"],
-                    "bfa7b7f5356df03546b97cd254a57a596405a91a"
+                    package["with"],
+                    serde_json::json!({"token": "${{ github.token }}"})
                 );
                 let invocation = steps
                     .iter()
@@ -5877,15 +5877,22 @@ fn server_role_receivers_use_fixed_package_and_separate_read_and_write_credentia
             .iter()
             .find(|step| step["name"] == "Load the fixed Securefix Server package")
             .unwrap();
-        assert_eq!(
-            loader["with"]["source-repository"], "civitaspo/securefix-server",
-            "{role}"
-        );
-        assert_eq!(
-            loader["with"]["destination-repository"],
-            "civitaspo/securefix-server"
-        );
-        assert_eq!(loader["with"]["channel"], "stable");
+        if role == "securefix" {
+            assert_eq!(
+                loader["with"],
+                serde_json::json!({"token": "${{ github.token }}"})
+            );
+        } else {
+            assert_eq!(
+                loader["with"]["source-repository"], "civitaspo/securefix-server",
+                "{role}"
+            );
+            assert_eq!(
+                loader["with"]["destination-repository"],
+                "civitaspo/securefix-server"
+            );
+            assert_eq!(loader["with"]["channel"], "stable");
+        }
         assert!(loader["uses"].as_str().unwrap().contains("@"));
         for mint in steps.iter().filter(|step| {
             step["uses"]

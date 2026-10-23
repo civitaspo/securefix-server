@@ -28,50 +28,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Load the fixed Securefix Server package
-        id: package-stable
-        if: ${{ !(github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-securefix.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1) }}
-        # Candidate-source CI only: pre12 lacks the new native CLI commands; this is not a qualified executable role.
-        uses: civitaspo/securefix-server/.github/actions/load-package@c6aa3110bb31d5ca5bae452d291870066f0147ef # v0.2.45-pre.12
+        id: package
+        uses: civitaspo/securefix-server/.github/actions/load-package@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97 # v0.2.45-pre.41
         with:
-          action-sha: c6aa3110bb31d5ca5bae452d291870066f0147ef
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/securefix-server
-          destination-repository-id: '1250079425'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: stable
-          token: ${{ github.token }}
-      - name: Load the fixed pre38 package for the exact scratch Securefix receiver
-        id: package-scratch
-        if: ${{ github.repository == 'civitaspo/testing-securefix-server' && github.repository_id == '1410312556' && github.workflow_ref == 'civitaspo/testing-securefix-server/.github/workflows/server-securefix.yml@refs/heads/main' && github.event_name == 'label' && github.run_attempt == 1 }}
-        uses: civitaspo/securefix-server/.github/actions/load-package@119643d5407f97b3589059246d43bd05590a248e # v0.2.45-pre.35
-        with:
-          action-sha: 119643d5407f97b3589059246d43bd05590a248e
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: 95520b982c915e8a7c20d6a8464aa9d926216573
-          publication-source-sha: 95520b982c915e8a7c20d6a8464aa9d926216573
-          publication-source-branch: integration/native-server-approve-pre35-20261023
-          publication-tag: v0.2.45-pre.38
-          publication-release-id: '421371928'
-          publication-asset-id: '667664206'
-          publication-asset-sha256: b06fc4c5dc4062c8ab7c49d35052407823c38d297c9ad31767fc574468e01daa
-          publication-asset-size: '12147624'
-          publication-producer-run-id: '39885673712'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Resolve the authenticated Client request label
         id: request
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CONFIG_PATH: ${{ inputs.config_path }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
         run: |
           set -euo pipefail
           "$CLI_BINARY" new-server locate-instance-event --operation securefix --config-path "$CONFIG_PATH"
@@ -102,7 +68,7 @@ jobs:
           SECUREFIX_CLIENT_TOKEN: ${{ steps.client-read.outputs.token }}
           SECUREFIX_WRITE_TOKEN: ${{ steps.client-writer.outputs.token }}
           CONFIG_PATH: ${{ inputs.config_path }}
-          CLI_BINARY: ${{ steps.package-scratch.outputs.binary || steps.package-stable.outputs.binary }}
+          CLI_BINARY: ${{ steps.package.outputs.binary }}
           PRODUCER_REPOSITORY: ${{ steps.request.outputs.producer_repository }}
           PRODUCER_RUN_ID: ${{ steps.request.outputs.producer_run_id }}
         run: |

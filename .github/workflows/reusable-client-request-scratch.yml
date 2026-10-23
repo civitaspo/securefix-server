@@ -28,28 +28,10 @@ jobs:
     outputs:
       artifact-name: ${{ steps.source.outputs.artifact_name }}
     steps:
-      - name: Load the fixed pre35 Securefix Client package
+      - name: Load the bundled Securefix Client package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@bfa7b7f5356df03546b97cd254a57a596405a91a # v0.2.45-pre.35
+        uses: civitaspo/securefix-server/.github/actions/load-package@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97 # v0.2.45-pre.41
         with:
-          action-sha: bfa7b7f5356df03546b97cd254a57a596405a91a
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Prepare a fixed Securefix source artifact
         id: source
@@ -91,28 +73,10 @@ jobs:
       server-repository-name: ${{ steps.capture.outputs.server_repository_name }}
       client-app-id: ${{ steps.capture.outputs.client_app_id }}
     steps:
-      - name: Load the fixed pre35 Securefix Client package
+      - name: Load the bundled Securefix Client package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@bfa7b7f5356df03546b97cd254a57a596405a91a # v0.2.45-pre.35
+        uses: civitaspo/securefix-server/.github/actions/load-package@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97 # v0.2.45-pre.41
         with:
-          action-sha: bfa7b7f5356df03546b97cd254a57a596405a91a
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - name: Capture the exact pull request Securefix request
         id: capture
@@ -187,28 +151,10 @@ jobs:
       contents: read
     timeout-minutes: 10
     steps:
-      - name: Load the fixed pre35 Securefix Client package
+      - name: Load the bundled Securefix Client package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@bfa7b7f5356df03546b97cd254a57a596405a91a # v0.2.45-pre.35
+        uses: civitaspo/securefix-server/.github/actions/load-package@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97 # v0.2.45-pre.41
         with:
-          action-sha: bfa7b7f5356df03546b97cd254a57a596405a91a
-          source-repository: civitaspo/securefix-server
-          source-repository-id: '1250079425'
-          destination-repository: civitaspo/testing-securefix-server
-          destination-repository-id: '1410312556'
-          source-default-branch: main
-          owner-id: '4525500'
-          channel: scratch
-          manifest-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-sha: fa40fc15f4ac79ad97282b83a44d26f6c747311c
-          publication-source-branch: integration/native-consumer-pre35-20261023
-          publication-tag: v0.2.45-pre.35
-          publication-release-id: '421283713'
-          publication-asset-id: '667334470'
-          publication-asset-sha256: 589ca95c11671707213b124299d28954bd56957345bbfb637ac2d68d48a9212d
-          publication-asset-size: '12173384'
-          publication-producer-run-id: '39866598474'
-          publication-producer-run-attempt: '1'
           token: ${{ github.token }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:

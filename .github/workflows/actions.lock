@@ -73,7 +73,7 @@ workflows:
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-        - 'civitaspo/securefix-server@bfa7b7f5356df03546b97cd254a57a596405a91a'
+        - 'civitaspo/securefix-server@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97'
     '.github/workflows/reusable-client-request.yml':
         - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
@@ -122,8 +122,7 @@ workflows:
         - 'crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd'
     '.github/workflows/reusable-server-securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@119643d5407f97b3589059246d43bd05590a248e'
-        - 'civitaspo/securefix-server@c6aa3110bb31d5ca5bae452d291870066f0147ef'
+        - 'civitaspo/securefix-server@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97'
     '.github/workflows/securefix.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
@@ -299,11 +298,13 @@ dependencies:
         commit: 'sha1-6be9fb42e14770a9162301787e158f7db3ab918a'
         owner_id: 4525500
         repo_id: 1250079425
-    'civitaspo/securefix-server@bfa7b7f5356df03546b97cd254a57a596405a91a':
+    'civitaspo/securefix-server@9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97':
         ref: 'integration/native-server-approve-pre35-20261023'
-        commit: 'sha1-bfa7b7f5356df03546b97cd254a57a596405a91a'
+        commit: 'sha1-9a3a92d53c2ca5116fbe652a2ad7a6a4785e8d97'
         owner_id: 4525500
         repo_id: 1250079425
+        uses:
+            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
     'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460':
         ref: 'integration/native-managed-files-c80e'
         commit: 'sha1-ee98f4f12f3c32855c95feb3fe75bc2870b88460'
