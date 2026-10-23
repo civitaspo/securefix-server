@@ -8383,7 +8383,7 @@ mod tests {
                     "conclusion": status_conclusion
                 }),
                 serde_json::json!({
-                    "id": 2,
+                    "id": 2000,
                     "name": NATIVE_POLICY_CHECK_NAME,
                     "app": {"id": instance.config.apps.policy_check_id},
                     "head_sha": head_sha,
@@ -8564,6 +8564,43 @@ mod tests {
             )
             .unwrap()
         );
+
+        let mut old_review = approved_review.clone();
+        old_review["body"] = native_instance_approval_body(
+            &old_authority,
+            &head_sha,
+            &approval_request_sha256,
+            approval_producer_run_id,
+            approval_producer_run_attempt,
+        )
+        .unwrap()["body"]
+            .clone();
+        let old_approval_fixture = Fixture::new(vec![
+            Route::get(
+                format!(
+                    "/repos/example-org/project/commits/{head_sha}/check-runs?per_page=100&page=1&filter=all"
+                ),
+                serde_json::json!({"total_count":3,"check_runs":checks("success")}),
+            ),
+            Route::get(
+                "/repos/example-org/project/pulls/4/reviews?per_page=100&page=1",
+                serde_json::json!([old_review]),
+            ),
+        ]);
+        let mut stale_approval_writes = 0;
+        assert!(
+            send_after_native_instance_merge_fence(
+                &accepted,
+                capture(&old_approval_fixture.api),
+                || {
+                    stale_approval_writes += 1;
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(stale_approval_writes, 0);
+        old_approval_fixture.finish();
 
         let mut latest_review = approved_review.clone();
         latest_review["id"] = serde_json::json!(43);
