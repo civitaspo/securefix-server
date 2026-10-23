@@ -13,8 +13,8 @@ workflows:
     '.github/workflows/release-pr.yml': []
     '.github/workflows/release-tag.yml': []
     '.github/workflows/securefix-request.yml':
-        - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
-        - 'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a'
+        - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+        - 'civitaspo/securefix-server@9d135f2ac6e0ba7312fcb8c344704abef3954d98'
     '.github/workflows/server-approve.yml': []
     '.github/workflows/server-merge.yml': []
     '.github/workflows/server-policy-check.yml': []
@@ -38,6 +38,14 @@ dependencies:
         commit: 'sha1-ea165f8d65b6e75b540449e92b4886f43607fa02'
         owner_id: 44036562
         repo_id: 192625955
+    'civitaspo/securefix-server@9d135f2ac6e0ba7312fcb8c344704abef3954d98':
+        ref: 'source/native-securefix-pre114-20261024'
+        commit: 'sha1-9d135f2ac6e0ba7312fcb8c344704abef3954d98'
+        owner_id: 4525500
+        repo_id: 1250079425
+        uses:
+            - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+            - 'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a'
     'civitaspo/securefix-server@f704d9ce91629b0a2094191dbcd3cb0ae591c93a':
         ref: 'integration/native-client-adoption-pre111-20261024'
         commit: 'sha1-f704d9ce91629b0a2094191dbcd3cb0ae591c93a'

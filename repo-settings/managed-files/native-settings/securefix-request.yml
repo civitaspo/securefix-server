@@ -1,14 +1,15 @@
 name: testing-Native Securefix request
 
 on:
-  pull_request_target:
-    types: [labeled]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
 
 permissions: {}
 
 jobs:
   prepare-source:
-    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.number == 432 && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.run_attempt == 1
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -16,40 +17,25 @@ jobs:
       contents: read
     timeout-minutes: 10
     outputs:
-      artifact-name: ${{ steps.source.outputs.artifact_name }}
+      artifact-name: ${{ steps.source.outputs.artifact-name }}
     steps:
-      - name: Load the fixed Securefix package
-        id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Format the existing PR fixture without signing credentials
+        run: printf '%s\n' 'native pull_request Client proof fixture' > native-producer-proof.txt
+      - name: Prepare and upload the credential-free Securefix artifact
+        id: source
+        uses: civitaspo/securefix-server/.github/actions/prepare-securefix@9d135f2ac6e0ba7312fcb8c344704abef3954d98 # v0.2.45-pre.114
         with:
           token: ${{ github.token }}
-      - name: Prepare a credential-free Securefix source artifact
-        id: source
-        env:
-          CLI_BINARY: ${{ steps.package.outputs.binary }}
-          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' 'native generic Client proof fixture' > native-producer-proof.txt
-          "$CLI_BINARY" new-client securefix prepare \
-            --root-dir '' \
-            --files native-producer-proof.txt \
-            --repository "$GITHUB_REPOSITORY" \
-            --branch "$SOURCE_BRANCH" \
-            --commit-message 'test: exercise native Securefix request' \
-            --custom-json '{}' \
-            --output-dir .securefix-artifacts
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ${{ steps.source.outputs.artifact_name }}
-          path: ${{ steps.source.outputs.artifact_path }}
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 2
+          files: native-producer-proof.txt
+          commit-message: 'test: exercise ordinary pull_request Securefix'
 
   request:
     needs: prepare-source
-    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.event.label.name == 'securefix-native-write-probe' && github.run_attempt == 1
+    if: github.repository == 'civitaspo/testing-securefix-server' && github.event.pull_request.number == 432 && github.event.pull_request.base.repo.id == 1410312556 && github.event.pull_request.head.repo.id == 1410312556 && github.event.pull_request.user.id == 4525500 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.state == 'open' && github.actor_id == '4525500' && github.run_attempt == 1
     uses: civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@84f939b68b82de70554f98c429d65e077ef4a771 # v0.2.45-pre.116
     with:
       operation: securefix
