@@ -1152,7 +1152,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(
                         uses,
                         format!(
-                            "civitaspo/securefix-server/.github/workflows/reusable-server-{role}.yml@13d31194fd2e82da4c6acfda51ad4a160ac0a711"
+                            "civitaspo/securefix-server/.github/workflows/reusable-server-{role}.yml@2719567ddd2cb9e13294e12cb9537780c6643263"
                         )
                     );
                     assert_eq!(job["with"]["config_path"], config_path);
