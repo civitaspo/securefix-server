@@ -106,3 +106,8 @@ default-branch history, it must have exactly two parents: a default-branch
 ancestor followed by the accepted exact PR head. Client capture, Server request
 verification and the write gate apply the same check. Workflow and Server authority epochs still
 reject workflow, configuration and deployment changes, including reverts, before writing.
+
+When the Client repository is also the configured Server instance, only the
+Client dispatch job uses its existing protected `main` environment to obtain the
+Client App key. Capture and attestation remain credential-free. External Client
+repositories continue to supply their repository secret without an environment.

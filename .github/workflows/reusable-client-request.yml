@@ -124,6 +124,7 @@ jobs:
   dispatch:
     needs: [capture, attest]
     runs-on: ubuntu-24.04
+    environment: ${{ github.repository == inputs.server_repository && 'main' || null }}
     permissions:
       actions: read
       contents: read

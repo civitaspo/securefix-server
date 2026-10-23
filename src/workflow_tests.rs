@@ -1424,6 +1424,23 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
 }
 
 #[test]
+fn native_self_hosted_client_uses_existing_environment_only_for_dispatch() {
+    let client = workflow("reusable-client-request.yml");
+    assert_eq!(
+        client["jobs"]["dispatch"]["environment"],
+        "${{ github.repository == inputs.server_repository && 'main' || null }}"
+    );
+    for name in ["capture", "attest"] {
+        assert!(client["jobs"][name]["environment"].is_null());
+        assert!(
+            !serde_json::to_string(&client["jobs"][name])
+                .unwrap()
+                .contains("secrets.")
+        );
+    }
+}
+
+#[test]
 fn native_request_producer_reuses_the_exact_source_pinned_candidate() {
     const CANDIDATE_SOURCE_SHA: &str = "7b5da5d248078c774d44d54a0e7fd145ddf67fd7";
     let producer = workflow("request-producer-probe.yml");
