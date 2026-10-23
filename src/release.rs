@@ -104,7 +104,7 @@ pub struct ReleasePlanV2 {
     /// The legacy release flow leaves this unset; native publication requires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_pr_head_sha: Option<String>,
-    /// Stable OSS Client package admitted from the configured distributor.
+    /// OSS Client package admitted from the configured distributor and channel.
     /// Bytes are re-resolved and the full identity compared immediately before write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_package: Option<NativeClientPackageSnapshot>,
@@ -132,9 +132,12 @@ pub struct ReleasePlanV2 {
 pub struct NativeClientPackageSnapshot {
     pub distributor_repository: String,
     pub distributor_id: u64,
+    pub release_repository: String,
+    pub release_repository_id: u64,
     pub implementation_sha: String,
     pub implementation_version: String,
     pub loader_action_sha: String,
+    pub loader_action_path: String,
     pub binary_source_sha: String,
     pub binary_version: String,
     pub protocol: String,
@@ -219,14 +222,7 @@ impl ReleasePlanV2 {
         validate_repository(&self.repository)?;
         CommitSha::parse(&self.server_revision)?;
         if let Some(authority) = &self.instance_authority {
-            CommitSha::parse(&authority.epoch)?;
-            CommitSha::parse(&authority.config_sha256)?;
-            ensure!(
-                !authority.config_path.is_empty()
-                    && authority.instance_id > 0
-                    && !authority.instance_repository.is_empty(),
-                "invalid instance config path in release plan"
-            );
+            crate::api::validate_native_authority_snapshot(authority)?;
         }
         CommitSha::parse(&self.source_revision)?;
         CommitSha::parse(&self.release_pr_sha)?;
@@ -1791,7 +1787,7 @@ fn tag_configured_release_pr(
     let source_revision =
         release_tag_reusable_revision(&references, &instance.config.acceptable_clients.repository)?;
     let package = verify_accepted_client_package(api, &instance.config, source_revision.as_str())?;
-    let package_snapshot = native_client_package_snapshot(&package)?;
+    let package_snapshot = native_client_package_snapshot(&package, &instance.config)?;
     validate_native_client_package_snapshot_for_config(&package_snapshot, &instance.config)?;
     ensure!(
         package.implementation_sha == source_revision.as_str(),
@@ -1917,7 +1913,8 @@ fn tag_configured_release_pr(
             &instance.config,
             manifest.source_revision.as_str(),
         )?;
-        let current_package_snapshot = native_client_package_snapshot(&current_package)?;
+        let current_package_snapshot =
+            native_client_package_snapshot(&current_package, &instance.config)?;
         validate_native_client_package_snapshot_for_config(
             &current_package_snapshot,
             &instance.config,
@@ -2240,7 +2237,7 @@ fn verify_current_native_release_tag_package(
     let signer_sha =
         release_tag_reusable_revision(&references, &instance.config.acceptable_clients.repository)?;
     let package = verify_accepted_client_package(api, &instance.config, signer_sha.as_str())?;
-    let snapshot = native_client_package_snapshot(&package)?;
+    let snapshot = native_client_package_snapshot(&package, &instance.config)?;
     validate_native_client_package_snapshot_for_config(&snapshot, &instance.config)?;
     ensure!(
         package.implementation_sha == signer_sha.as_str(),
@@ -2360,7 +2357,6 @@ fn native_release_request_parts(
 
 fn verify_native_release_target_policy(
     instance: &NativeServerInstanceAuthority,
-    policy: &Policy,
     repository: &Repository,
     repository_id: u64,
 ) -> Result<crate::policy::RepositoryPolicy> {
@@ -2375,20 +2371,6 @@ fn verify_native_release_target_policy(
         "release destination ID differs from the protected Server instance config"
     );
     let configured_policy = configured.policy();
-    let active_policy = policy.repository(repository.as_str())?;
-    ensure!(
-        configured_policy.release == active_policy.release
-            && configured_policy.capabilities == active_policy.capabilities
-            && configured_policy.native_binaries.len() == active_policy.native_binaries.len()
-            && configured_policy
-                .native_binaries
-                .iter()
-                .zip(&active_policy.native_binaries)
-                .all(|(left, right)| {
-                    left.target == right.target && left.runner == right.runner
-                }),
-        "protected Server instance release policy differs from its active runtime policy"
-    );
     configured_policy.require(Capability::Release)?;
     Ok(configured_policy)
 }
@@ -2400,13 +2382,24 @@ fn verify_accepted_client_package(
 ) -> Result<securefix::package::VerifiedNativeClientPackage> {
     let workflow = server_api.content(
         &instance.acceptable_clients.repository,
-        &instance.acceptable_clients.producer_workflow,
+        ".github/workflows/reusable-release-tag.yml",
         signer_sha,
     )?;
     let loader_action = crate::native_server::native_client_package_action(
         &workflow,
         &instance.acceptable_clients.repository,
     )?;
+    if instance.scratch_package_repository.is_some() {
+        return securefix::package::verify_native_client_package_scratch(
+            server_api,
+            instance,
+            &instance.acceptable_clients,
+            signer_sha,
+            &loader_action,
+            "securefix-native-request/v1",
+            None,
+        );
+    }
     let repository: Value = server_api.get(&format!(
         "/repos/{}",
         instance.acceptable_clients.repository
@@ -2431,7 +2424,6 @@ fn verify_accepted_client_package(
 
 fn parse_request() -> Result<()> {
     let api = api()?;
-    let _runtime = require_current_runtime(&api, ".github/workflows/reusable-server-release.yml")?;
     let instance = native_release_instance(&api)?;
     let event = crate::event()?;
     let (repo, run_id, repository_id) = native_release_request_parts(&event, &instance.config)?;
@@ -2454,38 +2446,28 @@ fn preflight() -> Result<()> {
         "https://api.github.com",
         env("SECUREFIX_RELEASE_READ_TOKEN")?,
     )?;
-    let policy = current_policy(&read)?;
     let instance = native_release_instance(&read)?;
     let event = crate::event()?;
     let (repo, run_id, repository_id) = native_release_request_parts(&event, &instance.config)?;
-    let repo_policy = policy.repository(repo.as_str())?;
-    repo_policy.require(Capability::Release)?;
-    let instance_policy =
-        verify_native_release_target_policy(&instance, &policy, &repo, repository_id)?;
+    let repo_policy = verify_native_release_target_policy(&instance, &repo, repository_id)?;
     let strategy = repo_policy
         .release
         .context("release strategy is not configured")?;
-    let _runtime = require_current_runtime(&read, ".github/workflows/reusable-server-release.yml")?;
-    let source = validated_source(&app, &policy, &repo, run_id, strategy)?;
-    let is_native_release =
-        strategy == ReleaseStrategy::GithubRelease && !instance_policy.native_binaries.is_empty();
-    let package_snapshot = if is_native_release {
-        verify_release_manifest_attestation(&app, &repo, repository_id, &source, &policy.revision)?;
-        ensure!(
-            source.manifest.source_revision.as_str() == policy.revision,
-            "native release source manifest does not use the active Server runtime"
-        );
-        let package = verify_accepted_client_package(
-            &read,
-            &instance.config,
-            source.manifest.source_revision.as_str(),
-        )?;
-        let snapshot = native_client_package_snapshot(&package)?;
-        validate_native_client_package_snapshot_for_config(&snapshot, &instance.config)?;
-        Some(snapshot)
-    } else {
-        None
-    };
+    let source = validated_native_source(&read, &app, &instance, &repo, run_id)?;
+    verify_release_manifest_attestation(
+        &app,
+        &repo,
+        repository_id,
+        &source,
+        &instance.config.acceptable_clients.repository,
+        source.manifest.source_revision.as_str(),
+    )?;
+    let package = verify_accepted_client_package(
+        &read,
+        &instance.config,
+        source.manifest.source_revision.as_str(),
+    )?;
+    let package_snapshot = native_client_package_snapshot(&package, &instance.config)?;
     let manifest = source.manifest.clone();
     let tag = manifest.tag.clone();
     let release = find_release(&app, &repo, &tag)?;
@@ -2508,14 +2490,14 @@ fn preflight() -> Result<()> {
             "published release is not marked immutable"
         );
     }
-    let server_revision = policy.revision.clone();
+    let server_revision = crate::api::native_server_release_pin(&instance.authority)?;
     let mut plan = ReleasePlanV2 {
         schema_version: 2,
         server_revision,
-        instance_authority: is_native_release.then(|| instance.authority.clone()),
+        instance_authority: Some(instance.authority.clone()),
         source_manifest_sha256: Some(source.manifest_sha256.clone()),
-        release_pr_head_sha: is_native_release.then(|| source.release_pr_head_sha.clone()),
-        client_package: package_snapshot,
+        release_pr_head_sha: Some(source.release_pr_head_sha.clone()),
+        client_package: Some(package_snapshot),
         repository: repo.as_str().to_owned(),
         strategy,
         source_run_id: manifest.source_run_id,
@@ -3125,52 +3107,17 @@ struct ValidatedReleaseSource {
     release_pr_head_sha: String,
 }
 
-fn validated_source(
+fn source_run_manifest(
     api: &GitHub,
-    policy: &Policy,
     repo: &Repository,
     run_id: RunId,
-    strategy: ReleaseStrategy,
-) -> Result<ValidatedReleaseSource> {
-    let run = successful_source_run(api, repo.as_str(), run_id.0)?;
-    ensure!(
-        run["name"]
-            == format!(
-                "{}Release Tag",
-                crate::config::trusted()?.deployment.workflow_prefix
-            ),
-        "source workflow is not named Release Tag"
-    );
-    ensure!(
-        run["repository"]["full_name"] == repo.as_str()
-            && run["head_repository"]["full_name"] == repo.as_str(),
-        "source workflow must run in the allowlisted repository"
-    );
+    run: &Value,
+    source_revision: &CommitSha,
+) -> Result<(ReleaseManifestV2, Vec<u8>)> {
     let source_run_sha = CommitSha::parse(
         run["head_sha"]
             .as_str()
             .context("source workflow lacks head SHA")?,
-    )?;
-    let referenced: Vec<ReferencedWorkflow> =
-        serde_json::from_value(run["referenced_workflows"].clone())
-            .context("source workflow lacks referenced workflow provenance")?;
-    referenced_revision(
-        &referenced,
-        ".github/workflows/reusable-release-tag.yml",
-        &policy.revision,
-    )?;
-    let server_repository = &crate::config::trusted()?.deployment.server.repository;
-    let reusable_path = crate::config::workflow_path(".github/workflows/reusable-release-tag.yml")?;
-    let source_revision = CommitSha::parse(
-        &referenced
-            .iter()
-            .find(|workflow| {
-                workflow
-                    .path
-                    .starts_with(&format!("{server_repository}/{reusable_path}@"))
-            })
-            .context("source workflow did not call pinned Release Tag reusable")?
-            .sha,
     )?;
     let artifact_list: ArtifactList = api.get(&format!(
         "/repos/{}/actions/runs/{}/artifacts?per_page=100",
@@ -3222,9 +3169,189 @@ fn validated_source(
         "release manifest does not match the source attempt"
     );
     ensure!(
-        manifest.source_revision == source_revision,
+        manifest.source_revision == *source_revision,
         "release manifest runtime revision does not match workflow provenance"
     );
+    Ok((manifest, manifest_bytes))
+}
+
+fn validated_native_source(
+    server_api: &GitHub,
+    client_api: &GitHub,
+    instance: &NativeServerInstanceAuthority,
+    repo: &Repository,
+    run_id: RunId,
+) -> Result<ValidatedReleaseSource> {
+    let repository_id = configured_release_destination(&instance.config, repo)?;
+    let run = successful_source_run(client_api, repo.as_str(), run_id.0)?;
+    ensure!(
+        run["repository"]["id"].as_u64() == Some(repository_id)
+            && run["repository"]["full_name"] == repo.as_str()
+            && run["head_repository"]["id"].as_u64() == Some(repository_id)
+            && run["head_repository"]["full_name"] == repo.as_str(),
+        "release source run is outside the configured Client repository"
+    );
+    let references: Vec<ReferencedWorkflow> =
+        serde_json::from_value(run["referenced_workflows"].clone())
+            .context("release source run lacks reusable workflow provenance")?;
+    let signer =
+        release_tag_reusable_revision(&references, &instance.config.acceptable_clients.repository)?;
+    let (manifest, manifest_bytes) = source_run_manifest(client_api, repo, run_id, &run, &signer)?;
+    let (pull, merge_sha, _) = verify_native_release_pr(
+        client_api,
+        &instance.authority.config_path,
+        instance,
+        repo,
+        repository_id,
+        manifest.release_pr_number,
+    )?;
+    ensure!(
+        manifest.release_pr_sha == merge_sha,
+        "release manifest names a different merge commit"
+    );
+    match run["event"].as_str() {
+        Some("pull_request") => {
+            ensure!(
+                run["head_sha"] == pull["head"]["sha"],
+                "release source run does not match the exact merged PR head"
+            );
+            let associated = run["pull_requests"]
+                .as_array()
+                .context("release run lacks PR associations")?;
+            if !associated
+                .iter()
+                .any(|candidate| candidate["number"].as_u64() == Some(manifest.release_pr_number))
+            {
+                let bot = &instance.config.identities.server_bot;
+                ensure!(
+                    crate::request::matches_principal(&run["actor"], bot.id, &bot.login, "Bot")
+                        && run["head_branch"] == pull["head"]["ref"],
+                    "release source association fallback is not the configured Server App branch"
+                );
+                let associated: Vec<Value> = client_api.paginate(&format!(
+                    "/repos/{}/commits/{}/pulls",
+                    repo.as_str(),
+                    manifest.source_run_sha.as_str(),
+                ))?;
+                let matching: Vec<_> = associated
+                    .iter()
+                    .filter(|candidate| {
+                        candidate["number"].as_u64() == Some(manifest.release_pr_number)
+                    })
+                    .collect();
+                ensure!(
+                    matching.len() == 1
+                        && matching[0]["head"]["sha"] == pull["head"]["sha"]
+                        && matching[0]["merge_commit_sha"] == pull["merge_commit_sha"]
+                        && matching[0]["base"]["repo"]["full_name"] == repo.as_str()
+                        && matching[0]["state"] == "closed",
+                    "release source commit does not identify its exact merged PR"
+                );
+            }
+        }
+        Some("workflow_dispatch") => {
+            let owner = &instance.config.identities.owner;
+            ensure!(
+                crate::request::matches_principal(
+                    &run["triggering_actor"],
+                    owner.id,
+                    &owner.login,
+                    "User"
+                ),
+                "release retry was not dispatched by the configured owner"
+            );
+        }
+        _ => bail!("unsupported Release Tag source event"),
+    }
+    let tag_ref: Value = client_api.get(&format!(
+        "/repos/{}/git/ref/tags/{}",
+        repo.as_str(),
+        url_encode(manifest.tag.as_str())
+    ))?;
+    ensure!(
+        tag_ref["object"]["type"] == "tag",
+        "release tag is not annotated"
+    );
+    let tag_object: Value = client_api.get(&format!(
+        "/repos/{}/git/tags/{}",
+        repo.as_str(),
+        tag_ref["object"]["sha"]
+            .as_str()
+            .context("release tag object SHA is missing")?,
+    ))?;
+    ensure!(
+        tag_object["object"]["type"] == "commit"
+            && tag_object["object"]["sha"] == merge_sha.as_str(),
+        "release tag points to a different commit"
+    );
+    let policy = verify_native_release_target_policy(instance, repo, repository_id)?;
+    let requires_bundle = policy.release == Some(ReleaseStrategy::TerraformProvider)
+        || !policy.native_binaries.is_empty();
+    ensure!(
+        manifest.artifact_id.is_some_and(|id| id > 0) == requires_bundle,
+        "release bundle does not match the configured asset policy"
+    );
+    server_api.require_remote_native_server_instance_authority_unchanged(instance)?;
+    Ok(ValidatedReleaseSource {
+        release_pr_head_sha: pull["head"]["sha"]
+            .as_str()
+            .context("merged release PR lacks head SHA")?
+            .to_owned(),
+        manifest,
+        manifest_sha256: sha256_bytes(&manifest_bytes),
+        manifest_bytes,
+    })
+}
+
+fn validated_source(
+    api: &GitHub,
+    policy: &Policy,
+    repo: &Repository,
+    run_id: RunId,
+    strategy: ReleaseStrategy,
+) -> Result<ValidatedReleaseSource> {
+    let run = successful_source_run(api, repo.as_str(), run_id.0)?;
+    ensure!(
+        run["name"]
+            == format!(
+                "{}Release Tag",
+                crate::config::trusted()?.deployment.workflow_prefix
+            ),
+        "source workflow is not named Release Tag"
+    );
+    ensure!(
+        run["repository"]["full_name"] == repo.as_str()
+            && run["head_repository"]["full_name"] == repo.as_str(),
+        "source workflow must run in the allowlisted repository"
+    );
+    let source_run_sha = CommitSha::parse(
+        run["head_sha"]
+            .as_str()
+            .context("source workflow lacks head SHA")?,
+    )?;
+    let referenced: Vec<ReferencedWorkflow> =
+        serde_json::from_value(run["referenced_workflows"].clone())
+            .context("source workflow lacks referenced workflow provenance")?;
+    referenced_revision(
+        &referenced,
+        ".github/workflows/reusable-release-tag.yml",
+        &policy.revision,
+    )?;
+    let server_repository = &crate::config::trusted()?.deployment.server.repository;
+    let reusable_path = crate::config::workflow_path(".github/workflows/reusable-release-tag.yml")?;
+    let source_revision = CommitSha::parse(
+        &referenced
+            .iter()
+            .find(|workflow| {
+                workflow
+                    .path
+                    .starts_with(&format!("{server_repository}/{reusable_path}@"))
+            })
+            .context("source workflow did not call pinned Release Tag reusable")?
+            .sha,
+    )?;
+    let (manifest, manifest_bytes) =
+        source_run_manifest(api, repo, run_id, &run, &source_revision)?;
     ensure!(
         manifest.source_revision.as_str() == policy.revision,
         "release runtime revision is stale"
@@ -3361,11 +3488,12 @@ fn verify_release_manifest_attestation(
     repo: &Repository,
     repository_id: u64,
     source: &ValidatedReleaseSource,
-    runtime_sha: &str,
+    signer_repository: &str,
+    signer_sha: &str,
 ) -> Result<()> {
     ensure!(
-        source.manifest.source_revision.as_str() == runtime_sha,
-        "release manifest signer differs from the active runtime source"
+        source.manifest.source_revision.as_str() == signer_sha,
+        "release manifest signer differs from the admitted Client implementation"
     );
     // The attested manifest proof is a separate artifact from the optional
     // native binary bundle; resolve it by exact run and name, not a caller ID.
@@ -3406,11 +3534,6 @@ fn verify_release_manifest_attestation(
     let bundle_path = temporary.path().join("bundle.json");
     std::fs::write(&manifest_path, &source.manifest_bytes)?;
     std::fs::write(&bundle_path, &bundle_bytes)?;
-    let signer_repository = crate::config::trusted()?
-        .deployment
-        .server
-        .repository
-        .as_str();
     let signer_workflow = ".github/workflows/reusable-release-tag.yml";
     let verified = securefix::attestation::verify_with_gh(
         &manifest_path,
@@ -3419,7 +3542,7 @@ fn verify_release_manifest_attestation(
             repository: repo.as_str(),
             signer_repository,
             signer_workflow,
-            signer_sha: runtime_sha,
+            signer_sha,
             source: None,
         },
     )?;
@@ -3430,7 +3553,7 @@ fn verify_release_manifest_attestation(
         repository_id,
         signer_repository,
         signer_workflow,
-        runtime_sha,
+        signer_sha,
         &source.manifest_bytes,
     )
 }
@@ -3480,19 +3603,23 @@ fn validate_native_client_package_snapshot_values(
     package: &NativeClientPackageSnapshot,
 ) -> Result<()> {
     validate_repository(&package.distributor_repository)?;
+    validate_repository(&package.release_repository)?;
     ensure!(
-        package.distributor_id > 0,
-        "Client distributor ID is invalid"
+        package.distributor_id > 0 && package.release_repository_id > 0,
+        "Client distributor or release repository ID is invalid"
     );
     CommitSha::parse(&package.implementation_sha)?;
     CommitSha::parse(&package.loader_action_sha)?;
     CommitSha::parse(&package.binary_source_sha)?;
+    securefix::package::PinnedPackageAction::new(
+        package.distributor_repository.clone(),
+        package.loader_action_path.clone(),
+        package.loader_action_sha.clone(),
+    )?;
     let implementation_version = Version::parse(&package.implementation_version)?;
     let binary_version = Version::parse(&package.binary_version)?;
     ensure!(
-        implementation_version.pre.is_empty()
-            && implementation_version.build.is_empty()
-            && binary_version.pre.is_empty()
+        implementation_version.build.is_empty()
             && binary_version.build.is_empty()
             && package.release_tag == format!("v{binary_version}")
             && package.protocol == "securefix-native-request/v1"
@@ -3529,6 +3656,7 @@ fn validate_native_client_package_snapshot_values(
 
 fn native_client_package_snapshot(
     package: &securefix::package::VerifiedNativeClientPackage,
+    config: &securefix::instance_config::InstanceConfig,
 ) -> Result<NativeClientPackageSnapshot> {
     let release = package.package.release();
     let producer_run = package.package.producer_run();
@@ -3541,11 +3669,14 @@ fn native_client_package_snapshot(
         "verified package producer run differs from its explicit identity"
     );
     let snapshot = NativeClientPackageSnapshot {
-        distributor_repository: release.publisher.repository.clone(),
-        distributor_id: release.publisher.repository_id,
+        distributor_repository: config.acceptable_clients.repository.clone(),
+        distributor_id: config.acceptable_clients.id,
+        release_repository: release.publisher.repository.clone(),
+        release_repository_id: release.publisher.repository_id,
         implementation_sha: package.implementation_sha.clone(),
         implementation_version: package.implementation_version.to_string(),
         loader_action_sha: package.loader_action_sha.clone(),
+        loader_action_path: package.loader_action_path.clone(),
         binary_source_sha: package.binary_source_sha.clone(),
         binary_version: package.binary_version.to_string(),
         protocol: package.protocol.clone(),
@@ -3565,7 +3696,7 @@ fn native_client_package_snapshot(
         package_producer_run_id: package.package_producer_run_id,
         package_producer_run_attempt: package.package_producer_run_attempt,
     };
-    validate_native_client_package_snapshot_values(&snapshot)?;
+    validate_native_client_package_snapshot_for_config(&snapshot, config)?;
     Ok(snapshot)
 }
 
@@ -3575,13 +3706,18 @@ fn validate_native_client_package_snapshot_for_config(
 ) -> Result<()> {
     validate_native_client_package_snapshot_values(package)?;
     let implementation_version = Version::parse(&package.implementation_version)?;
+    securefix::package::validate_native_client_package_destination(
+        config,
+        &securefix::package::TrustedPublisher {
+            repository: package.release_repository.clone(),
+            repository_id: package.release_repository_id,
+        },
+        &implementation_version,
+        &Version::parse(&package.binary_version)?,
+    )?;
     ensure!(
         package.distributor_repository == config.acceptable_clients.repository
-            && package.distributor_id == config.acceptable_clients.id
-            && config
-                .acceptable_clients
-                .version
-                .matches(&implementation_version),
+            && package.distributor_id == config.acceptable_clients.id,
         "accepted Client package snapshot no longer matches the instance distributor policy"
     );
     Ok(())
@@ -3848,32 +3984,77 @@ fn prepare_existing_provider_signature(
 
 fn sign() -> Result<()> {
     let server = GitHub::from_env("GITHUB_TOKEN")?;
-    let policy = current_policy(&server)?;
-    let _runtime = require_current_runtime(&server, ".github/workflows/release.yml")?;
     let public = GitHub::anonymous()?;
     let input = PathBuf::from("release-input");
     let assets_dir = input.join("assets");
     let mut plan: ReleasePlanV2 = serde_json::from_slice(&std::fs::read(input.join("plan.json"))?)?;
     plan.validate()?;
-    ensure!(
-        plan.server_revision == policy.revision,
-        "signing plan is stale"
-    );
     let repo = Repository::parse(&plan.repository)?;
-    let repo_policy = policy.repository(repo.as_str())?;
-    repo_policy.require(Capability::Release)?;
     ensure!(
-        repo_policy.release == Some(ReleaseStrategy::TerraformProvider)
-            && plan.strategy == ReleaseStrategy::TerraformProvider,
+        plan.strategy == ReleaseStrategy::TerraformProvider,
         "signing is only allowed for Terraform provider releases"
     );
-    validate_source_manifest_provenance(
-        &public,
-        &policy,
-        &repo,
-        &plan.source_manifest,
-        plan.strategy,
-    )?;
+    if plan.instance_authority.is_some() {
+        let instance = native_release_instance(&server)?;
+        ensure!(
+            plan.instance_authority.as_ref() == Some(&instance.authority)
+                && plan.server_revision
+                    == crate::api::native_server_release_pin(&instance.authority)?,
+            "signing plan has a stale Server deployment or configuration"
+        );
+        let repository_id = configured_release_destination(&instance.config, &repo)?;
+        ensure!(
+            verify_native_release_target_policy(&instance, &repo, repository_id)?.release
+                == Some(plan.strategy),
+            "signing strategy changed after preflight"
+        );
+        let source =
+            validated_native_source(&server, &public, &instance, &repo, plan.source_run_id)?;
+        ensure!(
+            source.manifest == plan.source_manifest
+                && Some(&source.manifest_sha256) == plan.source_manifest_sha256.as_ref()
+                && Some(&source.release_pr_head_sha) == plan.release_pr_head_sha.as_ref(),
+            "signing source changed after preflight"
+        );
+        verify_release_manifest_attestation(
+            &public,
+            &repo,
+            repository_id,
+            &source,
+            &instance.config.acceptable_clients.repository,
+            source.manifest.source_revision.as_str(),
+        )?;
+        let package = verify_accepted_client_package(
+            &server,
+            &instance.config,
+            source.manifest.source_revision.as_str(),
+        )?;
+        ensure!(
+            plan.client_package.as_ref()
+                == Some(&native_client_package_snapshot(&package, &instance.config)?),
+            "signing Client package changed after preflight"
+        );
+    } else {
+        let policy = current_policy(&server)?;
+        let _runtime = require_current_runtime(&server, ".github/workflows/release.yml")?;
+        ensure!(
+            plan.server_revision == policy.revision,
+            "signing plan is stale"
+        );
+        let repo_policy = policy.repository(repo.as_str())?;
+        repo_policy.require(Capability::Release)?;
+        ensure!(
+            repo_policy.release == Some(plan.strategy),
+            "signing strategy changed after preflight"
+        );
+        validate_source_manifest_provenance(
+            &public,
+            &policy,
+            &repo,
+            &plan.source_manifest,
+            plan.strategy,
+        )?;
+    }
     let assets = validate_asset_directory(&assets_dir, &plan.tag, repo.name())?;
     ensure!(
         assets.len() == plan.assets.len(),
@@ -4082,12 +4263,15 @@ fn validate_gpg_status(status: &str, fingerprint: &str) -> Result<()> {
 
 fn publish() -> Result<()> {
     let read = GitHub::from_env("GITHUB_TOKEN")?;
-    let policy = current_policy(&read)?;
-    let _runtime = require_current_runtime(&read, ".github/workflows/reusable-server-release.yml")?;
     let input = PathBuf::from("release-package");
     let assets_dir = input.join("assets");
     let plan: ReleasePlanV2 = serde_json::from_slice(&std::fs::read(input.join("plan.json"))?)?;
     plan.validate()?;
+    if plan.instance_authority.is_some() {
+        return publish_native_release(&read, &plan, &assets_dir);
+    }
+    let policy = current_policy(&read)?;
+    let _runtime = require_current_runtime(&read, ".github/workflows/reusable-server-release.yml")?;
     ensure!(
         plan.server_revision == policy.revision,
         "publish plan is stale"
@@ -4099,9 +4283,6 @@ fn publish() -> Result<()> {
         repo_policy.release == Some(plan.strategy),
         "release strategy changed after preflight"
     );
-    if plan.instance_authority.is_some() {
-        return publish_native_release(&read, &policy, &plan, &assets_dir);
-    }
     let api = GitHub::from_env("GH_TOKEN")?;
     if plan.strategy == ReleaseStrategy::GithubRelease {
         ensure!(
@@ -4211,7 +4392,6 @@ fn publish() -> Result<()> {
 
 fn publish_native_release(
     server_api: &GitHub,
-    policy: &Policy,
     plan: &ReleasePlanV2,
     assets_dir: &Path,
 ) -> Result<()> {
@@ -4223,7 +4403,6 @@ fn publish_native_release(
     );
     let instance_policy = verify_native_release_target_policy(
         &instance,
-        policy,
         &repository,
         instance
             .config
@@ -4235,17 +4414,16 @@ fn publish_native_release(
     )?;
     ensure!(
         instance_policy.release == Some(plan.strategy)
-            && plan.strategy == ReleaseStrategy::GithubRelease
-            && !instance_policy.native_binaries.is_empty(),
+            && plan.server_revision == crate::api::native_server_release_pin(&instance.authority)?,
         "native release plan no longer matches its configured release strategy"
     );
     let read_api = GitHub::from_env("SECUREFIX_RELEASE_READ_TOKEN")?;
-    let source = validated_source(
+    let source = validated_native_source(
+        server_api,
         &read_api,
-        policy,
+        &instance,
         &repository,
         plan.source_run_id,
-        plan.strategy,
     )?;
     ensure!(
         source.manifest_sha256 == plan.source_manifest_sha256.as_deref().unwrap_or_default()
@@ -4265,19 +4443,53 @@ fn publish_native_release(
             .context("native release target is absent from the protected instance config")?
             .id,
         &source,
-        &policy.revision,
+        &instance.config.acceptable_clients.repository,
+        source.manifest.source_revision.as_str(),
     )?;
     let package = verify_accepted_client_package(
         server_api,
         &instance.config,
         source.manifest.source_revision.as_str(),
     )?;
-    let package_snapshot = native_client_package_snapshot(&package)?;
+    let package_snapshot = native_client_package_snapshot(&package, &instance.config)?;
     validate_native_client_package_snapshot_for_config(&package_snapshot, &instance.config)?;
     ensure!(
         plan.client_package.as_ref() == Some(&package_snapshot),
         "accepted Client package changed after release preflight"
     );
+    if plan.strategy == ReleaseStrategy::TerraformProvider {
+        validate_signed_provider_assets(assets_dir, plan)?;
+    } else {
+        ensure!(
+            instance_policy.native_binaries.is_empty() == plan.native_assets.is_empty(),
+            "release assets no longer match the configured native target set"
+        );
+        if !plan.native_assets.is_empty() {
+            let native_manifest = NativeAssetManifest {
+                schema_version: 1,
+                repository: plan
+                    .native_binary_repository
+                    .clone()
+                    .context("native release lacks its source repository")?,
+                source_run_id: plan.source_manifest.source_run_id,
+                source_run_sha: plan.source_manifest.source_run_sha.clone(),
+                run_attempt: plan.source_manifest.run_attempt,
+                source_revision: plan.source_manifest.source_revision.clone(),
+                release_pr_number: plan.release_pr_number,
+                release_pr_sha: plan.source_manifest.release_pr_sha.clone(),
+                tag: plan.tag.clone(),
+                package_version: plan.source_manifest.package_version().to_owned(),
+                assets: plan.native_assets.clone(),
+            };
+            validate_native_manifest(
+                &native_manifest,
+                &repository,
+                &instance_policy.native_binaries,
+                &plan.source_manifest,
+            )?;
+            validate_native_asset_files(assets_dir, &native_manifest)?;
+        }
+    }
 
     let mut assets = Vec::with_capacity(plan.assets.len());
     for asset in &plan.assets {
@@ -4635,8 +4847,33 @@ fn validate_signed_provider_assets_for_project(
 
 fn cleanup() -> Result<()> {
     let api = GitHub::from_env("GITHUB_TOKEN")?;
-    let _runtime = require_current_runtime(&api, ".github/workflows/release.yml")?;
     let event = crate::event()?;
+    if std::env::var_os("SECUREFIX_INSTANCE_CONFIG_PATH").is_some() {
+        let instance = native_release_instance(&api)?;
+        let (_, run, _) = native_release_request_parts(&event, &instance.config)?;
+        let label = native_release_request_label_name(
+            &instance.config.release_request_label_prefix,
+            run.0,
+        )?;
+        let writer = GitHub::native_release_cleanup_from_env("GITHUB_TOKEN", &instance, &label)?;
+        let path = format!(
+            "/repos/{}/labels/{}",
+            instance.config.instance.repository,
+            url_encode(&label)
+        );
+        return match writer.delete(&path) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.downcast_ref::<ApiError>().is_some_and(|api_error| {
+                    api_error.status == reqwest::StatusCode::NOT_FOUND
+                }) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        };
+    }
+    let _runtime = require_current_runtime(&api, ".github/workflows/release.yml")?;
     let Some(label) = event["label"]["name"].as_str() else {
         return Ok(());
     };
@@ -5034,6 +5271,68 @@ mod tests {
             .unwrap();
         archive.write_all(b"{}").unwrap();
         assert!(release_manifest_bytes_from_zip(&archive.finish().unwrap().into_inner()).is_err());
+    }
+
+    #[test]
+    fn release_source_manifest_binds_client_signer_run_attempt_and_exact_bytes() {
+        use crate::fixtures::{Fixture, Route};
+        let manifest = provenance_test_manifest();
+        let repo = Repository::parse(&manifest.repository).unwrap();
+        let expected = serde_json::to_vec(&manifest).unwrap();
+        let run = json!({"head_sha":manifest.source_run_sha.as_str(), "run_attempt":manifest.run_attempt});
+        for (source_run, signer, accepted) in [
+            (run.clone(), manifest.source_revision.clone(), true),
+            (
+                run.clone(),
+                CommitSha::parse(&"f".repeat(40)).unwrap(),
+                false,
+            ),
+            (
+                json!({"head_sha":"e".repeat(40), "run_attempt":manifest.run_attempt}),
+                manifest.source_revision.clone(),
+                false,
+            ),
+            (
+                json!({"head_sha":manifest.source_run_sha.as_str(), "run_attempt":manifest.run_attempt+1}),
+                manifest.source_revision.clone(),
+                false,
+            ),
+        ] {
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&expected).unwrap();
+            let archive = zip.finish().unwrap().into_inner();
+            let fixture = Fixture::new(vec![
+                Route::get(
+                    format!(
+                        "/repos/{}/actions/runs/{}/artifacts?per_page=100",
+                        repo.as_str(),
+                        manifest.source_run_id.0
+                    ),
+                    json!({"artifacts":[{"name":"release-manifest","expired":false,"id":71,"size_in_bytes":archive.len()}]}),
+                ),
+                Route::raw(
+                    "GET",
+                    format!("/repos/{}/actions/artifacts/71/zip", repo.as_str()),
+                    200,
+                    archive,
+                ),
+            ]);
+            let actual = source_run_manifest(
+                &fixture.api,
+                &repo,
+                manifest.source_run_id,
+                &source_run,
+                &signer,
+            );
+            assert_eq!(actual.is_ok(), accepted);
+            if let Ok((parsed, bytes)) = actual {
+                assert_eq!(parsed, manifest);
+                assert_eq!(bytes, expected);
+            }
+            fixture.finish();
+        }
     }
 
     // This ignored probe is invoked only by the frozen, trusted integration
@@ -6995,6 +7294,45 @@ mod tests {
             native_assets: Vec::new(),
         };
         assert!(plan.validate().is_ok());
+        let mut native_plan = plan.clone();
+        native_plan.instance_authority = Some(NativeAuthoritySnapshot {
+            instance_repository: "example-org/server".to_owned(),
+            instance_id: 404,
+            default_branch: "main".to_owned(),
+            config_path: "securefix-server.toml".to_owned(),
+            config_sha256: "e".repeat(64),
+            epoch: "f".repeat(40),
+            workflows: vec![crate::api::NativeWorkflowAuthority {
+                role: securefix::instance_config::WorkflowRole::Release,
+                path: ".github/workflows/server-release.yml".to_owned(),
+                sha256: "a".repeat(64),
+                pins: vec![format!(
+                    "example-org/distributor/.github/workflows/reusable-server-release.yml@{}",
+                    native_plan.server_revision
+                )],
+            }],
+        });
+        native_plan.source_manifest_sha256 =
+            Some(sha256_bytes(&serde_json::to_vec(&source_manifest).unwrap()));
+        native_plan.release_pr_head_sha = Some("9".repeat(40));
+        let mut package = native_client_snapshot_fixture();
+        package.implementation_sha = source_manifest.source_revision.as_str().to_owned();
+        native_plan.client_package = Some(package);
+        native_plan.validate().unwrap();
+        let mut invalid_digest = native_plan.clone();
+        invalid_digest
+            .instance_authority
+            .as_mut()
+            .unwrap()
+            .config_sha256 = "e".repeat(40);
+        assert!(invalid_digest.validate().is_err());
+        let mut mismatched_client = native_plan;
+        mismatched_client
+            .client_package
+            .as_mut()
+            .unwrap()
+            .implementation_sha = "8".repeat(40);
+        assert!(mismatched_client.validate().is_err());
         let mut tampered = plan;
         tampered.release_pr_sha = "e".repeat(40);
         assert!(tampered.validate().is_err());
@@ -8304,14 +8642,16 @@ mod tests {
         api.finish();
     }
 
-    #[test]
-    fn native_client_snapshot_keeps_package_producer_and_publisher_separate() {
-        let snapshot = NativeClientPackageSnapshot {
+    fn native_client_snapshot_fixture() -> NativeClientPackageSnapshot {
+        NativeClientPackageSnapshot {
             distributor_repository: "civitaspo/securefix-server".into(),
             distributor_id: 1_250_079_425,
+            release_repository: "civitaspo/securefix-server".into(),
+            release_repository_id: 1_250_079_425,
             implementation_sha: "1".repeat(40),
             implementation_version: "1.0.0".into(),
             loader_action_sha: "2".repeat(40),
+            loader_action_path: ".github/actions/load-package".into(),
             binary_source_sha: "3".repeat(40),
             binary_version: "1.0.0".into(),
             protocol: "securefix-native-request/v1".into(),
@@ -8330,7 +8670,12 @@ mod tests {
             package_producer_branch: "main".into(),
             package_producer_run_id: 201,
             package_producer_run_attempt: 1,
-        };
+        }
+    }
+
+    #[test]
+    fn native_client_snapshot_keeps_package_producer_and_publisher_separate() {
+        let snapshot = native_client_snapshot_fixture();
 
         validate_native_client_package_snapshot_values(&snapshot).unwrap();
         assert_ne!(

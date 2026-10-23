@@ -370,6 +370,7 @@ pub struct VerifiedNativeClientPackage {
     pub implementation_sha: String,
     pub implementation_version: Version,
     pub loader_action_sha: String,
+    pub loader_action_path: String,
     pub binary_source_sha: String,
     pub binary_version: Version,
     pub protocol: String,
@@ -418,6 +419,7 @@ pub(crate) fn native_client_package_api_test_fixture() -> VerifiedNativeClientPa
         implementation_sha: "1".repeat(40),
         implementation_version: Version::parse("1.4.2").unwrap(),
         loader_action_sha: "2".repeat(40),
+        loader_action_path: ".github/actions/load-package".to_owned(),
         binary_source_sha: source_sha,
         binary_version: version,
         protocol: NATIVE_CLIENT_PROTOCOL.to_owned(),
@@ -439,6 +441,22 @@ pub(crate) fn native_client_package_api_test_fixture() -> VerifiedNativeClientPa
             producer_run_attempt: 1,
         },
     }
+}
+
+#[cfg(test)]
+pub(crate) fn native_client_package_api_scratch_test_fixture() -> VerifiedNativeClientPackage {
+    let mut package = native_client_package_api_test_fixture();
+    package.implementation_version = Version::parse("1.4.3-pre.1").unwrap();
+    package.binary_version = Version::parse("1.4.1-pre.1").unwrap();
+    package.package_producer_branch = "candidate/source".to_owned();
+    let release = &mut package.package.asset.release;
+    release.publisher = TrustedPublisher {
+        repository: "example-org/package-scratch".to_owned(),
+        repository_id: 987_655,
+    };
+    release.version = package.binary_version.clone();
+    release.tag = format!("v{}", package.binary_version);
+    package
 }
 
 /// Verify the configured Client implementation release and the separate
@@ -605,6 +623,7 @@ pub fn verify_native_client_package(
         implementation_sha: signer_sha.to_owned(),
         implementation_version,
         loader_action_sha: loader_action.sha.clone(),
+        loader_action_path: loader_action.path.clone(),
         binary_source_sha,
         binary_version,
         protocol: manifest.protocol,
@@ -926,6 +945,7 @@ pub fn verify_native_client_package_scratch(
         implementation_sha: signer_sha.to_owned(),
         implementation_version,
         loader_action_sha: loader_action.sha.clone(),
+        loader_action_path: loader_action.path.clone(),
         binary_source_sha,
         binary_version,
         protocol: manifest.protocol,
@@ -940,6 +960,41 @@ pub fn verify_native_client_package_scratch(
         package_producer_run_attempt: manifest.producer_run_attempt,
         package,
     })
+}
+
+/// Scratch admission is enabled only for the separately configured destination.
+/// Stable admission continues to require formal versions in the owner's range.
+pub fn validate_native_client_package_destination(
+    instance: &crate::instance_config::InstanceConfig,
+    destination: &TrustedPublisher,
+    implementation_version: &Version,
+    binary_version: &Version,
+) -> Result<bool> {
+    ensure!(
+        implementation_version.build.is_empty() && binary_version.build.is_empty(),
+        "Client package versions must not contain build metadata"
+    );
+    if destination.repository == instance.acceptable_clients.repository {
+        ensure!(
+            destination.repository_id == instance.acceptable_clients.id
+                && implementation_version.pre.is_empty()
+                && binary_version.pre.is_empty()
+                && instance
+                    .acceptable_clients
+                    .version
+                    .matches(implementation_version),
+            "Client package is not a formal release in the accepted range"
+        );
+        return Ok(false);
+    }
+    let scratch = configured_scratch_package_repository(instance)?;
+    ensure!(
+        destination.repository == scratch.repository
+            && destination.repository_id == scratch.id
+            && !binary_version.pre.is_empty(),
+        "Client package does not match the explicitly configured scratch destination"
+    );
+    Ok(true)
 }
 
 fn validate_remote_repository_identity(
@@ -3525,6 +3580,43 @@ mod tests {
     const SOURCE_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const CARGO_TOML: &str = "[package]\nname = \"securefix\"\nversion = \"1.2.3\"\n";
     const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn native_client_destination_never_implicitly_accepts_prereleases() {
+        let mut instance = crate::instance_config::InstanceConfig::parse(include_bytes!(
+            "../tests/fixtures/instance-config.toml"
+        ))
+        .unwrap();
+        let stable = native_client_package_api_test_fixture();
+        let scratch = native_client_package_api_scratch_test_fixture();
+        let validate = |config: &crate::instance_config::InstanceConfig,
+                        package: &VerifiedNativeClientPackage| {
+            validate_native_client_package_destination(
+                config,
+                &package.package.release().publisher,
+                &package.implementation_version,
+                &package.binary_version,
+            )
+        };
+        assert!(!validate(&instance, &stable).unwrap());
+        assert!(validate(&instance, &scratch).is_err());
+        instance.scratch_package_repository = Some(crate::config::Repository {
+            repository: "example-org/package-scratch".to_owned(),
+            id: 987_655,
+            default_branch: "main".to_owned(),
+        });
+        assert!(validate(&instance, &scratch).unwrap());
+        assert!(!validate(&instance, &stable).unwrap());
+        let mut wrong_id = instance.clone();
+        wrong_id.scratch_package_repository.as_mut().unwrap().id += 1;
+        assert!(validate(&wrong_id, &scratch).is_err());
+        let mut wrong_range = instance.clone();
+        wrong_range.acceptable_clients.version = VersionReq::parse(">=2.0.0").unwrap();
+        assert!(validate(&wrong_range, &stable).is_err());
+        let mut unreleased = stable.clone();
+        unreleased.implementation_version = scratch.implementation_version.clone();
+        assert!(validate(&instance, &unreleased).is_err());
+    }
 
     fn publisher() -> TrustedPublisher {
         TrustedPublisher {

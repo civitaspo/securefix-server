@@ -70,7 +70,7 @@ jobs:
         uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
           token: ${{ github.token }}
-      - name: Mint a read-only Client release token
+      - name: Mint a Client token for read-only draft inspection
         id: release-read
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -80,7 +80,7 @@ jobs:
           repositories: ${{ needs.parse.outputs.repo_name }}
           permission-actions: read
           permission-attestations: read
-          permission-contents: read
+          permission-contents: write
           permission-issues: read
           permission-pull-requests: read
       - name: Validate the exact source run and package provenance

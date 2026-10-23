@@ -376,6 +376,10 @@ enum WriteContext {
     NativeScratch(Box<NativeScratchWrite>),
     NativeInstance(Box<NativeInstanceWrite>),
     NativeRelease(Box<NativeReleaseWrite>),
+    NativeReleaseCleanup {
+        instance: Box<NativeServerInstanceAuthority>,
+        label: String,
+    },
 }
 
 #[derive(Clone)]
@@ -534,9 +538,12 @@ struct NativeReleaseTagWrite {
 struct NativeClientPackageIdentity {
     distributor_repository: String,
     distributor_id: u64,
+    release_repository: String,
+    release_repository_id: u64,
     implementation_sha: String,
     implementation_version: String,
     loader_action_sha: String,
+    loader_action_path: String,
     binary_source_sha: String,
     binary_version: String,
     protocol: String,
@@ -675,6 +682,22 @@ impl GitHub {
 
     pub fn anonymous() -> Result<Self> {
         Self::new("https://api.github.com", String::new())
+    }
+
+    pub fn native_release_cleanup_from_env(
+        name: &str,
+        instance: &NativeServerInstanceAuthority,
+        label: &str,
+    ) -> Result<Self> {
+        validate_native_release_cleanup_event(&instance.config, label, &crate::event()?)?;
+        let token = std::env::var(name).with_context(|| format!("missing {name}"))?;
+        ensure!(!token.is_empty(), "{name} is empty");
+        let mut api = Self::new("https://api.github.com", token)?;
+        api.writes = WriteContext::NativeReleaseCleanup {
+            instance: Box::new(instance.clone()),
+            label: label.to_owned(),
+        };
+        Ok(api)
     }
 
     pub fn new(base: &str, token: String) -> Result<Self> {
@@ -2220,6 +2243,18 @@ impl GitHub {
                 "native Client may only create its exact release request label"
             );
         }
+        if let WriteContext::NativeReleaseCleanup { instance, label } = &self.writes {
+            ensure!(
+                *method == Method::DELETE
+                    && path
+                        == format!(
+                            "/repos/{}/labels/{}",
+                            instance.config.instance.repository,
+                            encode_path_segment(label)
+                        ),
+                "native release cleanup may only delete its authenticated request label"
+            );
+        }
         if let WriteContext::NativeReleaseTag(write) = &self.writes {
             let tag_path = format!("/repos/{}/git/tags", write.repository);
             let ref_path = format!("/repos/{}/git/refs", write.repository);
@@ -2468,8 +2503,14 @@ impl GitHub {
                 self.write_token.as_deref().unwrap_or(&self.token)
             }
             WriteContext::NativeRelease(write)
-                if (method == Method::POST
-                    && path == format!("/repos/{}/releases", write.target_repository))
+                if (matches!(method, Method::GET | Method::HEAD)
+                    && (path == format!("/repos/{}/releases", write.target_repository)
+                        || path.starts_with(&format!(
+                            "/repos/{}/releases/",
+                            write.target_repository
+                        ))))
+                    || (method == Method::POST
+                        && path == format!("/repos/{}/releases", write.target_repository))
                     || (method == Method::PATCH
                         && write.release_id.is_some_and(|id| {
                             path == format!("/repos/{}/releases/{id}", write.target_repository)
@@ -2834,6 +2875,39 @@ impl GitHub {
             }
             WriteContext::NativeRelease(_) => {
                 return self.require_native_release_current();
+            }
+            WriteContext::NativeReleaseCleanup { instance, .. } => {
+                ensure!(
+                    std::env::var("GITHUB_REPOSITORY").as_deref()
+                        == Ok(instance.config.instance.repository.as_str())
+                        && std::env::var("GITHUB_REF").as_deref()
+                            == Ok(format!(
+                                "refs/heads/{}",
+                                instance.config.instance.default_branch
+                            )
+                            .as_str()),
+                    "release cleanup is outside the protected Server instance"
+                );
+                let workflow_sha =
+                    std::env::var("GITHUB_WORKFLOW_SHA").context("missing cleanup workflow SHA")?;
+                let workflow_ref =
+                    std::env::var("GITHUB_WORKFLOW_REF").context("missing cleanup workflow ref")?;
+                let role = crate::instance_config::WorkflowRole::Release;
+                let path = instance
+                    .config
+                    .workflow_roles
+                    .get(&role)
+                    .context("Release role is not configured")?;
+                let workflow =
+                    self.content(&instance.config.instance.repository, path, &workflow_sha)?;
+                validate_native_server_execution_workflow_role(
+                    &instance.authority,
+                    role,
+                    &workflow_ref,
+                    &workflow_sha,
+                    &workflow,
+                )?;
+                return self.require_remote_native_server_instance_authority_unchanged(instance);
             }
             WriteContext::PackageRelease(_) => {
                 return self.require_package_release_current();
@@ -3438,6 +3512,27 @@ impl GitHub {
         package: &NativeClientPackageIdentity,
     ) -> Result<()> {
         validate_native_client_package_snapshot(config, package)?;
+        if package.release_repository != package.distributor_repository {
+            let action = crate::package::PinnedPackageAction::new(
+                package.distributor_repository.clone(),
+                package.loader_action_path.clone(),
+                package.loader_action_sha.clone(),
+            )?;
+            let verified = crate::package::verify_native_client_package_scratch(
+                self,
+                config,
+                &config.acceptable_clients,
+                &package.implementation_sha,
+                &action,
+                &package.protocol,
+                None,
+            )?;
+            ensure!(
+                native_client_package_identity(config, &verified)? == *package,
+                "accepted scratch Client package changed before the release write"
+            );
+            return Ok(());
+        }
         let repository: Value =
             self.get_uncached(&format!("/repos/{}", package.distributor_repository))?;
         let release: Value = self.get_uncached(&format!(
@@ -5405,17 +5500,23 @@ fn validate_native_client_package_snapshot(
     crate::config::validate_branch(&package.producer_branch)?;
     let implementation_version = semver::Version::parse(&package.implementation_version)?;
     let binary_version = semver::Version::parse(&package.binary_version)?;
+    let scratch = crate::package::validate_native_client_package_destination(
+        config,
+        &crate::package::TrustedPublisher {
+            repository: package.release_repository.clone(),
+            repository_id: package.release_repository_id,
+        },
+        &implementation_version,
+        &binary_version,
+    )?;
+    crate::package::PinnedPackageAction::new(
+        package.distributor_repository.clone(),
+        package.loader_action_path.clone(),
+        package.loader_action_sha.clone(),
+    )?;
     ensure!(
         package.distributor_repository == config.acceptable_clients.repository
             && package.distributor_id == config.acceptable_clients.id
-            && config
-                .acceptable_clients
-                .version
-                .matches(&implementation_version)
-            && implementation_version.pre.is_empty()
-            && implementation_version.build.is_empty()
-            && binary_version.pre.is_empty()
-            && binary_version.build.is_empty()
             && package.release_tag == format!("v{binary_version}")
             && package.protocol == "securefix-native-request/v1"
             && package.release_id > 0
@@ -5425,7 +5526,7 @@ fn validate_native_client_package_snapshot(
             && package.publisher_run_attempt == 1
             && package.producer_run_id > 0
             && package.producer_run_attempt == 1
-            && package.producer_branch == package.publisher_branch,
+            && (scratch || package.producer_branch == package.publisher_branch),
         "saved Client package admission is invalid for the current instance policy"
     );
     validate_sha256(&package.asset_sha256, "Client package asset digest")
@@ -5609,13 +5710,7 @@ fn validate_native_release_common(
     ensure!(
         client_package.distributor_repository == config.acceptable_clients.repository
             && client_package.distributor_id == config.acceptable_clients.id
-            && source_workflow_sha == client_package.implementation_sha
-            && config
-                .acceptable_clients
-                .version
-                .matches(&semver::Version::parse(
-                    &client_package.implementation_version
-                )?),
+            && source_workflow_sha == client_package.implementation_sha,
         "native Client package does not match the configured distributor admission"
     );
     let configured = config
@@ -5655,21 +5750,17 @@ fn native_client_package_identity(
     crate::policy::validate_sha(&client.implementation_sha)?;
     crate::policy::validate_sha(&client.loader_action_sha)?;
     crate::policy::validate_sha(&client.binary_source_sha)?;
+    let scratch = crate::package::validate_native_client_package_destination(
+        config,
+        &release.publisher,
+        &client.implementation_version,
+        &client.binary_version,
+    )?;
     ensure!(
-        release.publisher.repository == config.acceptable_clients.repository
-            && release.publisher.repository_id == config.acceptable_clients.id
-            && release.implementation_sha == client.binary_source_sha
+        release.implementation_sha == client.binary_source_sha
             && release.source_sha == client.binary_source_sha
             && release.version == client.binary_version
             && release.tag == format!("v{}", client.binary_version)
-            && client.binary_version.pre.is_empty()
-            && client.binary_version.build.is_empty()
-            && client.implementation_version.pre.is_empty()
-            && client.implementation_version.build.is_empty()
-            && config
-                .acceptable_clients
-                .version
-                .matches(&client.implementation_version)
             && client.protocol == "securefix-native-request/v1"
             && release.release_id > 0
             && release.asset.id > 0
@@ -5678,16 +5769,19 @@ fn native_client_package_identity(
             && publisher_run_attempt == 1
             && client.package_producer_run_id > 0
             && client.package_producer_run_attempt == 1
-            && client.package_producer_branch == client.package_publisher_branch,
+            && (scratch || client.package_producer_branch == client.package_publisher_branch),
         "verified Client package does not match its accepted implementation and publisher"
     );
     validate_sha256(&release.asset.sha256, "Client package asset digest")?;
     Ok(NativeClientPackageIdentity {
-        distributor_repository: release.publisher.repository.clone(),
-        distributor_id: release.publisher.repository_id,
+        distributor_repository: config.acceptable_clients.repository.clone(),
+        distributor_id: config.acceptable_clients.id,
+        release_repository: release.publisher.repository.clone(),
+        release_repository_id: release.publisher.repository_id,
         implementation_sha: client.implementation_sha.clone(),
         implementation_version: client.implementation_version.to_string(),
         loader_action_sha: client.loader_action_sha.clone(),
+        loader_action_path: client.loader_action_path.clone(),
         binary_source_sha: client.binary_source_sha.clone(),
         binary_version: client.binary_version.to_string(),
         protocol: client.protocol.clone(),
@@ -5709,7 +5803,7 @@ fn native_client_package_identity(
     })
 }
 
-fn native_server_release_pin(authority: &NativeAuthoritySnapshot) -> Result<String> {
+pub fn native_server_release_pin(authority: &NativeAuthoritySnapshot) -> Result<String> {
     let workflow = authority
         .workflows
         .iter()
@@ -5734,6 +5828,49 @@ fn native_server_release_pin(authority: &NativeAuthoritySnapshot) -> Result<Stri
     crate::policy::validate_repository(pins[0].0)?;
     crate::policy::validate_sha(pins[0].1)?;
     Ok(pins[0].1.to_owned())
+}
+
+fn validate_native_release_cleanup_event(
+    config: &crate::instance_config::InstanceConfig,
+    label: &str,
+    event: &Value,
+) -> Result<()> {
+    let prefix = format!(
+        "{}securefix-native-release-",
+        config.release_request_label_prefix
+    );
+    let suffix = label
+        .strip_prefix(&prefix)
+        .context("cleanup label is not a native release request")?;
+    let run_id = suffix
+        .parse::<u64>()
+        .context("cleanup label has an invalid run ID")?;
+    let description = event["label"]["description"]
+        .as_str()
+        .context("cleanup label lacks its source run")?;
+    let (repository, run) = description
+        .rsplit_once('/')
+        .context("cleanup label description is invalid")?;
+    ensure!(
+        run_id > 0
+            && run_id.to_string() == suffix
+            && run == suffix
+            && event["action"] == "created"
+            && event["repository"]["id"].as_u64() == Some(config.instance.id)
+            && event["repository"]["full_name"] == config.instance.repository
+            && event["sender"]["id"].as_u64() == Some(config.identities.client_bot.id)
+            && event["sender"]["type"] == "Bot"
+            && event["label"]["name"] == label
+            && config.repositories.iter().any(|target| {
+                target.repository == repository
+                    && target
+                        .policy()
+                        .require(crate::policy::Capability::Release)
+                        .is_ok()
+            }),
+        "release cleanup event does not match the configured instance, Client App, and exact request"
+    );
+    Ok(())
 }
 
 fn validate_native_release_workflow_path(path: &str) -> Result<()> {
@@ -9859,6 +9996,118 @@ mod tests {
         missing_native_target.native_assets.clear();
         let target = native_release_target(&missing_native_target, &instance, &client_package);
         assert!(validate_native_release_target(&config, &write.server_authority, &target).is_err());
+    }
+
+    #[test]
+    fn native_release_scratch_package_keeps_distributor_and_destination_separate() {
+        let mut write = native_release_write_fixture();
+        let mut config =
+            crate::instance_config::InstanceConfig::parse(&write.config_bytes).unwrap();
+        let client = crate::package::native_client_package_api_scratch_test_fixture();
+        assert!(native_client_package_identity(&config, &client).is_err());
+        config.scratch_package_repository = Some(crate::config::Repository {
+            repository: "example-org/package-scratch".to_owned(),
+            id: 987_655,
+            default_branch: "main".to_owned(),
+        });
+        let identity = native_client_package_identity(&config, &client).unwrap();
+        assert_eq!(
+            identity.distributor_repository,
+            config.acceptable_clients.repository
+        );
+        assert_eq!(identity.release_repository, "example-org/package-scratch");
+        assert_ne!(identity.publisher_branch, identity.producer_branch);
+        validate_native_client_package_snapshot(&config, &identity).unwrap();
+        write.client_package = identity.clone();
+        let mut tampered = identity;
+        tampered.release_repository_id += 1;
+        assert!(validate_native_client_package_snapshot(&config, &tampered).is_err());
+        config.scratch_package_repository = None;
+        assert!(validate_native_client_package_snapshot(&config, &write.client_package).is_err());
+    }
+
+    #[test]
+    fn native_release_draft_reads_use_only_the_isolated_publisher_token() {
+        use crate::fixtures::{Fixture, Route};
+        let write = native_release_write_fixture();
+        let release_path = format!("/repos/{}/releases/42", write.target_repository);
+        let pull_path = format!(
+            "/repos/{}/pulls/{}",
+            write.target_repository, write.release_pr_number
+        );
+        let fixture = Fixture::new(vec![
+            Route::get(&release_path, serde_json::json!({"id":42,"draft":true}))
+                .with_request_header("Authorization", "Bearer publisher-token"),
+            Route::get(
+                &pull_path,
+                serde_json::json!({"number":write.release_pr_number}),
+            )
+            .with_request_header("Authorization", "Bearer reader-token"),
+        ]);
+        let mut api = GitHub::new(&fixture.base, "reader-token".to_owned()).unwrap();
+        api.write_token = Some("publisher-token".to_owned());
+        api.writes = WriteContext::NativeRelease(Box::new(write));
+        assert_eq!(api.get::<Value>(&release_path).unwrap()["draft"], true);
+        api.get::<Value>(&pull_path).unwrap();
+        fixture.finish();
+    }
+
+    #[test]
+    fn native_release_cleanup_is_bound_to_the_exact_authenticated_label() {
+        let write = native_release_write_fixture();
+        let config = crate::instance_config::InstanceConfig::parse(&write.config_bytes).unwrap();
+        let label = "securefix-native-release-42";
+        let event = serde_json::json!({
+            "action":"created",
+            "repository":{"id":config.instance.id,"full_name":config.instance.repository},
+            "sender":{"id":config.identities.client_bot.id,"type":"Bot"},
+            "label":{"name":label,"description":"example-org/project/42"}
+        });
+        validate_native_release_cleanup_event(&config, label, &event).unwrap();
+        for pointer in [
+            "/action",
+            "/repository/full_name",
+            "/repository/id",
+            "/sender/id",
+            "/sender/type",
+            "/label/name",
+            "/label/description",
+        ] {
+            let mut changed = event.clone();
+            *changed.pointer_mut(pointer).unwrap() = serde_json::json!("untrusted");
+            assert!(
+                validate_native_release_cleanup_event(&config, label, &changed).is_err(),
+                "{pointer}"
+            );
+        }
+        let instance = NativeServerInstanceAuthority {
+            config,
+            config_bytes: write.config_bytes,
+            authority: write.server_authority,
+        };
+        let mut api = GitHub::new("https://api.github.com", "unused".to_owned()).unwrap();
+        let expected = format!(
+            "/repos/{}/labels/{label}",
+            instance.config.instance.repository
+        );
+        api.writes = WriteContext::NativeReleaseCleanup {
+            instance: Box::new(instance),
+            label: label.to_owned(),
+        };
+        api.require_write_target(&Method::DELETE, &expected)
+            .unwrap();
+        assert!(api.require_write_target(&Method::POST, &expected).is_err());
+        assert!(
+            api.require_write_target(
+                &Method::DELETE,
+                "/repos/example-org/project/labels/securefix-native-release-42"
+            )
+            .is_err()
+        );
+        assert!(
+            api.require_write_target(&Method::DELETE, &expected.replace("42", "43"))
+                .is_err()
+        );
     }
 
     #[test]

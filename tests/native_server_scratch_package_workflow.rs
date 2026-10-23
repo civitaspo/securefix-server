@@ -219,6 +219,23 @@ fn server_release_receiver_uses_a_fixed_package_in_each_credential_domain() {
             }
         }
     }
+    let preflight = &workflow["jobs"]["preflight"];
+    let inspection = preflight["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "release-read")
+        .unwrap();
+    assert_eq!(inspection["with"]["permission-contents"], "write");
+    assert_eq!(
+        inspection["with"]["repositories"],
+        "${{ needs.parse.outputs.repo_name }}"
+    );
+    for step in workflow["jobs"]["sign"]["steps"].as_sequence().unwrap() {
+        assert!(step["with"]["private-key"].is_null());
+        assert!(step["env"]["SECUREFIX_RELEASE_READ_TOKEN"].is_null());
+        assert!(step["env"]["SECUREFIX_RELEASE_WRITE_TOKEN"].is_null());
+    }
 }
 
 #[test]

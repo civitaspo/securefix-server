@@ -23,6 +23,32 @@ sequenceDiagram
 
 The active control revision supplies the policy used for privileged effects. The source Release Tag run must be successful, originate in the exact client repository, expose a confined caller workflow path, and reference the runtime source selected by the active descriptor. For PR runs, the run SHA must match the associated PR head SHA; the server reads the caller workflow from the PR's base SHA, which must be on the default branch, and requires its reusable call to pin the active runtime source. Owner-dispatched retries read the workflow at the run SHA and require that SHA on the default branch. The v2 manifest binds its run ID/attempt, full control identity, runtime source, release PR, merge commit, tag, and configured release-bundle artifact ID. The PR must be merged `release/next` → `main` by the server bot. The server also reads `.release-version` from the merged commit and requires it to match the tag. Sensitive owner authorization is represented by a server-authored marker bound to the exact PR head SHA and full control identity.
 
+## Development instance release path
+
+The new `reusable-server-release.yml` path reads the Server instance's protected
+TOML. It does not use `control/active.json` or the binary's bundled policy.
+The Server wrapper pin and the Client Release Tag signer pin are independent.
+The source manifest must identify the actual accepted Client signer, exact
+producer run and attempt, merged release PR, and annotated tag. The plan binds
+the protected configuration and Server deployment authority. Signing and
+publication reject changes to those identities, the approved PR head, or the
+accepted package.
+
+Client package source and release storage are separate identities. Normal
+admission requires formal releases in `[acceptable_clients]`'s version range.
+Only an explicitly configured `scratch_package_repository` enables the existing
+prerelease verifier. The publisher requalifies that exact pinned Action manifest
+and package before scratch writes. A scratch destination never becomes the OSS
+distributor. Acquisition does not authorize publication.
+
+Draft inspection uses a single-Client token with Contents write permission in a
+read-only Rust API context. In the isolated publication job, draft and asset
+reads use the publication token; source, PR, and provenance reads use the reader
+token. Neither token reaches Client build hooks or the signing job. Request label
+cleanup can delete only the authenticated event's label in the current protected
+Server deployment. These candidate connections require scratch qualification
+before deployment; the existing production path above remains active meanwhile.
+
 ## Runtime distribution
 
 After explicit control activation and distribution dispatch, the distributor opens or updates a pull request authored by the Server App for the canonical managed caller-workflow files. It validates the configured branch, fresh PR identity and head, and exact managed-file changes. The PR remains reviewable and follows the normal review and check rules; distribution does not merge it or bypass those rules. Caller pins change only after control activation, not after ordinary publication.

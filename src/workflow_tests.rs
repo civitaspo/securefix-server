@@ -5693,7 +5693,7 @@ fn server_release_receiver_keeps_read_write_and_cleanup_credentials_separate() {
         .iter()
         .find(|step| step["id"] == "release-read")
         .unwrap();
-    assert_eq!(preflight_writer["with"]["permission-contents"], "read");
+    assert_eq!(preflight_writer["with"]["permission-contents"], "write");
     assert_eq!(preflight_writer["with"]["permission-issues"], "read");
     assert_eq!(preflight_writer["with"]["permission-pull-requests"], "read");
     let sign = &jobs["sign"];
