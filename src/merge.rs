@@ -13,7 +13,7 @@ use securefix::{
     workflow,
 };
 
-const INVALIDATING_EVENTS: &[&str] = &[
+pub(crate) const INVALIDATING_EVENTS: &[&str] = &[
     "head_ref_force_pushed",
     "head_ref_deleted",
     "base_ref_force_pushed",

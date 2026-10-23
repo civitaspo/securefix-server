@@ -32,6 +32,7 @@ jobs:
       pull-requests: read
     outputs:
       merge_sha: ${{ steps.resolve.outputs.merge_sha }}
+      source_run_sha: ${{ steps.resolve.outputs.source_run_sha }}
       strategy: ${{ steps.resolve.outputs.strategy }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       native_targets: ${{ steps.resolve.outputs.native_targets }}
@@ -126,6 +127,7 @@ jobs:
         id: target
         env:
           NATIVE_SOURCE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+          NATIVE_SOURCE_RUN_SHA: ${{ needs.resolve.outputs.source_run_sha }}
           RELEASE_PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           NATIVE_TARGET: ${{ matrix.target.target }}
           NATIVE_RUNNER: ${{ matrix.target.runner }}
@@ -153,7 +155,7 @@ jobs:
           jq -n \
             --argjson source_run_id "$GITHUB_RUN_ID" \
             --argjson source_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg source_run_sha "$GITHUB_SHA" \
+            --arg source_run_sha "$NATIVE_SOURCE_RUN_SHA" \
             --argjson release_pr_number "$RELEASE_PR_NUMBER" \
             --arg release_pr_sha "$NATIVE_SOURCE_SHA" \
             --arg package_version "$package_version" \

@@ -704,7 +704,9 @@ fn resolve_pr_command(number: u64) -> Result<()> {
             .context("release strategy is not configured")?;
         let (pr, merge_sha, _proof) =
             verify_native_release_pr(&api, &config_path, &instance, &repo, repository_id, number)?;
-        verify_current_native_release_tag_package(&api, &repo, repository_id, &instance, &pr)?;
+        let (_, source_run_sha) =
+            verify_current_native_release_tag_package(&api, &repo, repository_id, &instance, &pr)?;
+        crate::output("source_run_sha", source_run_sha.as_str())?;
         let head_sha = pr["head"]["sha"]
             .as_str()
             .context("release PR lacks a head SHA")?;
@@ -1220,7 +1222,7 @@ fn assemble_native(release_pr_number: u64) -> Result<()> {
                 repository_id,
                 release_pr_number,
             )?;
-            let source_revision = verify_current_native_release_tag_package(
+            let (source_revision, _) = verify_current_native_release_tag_package(
                 &api,
                 &repo,
                 repository_id,
@@ -1270,8 +1272,9 @@ fn assemble_native(release_pr_number: u64) -> Result<()> {
             .context("release source run lacks head SHA")?,
     )?;
     ensure!(
-        source_run_sha.as_str() == env("GITHUB_SHA")?,
-        "release source run head changed"
+        release_execution_context_sha(&source_run, &source_run_sha, &merge_sha)?.as_str()
+            == env("GITHUB_SHA")?,
+        "release execution context changed"
     );
     let artifact_list: ArtifactList = api.get(&format!(
         "/repos/{}/actions/runs/{}/artifacts?per_page=100",
@@ -2144,7 +2147,7 @@ fn verify_current_native_release_tag_package(
     repository_id: u64,
     instance: &NativeServerInstanceAuthority,
     pull: &Value,
-) -> Result<CommitSha> {
+) -> Result<(CommitSha, CommitSha)> {
     let run_id = RunId(env("GITHUB_RUN_ID")?.parse()?);
     let attempt = env("GITHUB_RUN_ATTEMPT")?.parse::<u64>()?;
     ensure!(
@@ -2202,7 +2205,22 @@ fn verify_current_native_release_tag_package(
         package.implementation_sha == signer_sha.as_str(),
         "Release Tag signer is not the admitted fixed-package implementation"
     );
-    Ok(signer_sha)
+    let source_run_sha = CommitSha::parse(
+        run["head_sha"]
+            .as_str()
+            .context("Release Tag run lacks a head SHA")?,
+    )?;
+    let merge_sha = CommitSha::parse(
+        pull["merge_commit_sha"]
+            .as_str()
+            .context("release PR lacks a merge SHA")?,
+    )?;
+    ensure!(
+        release_execution_context_sha(&run, &source_run_sha, &merge_sha)?.as_str()
+            == env("GITHUB_SHA")?,
+        "Release Tag execution context differs from its verified source event"
+    );
+    Ok((signer_sha, source_run_sha))
 }
 
 fn verify_native_release_pr(
@@ -3698,6 +3716,18 @@ fn validate_native_client_package_snapshot_for_config(
     Ok(())
 }
 
+fn release_execution_context_sha<'a>(
+    run: &Value,
+    source_run_sha: &'a CommitSha,
+    merge_sha: &'a CommitSha,
+) -> Result<&'a CommitSha> {
+    match run["event"].as_str() {
+        Some("pull_request") => Ok(merge_sha),
+        Some("workflow_dispatch") => Ok(source_run_sha),
+        _ => bail!("unsupported Release Tag source event"),
+    }
+}
+
 // This validator compares a verified bundle against the exact selected run,
 // signer, repository, and manifest bytes; keeping those values explicit makes
 // the trust bindings visible at the call site.
@@ -3730,6 +3760,8 @@ fn validate_release_manifest_certificate(
     let expected_signer =
         format!("https://github.com/{signer_repository}/{signer_workflow}@{signer_sha}");
     let source_sha = manifest.source_run_sha.as_str();
+    let context_sha =
+        release_execution_context_sha(run, &manifest.source_run_sha, &manifest.release_pr_sha)?;
     let owner_id = run["repository"]["owner"]["id"]
         .as_u64()
         .filter(|id| *id > 0)
@@ -3747,7 +3779,7 @@ fn validate_release_manifest_certificate(
             && certificate["githubWorkflowTrigger"].as_str() == run["event"].as_str()
             && certificate["sourceRepositoryURI"]
                 == format!("https://github.com/{}", manifest.repository)
-            && certificate["sourceRepositoryDigest"].as_str() == Some(source_sha)
+            && certificate["sourceRepositoryDigest"].as_str() == Some(context_sha.as_str())
             && certificate["sourceRepositoryIdentifier"]
                 .as_str()
                 .is_some_and(|value| value.parse::<u64>().ok() == Some(repository_id))
@@ -5166,6 +5198,47 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn closed_release_attestation_separates_api_head_from_approved_merge_context() {
+        let (mut manifest, mut run, _, mut verified) = release_manifest_certificate_fixture();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native-release-closed-context.json"
+        ))
+        .unwrap();
+        manifest.source_run_sha =
+            CommitSha::parse(fixture["run"]["head_sha"].as_str().unwrap()).unwrap();
+        manifest.release_pr_sha = CommitSha::parse(fixture["merge_sha"].as_str().unwrap()).unwrap();
+        run["event"] = fixture["run"]["event"].clone();
+        run["head_sha"] = fixture["run"]["head_sha"].clone();
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        verified[0]["verificationResult"]["statement"]["subject"][0]["digest"]["sha256"] =
+            json!(sha256_bytes(&bytes));
+        let certificate = &mut verified[0]["verificationResult"]["signature"]["certificate"];
+        certificate["githubWorkflowTrigger"] = json!("pull_request");
+        certificate["sourceRepositoryDigest"] = json!(manifest.release_pr_sha.as_str());
+        let check = |run: &Value, proof: &Value| {
+            validate_release_manifest_certificate(
+                proof,
+                &manifest,
+                run,
+                77,
+                "example-org/securefix-server",
+                ".github/workflows/reusable-release-tag.yml",
+                &"a".repeat(40),
+                &bytes,
+            )
+        };
+        assert!(check(&run, &verified).is_ok());
+        let mut wrong = verified.clone();
+        wrong[0]["verificationResult"]["signature"]["certificate"]["sourceRepositoryDigest"] =
+            json!(manifest.source_run_sha.as_str());
+        assert!(check(&run, &wrong).is_err());
+        run["head_sha"] = json!(manifest.release_pr_sha.as_str());
+        assert!(check(&run, &verified).is_err());
+        run["event"] = json!("push");
+        assert!(check(&run, &verified).is_err());
     }
 
     #[test]

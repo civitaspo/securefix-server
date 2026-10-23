@@ -1421,6 +1421,7 @@ fn require_no_later_release_review_decision(reviews: &[Value], marker: &Value) -
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Bind the independent command, merge, and authenticated identities.
 fn validate_native_release_approval_command(
     client_api: &securefix::api::GitHub,
     server_api: &securefix::api::GitHub,
@@ -1429,6 +1430,7 @@ fn validate_native_release_approval_command(
     run: &Value,
     merged_at: &chrono::DateTime<chrono::Utc>,
     merged_by: &crate::config::Principal,
+    merge_sha: &str,
 ) -> Result<()> {
     ensure!(
         manifest.producer.event == "issue_comment" && manifest.producer.run_attempt == 1,
@@ -1477,7 +1479,7 @@ fn validate_native_release_approval_command(
         "/repos/{}/issues/{}/timeline",
         manifest.repository.full_name, manifest.pull_request.number
     ))?;
-    validate_native_release_timeline(&events, locator.created_at, merged_at, merged_by)?;
+    validate_native_release_timeline(&events, locator.created_at, merged_at, merged_by, merge_sha)?;
     Ok(())
 }
 
@@ -1486,27 +1488,43 @@ fn validate_native_release_timeline(
     command_at: chrono::DateTime<chrono::Utc>,
     merged_at: &chrono::DateTime<chrono::Utc>,
     merged_by: &crate::config::Principal,
+    merge_sha: &str,
 ) -> Result<()> {
-    let mut allowed_merge_events = 0;
+    securefix::policy::validate_sha(merge_sha)?;
+    let mut merged = 0;
+    let mut closed = 0;
+    let mut deleted = 0;
     for event in events {
-        let created_at = parse_comment_time(&event["created_at"])
-            .context("release PR timeline event has no valid timestamp")?;
-        if !crate::merge::has_invalidating_event(std::slice::from_ref(event), command_at) {
+        let kind = event["event"]
+            .as_str()
+            .context("release timeline event kind is missing")?;
+        if !crate::merge::INVALIDATING_EVENTS.contains(&kind) {
             continue;
         }
-        let expected_merge_event = matches!(event["event"].as_str(), Some("closed" | "merged"))
-            && event["actor"]["id"].as_u64() == Some(merged_by.id)
-            && event["actor"]["login"].as_str() == Some(merged_by.login.as_str())
-            && created_at == *merged_at;
+        let created_at = parse_comment_time(&event["created_at"])
+            .context("release PR transition has no valid timestamp")?;
+        if created_at < command_at {
+            continue;
+        }
         ensure!(
-            expected_merge_event,
-            "release PR has an unexpected post-command timeline transition"
+            event["actor"]["id"].as_u64() == Some(merged_by.id)
+                && event["actor"]["login"].as_str() == Some(merged_by.login.as_str()),
+            "release PR transition was not performed by the configured merger"
         );
-        allowed_merge_events += 1;
+        match kind {
+            "merged"
+                if created_at == *merged_at && event["commit_id"].as_str() == Some(merge_sha) =>
+            {
+                merged += 1
+            }
+            "closed" if created_at == *merged_at => closed += 1,
+            "head_ref_deleted" if created_at >= *merged_at => deleted += 1,
+            _ => anyhow::bail!("release PR has an unexpected post-command timeline transition"),
+        }
     }
     ensure!(
-        allowed_merge_events == 1,
-        "release PR timeline must contain exactly one configured-merger close/merge transition"
+        merged == 1 && closed == 1 && deleted <= 1,
+        "release timeline must contain one exact configured-merger merge and close transition"
     );
     Ok(())
 }
@@ -2333,6 +2351,7 @@ pub(crate) fn verify_native_release_approval(
         &producer_run,
         &merged_at,
         merged_by,
+        merge_sha,
     )?;
     verify_current_merged_release_pull_request(
         client_api,
@@ -4656,56 +4675,65 @@ mod tests {
     }
 
     #[test]
-    fn release_timeline_allows_only_configured_merger_close() {
-        let command_at = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let merged_at = chrono::DateTime::parse_from_rfc3339("2026-10-22T11:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+    fn release_timeline_binds_actual_merge_close_and_automatic_branch_deletion() {
+        let events: Vec<Value> = serde_json::from_str(include_str!(
+            "../tests/fixtures/native-release-merged-timeline.json"
+        ))
+        .unwrap();
+        let command_at = parse_comment_time(&serde_json::json!("2026-10-23T10:11:48Z")).unwrap();
+        let merged_at = parse_comment_time(&serde_json::json!("2026-10-23T10:19:45Z")).unwrap();
         let merger = crate::config::Principal {
-            id: 7,
-            login: "server[bot]".to_owned(),
+            id: 288069019,
+            login: "civitaspo-securefix-server[bot]".to_owned(),
         };
-        let closed = serde_json::json!({
-            "event": "closed",
-            "created_at": "2026-10-22T11:00:00Z",
-            "actor": { "id": 7, "login": "server[bot]" }
-        });
-        assert!(
-            validate_native_release_timeline(
-                std::slice::from_ref(&closed),
-                command_at,
-                &merged_at,
-                &merger,
-            )
-            .is_ok()
+        let merge_sha = "3845f9810414bd818dfd2c9c818aa9014652fb3b";
+        let check = |events: &[Value]| {
+            validate_native_release_timeline(events, command_at, &merged_at, &merger, merge_sha)
+        };
+        assert!(check(&events).is_ok());
+        for kind in ["merged", "closed", "head_ref_deleted"] {
+            let mut wrong_actor = events.clone();
+            wrong_actor
+                .iter_mut()
+                .find(|event| event["event"] == kind)
+                .unwrap()["actor"]["id"] = serde_json::json!(7);
+            assert!(check(&wrong_actor).is_err(), "{kind}");
+            let mut missing_time = events.clone();
+            missing_time
+                .iter_mut()
+                .find(|event| event["event"] == kind)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("created_at");
+            assert!(check(&missing_time).is_err(), "{kind}");
+        }
+        let mut wrong_merge = events.clone();
+        wrong_merge
+            .iter_mut()
+            .find(|event| event["event"] == "merged")
+            .unwrap()["commit_id"] = serde_json::json!("a".repeat(40));
+        assert!(check(&wrong_merge).is_err());
+        for kind in ["reopened", "head_ref_force_pushed", "base_ref_changed"] {
+            let mut invalidated = events.clone();
+            invalidated.push(serde_json::json!({"event":kind,"created_at":"2026-10-23T10:15:00Z","actor":{"id":merger.id,"login":merger.login}}));
+            assert!(check(&invalidated).is_err(), "{kind}");
+        }
+        let mut premature_delete = events.clone();
+        premature_delete
+            .iter_mut()
+            .find(|event| event["event"] == "head_ref_deleted")
+            .unwrap()["created_at"] = serde_json::json!("2026-10-23T10:15:00Z");
+        assert!(check(&premature_delete).is_err());
+        let mut duplicate = events.clone();
+        duplicate.push(
+            events
+                .iter()
+                .find(|event| event["event"] == "merged")
+                .unwrap()
+                .clone(),
         );
-
-        let reopened = serde_json::json!({
-            "event": "reopened",
-            "created_at": "2026-10-22T10:30:00Z",
-            "actor": { "id": 7, "login": "server[bot]" }
-        });
-        assert!(
-            validate_native_release_timeline(
-                &[closed.clone(), reopened],
-                command_at,
-                &merged_at,
-                &merger,
-            )
-            .is_err()
-        );
-
-        let impostor_close = serde_json::json!({
-            "event": "closed",
-            "created_at": "2026-10-22T11:00:00Z",
-            "actor": { "id": 8, "login": "other[bot]" }
-        });
-        assert!(
-            validate_native_release_timeline(&[impostor_close], command_at, &merged_at, &merger,)
-                .is_err()
-        );
+        assert!(check(&duplicate).is_err());
     }
 
     #[test]

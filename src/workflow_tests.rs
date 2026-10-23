@@ -5284,7 +5284,21 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
     let release_source = include_str!("release.rs");
     assert!(!release_source.contains("fn build_native("));
     let native_assembler = release_source.split_once("fn assemble_native(").unwrap().1;
-    assert!(native_assembler.contains("source_run_sha.as_str() == env(\"GITHUB_SHA\")?"));
+    assert!(native_assembler.contains("release_execution_context_sha("));
+    assert_eq!(
+        build_step["env"]["NATIVE_SOURCE_RUN_SHA"],
+        "${{ needs.resolve.outputs.source_run_sha }}"
+    );
+    assert_eq!(
+        client["jobs"]["resolve"]["outputs"]["source_run_sha"],
+        "${{ steps.resolve.outputs.source_run_sha }}"
+    );
+    assert!(
+        build_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("--arg source_run_sha \"$NATIVE_SOURCE_RUN_SHA\"")
+    );
     assert!(native_assembler.contains("build.source_run_id == run_id"));
     assert!(native_assembler.contains("build.source_run_attempt == run_attempt"));
     assert!(native_assembler.contains("build.release_pr_sha == merge_sha"));
