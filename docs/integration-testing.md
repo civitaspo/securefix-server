@@ -539,3 +539,17 @@ as build input or fall back to it. This keeps a loader revision's fixed package
 mapping independent from the source being built. The specification digest
 remains bound into the immutable publication record. Existing published
 packages and the legacy scratch publisher are unchanged.
+
+
+## Normal native request events in scratch
+
+`testing-native-approve-event.yml`, `testing-native-merge-event.yml`, and
+`testing-native-policy-check-event.yml` receive Client App labels on the Server.
+They select fixed reusable workflows and use
+`repo-settings/native-role-events-test-instance.toml` from protected main.
+That configuration permits only the testing repository and exact protected-main
+Client callers. Approval and merge use owner `issue_comment` commands. Policy
+checks use `pull_request_target`. Scratch package admission retains the configured
+owner actor and PR-author checks. These workflows do not change production pins,
+policy, or credentials. Their presence alone does not establish a successful
+end-to-end test.
