@@ -1147,11 +1147,32 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     })
                 {
                     let config_path = "repo-settings/native-role-events-test-instance.toml";
+                    if role == "policy-check" && job_id == "stale-request-probe" {
+                        assert_eq!(
+                            job["permissions"],
+                            serde_json::json!({"actions":"read","attestations":"read","contents":"read","pull-requests":"read"})
+                        );
+                        let steps = job["steps"].as_array().unwrap();
+                        assert!(steps.iter().all(|step| {
+                            !serde_json::to_string(step)
+                                .unwrap()
+                                .contains("permission-checks: write")
+                        }));
+                        let verifier = steps.last().unwrap();
+                        assert!(
+                            verifier["run"]
+                                .as_str()
+                                .unwrap()
+                                .contains("instance-policy-check-run")
+                        );
+                        assert!(!verifier["run"].as_str().unwrap().contains("--publish"));
+                        continue;
+                    }
                     assert_eq!(job_id, "handler");
                     let revision = if role == "release" {
                         "93a05f200f9cd3c8c88036d971965db94eb0c24b"
-                    } else if role == "merge" {
-                        "5c52c7b6f61d58d3d0cafc35456777bc1b1e1ce3"
+                    } else if matches!(role, "merge" | "policy-check") {
+                        "046b97b22622f6ca052836303f1f194018fd51a6"
                     } else {
                         "2719567ddd2cb9e13294e12cb9537780c6643263"
                     };
