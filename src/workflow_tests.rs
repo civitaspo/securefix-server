@@ -1149,7 +1149,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     let config_path = "repo-settings/native-role-events-test-instance.toml";
                     assert_eq!(job_id, "handler");
                     let revision = if role == "release" {
-                        "1f08881109a12efa8e7f0331bed3968b553942cf"
+                        "03031647447ece73c7fb7376ee6f49931688ba1f"
                     } else if role == "merge" {
                         "5c52c7b6f61d58d3d0cafc35456777bc1b1e1ce3"
                     } else {
