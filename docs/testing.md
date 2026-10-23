@@ -123,3 +123,18 @@ the workflow uses the existing scratch Contents and pull-request write permissio
 and performs an independent merged-state readback. It does not replace the
 production `/merge` command or authorize production PRs. Hosted scratch
 qualification remains pending.
+
+## Host self-update probes
+
+The `testing-native-self-client-{approve,merge,policy-check}.yml` callers use the
+existing Server-hosted native event roles and test-only
+`repo-settings/native-role-events-test-instance.toml`. No separate Server
+repository, environment or secret placement is required. The Client dispatch
+uses the Host's existing protected `main` environment.
+
+Fixtures are owner-authored PRs titled `[testing native self] ...` from
+`testing/native-self-...` branches. Approval and merge require fresh unedited
+owner commands, exact-head review, signatures, checks and current authority. The
+test instance grants the Host only approval and merge. Its main mutations share
+`securefix-control` with the existing operational lane. Production workflows,
+active descriptor and bundled policy remain unchanged during these probes.
