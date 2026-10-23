@@ -31,7 +31,7 @@ fn native_client_requests_use_a_fixed_package_across_credential_domains() {
         let package = loaders[0];
         assert_eq!(
             package["uses"],
-            "civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a"
+            "civitaspo/securefix-server/.github/actions/load-package@acbb9eded335037dc7be51d1f49113043153cb2c"
         );
         assert!(package.get("if").is_none());
         assert_eq!(
@@ -121,7 +121,7 @@ fn native_client_capture_passes_the_securefix_artifact_only_to_its_rust_command(
 
 #[test]
 fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() {
-    const SOURCE: &str = "e78897bdbf15e7abd0135a879b2774fcbb932091";
+    const SOURCE: &str = "84f939b68b82de70554f98c429d65e077ef4a771";
     let config = securefix::instance_config::InstanceConfig::parse(
         &fs::read("repo-settings/native-role-events-test-instance.toml").unwrap(),
     )

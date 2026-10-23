@@ -1147,7 +1147,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "handler");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@e78897bdbf15e7abd0135a879b2774fcbb932091"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@84f939b68b82de70554f98c429d65e077ef4a771"
                     );
                     assert_eq!(
                         job["with"]["config_path"],
@@ -1192,7 +1192,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = "e78897bdbf15e7abd0135a879b2774fcbb932091";
+                    let revision = "84f939b68b82de70554f98c429d65e077ef4a771";
                     assert_eq!(
                         uses,
                         format!(
@@ -1220,7 +1220,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "reconcile");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@e78897bdbf15e7abd0135a879b2774fcbb932091"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@84f939b68b82de70554f98c429d65e077ef4a771"
                     );
                     assert_eq!(
                         job["with"],
@@ -3455,27 +3455,27 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(mapping["channel"], "scratch");
     assert_eq!(
         mapping["source_sha"],
-        "d2a4c04c963067b61acb71579bcfa8bee7c74b7e"
+        "9d135f2ac6e0ba7312fcb8c344704abef3954d98"
     );
     assert_eq!(
         mapping["source_manifest_sha256"],
-        "8fcde80ecfbfe073926b326724ba78032251b713ab4cc370b54e772efea76379"
+        "0c1b67b76bc35e3915cb4d61d96833d771873b3de10a70994aa9f8ec309d2a0d"
     );
-    assert_eq!(mapping["version"], "0.2.45-pre.109");
-    assert_eq!(mapping["tag"], "v0.2.45-pre.109");
-    assert_eq!(mapping["release_id"], 422235412);
-    assert_eq!(mapping["asset_id"], 670164620);
+    assert_eq!(mapping["version"], "0.2.45-pre.114");
+    assert_eq!(mapping["tag"], "v0.2.45-pre.114");
+    assert_eq!(mapping["release_id"], 422290526);
+    assert_eq!(mapping["asset_id"], 670346834);
     assert_eq!(
         mapping["asset_sha256"],
-        "7735d82da7e6f402d174b8015206709af5c1406d88135b92284ec14e1583a06e"
+        "5f976136822cac84dbfcc534fb02e4798cad04fcbd514f5cce06ed0347c2505a"
     );
     assert_eq!(
         mapping["producer_run_id"],
-        serde_json::json!(40007731540_u64)
+        serde_json::json!(40019724594_u64)
     );
     assert_eq!(
         mapping["publisher_run_id"],
-        serde_json::json!(40011669886_u64)
+        serde_json::json!(40020736718_u64)
     );
 }
 
@@ -4044,7 +4044,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                     package["uses"]
                         .as_str()
                         .unwrap()
-                        .ends_with("@f704d9ce91629b0a2094191dbcd3cb0ae591c93a")
+                        .ends_with("@acbb9eded335037dc7be51d1f49113043153cb2c")
                 );
                 assert_eq!(
                     package["with"],
@@ -4207,7 +4207,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
                         package_loader["uses"]
                             .as_str()
                             .unwrap()
-                            .ends_with("@f704d9ce91629b0a2094191dbcd3cb0ae591c93a")
+                            .ends_with("@acbb9eded335037dc7be51d1f49113043153cb2c")
                     );
                     assert!(
                         steps
@@ -5272,7 +5272,7 @@ fn native_settings_administrator_job_is_separate_from_managed_file_writer() {
     assert_eq!(steps.len(), 1);
     assert_eq!(
         steps[0]["uses"],
-        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@e78897bdbf15e7abd0135a879b2774fcbb932091"
+        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@84f939b68b82de70554f98c429d65e077ef4a771"
     );
     assert_eq!(
         steps[0]["with"],
@@ -5335,7 +5335,7 @@ fn release_build_sign_and_publish_keep_credentials_separate() {
             .unwrap();
         assert_eq!(fixed_ref.len(), 40);
         assert!(fixed_ref.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(fixed_ref, "f704d9ce91629b0a2094191dbcd3cb0ae591c93a");
+        assert_eq!(fixed_ref, "acbb9eded335037dc7be51d1f49113043153cb2c");
         assert_eq!(
             loader["with"],
             serde_json::json!({"token":"${{ github.token }}"})
