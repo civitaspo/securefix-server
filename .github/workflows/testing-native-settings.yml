@@ -18,3 +18,22 @@ jobs:
       manifest_path: repo-settings/native-settings-test-managed-files.json
     secrets:
       SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
+  repository-settings:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: main
+    concurrency:
+      group: securefix-control
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    steps:
+      - name: Reconcile scratch repository settings
+        uses: civitaspo/securefix-server/.github/actions/reconcile-repository-settings@16a9af64de4feb4da49d8d28d8103165db634759 # v0.2.45-pre.104
+        with:
+          token: ${{ github.token }}
+          administrator_token: ${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}
+          config_path: repo-settings/native-settings-test-instance.toml

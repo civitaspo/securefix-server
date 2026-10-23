@@ -4660,12 +4660,19 @@ fn operational_workflows_do_not_request_administration_or_settings_credentials()
                 );
             }
         }
-        assert!(
-            !serde_json::to_string(&value)
-                .unwrap()
-                .contains("CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN"),
-            "{path} exposes the repository-settings administrator credential"
-        );
+        for (job_id, job) in value["jobs"].as_object().unwrap() {
+            if path == ".github/workflows/testing-native-settings.yml"
+                && job_id == "repository-settings"
+            {
+                continue;
+            }
+            assert!(
+                !serde_json::to_string(job)
+                    .unwrap()
+                    .contains("CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN"),
+                "{path}/{job_id} exposes the repository-settings administrator credential"
+            );
+        }
     }
 }
 
@@ -5014,4 +5021,36 @@ fn lockfile_covers_every_workflow_and_ci_verifies_the_official_format() {
         .position(|s| s["run"] == "gh-actions-lock --verify")
         .unwrap();
     assert!(install < verify);
+}
+
+#[test]
+fn native_settings_administrator_job_is_separate_from_managed_file_writer() {
+    let value = workflow("testing-native-settings.yml");
+    let managed = &value["jobs"]["reconcile"];
+    assert_eq!(
+        managed["secrets"],
+        serde_json::json!({"SERVER_PRIVATE_KEY":"${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"})
+    );
+    let job = &value["jobs"]["repository-settings"];
+    assert_eq!(job["if"], managed["if"]);
+    assert_eq!(job["environment"], "main");
+    assert_eq!(job["concurrency"]["group"], "securefix-control");
+    assert_eq!(
+        job["permissions"],
+        serde_json::json!({"actions":"read", "attestations":"read", "contents":"read"})
+    );
+    let steps = job["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(
+        steps[0]["uses"],
+        "civitaspo/securefix-server/.github/actions/reconcile-repository-settings@16a9af64de4feb4da49d8d28d8103165db634759"
+    );
+    assert_eq!(
+        steps[0]["with"],
+        serde_json::json!({
+            "token":"${{ github.token }}",
+            "administrator_token":"${{ secrets.CIVITASPO_PUBLIC_REPO_SETTINGS_TOKEN }}",
+            "config_path":"repo-settings/native-settings-test-instance.toml"
+        })
+    );
 }
