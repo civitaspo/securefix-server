@@ -35,3 +35,20 @@ Server authority, settings workflow and desired source bytes, destination identi
 default head, and any previously created signed branch. Administrator settings
 reconciliation remains a separate job. The owner-selected `*-scratch` commands
 remain development probes and do not qualify this path as deployed.
+
+The native administrator path uses `settings instance-prepare --config-path PATH`
+to select Settings-capable destinations and `settings instance-reconcile
+--config-path PATH --repository OWNER/NAME` for each existing destination. It
+reads the six repository/collaborator/ruleset definitions from protected instance
+main. Identity and App values come from the external TOML, including the native
+policy-check App binding. The legacy collaborator template's username is not an
+identity source in this path. The dedicated `SECUREFIX_SETTINGS_ADMIN_TOKEN`
+must authenticate as the configured owner and is separate from the managed-file
+PR job. Every write checks current configuration, settings deployment, protected
+desired bytes and destination identity, and is restricted to repository settings,
+configured rulesets, immutable-release enablement and the configured reviewer.
+It cannot write code or PRs, create or reactivate merge controls, or disable
+immutable releases. Reconciliation reads back merge methods, protection rules,
+review/check bindings and reviewer access. Repository creation and full-list
+merge-control activation still use the existing management path until separately
+migrated; these commands do not replace those operations.

@@ -63,6 +63,16 @@ pub enum Command {
     },
     ActivationPreflight,
     ControlledMerges,
+    InstancePrepare {
+        #[arg(long)]
+        config_path: String,
+    },
+    InstanceReconcile {
+        #[arg(long)]
+        config_path: String,
+        #[arg(long)]
+        repository: String,
+    },
     ManagedPrepare {
         #[arg(long)]
         config_path: String,
@@ -103,6 +113,26 @@ pub enum Command {
 
 pub fn run(command: Command) -> Result<()> {
     match command {
+        Command::InstancePrepare { config_path } => {
+            let target = load_instance_settings(&config_path)?;
+            let repositories: Vec<_> = target
+                .0
+                .config
+                .repositories
+                .iter()
+                .filter(|entry| entry.capabilities.contains(&Capability::Settings))
+                .map(|entry| entry.repository.clone())
+                .collect();
+            ensure!(
+                !repositories.is_empty(),
+                "instance has no settings repositories"
+            );
+            crate::output("repositories", serde_json::to_string(&repositories)?)
+        }
+        Command::InstanceReconcile {
+            config_path,
+            repository,
+        } => reconcile_instance_settings(&config_path, &repository),
         Command::Prepare => prepare(),
         Command::Reconcile { repository } => reconcile(&repository),
         Command::ActivationPreflight => activation_preflight(),
@@ -1748,6 +1778,254 @@ fn api() -> Result<GitHub> {
     GitHub::from_env("GH_TOKEN")
 }
 
+const INSTANCE_SETTINGS_FILES: &[&str] = &[
+    "repo-settings/repository.json",
+    "repo-settings/collaborator.json",
+    "repo-settings/rulesets/default-branch.json",
+    "repo-settings/rulesets/review-and-checks.json",
+    "repo-settings/rulesets/controlled-merges.json",
+    "repo-settings/rulesets/all-tags.json",
+];
+
+fn load_instance_settings(
+    config_path: &str,
+) -> Result<(
+    securefix::api::NativeServerInstanceAuthority,
+    BTreeMap<String, Vec<u8>>,
+)> {
+    securefix::api::validate_native_instance_config_path(config_path)?;
+    let reader = GitHub::from_env("GITHUB_TOKEN")?;
+    let repository = std::env::var("GITHUB_REPOSITORY").context("missing settings instance")?;
+    let instance =
+        reader.capture_remote_native_server_instance_authority(&repository, config_path)?;
+    let reference: Value = reader.get_uncached(&format!(
+        "/repos/{repository}/git/ref/heads/{}",
+        instance.config.instance.default_branch
+    ))?;
+    let source = reference["object"]["sha"]
+        .as_str()
+        .context("settings source SHA missing")?;
+    crate::policy::validate_sha(source)?;
+    let workflow = instance
+        .config
+        .workflow_roles
+        .get(&securefix::instance_config::WorkflowRole::Settings)
+        .context("settings role missing")?;
+    let mut files = BTreeMap::new();
+    for path in INSTANCE_SETTINGS_FILES
+        .iter()
+        .copied()
+        .chain(std::iter::once(workflow.as_str()))
+    {
+        let bytes = reader.content(&repository, path, source)?;
+        ensure!(
+            bytes.len() <= 256 * 1024,
+            "settings source exceeds limit: {path}"
+        );
+        files.insert(path.to_owned(), bytes);
+    }
+    instance_settings_target(
+        &instance,
+        &files,
+        instance
+            .config
+            .repositories
+            .iter()
+            .find(|entry| entry.capabilities.contains(&Capability::Settings))
+            .context("instance has no settings destination")?
+            .repository
+            .as_str(),
+    )?;
+    Ok((instance, files))
+}
+
+fn instance_settings_target(
+    instance: &securefix::api::NativeServerInstanceAuthority,
+    files: &BTreeMap<String, Vec<u8>>,
+    repository: &str,
+) -> Result<securefix::api::NativeRepositorySettingsTarget> {
+    let configured = instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == repository)
+        .context("settings destination is not configured")?;
+    configured.policy().require(Capability::Settings)?;
+    let read = |path: &str| -> Result<Value> {
+        serde_json::from_slice(
+            files
+                .get(path)
+                .with_context(|| format!("missing protected settings {path}"))?,
+        )
+        .with_context(|| format!("invalid protected settings {path}"))
+    };
+    let repository_settings = read("repo-settings/repository.json")?;
+    validate_repository_merge_settings(&repository_settings, repository)?;
+    let collaborator = read("repo-settings/collaborator.json")?;
+    ensure!(
+        collaborator["permission"] == "push"
+            && collaborator.as_object().is_some_and(|object| object
+                .keys()
+                .all(|key| matches!(key.as_str(), "permission" | "username"))),
+        "collaborator settings must grant only push"
+    );
+    let collaborator = json!({"permission":"push"});
+    let mut rulesets = BTreeMap::new();
+    for name in [
+        "default-branch",
+        "review-and-checks",
+        "controlled-merges",
+        "all-tags",
+    ] {
+        let mut ruleset = read(&format!("{RULESET_DIR}/{name}.json"))?;
+        ensure!(ruleset["name"] == name, "settings ruleset name mismatch");
+        match name {
+            "default-branch" => validate_default_ruleset(&ruleset, repository)?,
+            "review-and-checks" | "controlled-merges" => {
+                let actors = ruleset["bypass_actors"]
+                    .as_array_mut()
+                    .context("settings bypass actors missing")?;
+                ensure!(
+                    actors.len() == 1,
+                    "settings ruleset must have exactly one Server App bypass"
+                );
+                actors[0]["actor_id"] = json!(instance.config.apps.server_id);
+                if name == "controlled-merges" {
+                    validate_controlled_merges(
+                        &ruleset,
+                        repository,
+                        instance.config.apps.server_id,
+                    )?;
+                } else {
+                    let statuses = ruleset["rules"]
+                        .as_array_mut()
+                        .context("settings rules missing")?
+                        .iter_mut()
+                        .find(|rule| rule["type"] == "required_status_checks")
+                        .and_then(|rule| {
+                            rule["parameters"]["required_status_checks"].as_array_mut()
+                        })
+                        .context("settings status checks missing")?;
+                    for check in statuses {
+                        match check["context"].as_str() {
+                            Some("status-check") => {
+                                check["integration_id"] =
+                                    json!(instance.config.apps.status_check_id)
+                            }
+                            Some(
+                                "securefix-policy-check" | "securefix-native-request-policy-check",
+                            ) => {
+                                check["context"] = json!("securefix-native-request-policy-check");
+                                check["integration_id"] =
+                                    json!(instance.config.apps.policy_check_id);
+                            }
+                            _ => bail!("unexpected settings required check"),
+                        }
+                    }
+                    validate_review_and_checks_named(
+                        &ruleset,
+                        repository,
+                        instance.config.apps.server_id,
+                        &Checks {
+                            status_app_id: instance.config.apps.status_check_id,
+                            policy_app_id: instance.config.apps.policy_check_id,
+                        },
+                        "securefix-native-request-policy-check",
+                    )?;
+                }
+            }
+            "all-tags" => ensure!(
+                ruleset["target"] == "tag"
+                    && ruleset["enforcement"] == "active"
+                    && ruleset["bypass_actors"] == json!([]),
+                "tag protections must be active without bypass"
+            ),
+            _ => unreachable!(),
+        }
+        rulesets.insert(name.to_owned(), ruleset);
+    }
+    Ok(securefix::api::NativeRepositorySettingsTarget {
+        instance: instance.clone(),
+        repository: repository.to_owned(),
+        repository_id: configured.id,
+        source_files: files.clone(),
+        repository_settings,
+        rulesets,
+        collaborator,
+    })
+}
+
+fn reconcile_instance_settings(config_path: &str, repository: &str) -> Result<()> {
+    let (instance, files) = load_instance_settings(config_path)?;
+    let target = instance_settings_target(&instance, &files, repository)?;
+    let api = GitHub::native_repository_settings_from_env(
+        "SECUREFIX_SETTINGS_ADMIN_TOKEN",
+        target.clone(),
+    )?;
+    let configured = instance
+        .config
+        .repositories
+        .iter()
+        .find(|entry| entry.repository == repository)
+        .unwrap();
+    api.patch::<Value>(&format!("/repos/{repository}"), &target.repository_settings)?;
+    upsert_ruleset(&api, repository, &target.rulesets["review-and-checks"])?;
+    upsert_ruleset(&api, repository, &target.rulesets["default-branch"])?;
+    if configured.protect_tags {
+        upsert_ruleset(&api, repository, &target.rulesets["all-tags"])?;
+    }
+    if configured.capabilities.contains(&Capability::Release)
+        || repository == instance.config.instance.repository
+    {
+        let path = format!("/repos/{repository}/immutable-releases");
+        let state: Value = api.get(&path)?;
+        if state["enabled"] != true {
+            api.put::<Value>(&path, &json!({}))?;
+        }
+        let state: Value = api.get_uncached(&path)?;
+        ensure!(
+            state["enabled"] == true,
+            "immutable releases were not enabled"
+        );
+    }
+    if instance.config.policy.merge_controls_enabled {
+        let existing = repository_rulesets(&api, repository, "controlled-merges")?;
+        ensure!(existing.len() <= 1, "multiple controlled merge rulesets");
+        if let Some(existing) = existing
+            .first()
+            .filter(|entry| entry["enforcement"] == "active")
+        {
+            let id = existing["id"]
+                .as_u64()
+                .context("controlled merge ID missing")?;
+            api.put::<Value>(
+                &format!("/repos/{repository}/rulesets/{id}"),
+                &target.rulesets["controlled-merges"],
+            )?;
+        }
+    }
+    let reviewer = &instance.config.identities.approval_reviewer;
+    api.put::<Value>(
+        &format!("/repos/{repository}/collaborators/{}", reviewer.login),
+        &target.collaborator,
+    )?;
+    validate_collaborator(&api, repository, &reviewer.login)?;
+    validate_native_merge_settings(&api, repository)?;
+    validate_default_branch_ruleset(&api, repository)?;
+    validate_review_and_checks_named(
+        &repository_ruleset(&api, repository, "review-and-checks")?,
+        repository,
+        instance.config.apps.server_id,
+        &Checks {
+            status_app_id: instance.config.apps.status_check_id,
+            policy_app_id: instance.config.apps.policy_check_id,
+        },
+        "securefix-native-request-policy-check",
+    )?;
+    println!("reconciled protected repository settings for {repository}");
+    Ok(())
+}
+
 fn prepare() -> Result<()> {
     let trusted = config::trusted()?;
     let deployment = &trusted.deployment;
@@ -2434,6 +2712,22 @@ fn validate_review_and_checks(
     server_app_id: u64,
     checks: &Checks,
 ) -> Result<()> {
+    validate_review_and_checks_named(
+        ruleset,
+        repository,
+        server_app_id,
+        checks,
+        "securefix-policy-check",
+    )
+}
+
+fn validate_review_and_checks_named(
+    ruleset: &Value,
+    repository: &str,
+    server_app_id: u64,
+    checks: &Checks,
+    policy_check_name: &str,
+) -> Result<()> {
     validate_ruleset_scope(ruleset, repository, "review-and-checks")?;
     ensure!(
         ruleset["bypass_actors"]
@@ -2485,7 +2779,7 @@ fn validate_review_and_checks(
     );
     for (name, integration_id) in [
         ("status-check", checks.status_app_id),
-        ("securefix-policy-check", checks.policy_app_id),
+        (policy_check_name, checks.policy_app_id),
     ] {
         ensure!(
             statuses.iter().any(|check| check["context"] == name
@@ -2830,6 +3124,50 @@ fn env_bool(name: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn instance_settings_uses_external_identities_and_native_check_contract() {
+        let bytes = include_bytes!("../tests/fixtures/instance-config.toml");
+        let config = securefix::instance_config::InstanceConfig::parse(bytes).unwrap();
+        let instance = securefix::api::NativeServerInstanceAuthority {
+            config,
+            config_bytes: bytes.to_vec(),
+            authority: securefix::api::NativeAuthoritySnapshot {
+                instance_repository: "example-org/securefix-server".into(),
+                instance_id: 404,
+                default_branch: "main".into(),
+                config_path: "securefix-server.toml".into(),
+                config_sha256: "a".repeat(64),
+                epoch: "b".repeat(40),
+                workflows: vec![],
+            },
+        };
+        let mut files: BTreeMap<String, Vec<u8>> = INSTANCE_SETTINGS_FILES
+            .iter()
+            .map(|path| ((*path).to_owned(), std::fs::read(path).unwrap()))
+            .collect();
+        let target = instance_settings_target(&instance, &files, "example-org/project").unwrap();
+        assert_eq!(target.repository_id, 987654);
+        assert_eq!(
+            target.rulesets["review-and-checks"]["bypass_actors"][0]["actor_id"],
+            instance.config.apps.server_id
+        );
+        let statuses = &target.rulesets["review-and-checks"]["rules"][1]["parameters"]["required_status_checks"];
+        assert_eq!(
+            statuses[1]["context"],
+            "securefix-native-request-policy-check"
+        );
+        assert_eq!(
+            statuses[1]["integration_id"],
+            instance.config.apps.policy_check_id
+        );
+        assert!(instance_settings_target(&instance, &files, "other-org/project").is_err());
+        files.insert(
+            "repo-settings/collaborator.json".into(),
+            br#"{"permission":"admin"}"#.to_vec(),
+        );
+        assert!(instance_settings_target(&instance, &files, "example-org/project").is_err());
+    }
+
     #[test]
     fn native_settings_deployment_matches_its_protected_desired_manifest() {
         let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(

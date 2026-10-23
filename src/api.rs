@@ -408,6 +408,18 @@ pub struct NativeManagedFilesTarget {
     pub deletions: Vec<String>,
 }
 
+/// Administrator reconciliation is independent of the workflow PR writer.
+#[derive(Debug, Clone)]
+pub struct NativeRepositorySettingsTarget {
+    pub instance: NativeServerInstanceAuthority,
+    pub repository: String,
+    pub repository_id: u64,
+    pub source_files: BTreeMap<String, Vec<u8>>,
+    pub repository_settings: Value,
+    pub rulesets: BTreeMap<String, Value>,
+    pub collaborator: Value,
+}
+
 #[derive(Clone)]
 struct NativeManagedFilesWrite {
     target: NativeManagedFilesTarget,
@@ -418,6 +430,7 @@ struct NativeManagedFilesWrite {
 enum WriteContext {
     ReadOnly,
     NativeManagedFiles(Box<NativeManagedFilesWrite>),
+    NativeRepositorySettings(Box<NativeRepositorySettingsTarget>),
     ClientLabel {
         server: String,
     },
@@ -890,9 +903,40 @@ impl GitHub {
     fn require_native_managed_files_current(&self, write: &NativeManagedFilesWrite) -> Result<()> {
         let target = &write.target;
         validate_native_managed_files_target(target)?;
-        let instance = &target.instance.config.instance;
-        let settings_path = target
-            .instance
+        self.require_native_settings_source_current(&target.instance, &target.source_files)?;
+        let repository: Value = self.get_uncached(&format!("/repos/{}", target.repository))?;
+        ensure!(
+            repository["id"].as_u64() == Some(target.repository_id)
+                && repository["full_name"] == target.repository
+                && repository["default_branch"] == target.default_branch,
+            "managed-file destination identity changed"
+        );
+        ensure!(
+            current_branch_sha(self, &target.repository, &target.default_branch)?
+                == target.base_sha,
+            "managed-file destination default branch changed"
+        );
+        if let Some(head) = write
+            .committed_head
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?
+            .as_ref()
+        {
+            ensure!(
+                current_branch_sha(self, &target.repository, &target.branch)? == *head,
+                "managed-file signed branch changed before PR creation"
+            );
+        }
+        Ok(())
+    }
+
+    fn require_native_settings_source_current(
+        &self,
+        instance_authority: &NativeServerInstanceAuthority,
+        source_files: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        let instance = &instance_authority.config.instance;
+        let settings_path = instance_authority
             .config
             .workflow_roles
             .get(&crate::instance_config::WorkflowRole::Settings)
@@ -918,14 +962,14 @@ impl GitHub {
                 std::env::var("GITHUB_ACTOR_ID")
                     .ok()
                     .and_then(|value| value.parse::<u64>().ok())
-                    == Some(target.instance.config.identities.owner.id),
+                    == Some(instance_authority.config.identities.owner.id),
                 "managed-file dispatch requires the configured owner"
             );
         }
         let server = Self::from_env("GITHUB_TOKEN")?;
-        server.require_remote_native_server_instance_authority_unchanged(&target.instance)?;
+        server.require_remote_native_server_instance_authority_unchanged(instance_authority)?;
         let revision = current_branch_sha(&server, &instance.repository, &instance.default_branch)?;
-        for (path, expected) in &target.source_files {
+        for (path, expected) in source_files {
             ensure!(
                 server.content_uncached(&instance.repository, path, &revision)? == *expected,
                 "managed-file protected source changed: {path}"
@@ -936,35 +980,135 @@ impl GitHub {
         crate::policy::validate_sha(&workflow_sha)?;
         ensure!(
             server.content_uncached(&instance.repository, settings_path, &workflow_sha)?
-                == *target
-                    .source_files
+                == *source_files
                     .get(settings_path)
                     .context("missing settings workflow source")?,
             "executing settings workflow differs from protected source"
+        );
+        Ok(())
+    }
+
+    pub fn native_repository_settings_from_env(
+        token_name: &str,
+        target: NativeRepositorySettingsTarget,
+    ) -> Result<Self> {
+        let mut api = Self::from_env(token_name)?;
+        api.writes = WriteContext::NativeRepositorySettings(Box::new(target));
+        api.require_current_revision()?;
+        Ok(api)
+    }
+
+    fn require_native_repository_settings_current(
+        &self,
+        target: &NativeRepositorySettingsTarget,
+    ) -> Result<()> {
+        let configured = target
+            .instance
+            .config
+            .repositories
+            .iter()
+            .find(|entry| entry.repository == target.repository && entry.id == target.repository_id)
+            .context("settings destination is not configured")?;
+        configured
+            .policy()
+            .require(crate::policy::Capability::Settings)?;
+        self.require_native_settings_source_current(&target.instance, &target.source_files)?;
+        let owner: Value = self.get_uncached("/user")?;
+        let expected = &target.instance.config.identities.owner;
+        ensure!(
+            owner["login"] == expected.login && owner["id"].as_u64() == Some(expected.id),
+            "settings administrator must authenticate as the configured owner"
         );
         let repository: Value = self.get_uncached(&format!("/repos/{}", target.repository))?;
         ensure!(
             repository["id"].as_u64() == Some(target.repository_id)
                 && repository["full_name"] == target.repository
-                && repository["default_branch"] == target.default_branch,
-            "managed-file destination identity changed"
+                && repository["owner"]["id"].as_u64()
+                    == Some(target.instance.config.identities.repository_owner.id),
+            "settings destination identity changed"
         );
-        ensure!(
-            current_branch_sha(self, &target.repository, &target.default_branch)?
-                == target.base_sha,
-            "managed-file destination default branch changed"
-        );
-        if let Some(head) = write
-            .committed_head
-            .lock()
-            .map_err(|_| anyhow::anyhow!("managed commit state poisoned"))?
-            .as_ref()
-        {
+        Ok(())
+    }
+
+    fn require_native_repository_settings_body(
+        &self,
+        target: &NativeRepositorySettingsTarget,
+        method: &Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<()> {
+        let root = format!("/repos/{}", target.repository);
+        let expected = if *method == Method::PATCH && path == root {
+            &target.repository_settings
+        } else if *method == Method::PUT && path == format!("{root}/immutable-releases") {
             ensure!(
-                current_branch_sha(self, &target.repository, &target.branch)? == *head,
-                "managed-file signed branch changed before PR creation"
+                target
+                    .instance
+                    .config
+                    .repositories
+                    .iter()
+                    .any(|entry| entry.repository == target.repository
+                        && entry
+                            .capabilities
+                            .contains(&crate::policy::Capability::Release))
+                    || target.repository == target.instance.config.instance.repository,
+                "immutable release update requires release capability"
             );
-        }
+            ensure!(
+                body == Some(&serde_json::json!({})),
+                "immutable release request must enable only"
+            );
+            return Ok(());
+        } else if *method == Method::PUT
+            && path
+                == format!(
+                    "{root}/collaborators/{}",
+                    target.instance.config.identities.approval_reviewer.login
+                )
+        {
+            &target.collaborator
+        } else if *method == Method::POST && path == format!("{root}/rulesets") {
+            let value = body.context("settings ruleset body missing")?;
+            let name = value["name"]
+                .as_str()
+                .context("settings ruleset name missing")?;
+            ensure!(
+                name != "controlled-merges",
+                "settings reconcile cannot activate merge controls"
+            );
+            target
+                .rulesets
+                .get(name)
+                .context("unconfigured settings ruleset")?
+        } else if *method == Method::PUT && path.starts_with(&format!("{root}/rulesets/")) {
+            let suffix = path.strip_prefix(&format!("{root}/rulesets/")).unwrap();
+            ensure!(
+                suffix.parse::<u64>().is_ok_and(|id| id > 0),
+                "invalid settings ruleset ID"
+            );
+            let existing: Value = self.get_uncached(path)?;
+            ensure!(
+                existing["source_type"] == "Repository",
+                "settings ruleset is not repository-owned"
+            );
+            let name = existing["name"]
+                .as_str()
+                .context("settings ruleset name missing")?;
+            ensure!(
+                name != "controlled-merges" || existing["enforcement"] == "active",
+                "settings reconcile cannot reactivate merge controls"
+            );
+            target
+                .rulesets
+                .get(name)
+                .context("unconfigured settings ruleset")?
+        } else {
+            bail!("repository settings writer cannot mutate this endpoint");
+        };
+        ensure!(
+            body == Some(expected),
+            "settings request differs from protected desired state"
+        );
         Ok(())
     }
 
@@ -2434,6 +2578,24 @@ impl GitHub {
     }
 
     fn require_write_target(&self, method: &Method, path: &str) -> Result<()> {
+        if let WriteContext::NativeRepositorySettings(target) = &self.writes {
+            let root = format!("/repos/{}", target.repository);
+            ensure!(
+                (*method == Method::PATCH && path == root)
+                    || (*method == Method::POST && path == format!("{root}/rulesets"))
+                    || (*method == Method::PUT
+                        && (path == format!("{root}/immutable-releases")
+                            || path
+                                == format!(
+                                    "{root}/collaborators/{}",
+                                    target.instance.config.identities.approval_reviewer.login
+                                )
+                            || path.strip_prefix(&format!("{root}/rulesets/")).is_some_and(
+                                |suffix| suffix.parse::<u64>().is_ok_and(|id| id > 0)
+                            ))),
+                "administrator writer is restricted to its configured repository settings"
+            );
+        }
         if let WriteContext::NativeManagedFiles(write) = &self.writes {
             let root = format!("/repos/{}", write.target.repository);
             ensure!(
@@ -2845,6 +3007,12 @@ impl GitHub {
                 body.context("native Client release label body is missing")?,
             )?;
         }
+        if let WriteContext::NativeRepositorySettings(target) = &self.writes
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            self.require_native_repository_settings_body(target, &method, path, body)?;
+        }
         if let WriteContext::NativeManagedFiles(write) = &self.writes
             && method != Method::GET
             && method != Method::HEAD
@@ -3149,6 +3317,9 @@ impl GitHub {
             WriteContext::ReadOnly => bail!("read-only API connection cannot write"),
             WriteContext::NativeManagedFiles(write) => {
                 return self.require_native_managed_files_current(write);
+            }
+            WriteContext::NativeRepositorySettings(target) => {
+                return self.require_native_repository_settings_current(target);
             }
             WriteContext::ClientLabel { .. } | WriteContext::NativeClientLabel { .. } => {
                 return Ok(());
@@ -8898,6 +9069,103 @@ mod tests {
             },
             committed_head: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn native_repository_settings_limits_endpoints_and_protected_payloads() {
+        let managed = native_managed_files_fixture();
+        let target = NativeRepositorySettingsTarget {
+            instance: managed.target.instance,
+            repository: managed.target.repository,
+            repository_id: managed.target.repository_id,
+            source_files: managed.target.source_files,
+            repository_settings: serde_json::json!({"allow_auto_merge":false}),
+            collaborator: serde_json::json!({"permission":"push"}),
+            rulesets: BTreeMap::from([(
+                "controlled-merges".into(),
+                serde_json::json!({"name":"controlled-merges","enforcement":"active"}),
+            )]),
+        };
+        let mut api = GitHub::new("http://127.0.0.1:1", "admin-only".into()).unwrap();
+        api.writes = WriteContext::NativeRepositorySettings(Box::new(target.clone()));
+        for (method, path) in [
+            (Method::POST, "/graphql"),
+            (Method::POST, "/repos/example-org/project/git/commits"),
+            (Method::PUT, "/repos/example-org/project/pulls/4/merge"),
+            (Method::PATCH, "/repos/other/project"),
+            (Method::DELETE, "/repos/example-org/project/rulesets/1"),
+            (Method::PUT, "/repos/example-org/project/rulesets/../1"),
+        ] {
+            assert!(api.require_write_target(&method, path).is_err(), "{path}");
+        }
+        let path = "/repos/example-org/project";
+        api.require_native_repository_settings_body(
+            &target,
+            &Method::PATCH,
+            path,
+            Some(&target.repository_settings),
+        )
+        .unwrap();
+        assert!(
+            api.require_native_repository_settings_body(
+                &target,
+                &Method::PATCH,
+                path,
+                Some(&serde_json::json!({"allow_auto_merge":true}))
+            )
+            .is_err()
+        );
+        assert!(
+            api.require_native_repository_settings_body(
+                &target,
+                &Method::POST,
+                "/repos/example-org/project/rulesets",
+                target.rulesets.get("controlled-merges")
+            )
+            .is_err()
+        );
+        assert!(
+            api.require_native_repository_settings_body(
+                &target,
+                &Method::PUT,
+                "/repos/example-org/project/immutable-releases",
+                Some(&serde_json::json!({"enabled":false}))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_repository_settings_never_reactivates_disabled_controls() {
+        use crate::fixtures::{Fixture, Route};
+        let managed = native_managed_files_fixture();
+        let target = NativeRepositorySettingsTarget {
+            instance: managed.target.instance,
+            repository: managed.target.repository,
+            repository_id: managed.target.repository_id,
+            source_files: managed.target.source_files,
+            repository_settings: serde_json::json!({}),
+            collaborator: serde_json::json!({"permission":"push"}),
+            rulesets: BTreeMap::from([(
+                "controlled-merges".into(),
+                serde_json::json!({"name":"controlled-merges","enforcement":"active"}),
+            )]),
+        };
+        let fixture = Fixture::new(vec![Route::get(
+            "/repos/example-org/project/rulesets/7",
+            serde_json::json!({"id":7,"name":"controlled-merges","source_type":"Repository","enforcement":"disabled"}),
+        )]);
+        let api = &fixture.api;
+        assert!(
+            api.require_native_repository_settings_body(
+                &target,
+                &Method::PUT,
+                "/repos/example-org/project/rulesets/7",
+                target.rulesets.get("controlled-merges")
+            )
+            .is_err()
+        );
+        fixture.finish();
     }
 
     #[test]
