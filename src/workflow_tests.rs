@@ -1165,6 +1165,12 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                                 .unwrap()
                                 .contains("instance-policy-check-run")
                         );
+                        assert!(
+                            verifier["run"]
+                                .as_str()
+                                .unwrap()
+                                .contains("--owner-selected-test-package")
+                        );
                         assert!(!verifier["run"].as_str().unwrap().contains("--publish"));
                         continue;
                     }

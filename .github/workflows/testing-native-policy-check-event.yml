@@ -65,4 +65,4 @@ jobs:
           "$CLI_BINARY" new-server instance-policy-check-run \
             --config-path repo-settings/native-role-events-test-instance.toml \
             --producer-repository civitaspo/testing-securefix-server \
-            --producer-run-id "$PRODUCER_RUN_ID"
+            --producer-run-id "$PRODUCER_RUN_ID" --owner-selected-test-package
