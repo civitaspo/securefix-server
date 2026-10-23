@@ -1449,7 +1449,7 @@ fn native_policy_check_authority_validates_before_its_checks_only_writer() {
         .iter()
         .find(|step| {
             step["uses"]
-                == "civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231"
+                == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
         })
         .unwrap();
     let inputs = &wrapper["on"]["workflow_dispatch"]["inputs"];
@@ -1486,7 +1486,7 @@ fn native_policy_check_authority_validates_before_its_checks_only_writer() {
             .iter()
             .find(|step| {
                 step["uses"]
-                    == "civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231"
+                    == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
             })
             .unwrap();
         assert_eq!(
@@ -1662,7 +1662,7 @@ fn native_approval_uses_the_fixed_package_and_keeps_the_user_token_in_one_protec
             .iter()
             .find(|step| {
                 step["uses"]
-                    == "civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231"
+                    == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
             })
             .unwrap();
         assert_eq!(package["name"], "Load the fixed immutable scratch package");
@@ -3871,7 +3871,7 @@ fn cli_jobs_install_verified_artifacts_on_path_before_invocation() {
             {
                 assert!(steps.iter().any(|step| {
                     step["uses"]
-                        == "civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231"
+                        == "civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d"
                         && step["with"] == serde_json::json!({"token":"${{ github.token }}"})
                 }));
                 assert!(steps.iter().any(|step| {

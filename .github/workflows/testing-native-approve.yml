@@ -48,7 +48,7 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
           token: ${{ github.token }}
       - name: Validate the owner-selected request without approval credentials
@@ -99,7 +99,7 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
       - name: Load the fixed immutable scratch package
-        uses: civitaspo/securefix-server/.github/actions/load-package@6756eaa1a229b9febd0476023b00ebdc0acd2231 # v0.2.45-pre.43
+        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
         with:
           token: ${{ github.token }}
       - name: Apply the current-head approval with the trusted Bot credential

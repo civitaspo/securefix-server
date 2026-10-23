@@ -132,7 +132,7 @@ workflows:
     '.github/workflows/testing-native-approve.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@6756eaa1a229b9febd0476023b00ebdc0acd2231'
+        - 'civitaspo/securefix-server@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d'
     '.github/workflows/testing-native-merge-event.yml': []
     '.github/workflows/testing-native-merge.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -147,7 +147,7 @@ workflows:
     '.github/workflows/testing-native-policy-check-authority.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@6756eaa1a229b9febd0476023b00ebdc0acd2231'
+        - 'civitaspo/securefix-server@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d'
     '.github/workflows/testing-native-policy-check-event.yml': []
     '.github/workflows/testing-native-release-assets-publish.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -263,9 +263,9 @@ dependencies:
         commit: 'sha1-ea165f8d65b6e75b540449e92b4886f43607fa02'
         owner_id: 44036562
         repo_id: 192625955
-    'civitaspo/securefix-server@6756eaa1a229b9febd0476023b00ebdc0acd2231':
-        ref: 'integration/native-server-approve-pre35-20261023'
-        commit: 'sha1-6756eaa1a229b9febd0476023b00ebdc0acd2231'
+    'civitaspo/securefix-server@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d':
+        ref: 'fix/token-only-package-loader-20261023'
+        commit: 'sha1-61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d'
         owner_id: 4525500
         repo_id: 1250079425
         uses:
