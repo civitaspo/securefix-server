@@ -13,7 +13,7 @@ jobs:
       actions: read
       attestations: read
       contents: read
-      issues: read
+      issues: write
       pull-requests: read
       checks: read
       statuses: read

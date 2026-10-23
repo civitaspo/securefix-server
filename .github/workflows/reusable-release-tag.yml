@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
         with:
           token: ${{ github.token }}
       - name: Validate merged release PR
@@ -52,6 +52,7 @@ jobs:
           SECUREFIX_INSTANCE_CONFIG_PATH: ${{ inputs.instance_config_path }}
           RELEASE_PR_NUMBER: ${{ inputs.release_pr_number || github.event.pull_request.number }}
         run: |
+          printf 'Release execution ref=%s sha=%s workflow-sha=%s\n' "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_WORKFLOW_SHA"
           securefix release resolve-pr --release-pr-number "$RELEASE_PR_NUMBER"
           echo "pr_number=$RELEASE_PR_NUMBER" >> "$GITHUB_OUTPUT"
 
@@ -69,7 +70,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
         with:
           token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,7 +188,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
         with:
           token: ${{ github.token }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -227,7 +228,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
         with:
           token: ${{ github.token }}
       - name: Create and verify release tag manifest
@@ -298,7 +299,7 @@ jobs:
     steps:
       - name: Load the fixed Securefix package
         id: package
-        uses: civitaspo/securefix-server/.github/actions/load-package@61fd0f85f2d02c78d333dbfcbf7848a1572e4f6d # v0.2.45-pre.44
+        uses: civitaspo/securefix-server/.github/actions/load-package@e392b49ede4052319bd3ca4f859b528a51c07177 # v0.2.45-pre.56
         with:
           token: ${{ github.token }}
       - name: Create server-only request token

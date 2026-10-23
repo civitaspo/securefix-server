@@ -514,6 +514,9 @@ fn validate_rendered_managed_role_workflow(
             "group": "securefix-control", "cancel-in-progress": false, "queue": "max"
         }))?;
     }
+    if role == securefix::instance_config::WorkflowRole::Release {
+        expected["jobs"]["handler"]["permissions"]["issues"] = serde_yaml::to_value("write")?;
+    }
     let actual: serde_yaml::Value = serde_yaml::from_slice(bytes)?;
     ensure!(
         actual == expected,
