@@ -55,3 +55,28 @@ cancelled, or is skipped. This lets activation verify real checks on the exact
 new default-branch commit rather than relying on pre-merge PR checks.
 
 The generated Merge Request wrapper permits the configured owner and the exact configured Renovate Bot on its own PRs. The runtime records bot requests separately from owner authorization and revalidates their provenance and accepted head. See [Renovate requests](merging.md#renovate-requests); changing a wrapper alone cannot authorize a bot in an older active runtime.
+
+## Fixed package loader
+
+Server and Client jobs use the same `load-package` composite Action pinned to a
+full commit SHA. Its only required input is `token`, normally `${{ github.token }}`,
+used for read-only package and provenance requests. Its bundled schema-v3
+`package.json` selects one immutable release, asset, source revision, source
+manifest digest, and producer/publisher run pair. The source build specification
+is a separate `source-package.json`; it does not select a published binary.
+Workflow, Action, and binary source revisions may differ. Multiple jobs may use
+the same fixed mapping without sharing their operation credentials.
+
+The Node.js 24 TypeScript loader validates the Linux x86-64 platform, repository
+identities, source specification, release state, size, digest, run identities,
+and cryptographically verified source/workflow-bound provenance before making
+the binary executable or adding its directory to PATH. It never executes the
+unverified binary. A relocated copy of the Action resolves its own manifest and
+modules relative to its files. Caller repository, actor, event, and attempt do
+not grant or deny package loading. Rust and the operation workflows retain
+request admission, policy, credential isolation, signatures, expected-head and
+stale authority checks. Download permission does not authorize a mutation.
+
+The current development mapping explicitly selects the verified scratch
+prerelease `v0.2.45-pre.42` in `civitaspo/testing-securefix-server`. It does not
+change the production `load-cli` or `load-runtime` path or activate a runtime.

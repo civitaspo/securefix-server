@@ -12,6 +12,7 @@ workflows:
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/ci.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+        - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/control-activation.yml':
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
@@ -131,7 +132,7 @@ workflows:
     '.github/workflows/testing-native-approve.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a'
+        - 'civitaspo/securefix-server@6756eaa1a229b9febd0476023b00ebdc0acd2231'
     '.github/workflows/testing-native-merge-event.yml': []
     '.github/workflows/testing-native-merge.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -146,7 +147,7 @@ workflows:
     '.github/workflows/testing-native-policy-check-authority.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
-        - 'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a'
+        - 'civitaspo/securefix-server@6756eaa1a229b9febd0476023b00ebdc0acd2231'
     '.github/workflows/testing-native-policy-check-event.yml': []
     '.github/workflows/testing-native-release-assets-publish.yml':
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
@@ -173,6 +174,7 @@ workflows:
         - 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
         - 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1'
         - 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0'
+        - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
         - 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
     '.github/workflows/testing-publish-runtime.yml':
         - 'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
@@ -246,6 +248,11 @@ dependencies:
         commit: 'sha1-634f93cb2916e3fdff6788551b99b062d0335ce0'
         owner_id: 44036562
         repo_id: 192626254
+    'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd':
+        ref: 'v8.0.0'
+        commit: 'sha1-ed597411d8f924073f98dfc5c65a23a2325f34cd'
+        owner_id: 44036562
+        repo_id: 205262760
     'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e':
         ref: 'v7.0.0'
         commit: 'sha1-b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
@@ -256,11 +263,13 @@ dependencies:
         commit: 'sha1-ea165f8d65b6e75b540449e92b4886f43607fa02'
         owner_id: 44036562
         repo_id: 192625955
-    'civitaspo/securefix-server@6be9fb42e14770a9162301787e158f7db3ab918a':
-        ref: 'main'
-        commit: 'sha1-6be9fb42e14770a9162301787e158f7db3ab918a'
+    'civitaspo/securefix-server@6756eaa1a229b9febd0476023b00ebdc0acd2231':
+        ref: 'integration/native-server-approve-pre35-20261023'
+        commit: 'sha1-6756eaa1a229b9febd0476023b00ebdc0acd2231'
         owner_id: 4525500
         repo_id: 1250079425
+        uses:
+            - 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
     'civitaspo/securefix-server@ee98f4f12f3c32855c95feb3fe75bc2870b88460':
         ref: 'integration/native-managed-files-c80e'
         commit: 'sha1-ee98f4f12f3c32855c95feb3fe75bc2870b88460'
