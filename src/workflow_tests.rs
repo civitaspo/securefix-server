@@ -1220,6 +1220,29 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                             "${{ secrets.CIVITASPO_BOT_PR_APPROVE_TOKEN }}"
                         );
                     }
+                } else if path == ".github/workflows/testing-native-settings.yml" {
+                    assert_eq!(job_id, "reconcile");
+                    assert_eq!(
+                        uses,
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@a34bf384006e06a3de73bb6f6f4d890ad4abc21b"
+                    );
+                    assert_eq!(
+                        job["with"],
+                        serde_json::json!({
+                            "config_path":"repo-settings/native-settings-test-instance.toml",
+                            "manifest_path":"repo-settings/native-settings-test-managed-files.json"
+                        })
+                    );
+                    assert_eq!(
+                        job["secrets"],
+                        serde_json::json!({
+                            "SERVER_PRIVATE_KEY":"${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}"
+                        })
+                    );
+                    assert_eq!(
+                        job["if"],
+                        "github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main'"
+                    );
                 } else {
                     assert!(
                         uses.starts_with("./.github/workflows/"),

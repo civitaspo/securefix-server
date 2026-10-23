@@ -1,0 +1,20 @@
+name: testing-native-settings
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  reconcile:
+    if: github.repository == 'civitaspo/securefix-server' && github.actor_id == '4525500' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    uses: civitaspo/securefix-server/.github/workflows/reusable-server-settings.yml@a34bf384006e06a3de73bb6f6f4d890ad4abc21b # v0.2.45-pre.95
+    with:
+      config_path: repo-settings/native-settings-test-instance.toml
+      manifest_path: repo-settings/native-settings-test-managed-files.json
+    secrets:
+      SERVER_PRIVATE_KEY: ${{ secrets.SECUREFIX_SERVER_PRIVATE_KEY }}
