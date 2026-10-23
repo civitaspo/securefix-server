@@ -1,0 +1,62 @@
+name: Prepare Securefix changes
+description: Stage and upload PR changes without signing or publication credentials
+inputs:
+  token:
+    description: Read-only token for the fixed Securefix package
+    required: true
+  files:
+    description: Newline-separated changed files relative to root-dir; empty skips upload
+    required: true
+  root-dir:
+    description: Workspace-relative root of the changed files
+    required: false
+    default: .
+  commit-message:
+    description: Message for the Server-signed commit
+    required: false
+    default: Securefix
+  custom-json:
+    description: Custom metadata JSON object
+    required: false
+    default: '{}'
+outputs:
+  artifact-name:
+    description: Source artifact name; empty when no files were provided
+    value: ${{ steps.prepare.outputs.artifact_name }}
+  artifact-id:
+    description: Uploaded source artifact ID
+    value: ${{ steps.upload.outputs.artifact-id }}
+  changed-files:
+    description: Newline-separated workspace-relative changed paths
+    value: ${{ steps.prepare.outputs.changed_files }}
+runs:
+  using: composite
+  steps:
+    - name: Load the fixed Securefix package
+      id: package
+      uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+      with:
+        token: ${{ inputs.token }}
+    - name: Prepare the bounded source artifact
+      id: prepare
+      shell: bash
+      env:
+        CLI_BINARY: ${{ steps.package.outputs.binary }}
+        FILES: ${{ inputs.files }}
+        ROOT_DIR: ${{ inputs.root-dir }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        CUSTOM_JSON: ${{ inputs.custom-json }}
+      run: |
+        set -euo pipefail
+        "$CLI_BINARY" new-client securefix prepare --files "$FILES" --root-dir "$ROOT_DIR" \
+          --commit-message "$COMMIT_MESSAGE" --custom-json "$CUSTOM_JSON" --output-dir .securefix-artifacts
+    - name: Upload the source artifact
+      id: upload
+      if: steps.prepare.outputs.artifact_name != ''
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ steps.prepare.outputs.artifact_name }}
+        path: ${{ steps.prepare.outputs.artifact_path }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 2

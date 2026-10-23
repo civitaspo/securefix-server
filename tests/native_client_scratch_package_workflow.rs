@@ -187,3 +187,90 @@ fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() 
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn prepare_action_keeps_untrusted_values_in_arguments_and_uploads_only_staged_files() {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+    let action = workflow(".github/actions/prepare-securefix/action.yml");
+    assert_eq!(action["runs"]["using"], "composite");
+    let steps = action["runs"]["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(
+        steps[0]["with"],
+        serde_json::json!({"token":"${{ inputs.token }}"})
+    );
+    assert_eq!(
+        steps[0]["uses"],
+        "civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a"
+    );
+    let prepare = &steps[1];
+    assert_eq!(prepare["id"], "prepare");
+    assert_eq!(
+        prepare["env"]["CLI_BINARY"],
+        "${{ steps.package.outputs.binary }}"
+    );
+    let script = prepare["run"].as_str().unwrap();
+    assert!(!script.contains("${{"));
+    let workspace = tempfile::tempdir().unwrap();
+    let cli = workspace.path().join("fixed securefix");
+    fs::write(
+        &cli,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\nexit \"${CLI_STATUS:-0}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    let args = workspace.path().join("args");
+    let values = [
+        ("FILES", "path with spaces\nquote'\";$(false).txt"),
+        ("ROOT_DIR", "source tree"),
+        ("COMMIT_MESSAGE", "fix \"quotes\"; $(false)"),
+        ("CUSTOM_JSON", r#"{"message":"$HOME"}"#),
+    ];
+    for status in ["0", "17"] {
+        let result = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .env("CLI_BINARY", &cli)
+            .env("CAPTURE_ARGS", &args)
+            .env("CLI_STATUS", status)
+            .envs(values)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(status.parse().unwrap()));
+        let expected = [
+            "new-client",
+            "securefix",
+            "prepare",
+            "--files",
+            values[0].1,
+            "--root-dir",
+            values[1].1,
+            "--commit-message",
+            values[2].1,
+            "--custom-json",
+            values[3].1,
+            "--output-dir",
+            ".securefix-artifacts",
+        ];
+        assert_eq!(
+            fs::read_to_string(&args).unwrap(),
+            expected.join("\n") + "\n"
+        );
+    }
+    let upload = &steps[2];
+    assert_eq!(upload["if"], "steps.prepare.outputs.artifact_name != ''");
+    assert_eq!(
+        upload["with"]["name"],
+        "${{ steps.prepare.outputs.artifact_name }}"
+    );
+    assert_eq!(
+        upload["with"]["path"],
+        "${{ steps.prepare.outputs.artifact_path }}"
+    );
+    assert_eq!(upload["with"]["include-hidden-files"], true);
+    assert_eq!(upload["with"]["if-no-files-found"], "error");
+    for output in ["artifact-name", "artifact-id", "changed-files"] {
+        assert!(action["outputs"][output]["value"].as_str().is_some());
+    }
+    assert!(!serde_json::to_string(&action).unwrap().contains("secrets."));
+}
