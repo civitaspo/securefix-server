@@ -3632,27 +3632,27 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
     assert_eq!(mapping["channel"], "scratch");
     assert_eq!(
         mapping["source_sha"],
-        "667678dd7399d04e0ad1679db545081bd0ac7ab9"
+        "bdba850f59b248a96e26d3799eb2ec16fc59d45d"
     );
     assert_eq!(
         mapping["source_manifest_sha256"],
-        "db366d7bc299aa398175e3fb923b08cdaf5f0a81419fcf9639e1c0ae27ceb451"
+        "d305b0562d30b8be5450aa78bd319e83eb09e07fb5cc1ecafa903cd0bdad4f6b"
     );
-    assert_eq!(mapping["version"], "0.2.45-pre.88");
-    assert_eq!(mapping["tag"], "v0.2.45-pre.88");
-    assert_eq!(mapping["release_id"], 422043976);
-    assert_eq!(mapping["asset_id"], 669648936);
+    assert_eq!(mapping["version"], "0.2.45-pre.93");
+    assert_eq!(mapping["tag"], "v0.2.45-pre.93");
+    assert_eq!(mapping["release_id"], 422116407);
+    assert_eq!(mapping["asset_id"], 669828610);
     assert_eq!(
         mapping["asset_sha256"],
-        "a5b261b9fba63e521a8ec7ba9db97ddc8bc6084d18c11189de667d85b0f9619b"
+        "607ae246b890eae6374f945739793e099f65fe5639a34b4a9abaf2dd585698ab"
     );
     assert_eq!(
         mapping["producer_run_id"],
-        serde_json::json!(39982985784_u64)
+        serde_json::json!(39992324987_u64)
     );
     assert_eq!(
         mapping["publisher_run_id"],
-        serde_json::json!(39983672658_u64)
+        serde_json::json!(39993479747_u64)
     );
 }
 
