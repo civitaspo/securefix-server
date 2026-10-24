@@ -31,7 +31,7 @@ fn native_client_requests_use_a_fixed_package_across_credential_domains() {
         let package = loaders[0];
         assert_eq!(
             package["uses"],
-            "civitaspo/securefix-server/.github/actions/load-package@6e267a900d6798d4097a3a2aae7b42fa2e2a46c7"
+            "civitaspo/securefix-server/.github/actions/load-package@17fef91b5576c2e2026a6d71ef5619d9fa2ceb95"
         );
         assert!(package.get("if").is_none());
         assert_eq!(
@@ -224,7 +224,7 @@ fn prepare_action_keeps_untrusted_values_in_arguments_and_uploads_only_staged_fi
     );
     assert_eq!(
         steps[0]["uses"],
-        "civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a"
+        "civitaspo/securefix-server/.github/actions/load-package@17fef91b5576c2e2026a6d71ef5619d9fa2ceb95"
     );
     let prepare = &steps[1];
     assert_eq!(prepare["id"], "prepare");

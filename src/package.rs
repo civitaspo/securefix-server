@@ -3986,7 +3986,7 @@ mod tests {
 
     #[test]
     fn bundled_v3_action_mapping_binds_the_verified_binary_receipt() {
-        const BINARY_SOURCE_SHA: &str = "19f556cee16bf9d070e90cd1c8d77cc5e23bb1ad";
+        const BINARY_SOURCE_SHA: &str = "4e3d3e9e55848ff393faa11abe40e4612530ce82";
         let action_bytes = include_bytes!("../.github/actions/load-package/package.json");
         let manifest = NativeClientPackageManifest::parse(action_bytes).unwrap();
         let source = TrustedPublisher {
@@ -3994,13 +3994,13 @@ mod tests {
             repository_id: 1_250_079_425,
         };
         let destination = TrustedPublisher {
-            repository: "civitaspo/testing-securefix-server".to_owned(),
-            repository_id: 1_410_312_556,
+            repository: source.repository.clone(),
+            repository_id: source.repository_id,
         };
         assert_eq!(
             manifest
                 .validate(
-                    ClientPackageChannel::Scratch,
+                    ClientPackageChannel::Stable,
                     &source,
                     &destination,
                     NATIVE_CLIENT_PROTOCOL,
@@ -4011,7 +4011,7 @@ mod tests {
         );
 
         let source_manifest_bytes =
-            include_bytes!("../tests/fixtures/native-package-source-manifest-v2.json");
+            include_bytes!("../tests/fixtures/native-package-stable-source-manifest-v2.json");
         assert_eq!(
             manifest.source_manifest_sha256,
             crate::hex_encode(Sha256::digest(source_manifest_bytes))
