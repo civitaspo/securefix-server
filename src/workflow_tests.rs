@@ -3555,30 +3555,30 @@ fn native_package_probe_separates_build_attest_publish_and_execution() {
         serde_json::from_slice(&fs::read(".github/actions/load-package/package.json").unwrap())
             .unwrap();
     assert_eq!(mapping["schema_version"], 3);
-    assert_eq!(mapping["channel"], "scratch");
+    assert_eq!(mapping["channel"], "stable");
     assert_eq!(
         mapping["source_sha"],
-        "19f556cee16bf9d070e90cd1c8d77cc5e23bb1ad"
+        "4e3d3e9e55848ff393faa11abe40e4612530ce82"
     );
     assert_eq!(
         mapping["source_manifest_sha256"],
-        "971eb72ddd9c67bd2321d59bd95177835fbc7c10d5e0cf3f144733670d6a8e21"
+        "80f604261c4baaf237b086ae1234416890ba459471b8e613e2cfffd8be50c974"
     );
-    assert_eq!(mapping["version"], "0.2.45-pre.119");
-    assert_eq!(mapping["tag"], "v0.2.45-pre.119");
-    assert_eq!(mapping["release_id"], 422339376);
-    assert_eq!(mapping["asset_id"], 670508792);
+    assert_eq!(mapping["version"], "0.2.45");
+    assert_eq!(mapping["tag"], "v0.2.45");
+    assert_eq!(mapping["release_id"], 422416188);
+    assert_eq!(mapping["asset_id"], 670800747);
     assert_eq!(
         mapping["asset_sha256"],
-        "327dc0233453b7668a3ab19907a4611726d31ff99f18ad4921e972a9bfe1193c"
+        "22f23fd07f918489607fd3c9c8fccd62a2715837e93f65fa53565d02c38a9087"
     );
     assert_eq!(
         mapping["producer_run_id"],
-        serde_json::json!(40028772400_u64)
+        serde_json::json!(40043753516_u64)
     );
     assert_eq!(
         mapping["publisher_run_id"],
-        serde_json::json!(40029271698_u64)
+        serde_json::json!(40044126390_u64)
     );
 }
 

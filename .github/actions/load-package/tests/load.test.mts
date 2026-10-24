@@ -445,23 +445,23 @@ test('attestation command failure never publishes the package', async () => {
   }
 });
 
-test('bundled mapping matches the immutable pre119 package receipt', async () => {
+test('bundled mapping matches the immutable stable package receipt', async () => {
   const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
   const parsed: unknown = JSON.parse(await readFile(join(originalDirectory, 'package.json'), 'utf8'));
   assert.ok(isRecord(parsed));
   const mapping = parsed;
   assert.equal(mapping.schema_version, 3);
-  assert.equal(mapping.channel, 'scratch');
-  assert.equal(mapping.source_sha, '19f556cee16bf9d070e90cd1c8d77cc5e23bb1ad');
-  assert.equal(mapping.source_manifest_sha256, '971eb72ddd9c67bd2321d59bd95177835fbc7c10d5e0cf3f144733670d6a8e21');
-  assert.equal(mapping.tag, 'v0.2.45-pre.119');
-  assert.equal(mapping.release_id, 422339376);
-  assert.equal(mapping.asset_id, 670508792);
-  assert.equal(mapping.asset_size, 12663688);
-  assert.equal(mapping.asset_sha256, '327dc0233453b7668a3ab19907a4611726d31ff99f18ad4921e972a9bfe1193c');
-  assert.equal(mapping.producer_run_id, 40028772400);
-  assert.equal(mapping.publisher_run_id, 40029271698);
-  assert.equal(mapping.publisher_sha, '25095d57a3ac6bab7d89785faedffd4920a2a47a');
+  assert.equal(mapping.channel, 'stable');
+  assert.equal(mapping.source_sha, '4e3d3e9e55848ff393faa11abe40e4612530ce82');
+  assert.equal(mapping.source_manifest_sha256, '80f604261c4baaf237b086ae1234416890ba459471b8e613e2cfffd8be50c974');
+  assert.equal(mapping.tag, 'v0.2.45');
+  assert.equal(mapping.release_id, 422416188);
+  assert.equal(mapping.asset_id, 670800747);
+  assert.equal(mapping.asset_size, 12663112);
+  assert.equal(mapping.asset_sha256, '22f23fd07f918489607fd3c9c8fccd62a2715837e93f65fa53565d02c38a9087');
+  assert.equal(mapping.producer_run_id, 40043753516);
+  assert.equal(mapping.publisher_run_id, 40044126390);
+  assert.equal(mapping.publisher_sha, '4e3d3e9e55848ff393faa11abe40e4612530ce82');
 });
 
 test('composite metadata exposes only token and invokes the tested Node 24 entry module', async () => {
