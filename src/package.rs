@@ -5380,7 +5380,10 @@ jobs:
             publisher_workflow: NATIVE_PACKAGE_PUBLISHER_WORKFLOW,
             asset_name: PACKAGE_BINARY_NAME,
             max_asset_bytes: 134217728,
-            stable: false,
+            stable: Version::parse(env!("CARGO_PKG_VERSION"))
+                .unwrap()
+                .pre
+                .is_empty(),
         };
         validate_native_package_release_source(cargo, manifest, &binding).unwrap();
 
