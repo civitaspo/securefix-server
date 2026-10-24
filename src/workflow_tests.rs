@@ -1147,7 +1147,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "handler");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@9eabce19f60eac5eb281ec0e85abc9913b6d727a"
+                        "civitaspo/securefix-server/.github/workflows/reusable-server-securefix.yml@bf66565ea834e0fe528f4655806335740afd3348"
                     );
                     assert_eq!(
                         job["with"]["config_path"],
@@ -1192,7 +1192,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                         continue;
                     }
                     assert_eq!(job_id, "handler");
-                    let revision = "9eabce19f60eac5eb281ec0e85abc9913b6d727a";
+                    let revision = "bf66565ea834e0fe528f4655806335740afd3348";
                     assert_eq!(
                         uses,
                         format!(
@@ -1225,7 +1225,7 @@ fn workflows_use_pinned_actions_and_immutable_flattened_artifacts() {
                     assert_eq!(job_id, "request");
                     assert_eq!(
                         uses,
-                        "civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@170cc1d6580c8e9041e9ef7ebd6ee1d01642acf9"
+                        "civitaspo/securefix-server/.github/workflows/reusable-client-request.yml@bf66565ea834e0fe528f4655806335740afd3348"
                     );
                 } else if path == ".github/workflows/testing-native-settings.yml" {
                     assert_eq!(job_id, "reconcile");
@@ -1507,14 +1507,18 @@ fn native_self_update_clients_are_bounded_and_reuse_the_existing_instance() {
                 guard.contains("github.event.pull_request.head.repo.id == github.repository_id")
             );
         }
-        assert!(config.allows_scratch_request_caller(
-            &config.instance.repository,
-            config.instance.id,
-            &format!(".github/workflows/{filename}"),
-            "refs/heads/main",
-            event,
-            operation
-        ));
+        assert!(config.scratch_request_callers.is_empty());
+        assert!(config.scratch_package_repository.is_none());
+        assert_eq!(
+            config.acceptable_clients.repository,
+            config.instance.repository
+        );
+        assert!(
+            config
+                .acceptable_clients
+                .version
+                .matches(&semver::Version::new(0, 2, 46))
+        );
     }
     for role in ["approve", "merge"] {
         let receiver = workflow(&format!("testing-native-{role}-event.yml"));
