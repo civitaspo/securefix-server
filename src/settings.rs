@@ -3412,7 +3412,7 @@ mod tests {
 
         let caller = &desired[MANAGED_CLIENT_POLICY_CHECK_TARGET];
         let policy_check_instance_config =
-            include_bytes!("../repo-settings/native-role-events-test-instance.toml");
+            include_bytes!("../tests/fixtures/native-role-events-scratch-instance.toml");
         assert!(
             validate_managed_policy_check_caller(&manifest, &desired, &instance_config, None)
                 .is_err()
@@ -3616,7 +3616,7 @@ mod tests {
             parse_managed_manifest(include_bytes!("../repo-settings/managed-files.json")).unwrap();
         let config = managed_instance_config();
         let server_config =
-            include_bytes!("../repo-settings/native-role-events-test-instance.toml");
+            include_bytes!("../tests/fixtures/native-role-events-scratch-instance.toml");
         let callers = BTreeMap::from([
             (
                 MANAGED_CLIENT_APPROVE_TARGET.to_owned(),
@@ -3929,7 +3929,7 @@ mod tests {
         let manifest: ManagedFilesManifest =
             serde_json::from_slice(include_bytes!("../repo-settings/managed-files.json")).unwrap();
         let instance_config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
-            "../repo-settings/native-role-events-test-instance.toml"
+            "../tests/fixtures/native-role-events-scratch-instance.toml"
         ))
         .unwrap();
         let pin_sha = "c".repeat(40);

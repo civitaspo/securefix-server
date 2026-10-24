@@ -3617,7 +3617,7 @@ version = "1.4.0-pre.1"
         ))
         .unwrap();
         let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
-            "../repo-settings/native-role-events-test-instance.toml"
+            "../tests/fixtures/native-role-events-scratch-instance.toml"
         ))
         .unwrap();
         let merge: RequestManifest = serde_json::from_value(fixture["merge"].clone()).unwrap();
@@ -3724,7 +3724,7 @@ version = "1.4.0-pre.1"
     #[test]
     fn scratch_package_accepts_server_owned_prs_without_minting_owner_commands() {
         let config = securefix::instance_config::InstanceConfig::parse(include_bytes!(
-            "../repo-settings/native-role-events-test-instance.toml"
+            "../tests/fixtures/native-role-events-scratch-instance.toml"
         ))
         .unwrap();
         let mut request = manifest();

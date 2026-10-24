@@ -1,0 +1,148 @@
+schema_version = 1
+release_request_label_prefix = "testing-"
+
+[instance]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+default_branch = "main"
+
+[identities.owner]
+login = "civitaspo"
+id = 4525500
+
+[identities.repository_owner]
+login = "civitaspo"
+id = 4525500
+
+[identities.client_bot]
+login = "civitaspo-securefix-client[bot]"
+id = 288068203
+
+[identities.server_bot]
+login = "civitaspo-securefix-server[bot]"
+id = 288069019
+
+[identities.approval_reviewer]
+login = "civitaspo-bot"
+id = 308696683
+
+[apps]
+client_id = 3872492
+server_id = 3872533
+status_check_id = 15368
+policy_check_id = 3872533
+
+[workflow_roles]
+approve = ".github/workflows/testing-native-approve-event.yml"
+merge = ".github/workflows/testing-native-merge-event.yml"
+policy_check = ".github/workflows/testing-native-policy-check-event.yml"
+release = ".github/workflows/testing-native-release-event.yml"
+securefix = ".github/workflows/testing-native-securefix-event.yml"
+
+[branches]
+release = "release/next"
+
+[policy]
+trusted_committers = [
+  "civitaspo",
+  "civitaspo-securefix-server[bot]",
+  "civitaspo-bot",
+]
+default_sensitive_paths = [
+  ".github/workflows/**",
+  ".github/actions/**",
+  "**/Cargo.toml",
+  "**/Cargo.lock",
+]
+merge_controls_enabled = false
+
+[policy.sensitive_path_approval_exemptions]
+users = []
+github_apps = []
+
+[[repositories]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+capabilities = ["approve", "merge", "release", "securefix"]
+release = "github-release"
+native_binaries = [
+  { target = "aarch64-apple-darwin", runner = "macos-15" },
+  { target = "x86_64-apple-darwin", runner = "macos-15-intel" },
+  { target = "aarch64-unknown-linux-musl", runner = "ubuntu-24.04-arm" },
+  { target = "x86_64-unknown-linux-musl", runner = "ubuntu-24.04" },
+]
+protect_tags = false
+
+[scratch_package_repository]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+default_branch = "main"
+
+[acceptable_clients]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+producer_workflow = ".github/workflows/reusable-client-request.yml"
+version = ">=0.2.45-pre.23"
+
+[[scratch_request_callers]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+workflow_path = ".github/workflows/policy-check.yml"
+workflow_ref = "refs/heads/main"
+event = "pull_request_target"
+operation = "policy_check"
+
+[[scratch_request_callers]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+workflow_path = ".github/workflows/approve-request.yml"
+workflow_ref = "refs/heads/main"
+event = "issue_comment"
+operation = "approval"
+
+[[scratch_request_callers]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+workflow_path = ".github/workflows/merge-request.yml"
+workflow_ref = "refs/heads/main"
+event = "issue_comment"
+operation = "merge"
+
+[[scratch_request_callers]]
+repository = "civitaspo/testing-securefix-server"
+id = 1410312556
+workflow_path = ".github/workflows/securefix-request.yml"
+workflow_ref = "refs/pull/432/merge"
+event = "pull_request"
+operation = "securefix"
+
+# Host self-update probes use only the test callers below.
+[[repositories]]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+capabilities = ["approve", "merge"]
+protect_tags = false
+
+[[scratch_request_callers]]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+workflow_path = ".github/workflows/testing-native-self-client-approve.yml"
+workflow_ref = "refs/heads/main"
+event = "issue_comment"
+operation = "approval"
+
+[[scratch_request_callers]]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+workflow_path = ".github/workflows/testing-native-self-client-merge.yml"
+workflow_ref = "refs/heads/main"
+event = "issue_comment"
+operation = "merge"
+
+[[scratch_request_callers]]
+repository = "civitaspo/securefix-server"
+id = 1250079425
+workflow_path = ".github/workflows/testing-native-self-client-policy-check.yml"
+workflow_ref = "refs/heads/main"
+event = "pull_request_target"
+operation = "policy_check"
