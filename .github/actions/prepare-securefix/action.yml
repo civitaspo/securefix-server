@@ -34,7 +34,7 @@ runs:
   steps:
     - name: Load the fixed Securefix package
       id: package
-      uses: civitaspo/securefix-server/.github/actions/load-package@f704d9ce91629b0a2094191dbcd3cb0ae591c93a # v0.2.45-pre.111
+      uses: civitaspo/securefix-server/.github/actions/load-package@adfbceffbbdc668db256cf97827149435c265d0e # v0.2.46
       with:
         token: ${{ inputs.token }}
     - name: Prepare the bounded source artifact

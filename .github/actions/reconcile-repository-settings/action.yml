@@ -15,7 +15,7 @@ runs:
   steps:
     - name: Load the fixed Securefix package
       id: package
-      uses: civitaspo/securefix-server/.github/actions/load-package@6e267a900d6798d4097a3a2aae7b42fa2e2a46c7 # v0.2.45-pre.120
+      uses: civitaspo/securefix-server/.github/actions/load-package@adfbceffbbdc668db256cf97827149435c265d0e # v0.2.46
       with:
         token: ${{ inputs.token }}
     - name: Select protected settings destinations
