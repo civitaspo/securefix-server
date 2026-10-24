@@ -120,23 +120,15 @@ fn native_client_capture_passes_the_securefix_artifact_only_to_its_rust_command(
 }
 
 #[test]
-fn managed_client_fixtures_keep_credentials_separate_from_source_preparation() {
+fn managed_clients_connect_the_generic_signer_to_their_authenticated_instance() {
     const SOURCE: &str = "9eabce19f60eac5eb281ec0e85abc9913b6d727a";
     let config = securefix::instance_config::InstanceConfig::parse(
-        &fs::read("repo-settings/native-role-events-test-instance.toml").unwrap(),
+        &fs::read("tests/fixtures/native-role-events-scratch-instance.toml").unwrap(),
     )
     .unwrap();
     assert_eq!(
         config.acceptable_clients.producer_workflow,
         ".github/workflows/reusable-client-request.yml"
-    );
-    assert!(config.scratch_request_callers.is_empty());
-    assert!(config.scratch_package_repository.is_none());
-    assert!(
-        config
-            .acceptable_clients
-            .version
-            .matches(&semver::Version::new(0, 2, 46))
     );
     for (file, job, operation) in [
         ("policy-check", "check", "policy_check"),
@@ -163,6 +155,24 @@ fn managed_client_fixtures_keep_credentials_separate_from_source_preparation() {
             request["with"]["instance_config_path"],
             "repo-settings/native-role-events-test-instance.toml"
         );
+        assert!(config.allows_scratch_request_caller(
+            "civitaspo/testing-securefix-server",
+            1410312556,
+            &format!(".github/workflows/{file}.yml"),
+            if operation == "securefix" {
+                "refs/pull/432/merge"
+            } else {
+                "refs/heads/main"
+            },
+            if matches!(operation, "approval" | "merge") {
+                "issue_comment"
+            } else if operation == "securefix" {
+                "pull_request"
+            } else {
+                "pull_request_target"
+            },
+            operation,
+        ));
         if operation == "securefix" {
             assert_eq!(request["needs"], "prepare-source");
             assert_eq!(
