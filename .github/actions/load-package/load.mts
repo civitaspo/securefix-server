@@ -453,8 +453,9 @@ export async function loadPackage(args: GitHubScriptArguments): Promise<void> {
   ) {
     throw new Error('package release is not the exact immutable release in the bundled mapping');
   }
-  if (releaseValue.target_commitish !== mapping.targetBranch) {
-    throw new Error('package release target differs from the configured destination branch');
+  const releaseTarget = mapping.channel === 'stable' ? mapping.sourceSha : mapping.targetBranch;
+  if (releaseValue.target_commitish !== releaseTarget) {
+    throw new Error('package release target differs from the fixed publication target');
   }
   canonicalReleaseRecord(releaseValue.body, mapping);
 
