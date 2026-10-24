@@ -13238,6 +13238,81 @@ mod tests {
     }
 
     #[test]
+    fn retired_descriptor_blocks_every_legacy_write_transport() {
+        use crate::fixtures::{Fixture, Route};
+        let server = crate::config::trusted()
+            .unwrap()
+            .deployment
+            .control_repository();
+        let descriptor = format!(
+            "/repos/{}/contents/control/active.json?ref={}",
+            server.repository, server.default_branch
+        );
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let fixture = Fixture::new(vec![Route::request(
+                "GET",
+                descriptor.clone(),
+                404,
+                serde_json::json!({"message":"Not Found"}),
+            )]);
+            let error = fixture
+                .api
+                .request(
+                    method,
+                    "/repos/civitaspo/example/labels",
+                    Some(&serde_json::json!({})),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<ApiError>().unwrap().status,
+                StatusCode::NOT_FOUND
+            );
+            fixture.finish();
+        }
+        let fixture = Fixture::new(vec![Route::request(
+            "GET",
+            descriptor.clone(),
+            404,
+            serde_json::json!({"message":"Not Found"}),
+        )]);
+        let error = fixture
+            .api
+            .create_commit(
+                "civitaspo/example",
+                "fixture",
+                &"a".repeat(40),
+                "fixture",
+                std::collections::BTreeMap::from([("fixture.txt".to_owned(), b"fixture".to_vec())]),
+                Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ApiError>().unwrap().status,
+            StatusCode::NOT_FOUND
+        );
+        fixture.finish();
+        let fixture = Fixture::new(vec![Route::request(
+            "GET",
+            descriptor,
+            404,
+            serde_json::json!({"message":"Not Found"}),
+        )]);
+        let error = fixture
+            .api
+            .upload(
+                "https://uploads.github.com/repos/civitaspo/example/releases/1/assets?name=fixture",
+                vec![1],
+                "application/octet-stream",
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ApiError>().unwrap().status,
+            StatusCode::NOT_FOUND
+        );
+        fixture.finish();
+    }
+
+    #[test]
     fn production_write_without_captured_control_identity_fails_closed() {
         let mut api = GitHub::new("http://127.0.0.1:1", "fixture-token".into()).unwrap();
         api.writes = WriteContext::Production {
