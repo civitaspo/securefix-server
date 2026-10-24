@@ -13,7 +13,7 @@ const SOURCE_SHA = '95520b982c915e8a7c20d6a8464aa9d926216573';
 const PUBLISHER_SHA = '39e7cd4bc3a9988f20357704ba00a7746750e522';
 const ASSET_BYTES = Buffer.from('verified test package fixture');
 const ASSET_SHA = createHash('sha256').update(ASSET_BYTES).digest('hex');
-const SOURCE_MANIFEST = Buffer.from(JSON.stringify({
+const SOURCE_SPEC = {
   schema_version: 2,
   component: 'securefix-server',
   protocol: 'securefix-native-request/v1',
@@ -22,7 +22,8 @@ const SOURCE_MANIFEST = Buffer.from(JSON.stringify({
   publisher_workflow: '.github/workflows/publish-native-package.yml',
   max_bytes: 134217728,
   assets: { 'linux-x86_64': 'securefix-linux-x86_64' },
-}));
+};
+const SOURCE_MANIFEST = Buffer.from(JSON.stringify(SOURCE_SPEC));
 const MAPPING = {
   schema_version: 3,
   channel: 'scratch',
@@ -87,45 +88,45 @@ const PUBLISHER_RUN = {
   head_repository: { id: MAPPING.source_repository_id, full_name: SOURCE },
 };
 
-function releaseRecord(): string {
+function releaseRecord(mapping = MAPPING): string {
   return JSON.stringify({
     schema_version: 1,
     source_sha: SOURCE_SHA,
-    source_manifest_sha256: MAPPING.source_manifest_sha256,
-    producer_workflow: MAPPING.producer_workflow,
-    producer_run_id: MAPPING.producer_run_id,
+    source_manifest_sha256: mapping.source_manifest_sha256,
+    producer_workflow: mapping.producer_workflow,
+    producer_run_id: mapping.producer_run_id,
     producer_run_attempt: 1,
-    publisher_workflow: MAPPING.publisher_workflow,
+    publisher_workflow: mapping.publisher_workflow,
     publisher_sha: PUBLISHER_SHA,
-    publisher_run_id: MAPPING.publisher_run_id,
+    publisher_run_id: mapping.publisher_run_id,
     publisher_run_attempt: 1,
-    tag: MAPPING.tag,
-    asset_name: MAPPING.asset_name,
-    asset_size: MAPPING.asset_size,
+    tag: mapping.tag,
+    asset_name: mapping.asset_name,
+    asset_size: mapping.asset_size,
     asset_sha256: ASSET_SHA,
   });
 }
 
-function verifierOutput(overrides: Record<string, unknown> = {}): string {
-  const signer = 'https://github.com/' + SOURCE + '/' + MAPPING.producer_workflow + '@refs/heads/' + MAPPING.source_branch;
+function verifierOutput(overrides: Record<string, unknown> = {}, mapping = MAPPING): string {
+  const signer = 'https://github.com/' + SOURCE + '/' + mapping.producer_workflow + '@refs/heads/' + mapping.source_branch;
   const certificate: Record<string, unknown> = {
     issuer: 'https://token.actions.githubusercontent.com',
     runnerEnvironment: 'github-hosted',
     githubWorkflowRepository: SOURCE,
     githubWorkflowSHA: SOURCE_SHA,
-    githubWorkflowRef: 'refs/heads/' + MAPPING.source_branch,
+    githubWorkflowRef: 'refs/heads/' + mapping.source_branch,
     buildSignerURI: signer,
     buildSignerDigest: SOURCE_SHA,
     buildConfigURI: signer,
     buildConfigDigest: SOURCE_SHA,
     sourceRepositoryURI: 'https://github.com/' + SOURCE,
     sourceRepositoryDigest: SOURCE_SHA,
-    sourceRepositoryRef: 'refs/heads/' + MAPPING.source_branch,
-    sourceRepositoryIdentifier: String(MAPPING.source_repository_id),
+    sourceRepositoryRef: 'refs/heads/' + mapping.source_branch,
+    sourceRepositoryIdentifier: String(mapping.source_repository_id),
     sourceRepositoryOwnerIdentifier: '4525500',
     buildTrigger: 'workflow_dispatch',
     githubWorkflowTrigger: 'workflow_dispatch',
-    runInvocationURI: 'https://github.com/' + SOURCE + '/actions/runs/' + MAPPING.producer_run_id + '/attempts/1',
+    runInvocationURI: 'https://github.com/' + SOURCE + '/actions/runs/' + mapping.producer_run_id + '/attempts/1',
   };
   Object.assign(certificate, overrides);
   return JSON.stringify([{
@@ -133,13 +134,14 @@ function verifierOutput(overrides: Record<string, unknown> = {}): string {
       signature: { certificate },
       statement: {
         predicateType: 'https://slsa.dev/provenance/v1',
-        subject: [{ name: MAPPING.asset_name, digest: { sha256: ASSET_SHA } }],
+        subject: [{ name: mapping.asset_name, digest: { sha256: ASSET_SHA } }],
       },
     },
   }]);
 }
 
 interface FixtureOptions {
+  stable?: boolean;
   corruptAsset?: boolean;
   corruptSourceManifest?: boolean;
   sourceManifestPath?: string;
@@ -166,21 +168,34 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
   root: string;
   error: unknown;
 }> {
+  const spec = options.stable ? { ...SOURCE_SPEC, version: '0.2.45' } : SOURCE_SPEC;
+  const validSourceManifest = Buffer.from(JSON.stringify(spec));
+  const mapping = options.stable ? {
+    ...MAPPING,
+    channel: 'stable',
+    version: spec.version,
+    tag: 'v' + spec.version,
+    source_branch: 'main',
+    destination_repository: SOURCE,
+    destination_repository_id: MAPPING.source_repository_id,
+    source_manifest_sha256: createHash('sha256').update(validSourceManifest).digest('hex'),
+    prerelease: false,
+  } : MAPPING;
   const root = await mkdtemp(join(tmpdir(), 'securefix loader test with spaces '));
   const actionDirectory = join(root, 'different nesting', 'renamed action with spaces');
   await mkdir(dirname(actionDirectory), { recursive: true });
   const originalDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
   await cp(originalDirectory, actionDirectory, { recursive: true, filter: (source) => basename(source) !== 'node_modules' });
   await writeFile(join(actionDirectory, 'package.json'), JSON.stringify({
-    ...MAPPING,
-    source_manifest_path: options.sourceManifestPath ?? MAPPING.source_manifest_path,
+    ...mapping,
+    source_manifest_path: options.sourceManifestPath ?? mapping.source_manifest_path,
   }));
 
   const outputs = new Map<string, string>();
   const paths: string[] = [];
   const ghCalls: string[][] = [];
   const apiRoutes: string[] = [];
-  const sourceManifest = options.corruptSourceManifest ? Buffer.from('{"wrong":true}') : SOURCE_MANIFEST;
+  const sourceManifest = options.corruptSourceManifest ? Buffer.from('{"wrong":true}') : validSourceManifest;
   const binary = options.corruptAsset ? Buffer.from('wrong executable bytes') : ASSET_BYTES;
   const github = {
     async request(route: string, parameters: Record<string, unknown>): Promise<{ data: unknown }> {
@@ -189,15 +204,15 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
       if (route === 'GET /repos/{owner}/{repo}') {
         const repository = String(parameters.owner) + '/' + String(parameters.repo);
         if (repository === SOURCE) {
-          return { data: { full_name: SOURCE, id: MAPPING.source_repository_id, default_branch: 'main', owner: { id: 4525500 } } };
+          return { data: { full_name: SOURCE, id: mapping.source_repository_id, default_branch: 'main', owner: { id: 4525500 } } };
         }
-        if (repository === DESTINATION) {
-          return { data: { full_name: DESTINATION, id: MAPPING.destination_repository_id, default_branch: 'main' } };
+        if (repository === mapping.destination_repository) {
+          return { data: { full_name: mapping.destination_repository, id: mapping.destination_repository_id, default_branch: 'main' } };
         }
       }
       if (route.includes('/contents/')) {
         return { data: {
-          path: options.sourceManifestResponsePath ?? options.sourceManifestPath ?? MAPPING.source_manifest_path,
+          path: options.sourceManifestResponsePath ?? options.sourceManifestPath ?? mapping.source_manifest_path,
           type: 'file',
           encoding: 'base64',
           size: sourceManifest.byteLength,
@@ -206,32 +221,32 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
       }
       if (route === 'GET /repos/{owner}/{repo}/releases/{release_id}') {
         return { data: {
-          id: MAPPING.release_id,
-          tag_name: MAPPING.tag,
+          id: mapping.release_id,
+          tag_name: mapping.tag,
           draft: false,
-          prerelease: true,
+          prerelease: mapping.prerelease,
           immutable: options.immutable ?? true,
-          target_commitish: options.targetCommitish ?? 'main',
-          body: releaseRecord(),
+          target_commitish: options.targetCommitish ?? (options.stable ? SOURCE_SHA : 'main'),
+          body: releaseRecord(mapping),
         } };
       }
       if (route === 'GET /repos/{owner}/{repo}/releases/{release_id}/assets') {
         const asset = {
-          id: MAPPING.asset_id,
-          name: MAPPING.asset_name,
-          size: MAPPING.asset_size,
+          id: mapping.asset_id,
+          name: mapping.asset_name,
+          size: mapping.asset_size,
           state: 'uploaded',
           digest: 'sha256:' + ASSET_SHA,
         };
         return { data: options.duplicateAsset ? [asset, asset] : [asset] };
       }
       if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}') {
-        return { data: parameters.run_id === MAPPING.producer_run_id
-          ? { ...SOURCE_RUN, ...options.producerOverrides }
+        return { data: parameters.run_id === mapping.producer_run_id
+          ? { ...SOURCE_RUN, head_branch: mapping.source_branch, ...options.producerOverrides }
           : { ...PUBLISHER_RUN, ...options.publisherOverrides } };
       }
       if (route === 'GET /repos/{owner}/{repo}/attestations/{subject_digest}') {
-        return { data: { attestations: [{ repository_id: MAPPING.source_repository_id, bundle: { fixture: true } }] } };
+        return { data: { attestations: [{ repository_id: mapping.source_repository_id, bundle: { fixture: true } }] } };
       }
       if (route === 'GET /repos/{owner}/{repo}/releases/assets/{asset_id}') return { data: binary };
       throw new Error('unexpected GitHub request: ' + route);
@@ -260,7 +275,7 @@ async function invokeCopiedAction(options: FixtureOptions = {}): Promise<{
       const downloaded = await readFile(binaryPath);
       assert.equal(downloaded.byteLength, ASSET_BYTES.byteLength);
       if (options.corruptAsset) assert.notEqual(createHash('sha256').update(downloaded).digest('hex'), ASSET_SHA);
-      return { exitCode: 0, stdout: verifierOutput(options.verifierOverrides), stderr: '' };
+      return { exitCode: 0, stdout: verifierOutput(options.verifierOverrides, mapping), stderr: '' };
     },
   };
   let error: unknown;
@@ -338,6 +353,34 @@ test('verified package is added to PATH and outputs without executing the candid
     await rm(result.root, { recursive: true, force: true });
   }
 });
+
+test('stable release targets its fixed binary source SHA and loads from a relocated action', async () => {
+  const result = await invokeCopiedAction({ stable: true });
+  try {
+    assert.equal(result.error, undefined);
+    assert.equal(result.outputs.get('version'), '0.2.45');
+    assert.equal(result.outputs.get('source-sha'), SOURCE_SHA);
+    assert.equal(result.paths.length, 1);
+    assert.equal(result.ghCalls.length, 1);
+  } finally {
+    await rm(result.root, { recursive: true, force: true });
+  }
+});
+
+for (const targetCommitish of ['main', 'a'.repeat(40)]) {
+  test('stable release rejects an unfixed target ' + targetCommitish + ' before asset access', async () => {
+    const result = await invokeCopiedAction({ stable: true, targetCommitish });
+    try {
+      assert.match(String(result.error), /release target differs/);
+      assert.equal(result.ghCalls.length, 0);
+      assert.equal(result.paths.length, 0);
+      assert.equal(result.outputs.size, 0);
+      assert.ok(!result.apiRoutes.includes('GET /repos/{owner}/{repo}/releases/{release_id}/assets'));
+    } finally {
+      await rm(result.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('bad downloaded digest fails before attestation or PATH publication', async () => {
   const result = await invokeCopiedAction({ corruptAsset: true });
